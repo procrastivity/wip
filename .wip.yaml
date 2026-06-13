@@ -71,8 +71,8 @@ initiatives:
     status: in-flight           # proposed | in-flight | shipped | archived | paused
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
-    # roadmap: .wip/initiatives/distillation/roadmap.md   # required once status=in-flight in normal use;
-                                               # this meta-initiative tracks via SYNTHESIS.md instead
+    roadmap: .wip/initiatives/distillation/roadmap.md
+    active_step: step-05            # Round 2 begins: wip-plumbing CLI contract spec
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:
