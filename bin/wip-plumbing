@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# wip-plumbing — deterministic core for wip. Main dispatcher.
+#
+# Parses global flags, sources the lib, dispatches to a subcommand file in
+# $WIP_LIB/wip-plumbing-subcommands/<name>.bash (each defines a single
+# function `wip_plumbing_cmd_<name>`). Never calls an LLM. See
+# engineering/specs/wip-plumbing-cli.md for the contract.
+set -euo pipefail
+
+# shellcheck disable=SC1007  # CDPATH= prefixes the cd command (neutralize CDPATH), not an assignment
+WIP_LIB="${WIP_LIB:-$(CDPATH= cd -- "$(dirname -- "$0")/../lib/wip" && pwd)}"
+export WIP_LIB
+
+# shellcheck source=lib/wip/wip-plumbing-lib.bash
+source "$WIP_LIB/wip-plumbing-lib.bash"
+
+WIP_JSON=1
+WIP_VERBOSE=0
+WIP_QUIET=0
+WIP_DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help | help)
+      wip_usage
+      exit 0
+      ;;
+    --version)
+      printf 'wip-plumbing %s\n' "$(wip_version)"
+      exit 0
+      ;;
+    -v | --verbose) WIP_VERBOSE=1 ;;
+    -q | --quiet) WIP_QUIET=1 ;;
+    --json) WIP_JSON=1 ;;
+    --no-json) WIP_JSON=0 ;;
+    --dry-run) WIP_DRY_RUN=1 ;;
+    --)
+      shift
+      break
+      ;;
+    -*) wip_die 2 usage "unknown global flag: $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+export WIP_JSON WIP_VERBOSE WIP_QUIET WIP_DRY_RUN
+
+cmd="${1:-}"
+[[ -n "$cmd" ]] || {
+  wip_usage
+  exit 2
+}
+shift || true
+
+case "$cmd" in
+  detect | doctor)
+    # shellcheck disable=SC1090
+    source "$WIP_LIB/wip-plumbing-subcommands/$cmd.bash"
+    "wip_plumbing_cmd_$cmd" "$@"
+    ;;
+  init | intake | status | next)
+    wip_die 1 not-implemented "'$cmd' lands in a later step (see engineering/specs/wip-plumbing-cli.md)"
+    ;;
+  *) wip_die 2 usage "unknown command: $cmd" ;;
+esac

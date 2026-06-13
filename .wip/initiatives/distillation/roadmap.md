@@ -26,8 +26,8 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 "where am I / what's next" on this very repo.
 
 - **step-05 — CLI contract spec** ✅ shipped 2026-06-12 — [`engineering/specs/wip-plumbing-cli.md`](../../../engineering/specs/wip-plumbing-cli.md): the 6 verbs, JSON I/O, exit codes (prtend conventions). 3 open questions to resolve while building step-06–08.
-- **step-06 — `detect` + `doctor`** — read `.wip.yaml`, verify sentinels, report drift. JSON out. *(next up)*
-- **step-07 — `init` + `intake`** — scaffold an initiative from `templates/`; validate inbound artifacts.
+- **step-06 — `detect` + `doctor`** ✅ shipped 2026-06-12 — `bin/wip-plumbing` + `lib/wip/` + tests + Makefile; `make check` green under nix (yq-go/shellcheck/shfmt). Established the bash deps + layout for Round 2. `doctor --fix` is advisory in v1. (Dogfood: `doctor` caught a real drift on our own repo — undeclared `diataxis` — now fixed in `.wip.yaml`.)
+- **step-07 — `init` + `intake`** — scaffold an initiative from `templates/`; validate inbound artifacts. *(next up)*
 - **step-08 — `status` + `next`** — read roadmap + (if Solo) todos; rank candidates. The headline value.
 - **step-09 — repo baseline** — flake.nix / .envrc / Makefile / pre-commit for `wip` itself (bootstrap by hand; the dogfood test for the eventual `wip setup` family).
 

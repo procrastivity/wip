@@ -101,7 +101,7 @@ Mandatory first call. Pure read of `.wip.yaml` + sentinel existence checks (ADR-
 Verification loop over the detection contract.
 
 - **Reads:** `.wip.yaml` + all sentinels; the initiative registry vs `.wip/initiatives/` on disk.
-- **Writes:** nothing, unless `--fix` (materializes a missing stanza for a present-but-undeclared sentinel; prunes a registry entry whose directory is gone — each `--fix` action is logged and reversible-by-diff).
+- **Writes:** nothing, unless `--fix` (materializes a missing stanza for a present-but-undeclared sentinel; prunes a registry entry whose directory is gone — each `--fix` action is logged and reversible-by-diff). **v1 status:** `--fix` is *advisory* — it warns and writes nothing; real autofix is a later step.
 - **Exit:** 0 if healthy; **4** if any drift remains (declared-but-missing sentinel, present-but-undeclared feature, registry/disk mismatch, two features sharing a root).
 - **stdout:**
 ```json
