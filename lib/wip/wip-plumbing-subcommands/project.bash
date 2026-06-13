@@ -180,13 +180,13 @@ _wip_project_forget() {
 
   local tmp
   tmp="$reg_file.tmp.$$"
-  local before after
-  before="$(grep -c . "$reg_file" 2>/dev/null || echo 0)"
+  local before=0 after=0
+  [[ -f "$reg_file" ]] && before="$(grep -c . "$reg_file" 2>/dev/null)" || before=0
   jq -c --arg id "$target_id" 'select(.id != $id)' "$reg_file" >"$tmp" 2>/dev/null || {
     rm -f "$tmp"
     wip_die 1 internal "project forget: rewrite failed"
   }
-  after="$(grep -c . "$tmp" 2>/dev/null || echo 0)"
+  [[ -f "$tmp" ]] && after="$(grep -c . "$tmp" 2>/dev/null)" || after=0
   mv -f "$tmp" "$reg_file"
 
   if ((before == after)); then

@@ -31,6 +31,19 @@ repos. `wip` detects them (`.wip.yaml` + a sentinel file) and invokes them.
 | `docs/` | **Diátaxis** — user docs for people consuming `wip` |
 | `.wip.yaml`, `.wip/` | this repo dogfooding itself (manifest + in-flight work) |
 
+## Develop
+
+Three commands from a fresh clone:
+
+```sh
+direnv allow      # loads the nix devShell (pinned in flake.nix)
+make hooks        # installs the pre-commit gate
+make check        # lint + tests (the same gate pre-commit runs)
+```
+
+Without nix: install `bash`, `jq`, `yq-go`, `shellcheck`, and `shfmt`
+yourself, then `make check` works the same.
+
 ## Dogfooding
 
 This repo uses `wip` to build `wip`. The active initiative is

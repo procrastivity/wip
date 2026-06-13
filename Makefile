@@ -5,7 +5,7 @@ SRC := bin/wip-plumbing \
        $(wildcard lib/wip/wip-plumbing-subcommands/*.bash)
 TESTS := $(wildcard test/test-*.sh)
 
-.PHONY: fmt lint test check deps-check
+.PHONY: fmt lint test check deps-check hooks
 
 fmt:
 	shfmt -w -i 2 -ci $(SRC) test/*.sh
@@ -24,3 +24,6 @@ deps-check:
 	  command -v $$d >/dev/null || { echo "missing dependency: $$d" >&2; exit 1; }; \
 	done
 	@echo "deps ok: bash jq yq git"
+
+hooks:
+	pre-commit install
