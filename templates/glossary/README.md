@@ -6,7 +6,8 @@ glossary by concatenating `core.md` with one partial per feature enabled in `.wi
 | Partial | Included when | Owns |
 |---------|---------------|------|
 | `core.md` | always | layers, collections, lifecycle verbs + state machine, composability/detection |
-| `solo.md` | `features.solo.enabled` | Roles + Solo substrate (orchestration) |
+| `orchestration.md` | `features.orchestration.enabled` | Roles + abstract substrate (backend-agnostic) |
+| `solo.md` | `features.orchestration.backend: solo` | Solo backend binding for orchestration |
 | `lds.md` | `features.lds.enabled` | LDS terms + the LDS graduation mechanism *(future)* |
 | `diataxis.md` | `features.diataxis.enabled` | Diátaxis terms *(future)* |
 
@@ -14,4 +15,5 @@ glossary by concatenating `core.md` with one partial per feature enabled in `.wi
 enabled feature's partial in declaration order, with a generated header naming the
 source partials. A project never hand-edits its assembled `.wip/GLOSSARY.md`.
 
-This repo enables `solo`, so its generated `.wip/GLOSSARY.md` = `core.md` + `solo.md`.
+This repo enables `orchestration` with the `solo` backend, so its generated
+`.wip/GLOSSARY.md` = `core.md` + `orchestration.md` + `solo.md`.

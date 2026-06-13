@@ -18,8 +18,11 @@ their own repos. `wip` must compose them without absorbing them.
   `analyze`/`review`/`extract` verbs; it does not reimplement extraction).
 - It **wraps, never reimplements**, existing installers (e.g. `changelog-portable-stub`).
 
-No tool's content lives inside the `wip` repo. The exception is `roles/` — Solo
-orchestration *behavior* is genuinely `wip`'s, but it depends on Solo as an external tool.
+No tool's content lives inside the `wip` repo. `roles/` is not an exception — it follows the
+same rule: `wip` owns the orchestration *behavior* (the Roles — genuinely `wip`'s) and the
+*seam*, while the orchestration *backend* (Solo today) is the external tool it binds to. The
+backend binding is isolated to one swappable surface so a second orchestration style can bind
+the same behavior — see ADR-0007.
 
 ## Consequences
 

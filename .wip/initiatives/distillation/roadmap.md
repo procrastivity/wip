@@ -35,8 +35,8 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 
 - **step-10 — `wip` porcelain** — provider wiring (OpenAI-compatible endpoint) over `wip-plumbing`.
 - **step-11 — `/wip:*` plugin** — `.claude-plugin/` + skills; `/wip:next` first.
-- **step-12 — Roles set** — distill + path-fix `workflow-portable-stub/playbook/` into `roles/` (was scratchpad item 2).
-- **step-13 — `wip glossary` assembler** — concatenate `core` + enabled-feature partials → generated `.wip/GLOSSARY.md`.
+- **step-12 — Roles set** — distill `workflow-portable-stub/playbook/` into the backend-agnostic role structure per [`roles/README.md`](../../../roles/README.md): behavior files + `tier-policy.md` + `backends/solo.md` binding (the only doc naming Solo MCP tools). Roles are gated on `features.orchestration.enabled`, bound by `features.orchestration.backend` (ADR-0007). Prereqs already landed: the glossary split (`orchestration.md` / `solo.md`) and the `.wip.yaml` capability/backend split. The `wip spawn` / `wip orchestrate` verbs (w4/w5) resolve a requested Tier through the *active backend* binding, not Solo directly. (was scratchpad item 2.)
+- **step-13 — `wip glossary` assembler** — concatenate `core` + enabled-feature partials (here: `core` + `orchestration` + `solo`) → generated `.wip/GLOSSARY.md`.
 - **step-14 — `wip setup` family** — direnv / release / hygiene / agents / deps (was the bulk of w2).
 - **step-15 — `graduate` / `extract`** — the LDS seam (wraps existing LDS verbs).
 

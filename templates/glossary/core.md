@@ -1,6 +1,6 @@
 <!-- wip glossary partial: CORE. Universal — every wip consumer gets this.
      Assembled into a project's .wip/GLOSSARY.md regardless of enabled features.
-     Feature-specific terms live in sibling partials (solo.md, lds.md, …) and are
+     Feature-specific terms live in sibling partials (orchestration.md, solo.md, lds.md, …) and are
      included only when that feature is enabled in .wip.yaml. -->
 
 ## Layers (architecture)
@@ -72,7 +72,7 @@ existing handoff doc moved verbatim to `brief.md`; its per-Step structure become
 | Term | Definition |
 |------|------------|
 | **`.wip.yaml`** | Root-level, always-committed manifest (hidden dotfile, paired with `.wip/`). The single deterministic entry point: enabled features + locations, gitignore policy, initiative registry, provider config, current initiative. No `find` walks at steady state. |
-| **Feature** | A composable capability a repo opts into (e.g. `lds`, `diataxis`, `changelog`, `direnv`, `solo`, …). Each ships independently and advertises itself. |
+| **Feature** | A composable capability a repo opts into (e.g. `lds`, `diataxis`, `changelog`, `direnv`, `orchestration`, …). Each ships independently and advertises itself. |
 | **Sentinel** | The file whose existence proves a Feature is really installed (declared per feature). |
 | **Detection contract** | A Feature is **active** iff a `.wip.yaml` stanza enables it **and** its Sentinel exists. Stanza-without-sentinel and sentinel-without-stanza are the two drift states `wip doctor` reports. |
 | **Graduation** | Promoting durable knowledge out of `.wip/` into a project's permanent docs. One-way. The mechanism is feature-specific (see the relevant partial); the *concept* is core. |
