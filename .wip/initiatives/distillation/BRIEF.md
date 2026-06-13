@@ -4,7 +4,7 @@
 > cross-cutting decision changes, it changes **here** and the affected prompt(s)
 > get a one-line note. This file dogfoods the `brief.md` primitive we are designing.
 
-## The meta-goal
+## Goal
 
 `/Users/beausimensen/Code/wip` is a deliberate collection of *slices* of several real
 projects. The owner (Beau) wants to **distill the workflows he's been using** into a
