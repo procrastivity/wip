@@ -17,6 +17,8 @@ source "$WIP_LIB/wip-plumbing-lib.bash"
 source "$WIP_LIB/wip-plumbing-registry-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-scaffold-lib.bash
 source "$WIP_LIB/wip-plumbing-scaffold-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-intake-lib.bash
+source "$WIP_LIB/wip-plumbing-intake-lib.bash"
 
 WIP_JSON=1
 WIP_VERBOSE=0
