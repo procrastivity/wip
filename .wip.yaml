@@ -38,8 +38,9 @@ features:
   wip:
     enabled: true
     root: .wip
-  playbook:                     # the Roles feature (orchestrator/coordinator/…)
-    enabled: false              # roles ship WITH the wip plugin; flip on if used
+  orchestration:                # the Roles capability (orchestrator/coordinator/researcher/builder)
+    enabled: true               # roles ship WITH the wip plugin; backend-agnostic (ADR-0007)
+    backend: solo               # which orchestration backend binds the roles (see solo: below)
     source: plugin              # plugin | vendored
   lds:
     enabled: false              # this repo is the distribution source, not an install
@@ -55,9 +56,9 @@ features:
     enabled: false              # sentinel: .envrc (pinned nix-direnv shim)
   prtend:
     enabled: false
-  solo:
+  solo:                         # Solo backend config (binding for orchestration.backend: solo)
     enabled: true               # sentinel: Solo project registration
-    agent_tier_policy:
+    agent_tier_policy:          # Tier→agent_tool_id is backend-specific, so it lives here
       force_tier: large         # this project: Opus-only (agent_tool_id=3)
 
 # --- initiative registry ----------------------------------------------------
