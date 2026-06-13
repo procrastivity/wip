@@ -22,8 +22,10 @@ commands:
             usage: intake classify <file>
                    intake validate <file> [--kind brief|amendment|workplan-seed|spec|handoff]
                    intake apply <file> --kind <k> [--target <slug|slug/step>]
-  status    where am I: round / active step        (later step)
-  next      ranked candidates for what to do next  (later step)
+  status    where am I: initiative / round / active step / dirty .wip files
+            usage: status [--initiative <slug>]
+  next      ranked candidates for what to do next
+            usage: next [--initiative <slug>]
 
 global flags:
   -h, --help        print this and exit 0
