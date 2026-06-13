@@ -294,14 +294,16 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
 
 ## 4. Open questions (resolve before/while building step-06–08)
 
-1. **`status` git dependency** — if a consumer's `.wip/` is gitignored (default), `git
-   status -- .wip/` reports nothing. Fall back to mtime-based "recently touched"? Or
-   accept "dirty" is empty for gitignored `.wip/`? *Lean: accept empty; dirty-tracking is
-   a committed-`.wip/` nicety.*
-2. **`roadmap.md` parsing** — Steps are `### step-NN — title` with a `✅` / "shipped"
-   marker. Define the exact grammar `next`/`status` parse, or add lightweight front-matter
-   per step? *Lean: parse the heading + a `Status:` line; avoid front-matter to keep
-   roadmaps human-first.*
+1. **`status` git dependency** — *resolved in step-08.* When `.wip/` is gitignored
+   (default), `git status --porcelain -- .wip/` reports nothing → `dirty_wip_files: []`.
+   The porcelain layer may mtime-augment later; plumbing stays git-only.
+2. **`roadmap.md` parsing** — *resolved in step-08.* The bullet form already in use is the
+   v1 grammar: `## Round <N> — <title>` rounds (with optional trailing `✅ shipped
+   <YYYY-MM-DD>`); steps as `- **step-<NN[.5]> — <title>**` bullets (with optional `✅`
+   marker and `shipped <YYYY-MM-DD>` date); `## Backlog` sections parsed as
+   `- **<title>** — <body>` entries. The amendment-form `### step-NN — <title>` heading
+   is recognized too. No front-matter; the parser lives in
+   `lib/wip/wip-plumbing-roadmap-lib.bash`.
 3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*; shipped in
    step-07.5. The closed kind vocabulary and per-kind shape rules are now enforced by
    `wip-plumbing intake validate`.
