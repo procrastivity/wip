@@ -16,6 +16,7 @@
           packages = with pkgs; [
             bash
             coreutils
+            curl
             git
             gnumake
             jq
