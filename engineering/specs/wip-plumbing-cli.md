@@ -20,6 +20,10 @@ and never makes a judgment a human/porcelain should make. v1 ships the verbs bel
 Intake is a pipeline rather than a single verb (ADR-0009); its plumbing surface is three
 subcommands, and two new verbs cover the destinations its `apply` step routes to.
 
+The standalone `wip` porcelain — which exposes this surface verbatim and adds the
+OpenAI-compatible provider seam — is specified in [`wip-porcelain.md`](./wip-porcelain.md)
+(step-10).
+
 | Verb | One-line | Roadmap step |
 |------|----------|--------------|
 | `detect` | What features/initiatives exist, per `.wip.yaml`. The mandatory first call. | step-06 |

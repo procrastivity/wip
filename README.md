@@ -44,6 +44,26 @@ make check        # lint + tests (the same gate pre-commit runs)
 Without nix: install `bash`, `jq`, `yq-go`, `shellcheck`, and `shfmt`
 yourself, then `make check` works the same.
 
+## Porcelain
+
+`bin/wip` is the standalone porcelain over `bin/wip-plumbing`. It exposes every
+deterministic verb of the plumbing transparently and adds two LLM-aware verbs —
+`ask` and `provider show` — that talk to any OpenAI-compatible endpoint. The
+endpoint is configured by env-var pointers in `.wip.yaml`'s `provider:` block.
+
+```sh
+# point at your provider (env names come from .wip.yaml's provider: block)
+export WIP_LLM_BASE_URL=https://api.openai.com
+export WIP_LLM_API_KEY=sk-...
+export WIP_LLM_MODEL=gpt-4o-mini
+
+bin/wip provider show          # diagnostic; never prints the api_key
+echo "hello"  | bin/wip ask    # one-shot chat completion
+bin/wip ask "what is wip?"
+```
+
+Spec: [`engineering/specs/wip-porcelain.md`](./engineering/specs/wip-porcelain.md).
+
 ## Dogfooding
 
 This repo uses `wip` to build `wip`. The active initiative is
