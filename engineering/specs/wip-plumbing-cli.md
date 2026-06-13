@@ -16,19 +16,27 @@ Conventions are adopted verbatim from prtend's CLI contract so the two compose.
 ## 1. Scope
 
 `wip-plumbing` is the **deterministic** half of `wip` (ADR-0001): it never calls an LLM
-and never makes a judgment a human/porcelain should make. v1 ships **six verbs**:
+and never makes a judgment a human/porcelain should make. v1 ships the verbs below.
+Intake is a pipeline rather than a single verb (ADR-0009); its plumbing surface is three
+subcommands, and two new verbs cover the destinations its `apply` step routes to.
 
 | Verb | One-line | Roadmap step |
 |------|----------|--------------|
 | `detect` | What features/initiatives exist, per `.wip.yaml`. The mandatory first call. | step-06 |
 | `doctor` | Verify the manifest against disk; report (and optionally fix) drift. | step-06 |
 | `init` | Scaffold the repo manifest and/or an initiative from `templates/`. | step-07 |
-| `intake` | Validate inbound planning artifacts (shape only). | step-07 |
+| `intake validate` | Shape-check an inbound planning artifact (the v0 single-kind validator). | step-07 |
+| `intake classify` | Best-guess `kind` from heuristics; never asks. | step-07.5 |
+| `intake validate` (per-kind) | Per-kind shape rules from `intake-kinds.md`. | step-07.5 |
+| `intake apply` | Terminal write; dispatches to `init` / `roadmap amend` / `workplan init`. | step-07.5 (gated on 08.5) |
+| `roadmap amend` | Deterministic edit to an initiative's `roadmap.md` (insert / replace / append-round). | step-08.5 |
+| `workplan init` | Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<slug>.md`. | step-08.5 |
 | `status` | Where am I: current initiative, round, active step, dirty `.wip/`. | step-08 |
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
 
 Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, `glossary`
-(assembler). They are later roadmap steps and get their own specs.
+(assembler), the `wip intake` porcelain (step-10.5). They are later roadmap steps and
+get their own specs.
 
 ## 2. Global conventions
 
@@ -129,17 +137,92 @@ content without `--force`).
 { "ok": true, "slug": "auth-rework", "wrote": [".wip/initiatives/auth-rework/brief.md", ".wip/initiatives/auth-rework/roadmap.md"], "skipped_protected": [], "manifest_updated": ".wip.yaml" }
 ```
 
-### `wip-plumbing intake --validate <file>...`
-Deterministic **shape** check on inbound planning artifacts (PRD/handoff/proposal). It
-does **not** compose a roadmap — that's the porcelain. Validates that a file is parseable
-and carries the minimum a Brief/Proposal needs (title, a goal/summary section).
+### `wip-plumbing intake` — pipeline subcommands
 
-- **Reads:** the named files.
+Intake is a pipeline (ADR-0009). The plumbing surface is three subcommands; the
+LLM-driven shaping and routing between them lives in the `wip intake` porcelain
+(roadmap step-10.5). The closed kind vocabulary, per-kind shape rules, and classify
+heuristics are specified in [`intake-kinds.md`](./intake-kinds.md).
+
+v0 (step-07) ships only `intake validate <file>` with a single-kind shape check
+(parseable + title + goal/summary). step-07.5 generalizes to the three subcommands
+below.
+
+#### `wip-plumbing intake classify <file>`
+Best-guess `kind` from front-matter + heading heuristics. Never asks; never makes a
+judgment call — that's porcelain.
+
+- **Reads:** the named file.
 - **Writes:** nothing.
-- **Exit:** 0 if all valid; **4** if any file fails shape validation; 2 if no files given.
+- **Exit:** 0 always when the file is parseable; **4** if unparseable or no title.
 - **stdout:**
 ```json
-{ "ok": true, "results": [ { "file": "handoff.md", "valid": true, "kind": "ad-hoc-brief", "missing": [] }, { "file": "prd.md", "valid": false, "kind": "unknown", "missing": ["title","goal"] } ] }
+{ "ok": true, "file": "plan.md", "kind": "amendment", "confidence": "high", "signals": ["front-matter wip-kind=amendment", "target=distillation", "insert-after=step-06"] }
+```
+
+#### `wip-plumbing intake validate <file> [--kind <k>]`
+Per-kind shape check. With `--kind` omitted, uses `classify`'s best guess.
+
+- **Reads:** the named file; for `--kind workplan-seed` or `--kind amendment`,
+  consults `.wip.yaml` + the target initiative's `roadmap.md` to verify the named slug
+  / step exists.
+- **Writes:** nothing.
+- **Exit:** 0 if valid; **4** if shape rules fail; 2 if no file given or `--kind` is not in
+  the closed vocabulary.
+- **stdout:**
+```json
+{ "ok": false, "file": "prd.md", "kind": "brief", "valid": false, "missing": ["goal-or-summary-section"] }
+```
+
+#### `wip-plumbing intake apply <file> --kind <k> [--target <slug|slug/step>]`
+Terminal write. Validates first; refuses on shape failure. Dispatches to the
+appropriate writer:
+
+- `--kind brief` → `init <derived-slug>`.
+- `--kind amendment` → `roadmap amend <target> <directive-from-artifact>`.
+- `--kind workplan-seed` → `workplan init <slug> <step-id> --from <file>`.
+- `--kind spec` → LDS seam (ADR-0006); v1 stub may refuse with exit 3 ("LDS not
+  active") until the LDS verb surface lands.
+- `--kind handoff` → exit 4 ("handoff is not a terminal kind; reshape first").
+
+- **Reads:** the artifact; whatever the dispatched verb reads.
+- **Writes:** whatever the dispatched verb writes.
+- **Exit:** 0 on success; **4** on shape failure or routing refusal; 2 on bad args; 3 if
+  routing to an inactive feature (e.g. `spec` with LDS disabled).
+- **stdout:** the dispatched verb's write ledger, with an outer envelope:
+```json
+{ "ok": true, "kind": "amendment", "dispatched": "roadmap amend", "target": "distillation", "result": { "wrote": [".wip/initiatives/distillation/roadmap.md"], "directive": "insert-after step-06" } }
+```
+
+### `wip-plumbing roadmap amend <slug>`
+Deterministic edit to `.wip/initiatives/<slug>/roadmap.md`. Reads a shaped `amendment`
+artifact from stdin or `--from <file>`. Idempotent: re-applying the same artifact is a
+no-op, detected via a hash-of-payload comment stamped at the insertion site.
+
+- **Flags:** exactly one of `--insert-after <step-id>`, `--replace <step-id>`,
+  `--append-round <title>`. If `--from` is given and the artifact carries a directive,
+  the CLI flag must match (or be omitted) — mismatch is exit 2.
+- **Reads:** the artifact + the target `roadmap.md`.
+- **Writes:** the target `roadmap.md` (or just the ledger with `--dry-run`).
+- **Exit:** 0 on amend or detected-duplicate no-op; **4** if target step doesn't exist,
+  or the artifact fails amendment-shape validation; 2 on bad flags.
+- **stdout:**
+```json
+{ "ok": true, "slug": "distillation", "directive": "insert-after step-06", "wrote": [".wip/initiatives/distillation/roadmap.md"], "idempotent_noop": false }
+```
+
+### `wip-plumbing workplan init <slug> <step-id> [--from <file>] [--force]`
+Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from
+`templates/workplan.md.tmpl`. Step must exist in the initiative's roadmap.
+
+- **Reads:** `.wip.yaml`, the initiative's `roadmap.md`, the optional seed file, the
+  template.
+- **Writes:** the workplan file (or just the ledger with `--dry-run`).
+- **Exit:** 0 on write; **4** if the file exists (without `--force`) or the step doesn't
+  exist; 2 on bad args.
+- **stdout:**
+```json
+{ "ok": true, "slug": "distillation", "step": "step-07.5", "wrote": [".wip/initiatives/distillation/workplans/step-07.5-intake-kinds.md"] }
 ```
 
 ### `wip-plumbing status [--initiative <slug>]`
@@ -191,5 +274,9 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
    marker. Define the exact grammar `next`/`status` parse, or add lightweight front-matter
    per step? *Lean: parse the heading + a `Status:` line; avoid front-matter to keep
    roadmaps human-first.*
-3. **`intake` validators** — how strict is "valid"? v1 = parseable + has a title and a
-   goal/summary heading. Richer kind-detection (PRD vs handoff vs spec) can come later.
+3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*. v0 (step-07)
+   stays at parseable + title + goal/summary; the closed kind vocabulary and per-kind
+   shape rules ship in step-07.5.
+4. **Amendment idempotency hash** — byte-hash the shaped payload, or a normalized
+   structural digest? Bytes are simpler; structural survives whitespace churn. Lean:
+   bytes in v1, revisit if churn proves it. *(see `intake-kinds.md` §6.)*
