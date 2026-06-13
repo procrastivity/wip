@@ -15,6 +15,7 @@ usage: wip-plumbing [global flags] <command> [args]
 commands:
   detect    report features + initiatives from .wip.yaml (mandatory first call)
   doctor    verify the manifest against disk; report drift  [--fix advisory in v1]
+  project   list / register / resolve / forget entries in the global registry
   init      scaffold manifest/initiative          (later step)
   intake    validate inbound planning artifacts   (later step)
   status    where am I: round / active step        (later step)
@@ -27,6 +28,13 @@ global flags:
   -q, --quiet       suppress non-error stderr
   --json|--no-json  structured output on stdout (default: json)
   --dry-run         print the write ledger; touch nothing
+  --project <id>    operate on the named project (abs path / segment / slug)
+
+env:
+  WIP_LIB           override lib/wip/ path (dev installs)
+  WIP_ROOT          force repo root, skipping the walk-up
+  WIP_REGISTRY_FILE override the global registry path
+  WIP_NO_REGISTRY=1 suppress registry reads and writes
 EOF
 }
 
@@ -46,25 +54,34 @@ wip_die() {
 }
 
 # wip_find_root — echo the repo root (nearest ancestor with .wip.yaml). Honors
-# $WIP_ROOT as an override. Returns 1 if none found.
+# $WIP_ROOT as an override. Returns 1 if none found. On success, fires
+# wip_registry_touch_root (best-effort; never fails the caller).
 wip_find_root() {
+  local root=""
   if [[ -n "${WIP_ROOT:-}" ]]; then
-    [[ -f "$WIP_ROOT/.wip.yaml" ]] && {
-      printf '%s\n' "$WIP_ROOT"
-      return 0
-    }
-    return 1
+    if [[ -f "$WIP_ROOT/.wip.yaml" ]]; then
+      root="$WIP_ROOT"
+    else
+      return 1
+    fi
+  else
+    local d="$PWD"
+    while :; do
+      if [[ -f "$d/.wip.yaml" ]]; then
+        root="$d"
+        break
+      fi
+      [[ "$d" == "/" ]] && break
+      d="$(dirname "$d")"
+    done
+    [[ -n "$root" ]] || return 1
   fi
-  local d="$PWD"
-  while :; do
-    [[ -f "$d/.wip.yaml" ]] && {
-      printf '%s\n' "$d"
-      return 0
-    }
-    [[ "$d" == "/" ]] && break
-    d="$(dirname "$d")"
-  done
-  return 1
+  # Best-effort registry touch — declared by the registry lib when sourced.
+  if declare -F wip_registry_touch_root >/dev/null 2>&1; then
+    wip_registry_touch_root "$root" 2>/dev/null || true
+  fi
+  printf '%s\n' "$root"
+  return 0
 }
 
 # wip_manifest_json <root> — convert .wip.yaml to JSON once. Empty output on parse error.

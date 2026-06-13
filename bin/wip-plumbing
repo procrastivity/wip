@@ -13,11 +13,14 @@ export WIP_LIB
 
 # shellcheck source=lib/wip/wip-plumbing-lib.bash
 source "$WIP_LIB/wip-plumbing-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-registry-lib.bash
+source "$WIP_LIB/wip-plumbing-registry-lib.bash"
 
 WIP_JSON=1
 WIP_VERBOSE=0
 WIP_QUIET=0
 WIP_DRY_RUN=0
+_wip_project_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,6 +37,12 @@ while [[ $# -gt 0 ]]; do
     --json) WIP_JSON=1 ;;
     --no-json) WIP_JSON=0 ;;
     --dry-run) WIP_DRY_RUN=1 ;;
+    --project)
+      [[ $# -ge 2 ]] || wip_die 2 usage "--project requires an argument"
+      _wip_project_id="$2"
+      shift
+      ;;
+    --project=*) _wip_project_id="${1#--project=}" ;;
     --)
       shift
       break
@@ -52,8 +61,45 @@ cmd="${1:-}"
 }
 shift || true
 
+# --project <id> arg-prelude: also accept the flag positioned after the verb,
+# strip it from argv before dispatch. Resolve once and export WIP_ROOT.
+_wip_filtered_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project)
+      [[ $# -ge 2 ]] || wip_die 2 usage "--project requires an argument"
+      _wip_project_id="$2"
+      shift 2
+      ;;
+    --project=*)
+      _wip_project_id="${1#--project=}"
+      shift
+      ;;
+    *)
+      _wip_filtered_args+=("$1")
+      shift
+      ;;
+  esac
+done
+if [[ -n "$_wip_project_id" ]]; then
+  set +e
+  _wip_resolved="$(wip_registry_resolve "$_wip_project_id" 2>/dev/null)"
+  _wip_resolved_rc=$?
+  set -e
+  case "$_wip_resolved_rc" in
+    0)
+      WIP_ROOT="$_wip_resolved"
+      export WIP_ROOT
+      ;;
+    3) wip_die 3 not-found "--project $_wip_project_id matched nothing" ;;
+    4) wip_die 4 ambiguous "--project $_wip_project_id is ambiguous" ;;
+    *) wip_die 1 internal "--project $_wip_project_id: resolve failed" ;;
+  esac
+fi
+set -- "${_wip_filtered_args[@]+"${_wip_filtered_args[@]}"}"
+
 case "$cmd" in
-  detect | doctor)
+  detect | doctor | project)
     # shellcheck disable=SC1090
     source "$WIP_LIB/wip-plumbing-subcommands/$cmd.bash"
     "wip_plumbing_cmd_$cmd" "$@"
