@@ -1,0 +1,80 @@
+# .wip.yaml — the wip manifest.
+#
+# Lives at REPO ROOT as a hidden dotfile, paired with the .wip/ directory.
+# ALWAYS COMMITTED, even when .wip/ content is gitignored — it is the single
+# deterministic entry point `wip-plumbing` reads to answer "what's installed,
+# where, and what's next." No `find` walks at steady state.
+#
+# This file is both the canonical schema (via comments) and a real, populated
+# instance for the `wip` distillation repo itself — so it doubles as a worked
+# example. See .wip/GLOSSARY.md for every term used here.
+
+version: 1
+
+# --- gitignore policy -------------------------------------------------------
+# Default: .wip/ content is ignored; only .wip.yaml (root) + the always-committed
+# tooling files inside .wip/ are tracked. Per-initiative override allowed.
+gitignore:
+  commit: false                 # false = ephemeral (default); true = track all of .wip/
+  always_commit:                # tracked even when commit=false
+    - .wip/GLOSSARY.md
+    - .wip/backlog.md
+
+# --- wip porcelain provider -------------------------------------------------
+# Used ONLY by the standalone `wip` porcelain (not by /wip:* under Claude Code,
+# which uses Claude Code's own model). Points at any OpenAI-compatible endpoint.
+# Omit this block to run plumbing-only (no judgment commands from a plain shell).
+provider:
+  kind: openai-compatible
+  base_url_env: WIP_LLM_BASE_URL   # read from env, never inline secrets
+  api_key_env: WIP_LLM_API_KEY
+  model_env: WIP_LLM_MODEL
+
+# --- features ---------------------------------------------------------------
+# A feature is ACTIVE iff: enabled here AND its sentinel file exists on disk.
+# `wip doctor` reports drift (declared-but-missing / present-but-undeclared).
+# Per-feature `version` + `installed_files` enable doctor + a future uninstall.
+features:
+  wip:
+    enabled: true
+    root: .wip
+  playbook:                     # the Roles feature (orchestrator/coordinator/…)
+    enabled: false              # roles ship WITH the wip plugin; flip on if used
+    source: plugin              # plugin | vendored
+  lds:
+    enabled: false              # this repo is the distribution source, not an install
+    # When enabled, scalar single root for v1 (monorepo plural deferred):
+    # root: engineering         # OR docs (old-style). sentinel: {root}/.lds-manifest.yaml
+  diataxis:
+    enabled: false              # sentinel: docs/README.md with 4 canonical sections
+    # MUST be false when lds.root == docs (no two features share a root).
+  changelog:
+    enabled: false              # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
+  direnv:
+    enabled: false              # sentinel: .envrc (pinned nix-direnv shim)
+  prtend:
+    enabled: false
+  solo:
+    enabled: true               # sentinel: Solo project registration
+    agent_tier_policy:
+      force_tier: large         # this project: Opus-only (agent_tool_id=3)
+
+# --- initiative registry ----------------------------------------------------
+# One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
+# Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
+# <slug>-step-NN-coordinator) so concurrent initiatives never collide.
+current_initiative: distillation
+
+initiatives:
+  - slug: distillation
+    title: Workflow Distillation
+    status: in-flight           # proposed | in-flight | shipped | archived | paused
+    intake: ad-hoc              # ad-hoc | spec-generator
+    brief: .wip/initiatives/distillation/BRIEF.md
+    # roadmap: .wip/initiatives/distillation/roadmap.md   # required once status=in-flight in normal use;
+                                               # this meta-initiative tracks via SYNTHESIS.md instead
+
+# --- integrations (optional) ------------------------------------------------
+# integrations:
+#   github:
+#     pr_body_source: .wip/${initiative}/roadmap.md

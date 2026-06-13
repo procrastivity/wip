@@ -1,0 +1,19 @@
+# Study slices — copies of other projects collected for distillation, not part
+# of the wip system itself. Ignored so this repo's history is just wip.
+bizapps-symfony-bot/
+bug-free-happiness/
+changelog-portable-stub/
+direnv-session-loader/
+hypomnema/
+layered-documentation-system/
+obsidian-sync-to-git/
+playbook/
+prtend/
+workflow-portable-stub/
+xcind/
+
+# Environment / tooling noise
+.direnv/
+result
+result-*
+.DS_Store
