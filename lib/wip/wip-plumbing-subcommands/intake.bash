@@ -1,29 +1,67 @@
-# intake — v0 single-kind validator (ADR-0009 surface; per-kind rules in step-07.5).
+# intake — classify / validate / apply per ADR-0009 + intake-kinds.md.
+# Plumbing only: never asks the user, never makes a judgment call.
 # shellcheck shell=bash
 
 wip_plumbing_cmd_intake() {
   local sub="${1:-}"
   shift || true
   case "$sub" in
-    validate) _wip_intake_validate_v0 "$@" ;;
-    classify | apply)
-      wip_die 2 not-implemented \
-        "intake $sub: not in v0 — lands in step-07.5 (see engineering/specs/intake-kinds.md)"
-      ;;
-    "") wip_die 2 usage "intake: missing subcommand (validate)" ;;
+    classify) _wip_intake_cmd_classify "$@" ;;
+    validate) _wip_intake_cmd_validate "$@" ;;
+    apply) _wip_intake_cmd_apply "$@" ;;
+    "") wip_die 2 usage "intake: missing subcommand (classify|validate|apply)" ;;
     *) wip_die 2 usage "intake: unknown subcommand: $sub" ;;
   esac
 }
 
-# v0 shape check: file is parseable + has an H1 title + has a `## Goal` or
-# `## Summary` heading. No front-matter parsing, no per-kind dispatch.
-_wip_intake_validate_v0() {
+_wip_intake_require_file() {
+  local file="$1"
+  [[ -n "$file" ]] || wip_die 2 usage "intake: missing <file>"
+  [[ -f "$file" && -r "$file" ]] || wip_die 2 not-found "intake: file not readable: $file"
+}
+
+_wip_intake_cmd_classify() {
   local file=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --kind | --kind=*)
-        wip_die 2 not-implemented \
-          "intake validate: --kind lands in step-07.5 (see engineering/specs/intake-kinds.md)"
+      -*) wip_die 2 usage "intake classify: unknown flag: $1" ;;
+      *)
+        if [[ -z "$file" ]]; then
+          file="$1"
+          shift
+        else
+          wip_die 2 usage "intake classify: unexpected arg: $1"
+        fi
+        ;;
+    esac
+  done
+  _wip_intake_require_file "$file"
+
+  local payload
+  set +e
+  payload="$(wip_intake_classify_payload "$file")"
+  local rc=$?
+  set -e
+  if [[ "$rc" != "0" ]]; then
+    wip_die 4 unparseable "intake classify: no H1 title in $file" "$file"
+  fi
+
+  jq -nc --arg file "$file" --argjson p "$payload" '
+    { ok: true, file: $file, kind: $p.kind, confidence: $p.confidence, signals: $p.signals }'
+}
+
+_wip_intake_cmd_validate() {
+  local file="" kind=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind)
+        [[ $# -ge 2 ]] || wip_die 2 usage "intake validate: --kind requires an argument"
+        kind="$2"
+        shift 2
+        ;;
+      --kind=*)
+        kind="${1#--kind=}"
+        shift
         ;;
       -*) wip_die 2 usage "intake validate: unknown flag: $1" ;;
       *)
@@ -36,33 +74,142 @@ _wip_intake_validate_v0() {
         ;;
     esac
   done
+  _wip_intake_require_file "$file"
 
-  [[ -n "$file" ]] || wip_die 2 usage "intake validate: missing <file>"
-  [[ -f "$file" && -r "$file" ]] ||
-    wip_die 2 not-found "intake validate: file not readable: $file"
-
-  local has_title has_goal_or_summary
-  has_title=0
-  has_goal_or_summary=0
-  if awk '/^# [^[:space:]]/ { found=1 } END { exit !found }' "$file"; then
-    has_title=1
-  fi
-  if awk '/^## (Goal|Summary)([[:space:]]|$)/ { found=1 } END { exit !found }' "$file"; then
-    has_goal_or_summary=1
-  fi
-
-  local missing="[]" valid=true
-  if [[ "$has_title" == "0" ]]; then
-    missing="$(jq -nc --argjson a "$missing" '$a + ["title"]')"
-    valid=false
-  fi
-  if [[ "$has_goal_or_summary" == "0" ]]; then
-    missing="$(jq -nc --argjson a "$missing" '$a + ["goal-or-summary-section"]')"
-    valid=false
+  if [[ -z "$kind" ]]; then
+    # No --kind: use classify's guess.
+    local payload
+    set +e
+    payload="$(wip_intake_classify_payload "$file")"
+    local rc=$?
+    set -e
+    if [[ "$rc" != "0" ]]; then
+      wip_die 4 unparseable "intake validate: no H1 title in $file" "$file"
+    fi
+    kind="$(jq -r '.kind' <<<"$payload")"
+  else
+    wip_intake_kind_valid "$kind" ||
+      wip_die 2 usage "intake validate: --kind must be one of: $WIP_INTAKE_KINDS"
   fi
 
-  jq -nc --arg file "$file" --argjson valid "$valid" --argjson missing "$missing" '
-    { ok: $valid, file: $file, kind: null, valid: $valid, missing: $missing }'
+  local result
+  result="$(wip_intake_validate_kind "$file" "$kind")"
+  local valid
+  valid="$(jq -r '.valid' <<<"$result")"
+
+  jq -nc \
+    --arg file "$file" --arg kind "$kind" \
+    --argjson valid "$valid" --argjson r "$result" '
+    { ok: $valid, file: $file, kind: $kind, valid: $valid,
+      missing: $r.missing, signals: $r.signals }'
 
   [[ "$valid" == "true" ]] || exit 4
+}
+
+_wip_intake_cmd_apply() {
+  # --target is parsed (per spec) but unused in step-07.5: brief derives its
+  # slug from front-matter/H1, and amendment/workplan-seed routing is stubbed.
+  # The variable will gain a consumer when step-08.5 wires `roadmap amend` /
+  # `workplan init`.
+  local file="" kind="" target=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind)
+        [[ $# -ge 2 ]] || wip_die 2 usage "intake apply: --kind requires an argument"
+        kind="$2"
+        shift 2
+        ;;
+      --kind=*)
+        kind="${1#--kind=}"
+        shift
+        ;;
+      --target)
+        [[ $# -ge 2 ]] || wip_die 2 usage "intake apply: --target requires an argument"
+        target="$2"
+        shift 2
+        ;;
+      --target=*)
+        target="${1#--target=}"
+        shift
+        ;;
+      -*) wip_die 2 usage "intake apply: unknown flag: $1" ;;
+      *)
+        if [[ -z "$file" ]]; then
+          file="$1"
+          shift
+        else
+          wip_die 2 usage "intake apply: unexpected arg: $1"
+        fi
+        ;;
+    esac
+  done
+  _wip_intake_require_file "$file"
+  [[ -n "$kind" ]] || wip_die 2 usage "intake apply: --kind is required"
+  wip_intake_kind_valid "$kind" ||
+    wip_die 2 usage "intake apply: --kind must be one of: $WIP_INTAKE_KINDS"
+  if [[ -n "$target" && "${WIP_VERBOSE:-0}" == "1" ]]; then
+    wip_warn "intake apply: --target $target (unused in step-07.5; consumed by step-08.5)"
+  fi
+
+  local result valid
+  result="$(wip_intake_validate_kind "$file" "$kind")"
+  valid="$(jq -r '.valid' <<<"$result")"
+  if [[ "$valid" != "true" ]]; then
+    jq -nc \
+      --arg file "$file" --arg kind "$kind" --argjson r "$result" '
+      { ok: false, file: $file, kind: $kind, valid: false,
+        missing: $r.missing, signals: $r.signals }'
+    exit 4
+  fi
+
+  case "$kind" in
+    brief) _wip_intake_apply_brief "$file" ;;
+    amendment)
+      wip_die 3 not-implemented \
+        "intake apply: amendment routing lands in step-08.5 (roadmap amend)"
+      ;;
+    workplan-seed)
+      wip_die 3 not-implemented \
+        "intake apply: workplan-seed routing lands in step-08.5 (workplan init)"
+      ;;
+    spec)
+      wip_die 3 not-implemented \
+        "intake apply: spec routing requires the LDS seam (ADR-0006); not yet wired"
+      ;;
+    handoff)
+      wip_die 4 not-terminal "intake apply: handoff is not a terminal kind; reshape first"
+      ;;
+  esac
+}
+
+_wip_intake_apply_brief() {
+  local file="$1"
+  local slug h1
+  slug="$(wip_intake_derive_slug "$file")"
+  [[ -n "$slug" ]] || wip_die 4 bad-slug "intake apply: could not derive slug from $file" "$file"
+
+  h1="$(wip_intake_read_h1 "$file")"
+
+  # Source init.bash so its function is in scope.
+  # shellcheck disable=SC1091
+  source "$WIP_LIB/wip-plumbing-subcommands/init.bash"
+
+  local ledger rc
+  set +e
+  if [[ -n "$h1" ]]; then
+    ledger="$(wip_plumbing_cmd_init "$slug" --title "$h1")"
+  else
+    ledger="$(wip_plumbing_cmd_init "$slug")"
+  fi
+  rc=$?
+  set -e
+
+  if [[ "$rc" != "0" ]]; then
+    # init already emitted its error envelope on stdout.
+    exit "$rc"
+  fi
+
+  jq -nc \
+    --arg kind "brief" --arg slug "$slug" --argjson result "$ledger" '
+    { ok: true, kind: $kind, dispatched: "init", target: $slug, result: $result }'
 }

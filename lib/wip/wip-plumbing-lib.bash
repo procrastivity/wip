@@ -18,8 +18,10 @@ commands:
   project   list / register / resolve / forget entries in the global registry
   init      scaffold manifest and/or initiative from templates/
             usage: init [<slug>] [--title <t>] [--intake ad-hoc|structured]
-  intake    validate inbound planning artifacts
-            usage: intake validate <file>   (classify/apply land in step-07.5)
+  intake    classify / validate / apply inbound planning artifacts
+            usage: intake classify <file>
+                   intake validate <file> [--kind brief|amendment|workplan-seed|spec|handoff]
+                   intake apply <file> --kind <k> [--target <slug|slug/step>]
   status    where am I: round / active step        (later step)
   next      ranked candidates for what to do next  (later step)
 

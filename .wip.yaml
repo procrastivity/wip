@@ -74,7 +74,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-07.5          # Round 2: intake kinds (init + v0 validate shipped)
+    active_step: step-08            # Round 2: status + next (intake pipeline shipped)
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:

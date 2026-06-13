@@ -171,9 +171,10 @@ LLM-driven shaping and routing between them lives in the `wip intake` porcelain
 (roadmap step-10.5). The closed kind vocabulary, per-kind shape rules, and classify
 heuristics are specified in [`intake-kinds.md`](./intake-kinds.md).
 
-v0 (step-07) ships only `intake validate <file>` with a single-kind shape check
-(parseable + title + goal/summary). step-07.5 generalizes to the three subcommands
-below.
+All three subcommands shipped in step-07.5. `apply`'s `amendment` and
+`workplan-seed` dispatch paths exit **3** until step-08.5 lands `roadmap amend`
+and `workplan init`; `spec` exits 3 until the LDS seam is wired. `brief`
+dispatches to `init` and works end-to-end today.
 
 #### `wip-plumbing intake classify <file>`
 Best-guess `kind` from front-matter + heading heuristics. Never asks; never makes a
@@ -301,9 +302,9 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
    marker. Define the exact grammar `next`/`status` parse, or add lightweight front-matter
    per step? *Lean: parse the heading + a `Status:` line; avoid front-matter to keep
    roadmaps human-first.*
-3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*. v0 (step-07)
-   stays at parseable + title + goal/summary; the closed kind vocabulary and per-kind
-   shape rules ship in step-07.5.
+3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*; shipped in
+   step-07.5. The closed kind vocabulary and per-kind shape rules are now enforced by
+   `wip-plumbing intake validate`.
 4. **Amendment idempotency hash** — byte-hash the shaped payload, or a normalized
    structural digest? Bytes are simpler; structural survives whitespace churn. Lean:
    bytes in v1, revisit if churn proves it. *(see `intake-kinds.md` §6.)*
