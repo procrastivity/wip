@@ -5,4 +5,4 @@ The contracts `wip` is built against. A spec is the durable, build-ready stateme
 
 | Spec | Status |
 |------|--------|
-| `wip-plumbing-cli.md` | 🚧 planned — distillation roadmap step-05 |
+| [`wip-plumbing-cli.md`](./wip-plumbing-cli.md) | draft — the v1 six-verb contract (distillation step-05) |

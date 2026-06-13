@@ -72,7 +72,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-05            # Round 2 begins: wip-plumbing CLI contract spec
+    active_step: step-06            # Round 2: build detect + doctor against the CLI contract spec
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:
