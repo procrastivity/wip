@@ -44,10 +44,10 @@ assert_eq "$tmp/proj" "$(jq -r '.path' "$reg")" "path field is abs"
 assert_eq "null" "$(jq -r '.slug' "$reg")" "slug defaults to null"
 
 # 2. Second touch within 60s is a no-op (mtime unchanged).
-mtime1="$(stat -f %m "$reg" 2>/dev/null || stat -c %Y "$reg")"
+mtime1="$(stat -c %Y "$reg" 2>/dev/null || stat -f %m "$reg")"
 sleep 1
 WIP_ROOT="$tmp/proj" bin/wip-plumbing detect >/dev/null
-mtime2="$(stat -f %m "$reg" 2>/dev/null || stat -c %Y "$reg")"
+mtime2="$(stat -c %Y "$reg" 2>/dev/null || stat -f %m "$reg")"
 assert_eq "$mtime1" "$mtime2" "fast-path: mtime unchanged within 60s"
 
 # 3. Backdate last_seen -> slow-path rewrite.

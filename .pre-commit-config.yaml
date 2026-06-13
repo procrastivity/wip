@@ -1,0 +1,37 @@
+# .pre-commit-config.yaml — gates that mirror `make check`.
+# All wip-specific hooks are LOCAL (no upstream `repo:` deps) so the pre-commit
+# graph matches what `make check` already runs. Stock hygiene hooks come from
+# pre-commit-hooks and are zero-config.
+#
+# Bootstrap once: `make hooks` (runs `pre-commit install`).
+# Run on demand:  `pre-commit run --all-files`.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: shfmt
+        name: shfmt -d -i 2 -ci
+        entry: shfmt -d -i 2 -ci
+        language: system
+        files: '^(bin/wip-plumbing|lib/wip/.*\.bash|test/.*\.sh)$'
+
+      - id: shellcheck
+        name: shellcheck -x
+        entry: shellcheck -x
+        language: system
+        files: '^(bin/wip-plumbing|lib/wip/.*\.bash|test/.*\.sh)$'
+
+      - id: wip-tests
+        name: make test
+        entry: make test
+        language: system
+        pass_filenames: false
+        always_run: true
