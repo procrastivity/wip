@@ -107,10 +107,6 @@ _wip_intake_cmd_validate() {
 }
 
 _wip_intake_cmd_apply() {
-  # --target is parsed (per spec) but unused in step-07.5: brief derives its
-  # slug from front-matter/H1, and amendment/workplan-seed routing is stubbed.
-  # The variable will gain a consumer when step-08.5 wires `roadmap amend` /
-  # `workplan init`.
   local file="" kind="" target=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -147,9 +143,6 @@ _wip_intake_cmd_apply() {
   [[ -n "$kind" ]] || wip_die 2 usage "intake apply: --kind is required"
   wip_intake_kind_valid "$kind" ||
     wip_die 2 usage "intake apply: --kind must be one of: $WIP_INTAKE_KINDS"
-  if [[ -n "$target" && "${WIP_VERBOSE:-0}" == "1" ]]; then
-    wip_warn "intake apply: --target $target (unused in step-07.5; consumed by step-08.5)"
-  fi
 
   local result valid
   result="$(wip_intake_validate_kind "$file" "$kind")"
@@ -164,14 +157,8 @@ _wip_intake_cmd_apply() {
 
   case "$kind" in
     brief) _wip_intake_apply_brief "$file" ;;
-    amendment)
-      wip_die 3 not-implemented \
-        "intake apply: amendment routing lands in step-08.5 (roadmap amend)"
-      ;;
-    workplan-seed)
-      wip_die 3 not-implemented \
-        "intake apply: workplan-seed routing lands in step-08.5 (workplan init)"
-      ;;
+    amendment) _wip_intake_apply_amendment "$file" "$target" ;;
+    workplan-seed) _wip_intake_apply_workplan_seed "$file" "$target" ;;
     spec)
       wip_die 3 not-implemented \
         "intake apply: spec routing requires the LDS seam (ADR-0006); not yet wired"
@@ -212,4 +199,62 @@ _wip_intake_apply_brief() {
   jq -nc \
     --arg kind "brief" --arg slug "$slug" --argjson result "$ledger" '
     { ok: true, kind: $kind, dispatched: "init", target: $slug, result: $result }'
+}
+
+_wip_intake_apply_amendment() {
+  local file="$1" cli_target="$2"
+  local fm slug
+  fm="$(wip_intake_read_front_matter "$file")"
+  if [[ -n "$cli_target" ]]; then
+    slug="$cli_target"
+  else
+    slug="$(_wip_intake_fm_str "$fm" "target")"
+  fi
+  [[ -n "$slug" ]] ||
+    wip_die 4 missing-target "intake apply: amendment lacks target slug" "$file"
+
+  # shellcheck disable=SC1091
+  source "$WIP_LIB/wip-plumbing-subcommands/roadmap.bash"
+
+  local ledger rc
+  set +e
+  ledger="$(wip_plumbing_cmd_roadmap amend "$slug" --from "$file")"
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || exit "$rc"
+
+  jq -nc \
+    --arg kind "amendment" --arg slug "$slug" --argjson result "$ledger" '
+    { ok: true, kind: $kind, dispatched: "roadmap amend", target: $slug,
+      result: $result }'
+}
+
+_wip_intake_apply_workplan_seed() {
+  local file="$1" cli_target="$2"
+  local fm target slug step_id
+  fm="$(wip_intake_read_front_matter "$file")"
+  if [[ -n "$cli_target" ]]; then
+    target="$cli_target"
+  else
+    target="$(_wip_intake_fm_str "$fm" "target")"
+  fi
+  [[ "$target" == */* ]] ||
+    wip_die 4 missing-target "intake apply: workplan-seed target must be <slug>/<step-id>" "$file"
+  slug="${target%%/*}"
+  step_id="${target#*/}"
+
+  # shellcheck disable=SC1091
+  source "$WIP_LIB/wip-plumbing-subcommands/workplan.bash"
+
+  local ledger rc
+  set +e
+  ledger="$(wip_plumbing_cmd_workplan init "$slug" "$step_id" --from "$file")"
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || exit "$rc"
+
+  jq -nc \
+    --arg kind "workplan-seed" --arg target "$target" --argjson result "$ledger" '
+    { ok: true, kind: $kind, dispatched: "workplan init", target: $target,
+      result: $result }'
 }

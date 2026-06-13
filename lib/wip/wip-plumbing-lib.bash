@@ -26,6 +26,11 @@ commands:
             usage: status [--initiative <slug>]
   next      ranked candidates for what to do next
             usage: next [--initiative <slug>]
+  roadmap   deterministic edits to an initiative's roadmap.md
+            usage: roadmap amend <slug> --from <file>
+                   [--insert-after <step-id> | --replace <step-id> | --append-round <title>]
+  workplan  scaffold a step workplan from templates/workplan.md.tmpl
+            usage: workplan init <slug> <step-id> [--from <seed>] [--slug <s>] [--force]
 
 global flags:
   -h, --help        print this and exit 0
