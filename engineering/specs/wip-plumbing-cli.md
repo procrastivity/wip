@@ -24,6 +24,7 @@ subcommands, and two new verbs cover the destinations its `apply` step routes to
 |------|----------|--------------|
 | `detect` | What features/initiatives exist, per `.wip.yaml`. The mandatory first call. | step-06 |
 | `doctor` | Verify the manifest against disk; report (and optionally fix) drift. | step-06 |
+| `project` | `list` / `register` / `resolve` / `forget` entries in the global registry. | step-06.5 |
 | `init` | Scaffold the repo manifest and/or an initiative from `templates/`. | step-07 |
 | `intake validate` | Shape-check an inbound planning artifact (the v0 single-kind validator). | step-07 |
 | `intake classify` | Best-guess `kind` from heuristics; never asks. | step-07.5 |
@@ -61,13 +62,20 @@ safely; you decide."
 
 ### Common flags
 `-h/--help` (exit 0), `--version` (top-level, exit 0), `-v/--verbose`, `-q/--quiet`,
-`--json/--no-json`, `--dry-run` (state-mutating verbs: print the write ledger, touch nothing).
+`--json/--no-json`, `--dry-run` (state-mutating verbs: print the write ledger, touch nothing),
+`--project <id>` (operate on a registered project from outside its tree; accepts an
+absolute path, dash-encoded segment, or opt-in slug — see
+[`wip-plumbing-registry.md`](./wip-plumbing-registry.md)).
 
 ### Manifest discovery & env
 - `.wip.yaml` is found by walking up from `$PWD` to the first match (the **repo root**).
   All relative paths in output resolve against that root.
 - `WIP_LIB` — override `lib/wip/` path (dev installs).
 - `WIP_ROOT` — force the repo root, skipping the walk-up.
+- `WIP_REGISTRY_FILE` — override the global registry path (default
+  `$XDG_STATE_HOME/wip/projects.jsonl`; see
+  [`wip-plumbing-registry.md`](./wip-plumbing-registry.md)).
+- `WIP_NO_REGISTRY=1` — suppress registry reads and writes for this invocation.
 - `wip-plumbing` reads **no** LLM/provider env — that's porcelain-only.
 
 ### Common error envelope (stderr is prose; stdout stays valid JSON on handled errors)
@@ -123,6 +131,25 @@ Verification loop over the detection contract.
   "drift_count": 1
 }
 ```
+
+### `wip-plumbing project <list|register|resolve|forget>`
+Manage the global registry at `$XDG_STATE_HOME/wip/projects.jsonl`
+(ADR-0008). Deterministic; no LLM. Full storage and resolution rules in
+[`wip-plumbing-registry.md`](./wip-plumbing-registry.md); summary below.
+
+- `project list [--json] [--prune]` — enumerate registered projects;
+  `--prune` first drops records whose `path` is gone or no longer has
+  `.wip.yaml`.
+- `project register [<path>] [--slug <slug>]` — idempotent upsert.
+  `<path>` defaults to `$PWD`. Sets/updates `slug`.
+- `project resolve <id>` — resolve an absolute path, dash-encoded segment,
+  or slug to a record (exit 0 + JSON / exit 3 not-found / exit 4 ambiguous).
+- `project forget <id>` — remove a record. Touches no project files.
+- **Writes:** the registry file. Write errors are swallowed (do not fail
+  the verb); with `-v` a one-line diagnostic is written to stderr.
+- **stdout:** for `register`/`resolve`, `{"ok":true,"record":{...}}`; for
+  `forget`, `{"ok":true,"forgot":"<id>"}`; for `list`, either a TSV-style
+  table or raw JSONL with `--json`.
 
 ### `wip-plumbing init [<slug>] [--title <t>] [--intake ad-hoc|structured]`
 Scaffold from `templates/`. Idempotent; protected-path model (never clobbers existing
