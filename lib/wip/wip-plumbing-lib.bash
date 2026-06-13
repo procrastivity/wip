@@ -16,8 +16,10 @@ commands:
   detect    report features + initiatives from .wip.yaml (mandatory first call)
   doctor    verify the manifest against disk; report drift  [--fix advisory in v1]
   project   list / register / resolve / forget entries in the global registry
-  init      scaffold manifest/initiative          (later step)
-  intake    validate inbound planning artifacts   (later step)
+  init      scaffold manifest and/or initiative from templates/
+            usage: init [<slug>] [--title <t>] [--intake ad-hoc|structured]
+  intake    validate inbound planning artifacts
+            usage: intake validate <file>   (classify/apply land in step-07.5)
   status    where am I: round / active step        (later step)
   next      ranked candidates for what to do next  (later step)
 

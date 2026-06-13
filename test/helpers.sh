@@ -17,6 +17,28 @@ assert_eq() {
   fi
 }
 
+assert_file() {
+  local path="$1" msg="${2:-assert_file}"
+  if [[ -f "$path" ]]; then
+    _WIP_PASS=$((_WIP_PASS + 1))
+    printf '  ok   %s\n' "$msg"
+  else
+    _WIP_FAIL=$((_WIP_FAIL + 1))
+    printf '  FAIL %s\n       missing: %s\n' "$msg" "$path" >&2
+  fi
+}
+
+assert_absent() {
+  local path="$1" msg="${2:-assert_absent}"
+  if [[ ! -e "$path" ]]; then
+    _WIP_PASS=$((_WIP_PASS + 1))
+    printf '  ok   %s\n' "$msg"
+  else
+    _WIP_FAIL=$((_WIP_FAIL + 1))
+    printf '  FAIL %s\n       unexpected: %s\n' "$msg" "$path" >&2
+  fi
+}
+
 # test_summary — print counts; return nonzero if any failed (fails `make test`).
 test_summary() {
   printf '%s: %d passed, %d failed\n' "$_WIP_TEST_NAME" "$_WIP_PASS" "$_WIP_FAIL"

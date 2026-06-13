@@ -7,5 +7,10 @@ own docs).
 | Path | What |
 |------|------|
 | [`glossary/`](./glossary/) | layered vocabulary partials (`core.md` + per-feature); assembled into a project's `.wip/GLOSSARY.md` |
-| `wip.yaml.tmpl` | starter `.wip.yaml` for `wip init` *(future)* |
-| `brief.md.tmpl`, `roadmap.md.tmpl`, `workplan.md.tmpl` | initiative artifact templates *(future)* |
+| [`wip.yaml.tmpl`](./wip.yaml.tmpl) | starter `.wip.yaml` for `wip init` (repo-level scaffold) |
+| [`brief.md.tmpl`](./brief.md.tmpl), [`roadmap.md.tmpl`](./roadmap.md.tmpl) | initiative artifact templates rendered by `wip init <slug>` |
+| `workplan.md.tmpl` | rendered by `wip workplan init` *(future — step-08.5)* |
+
+Placeholders are bracketed `{{key}}` and substituted by `wip_scaffold_render`
+(`lib/wip/wip-plumbing-scaffold-lib.bash`). The standard keys are `slug`,
+`title`, and `date` (YYYY-MM-DD).
