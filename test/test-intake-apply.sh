@@ -53,41 +53,48 @@ out="$(run "$tmp/brief-h1.md" --kind brief)"
 # "Auth Rework" derives -> "auth-rework" but auth-rework doesn't exist yet.
 assert_eq "auth-rework" "$(jq -r '.target' <<<"$out")" "slug derived from H1"
 
-# 3. amendment -> exit 3 not-implemented.
+# 3. amendment -> dispatches through roadmap amend.
+mkdir -p "$tmp/.wip/initiatives/auth"
+cat >"$tmp/.wip/initiatives/auth/roadmap.md" <<'MD'
+# Roadmap
+
+## Round 1 — Build
+
+- **step-01 — One** ✅ — done.
+- **step-02 — Two** — current.
+MD
 cat >"$tmp/amend.md" <<'MD'
 ---
 target: auth
 insert-after: step-02
 ---
 # Step
-### step-03 — X
-Body.
-MD
-set +e
-out="$(run "$tmp/amend.md" --kind amendment 2>/dev/null)"
-rc=$?
-set -e
-assert_eq "3" "$rc" "amendment exit 3"
-assert_eq "not-implemented" "$(jq -r '.error.kind' <<<"$out")" "amendment not-implemented"
 
-# 4. workplan-seed -> exit 3.
-mkdir -p "$tmp/.wip/initiatives/auth"
-cat >"$tmp/.wip/initiatives/auth/roadmap.md" <<'MD'
-# Roadmap
-- **step-01 — One**
+### step-03 — Three
+
+A new step.
 MD
+out="$(run "$tmp/amend.md" --kind amendment)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "amendment ok"
+assert_eq "roadmap amend" "$(jq -r '.dispatched' <<<"$out")" "amendment dispatched"
+assert_eq "auth" "$(jq -r '.target' <<<"$out")" "amendment target"
+assert_grep "step-03 — Three" "$tmp/.wip/initiatives/auth/roadmap.md" "amendment wrote roadmap"
+
+# 4. workplan-seed -> dispatches through workplan init.
 cat >"$tmp/wps.md" <<'MD'
 ---
-target: auth/step-01
+target: auth/step-02
 ---
-# Seed
-Body.
+# Seed for step-02
+
+Seed body.
 MD
-set +e
-out="$(run "$tmp/wps.md" --kind workplan-seed 2>/dev/null)"
-rc=$?
-set -e
-assert_eq "3" "$rc" "workplan-seed exit 3"
+out="$(run "$tmp/wps.md" --kind workplan-seed)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "workplan-seed ok"
+assert_eq "workplan init" "$(jq -r '.dispatched' <<<"$out")" "workplan-seed dispatched"
+assert_eq "auth/step-02" "$(jq -r '.target' <<<"$out")" "workplan-seed target"
+assert_file "$tmp/.wip/initiatives/auth/workplans/step-02-two.md" "workplan written"
+assert_grep "## Seed (from intake)" "$tmp/.wip/initiatives/auth/workplans/step-02-two.md" "seed appended"
 
 # 5. spec -> exit 3.
 cat >"$tmp/spec.md" <<'MD'

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+_WIP_TEST_NAME="roadmap-amend"
+# shellcheck source=test/helpers.sh
+source test/helpers.sh
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+export WIP_NO_REGISTRY=1
+
+mkdir -p "$tmp/.wip/initiatives/demo"
+cat >"$tmp/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+make_roadmap() {
+  cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+## Round 1 — Build
+
+- **step-01 — First** ✅ — done.
+- **step-02 — Second** — current.
+
+## Deferred
+
+- nothing yet.
+
+## Backlog
+
+- **Cleanup** — later.
+MD
+}
+
+run() { WIP_ROOT="$tmp" bin/wip-plumbing roadmap amend "$@"; }
+
+# 1. insert-after happy path + idempotent re-apply.
+make_roadmap
+cat >"$tmp/insert.md" <<'MD'
+---
+target: demo
+insert-after: step-02
+---
+# Amend
+
+### step-03 — Third
+
+A new step.
+MD
+out="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "insert-after ok"
+assert_eq "false" "$(jq -r '.idempotent_noop' <<<"$out")" "first apply not idempotent"
+assert_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "step-03 in roadmap"
+assert_grep "<!-- wip-amend:" "$tmp/.wip/initiatives/demo/roadmap.md" "marker present"
+
+out2="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out2")" "second apply idempotent"
+assert_eq "0" "$(jq -r '.wrote | length' <<<"$out2")" "second apply wrote 0"
+
+# 2. CLI flag matching artifact -> ok.
+make_roadmap
+out3="$(run demo --from "$tmp/insert.md" --insert-after step-02)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out3")" "matching CLI directive ok"
+
+# 3. CLI flag disagreeing -> exit 2.
+set +e
+run demo --from "$tmp/insert.md" --insert-after step-01 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "disagreeing directive exit 2"
+
+# 4. Missing target step -> exit 4.
+make_roadmap
+cat >"$tmp/bad.md" <<'MD'
+---
+target: demo
+insert-after: step-99
+---
+# Amend
+### step-03 — X
+Body.
+MD
+set +e
+run demo --from "$tmp/bad.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "4" "$rc" "missing target step exit 4"
+
+# 5. Shape failure (missing directive) -> exit 4.
+make_roadmap
+cat >"$tmp/shape-bad.md" <<'MD'
+---
+target: demo
+---
+# No directive
+Body.
+MD
+set +e
+out6="$(run demo --from "$tmp/shape-bad.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "shape failure exit 4"
+assert_eq "false" "$(jq -r '.valid' <<<"$out6")" "shape failure valid=false"
+
+# 6. replace happy path.
+make_roadmap
+cat >"$tmp/replace.md" <<'MD'
+---
+target: demo
+replace: step-02
+---
+# Replace
+
+### step-02 — Second (updated)
+
+Replaced body content.
+MD
+out7="$(run demo --from "$tmp/replace.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out7")" "replace ok"
+assert_grep "Second (updated)" "$tmp/.wip/initiatives/demo/roadmap.md" "replace title applied"
+
+# 7. append-round happy path before ## Deferred.
+make_roadmap
+cat >"$tmp/round.md" <<'MD'
+---
+target: demo
+append-round: Polish
+---
+# Append
+
+## Round 2 — Polish
+
+### step-10 — Cleanup
+
+Final touches.
+MD
+out8="$(run demo --from "$tmp/round.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out8")" "append-round ok"
+# The new round must be inserted before "## Deferred".
+def_line=$(grep -n "^## Deferred" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+round_line=$(grep -n "^## Round 2 — Polish" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+if [[ "$round_line" -lt "$def_line" ]]; then
+  _WIP_PASS=$((_WIP_PASS + 1))
+  echo "  ok   round inserted before Deferred"
+else
+  _WIP_FAIL=$((_WIP_FAIL + 1))
+  echo "  FAIL round position wrong (round=$round_line, def=$def_line)" >&2
+fi
+
+# 8. dry-run with insert: no writes.
+make_roadmap
+out9="$(WIP_ROOT="$tmp" bin/wip-plumbing --dry-run roadmap amend demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out9")" "dry-run ok"
+assert_eq "true" "$(jq -r '.dry_run' <<<"$out9")" "dry-run flag"
+assert_not_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "dry-run did not write"
+
+# 9. Unknown initiative -> exit 3.
+set +e
+WIP_ROOT="$tmp" bin/wip-plumbing roadmap amend bogus --from "$tmp/insert.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "3" "$rc" "unknown initiative exit 3"
+
+# 10. Missing --from -> exit 2.
+set +e
+WIP_ROOT="$tmp" bin/wip-plumbing roadmap amend demo >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "missing --from exit 2"
+
+test_summary

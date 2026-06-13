@@ -171,10 +171,10 @@ LLM-driven shaping and routing between them lives in the `wip intake` porcelain
 (roadmap step-10.5). The closed kind vocabulary, per-kind shape rules, and classify
 heuristics are specified in [`intake-kinds.md`](./intake-kinds.md).
 
-All three subcommands shipped in step-07.5. `apply`'s `amendment` and
-`workplan-seed` dispatch paths exit **3** until step-08.5 lands `roadmap amend`
-and `workplan init`; `spec` exits 3 until the LDS seam is wired. `brief`
-dispatches to `init` and works end-to-end today.
+All three subcommands shipped in step-07.5. As of step-08.5, `apply` is also
+end-to-end for `brief` → `init`, `amendment` → `roadmap amend`, and
+`workplan-seed` → `workplan init`. `spec` still exits 3 (LDS seam not yet
+wired); `handoff` exits 4 (not terminal).
 
 #### `wip-plumbing intake classify <file>`
 Best-guess `kind` from front-matter + heading heuristics. Never asks; never makes a
@@ -307,6 +307,8 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
 3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*; shipped in
    step-07.5. The closed kind vocabulary and per-kind shape rules are now enforced by
    `wip-plumbing intake validate`.
-4. **Amendment idempotency hash** — byte-hash the shaped payload, or a normalized
-   structural digest? Bytes are simpler; structural survives whitespace churn. Lean:
-   bytes in v1, revisit if churn proves it. *(see `intake-kinds.md` §6.)*
+4. **Amendment idempotency hash** — *resolved in step-08.5.* SHA-256 of the
+   **rendered insertion payload** (bullet line or appended round block), not the source
+   artifact's bytes. Identical inserts shaped from differently-framed artifacts collapse
+   to the same hash. Marker line: `<!-- wip-amend: <sha256> -->` immediately after the
+   inserted block.
