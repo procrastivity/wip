@@ -7,9 +7,14 @@
 # shellcheck shell=bash
 
 # wip_shaper_system_prompt <kind> — emit the system prompt for <kind>.
-# The shaper preamble + per-kind shape rules from intake-kinds.md §2/§3
-# are inlined here. New kinds add a case below; the spec stays the source
-# of truth.
+# The shaper preamble + per-kind shape rules live at
+# templates/prompts/intake/{preamble,<kind>}.md and are SHARED with the
+# /wip:* Claude Code plugin (step-11). Resolution order for the templates
+# dir:
+#   1. $WIP_TEMPLATES_DIR (explicit override; test seam + install seam)
+#   2. $WIP_LIB/../templates (i.e. repo's templates/ next to lib/wip/)
+# An unknown kind emits "Target kind: <kind> — unknown.\n" to match the
+# legacy heredoc fallback exactly.
 wip_shaper_system_prompt() {
   local kind="$1"
   local preamble
@@ -19,118 +24,42 @@ wip_shaper_system_prompt() {
   printf '%s\n\n%s\n' "$preamble" "$rules"
 }
 
+_wip_shaper_templates_dir() {
+  if [[ -n "${WIP_TEMPLATES_DIR:-}" ]]; then
+    printf '%s' "$WIP_TEMPLATES_DIR"
+    return 0
+  fi
+  local lib
+  # shellcheck disable=SC1007  # CDPATH= prefixes the cd command (neutralize CDPATH), not an assignment
+  lib="${WIP_LIB:-$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+  # lib/wip/ sits next to templates/ under the repo root.
+  # shellcheck disable=SC1007
+  CDPATH= cd -- "$lib/../../templates" 2>/dev/null && pwd
+}
+
+_wip_shaper_read_template() {
+  local name="$1"
+  local dir
+  dir="$(_wip_shaper_templates_dir)"
+  local path="$dir/prompts/intake/$name.md"
+  if [[ ! -f "$path" ]]; then
+    return 1
+  fi
+  cat -- "$path"
+}
+
 _wip_shaper_preamble() {
-  cat <<'EOF'
-You are the SHAPER stage of the `wip intake` pipeline (ADR-0009).
-
-Your job: take an arbitrary inbound planning artifact and rewrite it into
-the canonical form for its declared kind so that the deterministic
-`wip-plumbing intake validate` gate downstream accepts it.
-
-Output protocol — exactly one of:
-
-1. A single shaped markdown document. Emit ONLY the document body, no
-   preamble, no commentary, no ``` fences. The first line of the document
-   should be its YAML front-matter `---` head (when required by the kind),
-   followed by the markdown body with its `# Title` heading.
-
-2. A single clarifying question, formatted EXACTLY as:
-
-   ---ASK---
-   question: <one short sentence>
-   why: <one short sentence describing what the artifact is missing>
-   ---END---
-
-   Emit nothing else. The orchestrator will inject the user's answer and
-   re-issue the shape request. Ask at most ONE question per turn.
-
-Hard rules:
-- Never invent facts. If you cannot fill a required section from the
-  artifact, ASK or (when told to skip questions) add a TODO list at the
-  end of the shaped artifact under `## TODO (shaper guesses)`.
-- Never emit both a shaped document and an ASK in the same response.
-- Never wrap the shaped document in code fences.
-- Preserve the original artifact's intent and prose voice; restructure
-  rather than rewrite-from-scratch where possible.
-EOF
+  _wip_shaper_read_template preamble
 }
 
 _wip_shaper_rules() {
   local kind="$1"
   case "$kind" in
-    brief)
-      cat <<'EOF'
-Target kind: brief — a new initiative.
-
-Required shape (validator rules from intake-kinds.md §2):
-- Title heading: `# <Title>`.
-- One of: `## Goal` OR `## Summary` (one is required).
-- Optional YAML front-matter with `slug: <kebab-case>` if a slug should be
-  forced; otherwise the slug is derived from the H1.
-- Do NOT add `target:` referencing an existing initiative slug. If the
-  artifact is about an existing initiative, return an ASK clarifying
-  whether this is a new initiative or an amendment.
-EOF
-      ;;
-    amendment)
-      cat <<'EOF'
-Target kind: amendment — an edit to an existing initiative's roadmap.
-
-Required shape (validator rules from intake-kinds.md §2/§3):
-- YAML front-matter MUST include:
-  - `target: <initiative-slug>` — the slug being amended.
-  - exactly ONE directive: `insert-after: step-NN`, `replace: step-NN`,
-    or `append-round: <Round title>`.
-- A title heading (`# <Title>`) below the front-matter.
-- Body content per the directive:
-  - `insert-after` / `replace`: include a `### step-XX — <title>` heading
-    where `XX` is the new step's id (may be a `.5` slot per the
-    distillation convention) plus a one-or-more-paragraph body.
-  - `append-round`: include `## Round <N> — <title>` plus at least one
-    `### step-NN — <title>` entry.
-
-If `target:`, the directive, or the step id is unknown, return an ASK.
-EOF
-      ;;
-    workplan-seed)
-      cat <<'EOF'
-Target kind: workplan-seed — input narrative for a specific step's workplan.
-
-Required shape:
-- YAML front-matter with `target: <slug>/<step-id>` (the slug AND the
-  step-id, separated by `/`).
-- A title heading (`# <Title>`) below the front-matter.
-- Narrative body (no required section set).
-
-If either the slug or the step-id is unclear, return an ASK.
-EOF
-      ;;
-    spec)
-      cat <<'EOF'
-Target kind: spec — an LDS-shaped feature spec.
-
-Required shape (minimal fallback rules; LDS delegation is out of scope):
-- Title heading (`# <Title>`).
-- `## Summary` section.
-- One of `## User stories` OR `## Requirements`.
-EOF
-      ;;
-    handoff)
-      cat <<'EOF'
-Target kind: handoff — loose narrative.
-
-Required shape:
-- Title heading (`# <Title>`) and parseable markdown body.
-
-Note: `handoff` is not a terminal kind. The pipeline will refuse to
-`apply` it. You typically reach this kind only when the user has
-explicitly forced `--kind handoff`.
-EOF
+    brief | amendment | workplan-seed | spec | handoff)
+      _wip_shaper_read_template "$kind"
       ;;
     *)
-      cat <<EOF
-Target kind: $kind — unknown.
-EOF
+      printf 'Target kind: %s — unknown.\n' "$kind"
       ;;
   esac
 }
