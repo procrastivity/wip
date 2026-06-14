@@ -37,6 +37,12 @@ commands:
   glossary  assemble / check the effective glossary for this project
             usage: glossary assemble [--output <path>]
                    glossary check
+  setup     install-time scaffold writers (one per capability)
+            usage: setup deps     [--force]   (flake.nix + flake.lock)
+                   setup direnv   [--force]   (.envrc; requires flake.nix)
+                   setup hygiene  [--force]   (.pre-commit-config.yaml)
+                   setup release  [--force]   (cliff.toml + CHANGELOG.md)
+                   setup agents   [--force]   (.claude-plugin/ vendored)
 
 global flags:
   -h, --help        print this and exit 0
