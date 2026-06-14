@@ -43,6 +43,8 @@ commands:
                    setup hygiene  [--force]   (.pre-commit-config.yaml)
                    setup release  [--force]   (cliff.toml + CHANGELOG.md)
                    setup agents   [--force]   (.claude-plugin/ vendored)
+                   setup lds      [--force] [--sentinel-only]
+                                  (LDS scaffold under engineering/)
   graduate  promote a single planning artifact to its LDS canon slot
             usage: graduate <artifact-path> [--to <slot>] [--force]
                    (slot is <eng-docs>-relative; auto-numbers

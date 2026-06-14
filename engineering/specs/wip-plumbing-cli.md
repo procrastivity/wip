@@ -48,6 +48,7 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup hygiene` | Write `.pre-commit-config.yaml` (local hooks mirroring `make check`). | step-14 |
 | `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
 | `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
+| `setup lds` | Write the LDS install scaffold to `engineering/` (manifest + nine layer dirs + maintenance copies); flip `features.lds.{enabled, root: engineering}`. | step-15 follow-up |
 | `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
 | `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
 
@@ -431,9 +432,11 @@ local hook that fires when `.wip.yaml`, `.wip/GLOSSARY.md`, or any
 `templates/glossary/*.md` changes — the three drift modes the seam
 catches: content drift, manifest drift, partial drift.
 
-### `wip-plumbing setup <deps|direnv|hygiene|release|agents> [--force]`
+### `wip-plumbing setup <deps|direnv|hygiene|release|agents|lds> [--force]`
 
-Install-time deterministic scaffold writers, one per capability (step-14).
+Install-time deterministic scaffold writers, one per capability (step-14
+shipped the first five; `setup lds` is the step-15 follow-up — the
+sixth verb, see [Sub-section below](#setup-lds-the-sixth-verb-the-lds-scaffold)).
 Each verb writes verbatim files from `templates/setup/<verb>/` into the
 consumer repo, flips its mapped feature flag in `.wip.yaml` where
 applicable, and verifies its sentinel exists post-write. No `{{key}}`
@@ -485,6 +488,7 @@ already-flipped verb is a manifest no-op).
 | `setup hygiene` | (none — v1) | (none) |
 | `setup release` | `features.changelog.enabled: true` | `CHANGELOG.md` |
 | `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
+| `setup lds` | `features.lds.{enabled, root: engineering}` | `engineering/.lds-manifest.yaml` |
 
 `setup agents` deliberately does NOT auto-create the `features.solo`
 block (per ADR-0007, that block carries the consumer's backend-specific
@@ -537,6 +541,57 @@ have `wip` installed. This repo's own `.claude-plugin/` keeps
 `bin/wip-plumbing` (dogfood-local). The divergence is exactly the
 one-substitution rule; the agents template tree is excluded from the
 verbatim-cmp fidelity tests for that reason.
+
+#### `setup lds` — the sixth verb (the LDS scaffold)
+
+Step-15 follow-up. Writes the LDS install scaffold into the consumer
+repo so `graduate` / `extract` (the LDS seam verbs) have a place to
+land. Inherits every shared `setup` contract above (three-way
+idempotency, `--force`, `--dry-run`, JSON ledger, manifest flag flip,
+sentinel post-check, `--project` forwarding). Verb-specific shape
+below.
+
+**Writes (full mode — 13 files):**
+
+- `engineering/.lds-manifest.yaml` — the sentinel; ships as an
+  approved-shape manifest with `entries: []` so `extract` exits 4
+  `manifest-empty` (correctly) until the consumer authors entries.
+- `engineering/{decisions,product,architecture,specs,reference,features,implementation,appendices}/.gitkeep`
+  — 8 zero-byte files so the canonical LDS layer dirs survive
+  `git add`. Matches step-15's `WIP_GRADUATE_LAYERS` allowlist.
+- `engineering/maintenance/{audit,refine,sync,update}.md` — verbatim
+  copies of the LDS maintenance workflow files; the `{ENG_DOCS_DIR}`
+  placeholders in `audit.md` are instruction text read by an AI agent
+  at LDS-workflow time, not template substitutions this verb performs.
+
+**Hardcoded LDS root.** v1 always writes to `engineering/`. If the
+consumer's `.wip.yaml` already has `features.lds.root` set to
+something other than `engineering` (or unset), the verb exits 3
+`lds-already-installed-elsewhere` with `error.path` carrying the
+existing root. Configurable `--root <dir>` is a follow-up.
+
+**`--sentinel-only` flag (lds only).** Writes ONLY
+`engineering/.lds-manifest.yaml`, skips the `.gitkeep` files and the
+`maintenance/*.md` copies. Still flips both feature-flag keys. Use
+when adopting LDS in a repo whose `engineering/` tree already has
+hand-authored content (or content from another tool). Passing
+`--sentinel-only` to any other `setup` subcommand exits 2 `usage`.
+
+**Manifest flag flip.** Sets both
+`features.lds.enabled: true` AND `features.lds.root: engineering` in
+the same yq-in-place update. The `root` key is what
+`_wip_feature_records` reads to compute the sentinel path, so flipping
+both keeps `detect` / `doctor` consistent without a separate edit.
+
+**Post-write invariant.** `engineering/.lds-manifest.yaml` exists and
+`wip-plumbing doctor` reports zero LDS drift. Pinned by
+`test/test-setup.sh`'s sentinel + doctor checks.
+
+**Out of scope for v1.** No migration mode (multi-session LLM workflow —
+porcelain territory); no per-layer template files
+(`_template.md` / `0000-template.md`); no plural LDS installs
+(`features.lds.installs[]`); no upgrade workflow. The 13 files are the
+fresh-install minimum that unblocks `graduate` / `extract`.
 
 ### `wip-plumbing graduate <artifact> [--to <slot>] [--force]`
 
