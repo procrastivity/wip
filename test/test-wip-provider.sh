@@ -33,7 +33,7 @@ assert_eq "true" "$(jq -r '.api_key_present' <<<"$out")" "happy: api_key_present
 assert_eq "TEST_BASE_URL" "$(jq -r '.env.base_url_env' <<<"$out")" "happy: env.base_url_env"
 assert_eq "TEST_API_KEY" "$(jq -r '.env.api_key_env' <<<"$out")" "happy: env.api_key_env"
 assert_eq "TEST_MODEL" "$(jq -r '.env.model_env' <<<"$out")" "happy: env.model_env"
-assert_eq "0.1.0-dev" "$(jq -r '.porcelain_version' <<<"$out")" "happy: porcelain_version"
+assert_eq "0.2.0-dev" "$(jq -r '.porcelain_version' <<<"$out")" "happy: porcelain_version"
 
 # api_key value never appears in the output.
 if grep -q "sk-secret" <<<"$out"; then
