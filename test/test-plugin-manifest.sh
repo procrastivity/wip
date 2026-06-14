@@ -69,10 +69,15 @@ assert_grep \
   .claude-plugin/commands/intake.md \
   "intake.md forbids ASK fence"
 
-# agents/ stub must be README-only (no role files yet — those land step-12).
-assert_file ".claude-plugin/agents/README.md" "agents/README.md stub"
-extras="$(find .claude-plugin/agents -mindepth 1 -not -name README.md 2>/dev/null | wc -l | tr -d ' ')"
-assert_eq "0" "$extras" "agents/ only contains README (step-12 lands files)"
+# agents/ contains the four wip role agent files + README (step-12).
+# Detailed agent-file contract (front-matter, @-file pointers,
+# backend-agnostic invariant) is pinned in test-roles-backend-seam.sh.
+assert_file ".claude-plugin/agents/README.md" "agents/README.md present"
+for a in orchestrator coordinator researcher builder; do
+  assert_file ".claude-plugin/agents/$a.md" "agents/$a.md present"
+done
+extras="$(find .claude-plugin/agents -mindepth 1 -not -name README.md -not -name 'orchestrator.md' -not -name 'coordinator.md' -not -name 'researcher.md' -not -name 'builder.md' 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "0" "$extras" "agents/ contains only README + the four role files"
 
 # README mentions all three commands (catches a missed-command-in-docs).
 for cmd in next status intake; do
