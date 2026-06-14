@@ -19,16 +19,22 @@ wip_plumbing_cmd_setup() {
     shift
   fi
   case "$sub" in
-    deps | direnv | hygiene | release | agents) ;;
-    "") wip_die 2 usage "setup: missing subcommand (deps|direnv|hygiene|release|agents)" ;;
+    deps | direnv | hygiene | release | agents | lds) ;;
+    "") wip_die 2 usage "setup: missing subcommand (deps|direnv|hygiene|release|agents|lds)" ;;
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0
+  local force=0 sentinel_only=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
         force=1
+        shift
+        ;;
+      --sentinel-only)
+        [[ "$sub" == "lds" ]] ||
+          wip_die 2 usage "setup $sub: --sentinel-only is only valid for \`setup lds\`"
+        sentinel_only=1
         shift
         ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
@@ -65,12 +71,26 @@ wip_plumbing_cmd_setup() {
           "setup direnv: flake.nix not found; hint: run \`wip-plumbing setup deps\` first" \
           "flake.nix"
       ;;
+    lds)
+      local existing_lds_root
+      existing_lds_root="$(yq -r '.features.lds.root // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+      if [[ -n "$existing_lds_root" && "$existing_lds_root" != "engineering" ]]; then
+        wip_die 3 lds-already-installed-elsewhere \
+          "setup lds: features.lds.root is already set to \"$existing_lds_root\"; v1 hardcodes \`engineering/\` (backlog: configurable --root)" \
+          "$existing_lds_root"
+      fi
+      ;;
   esac
 
   local raw rc
   set +e
-  raw="$(wip_setup_walk_template_tree "$tmpl_dir" "$root")"
-  rc=$?
+  if [[ "$sub" == "lds" && "$sentinel_only" == "1" ]]; then
+    raw="$(_wip_setup_lds_sentinel_only "$tmpl_dir" "$root")"
+    rc=$?
+  else
+    raw="$(wip_setup_walk_template_tree "$tmpl_dir" "$root")"
+    rc=$?
+  fi
   set -e
 
   local wrote=() skipped=() wrote_forced=() refused=()
@@ -117,6 +137,11 @@ wip_plumbing_cmd_setup() {
     agents)
       manifest_status="$(wip_setup_set_feature_flag "$manifest" "orchestration" \
         "enabled=true" "backend=solo" "source=plugin")" ||
+        wip_die 1 internal "setup $sub: manifest update failed"
+      ;;
+    lds)
+      manifest_status="$(wip_setup_set_feature_flag "$manifest" "lds" \
+        "enabled=true" "root=engineering")" ||
         wip_die 1 internal "setup $sub: manifest update failed"
       ;;
   esac
@@ -175,8 +200,39 @@ wip_setup_sentinel_for_verb() {
   case "$1" in
     direnv) printf '.envrc' ;;
     release) printf 'CHANGELOG.md' ;;
+    lds) printf 'engineering/.lds-manifest.yaml' ;;
     *) printf '' ;;
   esac
+}
+
+# _wip_setup_lds_sentinel_only <tmpl-root> <dest-root> — write ONLY the LDS
+# sentinel (.lds-manifest.yaml) and emit a single `<status><TAB><relpath>`
+# line. Skips layer dirs and maintenance/ files. Used by `setup lds
+# --sentinel-only` for repos that already have an authored `engineering/`
+# tree and just need the manifest binding.
+_wip_setup_lds_sentinel_only() {
+  local tmpl_root="$1" dest_root="$2"
+  local rel="engineering/.lds-manifest.yaml"
+  local tmpl="$tmpl_root/$rel" dest="$dest_root/$rel"
+  [[ -f "$tmpl" ]] || {
+    printf 'wip-plumbing: setup lds: sentinel template missing: %s\n' "$tmpl" >&2
+    return 1
+  }
+  local status rc
+  set +e
+  status="$(wip_setup_write_idempotent "$tmpl" "$dest")"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    4) ;;
+    *)
+      printf 'wip-plumbing: setup lds: sentinel write failed (%d)\n' "$rc" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\t%s\n' "$status" "$rel"
+  return "$rc"
 }
 
 # _wip_setup_arr_json <items...> — emit a JSON array of the args, sorted in
@@ -209,6 +265,10 @@ _wip_setup_hint() {
     agents)
       printf 'wip-plumbing: setup agents: hint: restart Claude Code to load the wip plugin\n' >&2
       printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tier_policy in .wip.yaml if Solo is your backend\n' >&2
+      ;;
+    lds)
+      printf 'wip-plumbing: setup lds: hint: run `wip-plumbing doctor` to verify the LDS sentinel\n' >&2
+      printf 'wip-plumbing: setup lds: hint: `wip-plumbing graduate <artifact>` now works against this repo\n' >&2
       ;;
   esac
 }

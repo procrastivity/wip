@@ -190,4 +190,179 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "missing subcommand exit 2"
 
+# --- 15. setup lds — template fidelity (maintenance/*.md) -------------------
+# Maintenance .md files ship verbatim from the LDS distribution; any drift here
+# means the templates/setup/lds/ tree needs a refresh.
+for m in audit refine sync update; do
+  assert_cmp "templates/setup/lds/engineering/maintenance/$m.md" \
+    "layered-documentation-system/maintenance/$m.md" \
+    "lds maintenance/$m.md byte-equal to LDS distribution"
+done
+
+# Seed manifest is yq-parseable + has the validator-required shape
+assert_eq "1.0.0" "$(yq -r '.metadata.schema_version' \
+  templates/setup/lds/engineering/.lds-manifest.yaml)" \
+  "lds seed manifest schema_version=1.0.0"
+assert_eq "approved" "$(yq -r '.metadata.status' \
+  templates/setup/lds/engineering/.lds-manifest.yaml)" \
+  "lds seed manifest status=approved"
+assert_eq "0" "$(yq -r '.entries | length' \
+  templates/setup/lds/engineering/.lds-manifest.yaml)" \
+  "lds seed manifest entries=[]"
+
+# --- 16. setup lds (full mode) writes 13 files; idempotent on re-run ---------
+workdir="$tmp/lds-full"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[lds] ok"
+assert_eq "13" "$(jq -r '.wrote | length' <<<"$out")" "[lds] wrote 13 files"
+assert_eq "0" "$(jq -r '.refused | length' <<<"$out")" "[lds] no refusals"
+assert_eq "engineering/.lds-manifest.yaml" "$(jq -r '.sentinel' <<<"$out")" \
+  "[lds] sentinel path"
+assert_eq "true" "$(jq -r '.sentinel_present' <<<"$out")" "[lds] sentinel present"
+
+# Layer dirs all exist with .gitkeep
+for layer in decisions product architecture specs reference features implementation appendices; do
+  assert_file "$workdir/engineering/$layer/.gitkeep" "[lds] $layer/.gitkeep present"
+done
+assert_file "$workdir/engineering/maintenance/audit.md" "[lds] maintenance/audit.md present"
+assert_file "$workdir/engineering/.lds-manifest.yaml" "[lds] sentinel manifest on disk"
+
+# Re-run idempotency
+out2="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds 2>/dev/null)"
+assert_eq "0" "$(jq -r '.wrote | length' <<<"$out2")" "[lds] re-run wrote 0"
+assert_eq "13" "$(jq -r '.skipped_idempotent | length' <<<"$out2")" \
+  "[lds] re-run skipped all 13"
+assert_eq "null" "$(jq -r '.manifest_updated' <<<"$out2")" \
+  "[lds] re-run manifest no-op"
+
+# --- 17. setup lds flips features.lds.{enabled, root: engineering} ----------
+assert_eq "true" "$(yq -r '.features.lds.enabled' "$workdir/.wip.yaml")" \
+  "[lds] features.lds.enabled flipped"
+assert_eq "engineering" "$(yq -r '.features.lds.root' "$workdir/.wip.yaml")" \
+  "[lds] features.lds.root set"
+
+# Doctor reports zero drift after setup lds
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing doctor 2>/dev/null)"
+assert_eq "0" "$(jq -r '.drift_count' <<<"$out")" "[lds] doctor drift 0"
+
+# --- 18. --force overwrites drifted maintenance file -------------------------
+workdir="$tmp/lds-drift"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup lds >/dev/null 2>&1
+echo "drift" >>"$workdir/engineering/maintenance/audit.md"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[lds] drift exit 4"
+assert_eq "content-drift" "$(jq -r '.error.kind' <<<"$out")" "[lds] drift kind"
+assert_eq "1" "$(jq -r '[.error.paths[] | select(. == "engineering/maintenance/audit.md")] | length' <<<"$out")" \
+  "[lds] drift path listed"
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds --force 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[lds] --force ok after drift"
+assert_cmp "templates/setup/lds/engineering/maintenance/audit.md" \
+  "$workdir/engineering/maintenance/audit.md" \
+  "[lds] post-force audit.md restored"
+
+# --- 19. --sentinel-only writes only the manifest ----------------------------
+workdir="$tmp/lds-sentinel"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds --sentinel-only 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[lds --sentinel-only] ok"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" \
+  "[lds --sentinel-only] wrote 1 file"
+assert_eq "engineering/.lds-manifest.yaml" "$(jq -r '.wrote[0]' <<<"$out")" \
+  "[lds --sentinel-only] wrote the manifest"
+assert_file "$workdir/engineering/.lds-manifest.yaml" \
+  "[lds --sentinel-only] sentinel on disk"
+assert_absent "$workdir/engineering/decisions/.gitkeep" \
+  "[lds --sentinel-only] no decisions/.gitkeep"
+assert_absent "$workdir/engineering/maintenance/audit.md" \
+  "[lds --sentinel-only] no maintenance/audit.md"
+# Flags still flip
+assert_eq "true" "$(yq -r '.features.lds.enabled' "$workdir/.wip.yaml")" \
+  "[lds --sentinel-only] features.lds.enabled flipped"
+assert_eq "engineering" "$(yq -r '.features.lds.root' "$workdir/.wip.yaml")" \
+  "[lds --sentinel-only] features.lds.root set"
+
+# --sentinel-only after a full install: byte-equal sentinel ⇒ skipped
+out="$(WIP_ROOT="$tmp/lds-full" bin/wip-plumbing setup lds --sentinel-only 2>/dev/null)"
+assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out")" \
+  "[lds --sentinel-only] idempotent on top of full install"
+
+# --- 20. --sentinel-only rejected for other subcommands ----------------------
+set +e
+WIP_ROOT="$tmp/lds-full" bin/wip-plumbing setup deps --sentinel-only >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "[deps --sentinel-only] exit 2 usage"
+
+# --- 21. --dry-run touches nothing on lds ------------------------------------
+workdir="$tmp/lds-dryrun"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing --dry-run setup lds 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[lds --dry-run] ok"
+assert_eq "13" "$(jq -r '.wrote | length' <<<"$out")" "[lds --dry-run] ledger 13"
+assert_absent "$workdir/engineering/.lds-manifest.yaml" \
+  "[lds --dry-run] no manifest on disk"
+assert_absent "$workdir/engineering/decisions/.gitkeep" \
+  "[lds --dry-run] no .gitkeep on disk"
+assert_eq "null" "$(yq -r '.features.lds.enabled // "null"' "$workdir/.wip.yaml")" \
+  "[lds --dry-run] no manifest change"
+
+# --- 22. setup lds refuses when features.lds.root is set elsewhere ----------
+workdir="$tmp/lds-elsewhere"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+yq -i '.features.lds.root = "docs"' "$workdir/.wip.yaml"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup lds 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "3" "$rc" "[lds elsewhere] exit 3"
+assert_eq "lds-already-installed-elsewhere" "$(jq -r '.error.kind' <<<"$out")" \
+  "[lds elsewhere] kind"
+assert_eq "docs" "$(jq -r '.error.path' <<<"$out")" \
+  "[lds elsewhere] path = existing root"
+
+# --- 23. End-to-end dogfood: setup lds unblocks graduate --------------------
+workdir="$tmp/lds-dogfood"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup lds >/dev/null 2>&1
+mkdir -p "$workdir/scratch"
+cat >"$workdir/scratch/dogfood.md" <<'EOF'
+---
+graduate-to: decisions/auto-followup-dogfood.md
+---
+# Dogfood ADR
+
+Body content proving setup lds → graduate works end-to-end.
+EOF
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing graduate "$workdir/scratch/dogfood.md" 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dogfood] graduate ok"
+assert_eq "engineering/decisions/0001-followup-dogfood.md" \
+  "$(jq -r '.target' <<<"$out")" "[dogfood] auto-numbered target"
+assert_file "$workdir/engineering/decisions/0001-followup-dogfood.md" \
+  "[dogfood] graduated file on disk"
+# Re-run is idempotent
+out2="$(WIP_ROOT="$workdir" bin/wip-plumbing graduate "$workdir/scratch/dogfood.md" 2>/dev/null)"
+assert_eq "0" "$(jq -r '.wrote | length' <<<"$out2")" "[dogfood] graduate re-run wrote 0"
+assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out2")" \
+  "[dogfood] graduate re-run skipped"
+
+# --- 24. glossary assemble after setup lds: lds.md skipped gracefully -------
+# glossary assemble emits markdown to stdout by default; --output yields a
+# JSON ledger we can inspect for the lds partial's skip-vs-include state.
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing glossary assemble \
+  --output "$workdir/.wip/GLOSSARY.md" 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dogfood] glossary assemble ok"
+assert_eq "1" "$(jq -r '[.partials_skipped[]? | select(.name == "lds.md")] | length' <<<"$out")" \
+  "[dogfood] glossary lists lds partial as skipped"
+
 test_summary
