@@ -74,7 +74,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-11            # Round 3: /wip:* plugin
+    active_step: step-12            # Round 3: Roles set
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:

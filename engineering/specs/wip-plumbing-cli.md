@@ -22,7 +22,8 @@ subcommands, and two new verbs cover the destinations its `apply` step routes to
 
 The standalone `wip` porcelain — which exposes this surface verbatim and adds the
 OpenAI-compatible provider seam — is specified in [`wip-porcelain.md`](./wip-porcelain.md)
-(step-10).
+(step-10). The `/wip:*` Claude Code plugin — the third frontend, which reads the same
+plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 
 | Verb | One-line | Roadmap step |
 |------|----------|--------------|
@@ -38,6 +39,8 @@ OpenAI-compatible provider seam — is specified in [`wip-porcelain.md`](./wip-p
 | `workplan init` | Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<slug>.md`. | step-08.5 |
 | `status` | Where am I: current initiative, round, active step, dirty `.wip/`. | step-08 |
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
+| `template show` | Print a canonical template body by id (`intake/preamble`, …). | step-11 |
+| `template list` | Enumerate `templates/prompts/**/*.md` as `{id, path}` records. | step-11 |
 
 Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, `glossary`
 (assembler), the `wip intake` porcelain (step-10.5). They are later roadmap steps and
@@ -293,6 +296,53 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
   ]
 }
 ```
+
+### `wip-plumbing template <show|list>`
+
+Print the canonical templates that ship with `wip`. Shipped in step-11 to
+back the `/wip:*` plugin's prompt-sharing seam (see
+[`wip-plugin.md`](./wip-plugin.md) §4); useful generally for any frontend
+that needs the canonical bytes by name rather than by path.
+
+ID grammar: path under `templates/prompts/` minus the `.md` suffix. E.g.
+`intake/preamble` → `templates/prompts/intake/preamble.md`.
+
+Templates dir resolution: `$WIP_TEMPLATES_DIR` (override) →
+`$WIP_LIB/../../templates`.
+
+#### `wip-plumbing template show <id>`
+
+- **Reads:** the resolved template file.
+- **Writes:** nothing.
+- **Stdout:** the file body **verbatim** (no JSON envelope; this is one of
+  the few plumbing verbs that emits raw bytes — same shape as a future
+  `template render` would render, just without substitution).
+- **Exit:** 0 on success; **2** if no id given, or the id is absolute (`/…`)
+  or contains `..`; **4** if the templates dir is missing
+  (`no-templates`), or the id resolves to no file (`unknown-template`).
+
+```
+$ wip-plumbing template show intake/preamble
+You are the SHAPER stage of the `wip intake` pipeline (ADR-0009).
+…
+```
+
+#### `wip-plumbing template list [--no-json]`
+
+- **Reads:** the resolved templates dir; enumerates
+  `prompts/**/*.md` (`find -type f -name '*.md'`).
+- **Writes:** nothing.
+- **Stdout (JSON, default):**
+  ```json
+  { "ok": true, "templates": [
+      { "id": "intake/preamble", "path": "/abs/templates/prompts/intake/preamble.md" },
+      { "id": "intake/brief",    "path": "…/intake/brief.md" }
+    ] }
+  ```
+  Sorted by id.
+- **Stdout (`--no-json`):** TSV — `<id>\t<path>` per line.
+- **Exit:** 0 on success; **4** `no-templates` if the templates dir is
+  missing.
 
 ---
 

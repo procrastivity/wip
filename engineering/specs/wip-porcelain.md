@@ -15,6 +15,12 @@ intake shaper, later steps) have somewhere to call. v1 is intentionally
 minimal: provider wiring + one proof-of-life `ask` verb + a `provider show`
 diagnostic. No prose renderers; no streaming; no retries.
 
+The third layer — the `/wip:*` Claude Code plugin — is specified separately
+in [`wip-plugin.md`](./wip-plugin.md) (step-11). It reads the same plumbing
+and shares the same shaper prompts via `templates/prompts/intake/`; the
+CLI porcelain's intake shaper (step-10.5) reads those prompts at runtime
+rather than carrying them as heredocs.
+
 ---
 
 ## 1. Scope
