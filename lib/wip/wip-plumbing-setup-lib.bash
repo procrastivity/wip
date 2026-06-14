@@ -218,6 +218,17 @@ _wip_setup_jsonify() {
   esac
 }
 
+# wip_json_string_array <items...> — emit a JSON array of the args, in the
+# order given. Empty when no args. Reusable by any verb whose ledger
+# carries string-list fields (wrote/skipped/refused/etc).
+wip_json_string_array() {
+  local out="[]" p
+  for p in "$@"; do
+    out="$(jq -nc --argjson a "$out" --arg p "$p" '$a + [$p]')"
+  done
+  printf '%s' "$out"
+}
+
 # wip_setup_sentinel_for <feature> — echo the sentinel path for a feature, or
 # empty if the feature has no sentinel. Mirrors the map in
 # `_wip_feature_records` so the setup post-check stays aligned with detect.
