@@ -74,7 +74,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-15            # Round 3: graduate / extract (LDS seam)
+    active_step: step-15            # Round 3 complete (step-15 shipped 2026-06-14)
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:

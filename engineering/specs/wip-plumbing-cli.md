@@ -48,8 +48,10 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup hygiene` | Write `.pre-commit-config.yaml` (local hooks mirroring `make check`). | step-14 |
 | `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
 | `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
+| `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
+| `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
 
-Non-goals for v1: `graduate`/`extract`, `orchestrate`/`spawn`, the `wip intake`
+Non-goals for v1: `orchestrate`/`spawn`, the `wip intake`
 porcelain (step-10.5). They are later roadmap steps and get their own specs.
 
 ## 2. Global conventions
@@ -222,8 +224,11 @@ appropriate writer:
 - `--kind brief` → `init <derived-slug>`.
 - `--kind amendment` → `roadmap amend <target> <directive-from-artifact>`.
 - `--kind workplan-seed` → `workplan init <slug> <step-id> --from <file>`.
-- `--kind spec` → LDS seam (ADR-0006); v1 stub may refuse with exit 3 ("LDS not
-  active") until the LDS verb surface lands.
+- `--kind spec` → LDS seam (ADR-0006). The LDS verb surface ships in step-15
+  as the top-level `graduate` and `extract` verbs. v1 of intake-apply still
+  exits 3 here; routing `spec` artifacts through to `graduate` requires the
+  shaper layer to insert a `graduate-to:` directive, which is a separate
+  porcelain change (backlog: `intake-apply-spec-graduate-dispatch`).
 - `--kind handoff` → exit 4 ("handoff is not a terminal kind; reshape first").
 
 - **Reads:** the artifact; whatever the dispatched verb reads.
@@ -532,6 +537,217 @@ have `wip` installed. This repo's own `.claude-plugin/` keeps
 `bin/wip-plumbing` (dogfood-local). The divergence is exactly the
 one-substitution rule; the agents template tree is excluded from the
 verbatim-cmp fidelity tests for that reason.
+
+### `wip-plumbing graduate <artifact> [--to <slot>] [--force]`
+
+Promote one wip-internal planning artifact to its LDS canon slot
+(step-15). The single-artifact LDS seam per
+[ADR-0006](../decisions/0006-wip-owns-seams-not-tools.md): the verb
+*invokes the deterministic core* of LDS's extract workflow for the
+one-artifact case and never re-implements the LLM-driven `analyze` /
+`review` phases (those stay in the porcelain).
+
+The target slot comes from the artifact's `graduate-to:` front-matter
+directive (relative to the LDS root, e.g. `decisions/0010-foo.md`),
+overridden by `--to <slot>` when present. The directive itself is
+**stripped** on write; all other front-matter keys (status, date, etc.)
+pass through unchanged.
+
+**Shorthand: `decisions/auto-<slug>.md`.** Resolves to
+`decisions/<next-NNNN>-<slug>.md` where `next-NNNN` is one above the
+highest existing 4-digit prefix in `<eng-docs>/decisions/`. Empty
+directory → `0001`. Auto-numbering is **decisions-only**; using
+`auto-*` outside `decisions/` exits 4 `bad-auto-slot`.
+
+**Layer allowlist.** The first path segment of the target must be one of
+the canonical LDS layers (`decisions`, `product`, `architecture`,
+`specs`, `reference`, `features`, `implementation`) plus `maintenance`
+and `appendices`. Anything else exits 4 `unknown-layer`.
+
+**Write contract: three-way idempotency** (same as `setup`):
+
+- **absent** → write rendered body; status `wrote`.
+- **byte-equal** → silent skip; status `skipped_idempotent`.
+- **differs** → exit 4 `content-drift` with the path in `error.path`;
+  `--force` overwrites and records `wrote_forced`.
+
+**LDS preconditions.**
+
+- `features.lds.enabled: false` → exit 3 `lds-not-enabled`.
+- `enabled: true` but `<eng-docs>/.lds-manifest.yaml` missing → exit 3
+  `lds-sentinel-missing` (hint: install LDS scaffold; `setup lds` is
+  backlog).
+
+**Reads:** the artifact file; `.wip.yaml` (for the LDS root +
+sentinel); `<eng-docs>/decisions/` (for auto-NNNN scanning).
+
+**Writes:** the rendered target file (or just the ledger with
+`--dry-run`).
+
+**Exit:**
+
+- **0** — success (including idempotent skip and `wrote_forced`).
+- **2** — bad args (unknown flag, missing artifact arg, unexpected arg).
+- **3** — `lds-not-enabled` / `lds-sentinel-missing` /
+  `missing-manifest`.
+- **4** — `bad-artifact` (file missing), `no-target` (no directive and
+  no `--to`), `bad-target` (absolute / `..` / not `<layer>/<file>`),
+  `unknown-layer`, `bad-auto-slot`, `content-drift`.
+
+**stdout (success):**
+
+```json
+{
+  "ok": true,
+  "verb": "graduate",
+  "artifact": ".wip/initiatives/distillation/scratch/foo.md",
+  "target": "engineering/decisions/0010-graduate-seam.md",
+  "wrote": ["engineering/decisions/0010-graduate-seam.md"],
+  "skipped_idempotent": [],
+  "wrote_forced": [],
+  "refused": []
+}
+```
+
+**stdout (content drift):**
+
+```json
+{
+  "ok": false,
+  "verb": "graduate",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "target differs from artifact; re-run with --force to overwrite",
+    "path": "engineering/decisions/0010-graduate-seam.md"
+  }
+}
+```
+
+### `wip-plumbing extract [--manifest <path>] [--force]`
+
+Run the deterministic LDS Extract phase against an approved extraction
+manifest (step-15). The bulk-from-manifest LDS seam: reads a
+manifest, walks `entries[]`, writes each target. The LLM-driven
+`analyze` / `review` phases (which generate / approve the manifest)
+stay in the porcelain.
+
+**Manifest discovery.** Default: `<eng-docs>/.lds-manifest.yaml` (the
+same path the `lds` feature's sentinel rule points at, so a single
+source of truth for detect / doctor / extract). Override:
+`--manifest <path>`.
+
+**v1 scope (the minimum viable LDS seam — see workplan step-15 for
+deferral rationale):**
+
+| Aspect | v1 status |
+|---|---|
+| `verbatim` mode | **supported** |
+| `content` mode | **supported** |
+| `transform` mode | **skipped** (`unsupported[]`) |
+| `summarize` mode | **skipped** (`unsupported[]`) |
+| Simple-path source (string) | **supported** |
+| Single-file with line range | **supported** |
+| Multi-file source (`source.files[]`) | **skipped** |
+| SHA-256 source hash verification | **skipped-v1** (ledger flag) |
+| Templates + `field_mappings` | **skipped** (`unsupported[]`) |
+| `--resume` mode | **not implemented** |
+| Extraction report file | **not written** (ledger is stdout-only) |
+
+Skipped (unsupported) entries do **not** fail the run; other entries
+in the same manifest still execute. The ledger names every skip so the
+consumer can see what didn't land.
+
+**Per-entry write contract: three-way idempotency** (same as
+`graduate` and `setup`). A bytes-equal target is silently skipped; a
+drifted target is refused with `exit 4 content-drift` (paths in
+`error.paths`); `--force` overwrites.
+
+**Source attribution comments** (LDS §6.3) are prepended to every
+written target — exact format:
+
+```html
+<!-- Migrated from legacy/foo.md:45-120 -->
+<!-- Extraction ID: vision-main -->
+```
+
+For content mode: `<!-- Generated content - no source file -->` plus
+the Extraction ID line. The attribution is part of the bytes
+idempotency compares.
+
+**Manifest validation** (required-fields only):
+
+- `metadata.schema_version` must match `1.x.x` (any 1.x).
+- `metadata.status == "approved"`.
+- `entries` non-empty.
+- Entry ids unique.
+- Each entry has `id`, `target`, `mode` (one of
+  verbatim/content/transform/summarize), and a `source` when
+  `mode != content`.
+
+**LDS preconditions.** Same as `graduate`:
+`lds-not-enabled` (exit 3) / `lds-sentinel-missing` (exit 3).
+
+**Reads:** `.wip.yaml`; the manifest at the default or `--manifest`
+path; every entry's source file (for `verbatim` mode).
+
+**Writes:** one target per supported entry (or just the ledger with
+`--dry-run`).
+
+**Exit:**
+
+- **0** — success (every entry wrote, skipped, or was logged as
+  unsupported / bad-shape *without any drift*).
+- **2** — bad args (unknown flag, value missing).
+- **3** — `lds-not-enabled` / `lds-sentinel-missing` /
+  `missing-manifest`.
+- **4** — `manifest-missing`, `manifest-unparseable`,
+  `manifest-not-approved`, `incompatible-schema`, `manifest-empty`,
+  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`.
+
+**stdout (success):**
+
+```json
+{
+  "ok": true,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "entries_total": 3,
+  "wrote": ["engineering/decisions/0001-foo.md"],
+  "skipped_idempotent": ["engineering/specs/bar.md"],
+  "wrote_forced": [],
+  "refused": [],
+  "unsupported": [
+    {"id": "spec-with-transform", "mode": "transform", "reason": "transform mode not supported in v1"}
+  ],
+  "bad_entries": [],
+  "hash_verification": "skipped-v1"
+}
+```
+
+**stdout (content drift):**
+
+```json
+{
+  "ok": false,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "extracted targets differ from manifest output; re-run with --force to overwrite",
+    "paths": ["engineering/decisions/0001-foo.md"]
+  }
+}
+```
+
+**Templates dir resolution:** not relevant — `extract` does not read
+the `wip` templates dir (the LDS templates referenced in
+`field_mappings` are in the consumer's own LDS install, and v1 skips
+templated entries anyway).
+
+**`--dry-run`:** computes the ledger reflecting what *would* be
+written / skipped / refused; touches neither files nor manifest.
 
 ---
 

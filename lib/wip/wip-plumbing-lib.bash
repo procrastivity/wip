@@ -43,6 +43,15 @@ commands:
                    setup hygiene  [--force]   (.pre-commit-config.yaml)
                    setup release  [--force]   (cliff.toml + CHANGELOG.md)
                    setup agents   [--force]   (.claude-plugin/ vendored)
+  graduate  promote a single planning artifact to its LDS canon slot
+            usage: graduate <artifact-path> [--to <slot>] [--force]
+                   (slot is <eng-docs>-relative; auto-numbers
+                   decisions/auto-<slug>.md)
+  extract   run the deterministic LDS Extract phase against an approved manifest
+            usage: extract [--manifest <path>] [--force]
+                   (default manifest: <eng-docs>/.lds-manifest.yaml;
+                   v1: verbatim+content modes; transform/summarize
+                   land in unsupported[])
 
 global flags:
   -h, --help        print this and exit 0
