@@ -51,9 +51,8 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 - Plural LDS installs / monorepo support (v1 = scalar single root).
 - python-uv flake impure-shellHook variant (default is `make install`).
 - Diátaxis sentinel: README-4-section heuristic for v1 vs `.diataxis-manifest.yaml` later.
-- `/wip:*` colon namespacing vs flat `/wip-status`.
 
-## Backlog (cross-cutting; see also `.wip/backlog.md`)
+## Backlog
 
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
