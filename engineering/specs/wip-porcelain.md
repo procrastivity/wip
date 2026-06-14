@@ -19,18 +19,19 @@ diagnostic. No prose renderers; no streaming; no retries.
 
 ## 1. Scope
 
-In v1, the porcelain owns exactly two verbs:
+In v1, the porcelain owns these verbs:
 
 | Verb | One-line |
 |------|----------|
 | `ask` | Single-turn chat completion via the resolved provider. |
+| `intake` | LLM-driven shape/route pipeline for inbound artifacts (step-10.5; ADR-0009 phases 2 + 4). |
 | `provider show` | Print the resolved provider config (sans secrets). |
 
-Every other verb (`detect`, `doctor`, `project`, `init`, `intake`, `status`,
-`next`, `roadmap`, `workplan`) is **transparently proxied** to
-`wip-plumbing` via `exec`. Argv is forwarded verbatim; exit codes, stdout,
-and stderr pass through. The porcelain does not parse, re-render, or augment
-plumbing output in v1.
+Every other verb (`detect`, `doctor`, `project`, `init`, `status`, `next`,
+`roadmap`, `workplan`) is **transparently proxied** to `wip-plumbing` via
+`exec`. Argv is forwarded verbatim; exit codes, stdout, and stderr pass
+through. The porcelain does not parse, re-render, or augment plumbing
+output in v1.
 
 Non-goals for v1: prose renderers for any verb, streaming responses,
 multi-turn conversations, retry/backoff logic, token accounting, history
@@ -86,6 +87,22 @@ Error kinds:
   command nonzero).
 - `bad-response` — provider returned JSON without
   `.choices[0].message.content`.
+- `classify-failed` (`intake` only) — plumbing `intake classify`
+  rejected the file (no H1 / unparseable).
+- `kind-ambiguous` (`intake` only) — `--yes` set with low/medium
+  classify confidence and no `--kind` override. Envelope includes the
+  classify payload under `error.classify`.
+- `shape-failed` (`intake` only) — shape→validate loop exhausted
+  `--max-rounds`. Envelope includes `error.missing[]`, `error.rounds`,
+  and `error.last_body` (truncated to 4 KiB).
+- `ask-without-tty` (`intake` only) — the shaper emitted an `ASK:`
+  block while `--yes` was set, or no tty/stdin was available to answer.
+  Envelope includes the LLM's `error.question` + `error.why`.
+- `bad-shape-response` (`intake` only) — shaper response was neither a
+  valid shape body nor a parseable ASK block.
+- `apply-failed` (`intake` only) — plumbing `intake apply` rejected the
+  shaped artifact after the validate gate passed. Envelope echoes the
+  apply call's output under `error.apply`.
 
 ### Global flags
 
@@ -178,19 +195,135 @@ diagnostics — only `api_key_present` does. `env.{base_url_env,api_key_env,
 model_env}` are the env *names* from `.wip.yaml`, not their values, so a
 typo in the manifest is diagnosable without leaking secrets.
 
+### `wip intake <file> [flags]`
+
+The headline porcelain verb. Drives the full intake pipeline (ADR-0009)
+end-to-end: classify (plumbing) → shape (LLM, this layer) → validate
+(plumbing) → route (this layer) → apply (plumbing). The shaper may emit
+clarifying questions back to the user; the plumbing beneath it never
+asks. After this verb a real Claude Code plan file round-trips into a
+`roadmap.md` amendment or a new initiative without manual editing.
+
+#### Flags
+
+| Flag | Effect |
+|------|--------|
+| `--kind <k>` | Force `kind ∈ {brief, amendment, workplan-seed, spec, handoff}`; skip the classify-confidence check. |
+| `--target <slug>` / `<slug>/<step>` | Force the apply target; skip the route derivation from front-matter. |
+| `--yes`, `-y` | Non-interactive: skip all clarifying questions and route confirmations. Low classify confidence without `--kind` exits 4; any `ASK:` from the shaper exits 4. |
+| `--dry-run` | Run classify + shape + validate + route; **do not** call apply. Stdout envelope has `dry_run: true` and `shaped_path` for inspection. |
+| `--output <path>` | Persist the shaped artifact to `<path>` (in addition to apply, or instead of when `--dry-run`). |
+| `--max-rounds <n>` | Cap shape→validate retries (default **2**). Clamped to ≥1. |
+
+#### Pipeline phases
+
+1. **classify** — shell-out to `wip-plumbing intake classify <file>`.
+   Failure → exit 4 `classify-failed`. High confidence accepted silently;
+   medium/low + `--yes` without `--kind` → exit 4 `kind-ambiguous`;
+   medium/low + interactive → user prompt.
+2. **shape** — LLM call through `wip_provider_chat`. The system prompt
+   inlines the per-kind shape rules from
+   [`intake-kinds.md`](./intake-kinds.md) §2/§3. The shaper response is
+   either a fully shaped markdown body OR an `---ASK---` fenced
+   clarifying-question block (§ ASK protocol below). Conversation grows
+   each turn; up to `--max-rounds` LLM calls per invocation.
+3. **validate** — shell-out to `wip-plumbing intake validate --kind <k>`
+   on the shaped artifact. Failure → re-shape with the `missing[]` array
+   appended to the conversation; exhausted retries → exit 4
+   `shape-failed`.
+4. **route** — `--target` wins. For `brief`, derive slug from shaped
+   front-matter `slug:` or H1; confirm with the user when interactive.
+   For `amendment` / `workplan-seed`, read `target:` from the shaped
+   front-matter (validate already enforced its presence).
+5. **apply** — shell-out to `wip-plumbing intake apply --kind <k>
+   [--target <t>]`. Failure → exit 4 `apply-failed`.
+
+#### ASK protocol
+
+The shaper emits at most ONE clarifying question per turn. Format:
+
+```
+---ASK---
+question: <one short sentence>
+why: <one short sentence describing what is missing>
+---END---
+```
+
+The porcelain reads the user's one-line answer from stdin (when piped)
+or `/dev/tty` (interactive), then re-issues the shape request with the
+prior assistant turn + the answer appended. The `why:` line is echoed to
+stderr as a `wip:` warning before the question.
+
+#### Conversation contract
+
+Initial request:
+
+```json
+[
+  {"role":"system","content":"<shaper preamble + per-kind rules>"},
+  {"role":"user","content":"# Original artifact\n…\n# Classify\n<json>\n# Task\n…"}
+]
+```
+
+Retry after validate failure:
+
+```json
+[ /* …prior messages… */,
+  {"role":"assistant","content":"<prior shaped body>"},
+  {"role":"user","content":"validate rejected your last response; missing=[…]; re-emit"}
+]
+```
+
+Follow-up after a user-answered ASK:
+
+```json
+[ /* …prior messages… */,
+  {"role":"assistant","content":"<ASK block>"},
+  {"role":"user","content":"User answer: …"}
+]
+```
+
+No `temperature` / `max_tokens` / `stream` knobs in v1; provider
+defaults apply.
+
+#### Stdout envelope
+
+Success:
+
+```json
+{ "ok": true, "kind": "amendment", "target": "distillation",
+  "rounds": 2, "asked": ["which step slot?"],
+  "result": { /* plumbing apply ledger */ } }
+```
+
+Dry-run success (no `result`):
+
+```json
+{ "ok": true, "dry_run": true, "kind": "brief", "target": "payments",
+  "rounds": 1, "asked": [], "shaped_path": "/tmp/wip-intake-shape.XXX" }
+```
+
+`rounds` counts every LLM call (initial shape + ASK turns + validate
+retries) so users can see total LLM cost at a glance. `asked` is the
+ordered list of clarifying questions the shaper raised (empty under
+`--yes` / when the shaper never asked).
+
 ### Proxied plumbing verbs
 
-`wip <verb> [args...]` for any verb not in `{ask, provider}` resolves the
-plumbing binary and `exec`s it with the original argv. The shell is
-replaced; signals and exit codes propagate without an added PID layer. An
-unknown verb bubbles plumbing's own exit-2 envelope.
+`wip <verb> [args...]` for any verb not in `{ask, intake, provider}`
+resolves the plumbing binary and `exec`s it with the original argv. The
+shell is replaced; signals and exit codes propagate without an added
+PID layer. An unknown verb bubbles plumbing's own exit-2 envelope.
 
 ---
 
 ## 4. Open questions
 
-None lock new decisions in this step; the workplan's leans for prompt
-precedence (arg beats stdin), system-prompt source (`--system <text>`
-only), Authorization gating (empty-but-set env → no header), and prose
-renderers (none in v1) all hold. step-10.5 will revisit when the LLM-driven
-intake shaper has concrete needs.
+step-10 leans (prompt precedence, `--system <text>` only,
+Authorization gating, prose renderers deferred) all hold. step-10.5
+landed `wip intake` without locking new decisions: the ASK protocol is a
+fenced block (not JSON), the conversation grows linearly across rounds,
+the shaped artifact lives in `$TMPDIR` (persisted via `--output`), and
+the porcelain always shells out to plumbing validate (never re-implements
+shape rules). Future steps may revisit when prose renderers for proxied
+verbs land or when multi-turn `ask` becomes a concrete need.

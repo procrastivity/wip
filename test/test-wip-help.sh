@@ -7,7 +7,7 @@ source test/helpers.sh
 
 # --version
 out="$(bin/wip --version)"
-assert_eq "wip 0.1.0-dev" "$out" "--version output"
+assert_eq "wip 0.2.0-dev" "$out" "--version output"
 
 # --help exits 0 and mentions ask + provider.
 out="$(bin/wip --help)"

@@ -3,7 +3,7 @@
 # the two layers (ADR-0001) rev independently. Pure bash + jq + curl.
 # shellcheck shell=bash
 
-WIP_PORCELAIN_VERSION="0.1.0-dev"
+WIP_PORCELAIN_VERSION="0.2.0-dev"
 
 wip_p_version() { printf '%s\n' "$WIP_PORCELAIN_VERSION"; }
 
@@ -17,6 +17,10 @@ porcelain commands (LLM-aware):
   ask         single-turn chat completion via the resolved provider
               usage: ask [<prompt>|-] [--system <text>]
                      (prompt arg wins over stdin; `-` reads stdin)
+  intake      LLM-driven shape/route pipeline for inbound artifacts
+              usage: intake <file> [--kind <k>] [--target <slug|slug/step>]
+                            [--yes] [--dry-run] [--output <path>]
+                            [--max-rounds <n>]
   provider    inspect provider config
               usage: provider show [--json|--no-json]
 
@@ -60,6 +64,35 @@ wip_p_die() {
   fi
   printf 'wip: %s\n' "$msg" >&2
   exit "$code"
+}
+
+# wip_p_prompt <msg> — ask the user a question, echo their one-line answer.
+# When stdin is a pipe / redirect (not a tty), read it — that's the test &
+# scripted-input path. Otherwise fall back to /dev/tty for the interactive
+# case. Writes the prompt prefix to stderr so stdout stays reserved for
+# envelopes. Returns nonzero (no echo) when no input source is available.
+wip_p_prompt() {
+  local msg="$1" answer=""
+  printf 'wip: %s ' "$msg" >&2
+  if [[ ! -t 0 ]]; then
+    IFS= read -r answer || return 1
+  elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    IFS= read -r answer </dev/tty || return 1
+  else
+    printf '\n' >&2
+    return 1
+  fi
+  printf '%s' "$answer"
+}
+
+# wip_p_confirm <msg> — yes/no prompt with default-no. Exit 0 on yes, 1 else.
+wip_p_confirm() {
+  local msg="$1" answer
+  answer="$(wip_p_prompt "$msg [y/N]")" || return 1
+  case "$answer" in
+    y | Y | yes | YES | Yes) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # wip_p_find_plumbing — echo the path to the wip-plumbing binary, or nonzero.

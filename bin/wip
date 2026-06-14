@@ -16,6 +16,8 @@ export WIP_LIB
 source "$WIP_LIB/wip-porcelain-lib.bash"
 # shellcheck source=lib/wip/wip-provider-lib.bash
 source "$WIP_LIB/wip-provider-lib.bash"
+# shellcheck source=lib/wip/wip-intake-shaper-lib.bash
+source "$WIP_LIB/wip-intake-shaper-lib.bash"
 
 WIP_VERBOSE=0
 
@@ -72,6 +74,11 @@ case "$cmd" in
     # shellcheck disable=SC1091
     source "$WIP_LIB/wip-subcommands/provider.bash"
     wip_cmd_provider "$@"
+    ;;
+  intake)
+    # shellcheck disable=SC1091
+    source "$WIP_LIB/wip-subcommands/intake.bash"
+    wip_cmd_intake "$@"
     ;;
   *)
     # Transparent proxy to wip-plumbing. exec replaces the shell so signals
