@@ -43,8 +43,13 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `template list` | Enumerate `templates/prompts/**/*.md` as `{id, path}` records. | step-11 |
 | `glossary assemble` | Render `core` + enabled-feature partials → effective glossary markdown. | step-13 |
 | `glossary check` | Compare on-disk `.wip/GLOSSARY.md` against a fresh assemble; exit 4 on drift. | step-13 |
+| `setup deps` | Write `flake.nix` + `flake.lock` (devShell pinning the bash toolchain). | step-14 |
+| `setup direnv` | Write `.envrc` (nix-direnv shim); flip `features.direnv.enabled`. Requires `flake.nix`. | step-14 |
+| `setup hygiene` | Write `.pre-commit-config.yaml` (local hooks mirroring `make check`). | step-14 |
+| `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
+| `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
 
-Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, the `wip intake`
+Non-goals for v1: `graduate`/`extract`, `orchestrate`/`spawn`, the `wip intake`
 porcelain (step-10.5). They are later roadmap steps and get their own specs.
 
 ## 2. Global conventions
@@ -420,6 +425,113 @@ Pre-commit wiring lives in `.pre-commit-config.yaml` as a `wip-glossary`
 local hook that fires when `.wip.yaml`, `.wip/GLOSSARY.md`, or any
 `templates/glossary/*.md` changes — the three drift modes the seam
 catches: content drift, manifest drift, partial drift.
+
+### `wip-plumbing setup <deps|direnv|hygiene|release|agents> [--force]`
+
+Install-time deterministic scaffold writers, one per capability (step-14).
+Each verb writes verbatim files from `templates/setup/<verb>/` into the
+consumer repo, flips its mapped feature flag in `.wip.yaml` where
+applicable, and verifies its sentinel exists post-write. No `{{key}}`
+substitution — these are infrastructure files, not artifacts.
+
+**Per-file write contract (three-way):**
+
+- **Absent** → write the template bytes; ledger status `wrote`.
+- **Present, byte-equal to template** → silent skip; ledger status
+  `skipped` (under `skipped_idempotent`).
+- **Present, differs** → refuse; **exit 4** `content-drift` with the
+  offending path(s) in `error.paths`. The verb does NOT touch the
+  manifest in this case.
+- **Present, differs, `--force`** → overwrite; ledger status
+  `wrote_forced`.
+
+`flake.lock` is special-cased to **"skip if present, never compare"**:
+locks evolve per consumer (`nix flake update` rolls inputs forward), so
+byte-equal would refuse every consumer who's done one update. Under
+`--force` the lock is still overwritten.
+
+**Composition.** Verbs do not auto-chain. `setup direnv` requires
+`flake.nix` and exits 3 `missing-prereq` with `error.path: "flake.nix"`
+when absent (hint to run `setup deps` first). All verbs exit 3
+`missing-manifest` when `.wip.yaml` is absent (run `init` first).
+
+**Reads:** `templates/setup/<verb>/`; the consumer repo's existing
+files at the destination paths; `.wip.yaml` (for the feature-flag flip).
+
+**Writes:** the destination files per the contract above; `.wip.yaml`
+(for the feature-flag flip; only on a real diff — re-running an
+already-flipped verb is a manifest no-op).
+
+**Exit:**
+
+- **0** — success (including idempotent no-op and `wrote_forced`).
+- **2** — bad subcommand, unknown flag, missing subcommand.
+- **3** — `missing-manifest` (no `.wip.yaml`) or `missing-prereq`
+  (e.g. `setup direnv` without `flake.nix`).
+- **4** — `content-drift` (one or more destination files differ from
+  template and `--force` was not passed).
+
+**Verb → feature flag map:**
+
+| Verb | Feature block flipped | Sentinel checked post-write |
+|---|---|---|
+| `setup deps` | (none) | (none) |
+| `setup direnv` | `features.direnv.enabled: true` | `.envrc` |
+| `setup hygiene` | (none — v1) | (none) |
+| `setup release` | `features.changelog.enabled: true` | `CHANGELOG.md` |
+| `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
+
+`setup agents` deliberately does NOT auto-create the `features.solo`
+block (per ADR-0007, that block carries the consumer's backend-specific
+`agent_tier_policy`; a default would be presumptuous). Stderr emits a
+hint to configure `features.solo.agent_tier_policy` after the verb.
+
+**stdout (success):**
+```json
+{
+  "ok": true,
+  "verb": "setup direnv",
+  "wrote": [".envrc"],
+  "skipped_idempotent": [],
+  "wrote_forced": [],
+  "refused": [],
+  "manifest_updated": ".wip.yaml",
+  "sentinel": ".envrc",
+  "sentinel_present": true
+}
+```
+
+**stdout (content drift):**
+```json
+{
+  "ok": false,
+  "verb": "setup deps",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "infrastructure files differ from template; re-run with --force to overwrite",
+    "paths": ["flake.nix"]
+  }
+}
+```
+
+**stderr:** per-verb one-line hint on success (suppressed by `-q`); error
+diagnostics on failure paths.
+
+**Templates dir resolution:** `$WIP_TEMPLATES_DIR` override → `$WIP_LIB/../../templates`
+(same seam as `template show` / `glossary assemble`). Each verb reads
+`<templates-dir>/setup/<verb>/`.
+
+**`--dry-run`:** prints the ledger (`wrote` lists what *would* be
+written) and touches neither files nor the manifest. Sentinel
+`sentinel_present` is `false` because the ledger reflects pre-write state.
+
+**Plugin file substitution:** `templates/setup/agents/.claude-plugin/`
+references `wip-plumbing` (PATH-resolved) — consumers are expected to
+have `wip` installed. This repo's own `.claude-plugin/` keeps
+`bin/wip-plumbing` (dogfood-local). The divergence is exactly the
+one-substitution rule; the agents template tree is excluded from the
+verbatim-cmp fidelity tests for that reason.
 
 ---
 

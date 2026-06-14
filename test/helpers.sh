@@ -50,6 +50,17 @@ assert_grep() {
   fi
 }
 
+assert_cmp() {
+  local a="$1" b="$2" msg="${3:-assert_cmp}"
+  if cmp -s -- "$a" "$b"; then
+    _WIP_PASS=$((_WIP_PASS + 1))
+    printf '  ok   %s\n' "$msg"
+  else
+    _WIP_FAIL=$((_WIP_FAIL + 1))
+    printf '  FAIL %s\n       a: %s\n       b: %s\n' "$msg" "$a" "$b" >&2
+  fi
+}
+
 assert_not_grep() {
   local pattern="$1" path="$2" msg="${3:-assert_not_grep}"
   if ! grep -q -- "$pattern" "$path" 2>/dev/null; then
