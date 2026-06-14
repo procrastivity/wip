@@ -74,7 +74,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-13            # Round 3: wip glossary assembler
+    active_step: step-14            # Round 3: wip setup family
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:

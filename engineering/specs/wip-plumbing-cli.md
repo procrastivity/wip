@@ -41,10 +41,11 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
 | `template show` | Print a canonical template body by id (`intake/preamble`, …). | step-11 |
 | `template list` | Enumerate `templates/prompts/**/*.md` as `{id, path}` records. | step-11 |
+| `glossary assemble` | Render `core` + enabled-feature partials → effective glossary markdown. | step-13 |
+| `glossary check` | Compare on-disk `.wip/GLOSSARY.md` against a fresh assemble; exit 4 on drift. | step-13 |
 
-Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, `glossary`
-(assembler), the `wip intake` porcelain (step-10.5). They are later roadmap steps and
-get their own specs.
+Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, the `wip intake`
+porcelain (step-10.5). They are later roadmap steps and get their own specs.
 
 ## 2. Global conventions
 
@@ -343,6 +344,82 @@ You are the SHAPER stage of the `wip intake` pipeline (ADR-0009).
 - **Stdout (`--no-json`):** TSV — `<id>\t<path>` per line.
 - **Exit:** 0 on success; **4** `no-templates` if the templates dir is
   missing.
+
+### `wip-plumbing glossary <assemble|check>`
+
+Render the effective glossary for the project by concatenating
+`templates/glossary/core.md` with the partials whose feature is active in
+`.wip.yaml`. Inclusion rules are declared in
+[`templates/glossary/README.md`](../../templates/glossary/README.md); the
+authoritative table is enforced in `lib/wip/wip-plumbing-glossary-lib.bash`
+(adding a new partial is a one-row addition there). Per
+[ADR-0007](../decisions/0007-orchestration-backend-seam.md), `solo.md` is
+gated on `features.orchestration.backend == "solo"`, NOT on
+`features.solo.enabled`.
+
+Templates dir resolution: `$WIP_TEMPLATES_DIR` (override) →
+`$WIP_LIB/../../templates` (same seam as `template`).
+
+Each partial's leading `<!-- wip glossary partial: … -->` block is stripped
+on emit (the generated header records the inclusion roster once;
+duplicating it three times mid-document is noise). A partial whose
+predicate is true but whose file is not on disk (e.g. `lds.md` / `diataxis.md`
+before they ship) is a **graceful skip** — the assemble output omits its
+body and the JSON ledger lists it under `partials_skipped[]` with
+`reason: "predicate-true; partial-not-shipped"`.
+
+#### `wip-plumbing glossary assemble [--output <path>]`
+
+- **Reads:** `.wip.yaml`; each enabled partial under the resolved
+  templates dir.
+- **Writes:** nothing (stdout-only) by default. With `--output <path>`:
+  the named file via atomic tmpfile + `mv`. `--dry-run` with `--output`:
+  prints the ledger only.
+- **Stdout (no `--output`):** the assembled markdown **verbatim** (no
+  JSON envelope; same shape as `template show`). Body opens with an H1,
+  a `<!-- GENERATED … -->` block recording Source paths + Driven-by
+  predicates + the regen/verify recipes, and a one-paragraph intro
+  blockquote; then per-partial `<!-- partial: NAME  source: PATH  reason: PREDICATE -->`
+  dividers followed by the stripped partial body.
+- **Stdout (with `--output`):** JSON write ledger.
+  ```json
+  { "ok": true, "wrote": [".wip/GLOSSARY.md"],
+    "partials_included": [
+      {"name":"core.md", "source_path":"…/templates/glossary/core.md", "predicate":"always"},
+      {"name":"orchestration.md", "source_path":"…", "predicate":"features.orchestration.enabled"},
+      {"name":"solo.md", "source_path":"…", "predicate":"features.orchestration.backend"}
+    ],
+    "partials_skipped": [
+      {"name":"diataxis.md", "predicate":"features.diataxis.enabled",
+       "reason":"predicate-true; partial-not-shipped"}
+    ] }
+  ```
+- **Exit:** 0 on success; **2** on bad args; **4** `no-templates` if
+  the templates dir is missing, `no-manifest` / `bad-manifest` as usual.
+
+#### `wip-plumbing glossary check`
+
+- **Reads:** `.wip.yaml`, each enabled partial, the on-disk glossary at
+  the path derived from `gitignore.always_commit[]` (looking for
+  `.wip/GLOSSARY.md`; falls back to literal `.wip/GLOSSARY.md`).
+- **Writes:** nothing.
+- **Stdout (no drift):**
+  ```json
+  { "ok": true, "drift": false, "expected_path": ".wip/GLOSSARY.md",
+    "partials": [ {"name":"core.md", "predicate":"always", "status":"included", "reason":"always"}, … ] }
+  ```
+- **Stdout (drift):** error envelope, plus `expected_path`,
+  `actual_path`, `byte_diff_count`, `partials`.
+- **Stderr (drift):** the regen-hint line, then `diff -u` output between
+  on-disk and freshly-assembled. Stderr-only — the JSON envelope does
+  not embed the diff bytes.
+- **Exit:** 0 on agreement; **4** on drift (`glossary-drift`).
+  No `--fix` in v1 (cf. `doctor --fix`'s advisory-only stance).
+
+Pre-commit wiring lives in `.pre-commit-config.yaml` as a `wip-glossary`
+local hook that fires when `.wip.yaml`, `.wip/GLOSSARY.md`, or any
+`templates/glossary/*.md` changes — the three drift modes the seam
+catches: content drift, manifest drift, partial drift.
 
 ---
 

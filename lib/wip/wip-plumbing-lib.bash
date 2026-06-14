@@ -34,6 +34,9 @@ commands:
   template  show / list the canonical templates that ship with wip
             usage: template show <id>          (e.g. intake/preamble)
                    template list [--no-json]
+  glossary  assemble / check the effective glossary for this project
+            usage: glossary assemble [--output <path>]
+                   glossary check
 
 global flags:
   -h, --help        print this and exit 0
@@ -102,6 +105,21 @@ wip_find_root() {
 wip_manifest_json() {
   local root="$1"
   yq -o=json '.' "$root/.wip.yaml" 2>/dev/null
+}
+
+# wip_templates_dir — echo the resolved templates/ directory absolute path.
+# Resolution order:
+#   1. $WIP_TEMPLATES_DIR (explicit override; test seam + install seam)
+#   2. $WIP_LIB/../../templates (i.e. templates/ next to lib/wip/)
+# Empty output (and non-zero return) when neither resolves.
+wip_templates_dir() {
+  if [[ -n "${WIP_TEMPLATES_DIR:-}" ]]; then
+    printf '%s' "$WIP_TEMPLATES_DIR"
+    return 0
+  fi
+  local lib="${WIP_LIB:?WIP_LIB unset}"
+  # shellcheck disable=SC1007
+  CDPATH= cd -- "$lib/../../templates" 2>/dev/null && pwd
 }
 
 # Emit "name <US> enabled <US> sentinel" per declared feature, where <US> is the

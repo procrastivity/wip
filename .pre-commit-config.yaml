@@ -35,3 +35,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: wip-glossary
+        name: wip-plumbing glossary check
+        entry: bin/wip-plumbing glossary check
+        language: system
+        pass_filenames: false
+        files: '^(\.wip\.yaml|\.wip/GLOSSARY\.md|templates/glossary/.*\.md)$'

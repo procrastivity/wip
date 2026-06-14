@@ -11,9 +11,11 @@ glossary by concatenating `core.md` with one partial per feature enabled in `.wi
 | `lds.md` | `features.lds.enabled` | LDS terms + the LDS graduation mechanism *(future)* |
 | `diataxis.md` | `features.diataxis.enabled` | Diátaxis terms *(future)* |
 
-**Assembly** (eventual `wip glossary` / `wip-plumbing` verb): `core.md` first, then each
-enabled feature's partial in declaration order, with a generated header naming the
-source partials. A project never hand-edits its assembled `.wip/GLOSSARY.md`.
+**Assembly** is `wip-plumbing glossary assemble` (regen) and `wip-plumbing glossary
+check` (drift gate): `core.md` first, then each enabled feature's partial in
+declaration order, with a generated header naming the source partials. A project
+never hand-edits its assembled `.wip/GLOSSARY.md`. Regenerate with
+`bin/wip-plumbing glossary assemble > .wip/GLOSSARY.md` (or `make glossary`).
 
 This repo enables `orchestration` with the `solo` backend, so its generated
 `.wip/GLOSSARY.md` = `core.md` + `orchestration.md` + `solo.md`.
