@@ -7,7 +7,7 @@ SRC := bin/wip \
        $(wildcard lib/wip/wip-subcommands/*.bash)
 TESTS := $(wildcard test/test-*.sh)
 
-.PHONY: fmt lint test check deps-check hooks
+.PHONY: fmt lint test check deps-check hooks glossary
 
 fmt:
 	shfmt -w -i 2 -ci $(SRC) test/*.sh
@@ -29,3 +29,6 @@ deps-check:
 
 hooks:
 	pre-commit install
+
+glossary:
+	bin/wip-plumbing glossary assemble > .wip/GLOSSARY.md

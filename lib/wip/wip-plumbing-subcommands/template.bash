@@ -9,9 +9,8 @@
 #   - lib/wip/wip-intake-shaper-lib.bash (CLI shaper, indirectly via disk read)
 #   - .claude-plugin/commands/intake.md  (the /wip:intake skill body)
 #
-# Resolution order for the templates dir:
-#   1. $WIP_TEMPLATES_DIR (explicit override; test seam + install seam)
-#   2. $WIP_LIB/../../templates (i.e. templates/ next to lib/wip/)
+# Templates dir resolution lives in `wip_templates_dir` (lib). $WIP_TEMPLATES_DIR
+# overrides; otherwise resolves to templates/ next to lib/wip/.
 # shellcheck shell=bash
 
 wip_plumbing_cmd_template() {
@@ -25,16 +24,6 @@ wip_plumbing_cmd_template() {
   esac
 }
 
-_wip_template_dir() {
-  if [[ -n "${WIP_TEMPLATES_DIR:-}" ]]; then
-    printf '%s' "$WIP_TEMPLATES_DIR"
-    return 0
-  fi
-  local lib="${WIP_LIB:?WIP_LIB unset}"
-  # shellcheck disable=SC1007
-  CDPATH= cd -- "$lib/../../templates" 2>/dev/null && pwd
-}
-
 _wip_template_show() {
   local id="${1:-}"
   [[ -n "$id" ]] || wip_die 2 usage "template show requires an <id>"
@@ -42,7 +31,7 @@ _wip_template_show() {
     /* | *..*) wip_die 2 usage "template id must be relative and contain no .." ;;
   esac
   local dir
-  dir="$(_wip_template_dir)"
+  dir="$(wip_templates_dir)"
   [[ -n "$dir" && -d "$dir" ]] || wip_die 4 no-templates "templates dir not found" "$dir"
   local path="$dir/prompts/$id.md"
   if [[ ! -f "$path" ]]; then
@@ -53,7 +42,7 @@ _wip_template_show() {
 
 _wip_template_list() {
   local dir
-  dir="$(_wip_template_dir)"
+  dir="$(wip_templates_dir)"
   [[ -n "$dir" && -d "$dir" ]] || wip_die 4 no-templates "templates dir not found" "$dir"
   local prompts="$dir/prompts"
   if [[ ! -d "$prompts" ]]; then
