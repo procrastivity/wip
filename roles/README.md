@@ -31,12 +31,12 @@ behavior or `tier-policy.md` files.
 
 ## Status
 
-🚧 Not yet authored. These will be distilled — and decoupled per ADR-0007 — from
-`workflow-portable-stub/playbook/` (a gitignored study slice). See the distillation
-roadmap, Step "Roles" (step-12). Capability vocabulary lives in
-`templates/glossary/orchestration.md`; the Solo binding in `templates/glossary/solo.md`.
+✅ Shipped step-12 — distilled from the gitignored
+`workflow-portable-stub/playbook/` study slice and decoupled per ADR-0007.
+Capability vocabulary lives in `templates/glossary/orchestration.md`; the
+Solo binding in `templates/glossary/solo.md`.
 
-Planned layout:
+Layout:
 
 ```
 roles/

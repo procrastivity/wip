@@ -16,10 +16,42 @@ commands:
   detect    report features + initiatives from .wip.yaml (mandatory first call)
   doctor    verify the manifest against disk; report drift  [--fix advisory in v1]
   project   list / register / resolve / forget entries in the global registry
-  init      scaffold manifest/initiative          (later step)
-  intake    validate inbound planning artifacts   (later step)
-  status    where am I: round / active step        (later step)
-  next      ranked candidates for what to do next  (later step)
+  init      scaffold manifest and/or initiative from templates/
+            usage: init [<slug>] [--title <t>] [--intake ad-hoc|structured]
+  intake    classify / validate / apply inbound planning artifacts
+            usage: intake classify <file>
+                   intake validate <file> [--kind brief|amendment|workplan-seed|spec|handoff]
+                   intake apply <file> --kind <k> [--target <slug|slug/step>]
+  status    where am I: initiative / round / active step / dirty .wip files
+            usage: status [--initiative <slug>]
+  next      ranked candidates for what to do next
+            usage: next [--initiative <slug>]
+  roadmap   deterministic edits to an initiative's roadmap.md
+            usage: roadmap amend <slug> --from <file>
+                   [--insert-after <step-id> | --replace <step-id> | --append-round <title>]
+  workplan  scaffold a step workplan from templates/workplan.md.tmpl
+            usage: workplan init <slug> <step-id> [--from <seed>] [--slug <s>] [--force]
+  template  show / list the canonical templates that ship with wip
+            usage: template show <id>          (e.g. intake/preamble)
+                   template list [--no-json]
+  glossary  assemble / check the effective glossary for this project
+            usage: glossary assemble [--output <path>]
+                   glossary check
+  setup     install-time scaffold writers (one per capability)
+            usage: setup deps     [--force]   (flake.nix + flake.lock)
+                   setup direnv   [--force]   (.envrc; requires flake.nix)
+                   setup hygiene  [--force]   (.pre-commit-config.yaml)
+                   setup release  [--force]   (cliff.toml + CHANGELOG.md)
+                   setup agents   [--force]   (.claude-plugin/ vendored)
+  graduate  promote a single planning artifact to its LDS canon slot
+            usage: graduate <artifact-path> [--to <slot>] [--force]
+                   (slot is <eng-docs>-relative; auto-numbers
+                   decisions/auto-<slug>.md)
+  extract   run the deterministic LDS Extract phase against an approved manifest
+            usage: extract [--manifest <path>] [--force]
+                   (default manifest: <eng-docs>/.lds-manifest.yaml;
+                   v1: verbatim+content modes; transform/summarize
+                   land in unsupported[])
 
 global flags:
   -h, --help        print this and exit 0
@@ -88,6 +120,21 @@ wip_find_root() {
 wip_manifest_json() {
   local root="$1"
   yq -o=json '.' "$root/.wip.yaml" 2>/dev/null
+}
+
+# wip_templates_dir — echo the resolved templates/ directory absolute path.
+# Resolution order:
+#   1. $WIP_TEMPLATES_DIR (explicit override; test seam + install seam)
+#   2. $WIP_LIB/../../templates (i.e. templates/ next to lib/wip/)
+# Empty output (and non-zero return) when neither resolves.
+wip_templates_dir() {
+  if [[ -n "${WIP_TEMPLATES_DIR:-}" ]]; then
+    printf '%s' "$WIP_TEMPLATES_DIR"
+    return 0
+  fi
+  local lib="${WIP_LIB:?WIP_LIB unset}"
+  # shellcheck disable=SC1007
+  CDPATH= cd -- "$lib/../../templates" 2>/dev/null && pwd
 }
 
 # Emit "name <US> enabled <US> sentinel" per declared feature, where <US> is the

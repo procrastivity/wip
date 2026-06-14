@@ -1,0 +1,29 @@
+# .wip.yaml — the wip manifest.
+#
+# Lives at REPO ROOT, always committed. The deterministic entry point
+# `wip-plumbing` reads to answer "what's installed, where, and what's next."
+# See .wip/GLOSSARY.md for every term used here.
+
+version: 1
+
+# --- gitignore policy -------------------------------------------------------
+# Default: .wip/ content is ignored; only .wip.yaml + the always-committed
+# tooling files inside .wip/ are tracked.
+gitignore:
+  commit: false
+  always_commit:
+    - .wip/GLOSSARY.md
+    - .wip/backlog.md
+
+# --- features ---------------------------------------------------------------
+# A feature is ACTIVE iff: enabled here AND its sentinel file exists on disk.
+# Other features (lds, diataxis, changelog, direnv, solo, ...) are opt-in via
+# the `wip setup` family. Add stanzas here as you enable them.
+features:
+  wip:
+    enabled: true
+    root: .wip
+
+# --- initiative registry ----------------------------------------------------
+# Populated by `wip init <slug>`. `current_initiative` selects the default.
+initiatives: []

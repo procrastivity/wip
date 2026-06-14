@@ -1,0 +1,232 @@
+# wip-plumbing-amend-lib.bash — render + hash + in-place edit primitives
+# behind `roadmap amend`. Pure bash + awk + sha256. Portable on BSD awk.
+#
+# Idempotency model: the hash covers the rendered insertion payload (the
+# bullet block or the appended round), not the source artifact. Identical
+# inserts shaped from differently-framed artifacts collapse to the same
+# hash. Marker line: `<!-- wip-amend: <sha256> -->`.
+# shellcheck shell=bash
+
+# wip_amend_extract_directive_from_fm <fm-json> — emit "<kind>\t<value>" for
+# the present directive, or "" if none. Caller has already parsed JSON.
+wip_amend_extract_directive_from_fm() {
+  local fm="$1" kind v
+  for kind in insert-after replace append-round; do
+    v="$(printf '%s' "$fm" | jq -r --arg k "$kind" '.[$k] // empty' 2>/dev/null)"
+    if [[ -n "$v" ]]; then
+      printf '%s\t%s\n' "$kind" "$v"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# wip_amend_extract_body <file> — strip the leading `---`…`---` head if
+# present and echo the rest. No FM → echo file as-is.
+wip_amend_extract_body() {
+  awk '
+    NR == 1 && /^---[[:space:]]*$/ { fm = 1; next }
+    fm && !past && /^---[[:space:]]*$/ { past = 1; next }
+    fm && !past { next }
+    { print }
+  ' "$1"
+}
+
+# wip_amend_hash <text-on-stdin> — emit lowercase hex sha256 of stdin.
+wip_amend_hash() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+# Build the marker comment line.
+wip_amend_marker() {
+  printf '<!-- wip-amend: %s -->' "$1"
+}
+
+# wip_amend_render_step_bullet <body-on-stdin> [existing_title] — read body
+# from stdin: a single `### step-XX — <title>` heading + one-or-more
+# paragraphs. Emit one bullet line followed by collapsed body text:
+#   - **step-XX — Title** — <body collapsed to single paragraph>
+# When existing_title is supplied AND the heading omits a title, reuse it.
+# Returns 1 if no valid heading found.
+wip_amend_render_step_bullet() {
+  local existing_title="${1:-}"
+  awk -v existing="$existing_title" '
+    BEGIN { step_id = ""; title = ""; body = "" }
+    /^### step-/ {
+      if (step_id != "") { next }   # only first heading
+      # Extract step id (step-NN or step-NN.M).
+      s = $0
+      sub(/^### step-/, "", s)
+      # id continues while alnum or .
+      i = 0
+      while (i < length(s) && substr(s, i+1, 1) ~ /[0-9.]/) i++
+      step_id = "step-" substr(s, 1, i)
+      rest = substr(s, i + 1)
+      # Trim leading " — " or " - " or whitespace.
+      sub(/^[[:space:]]*[—-][[:space:]]*/, "", rest)
+      title = rest
+      next
+    }
+    step_id != "" {
+      # Collect body lines.
+      if (body == "") body = $0
+      else body = body " " $0
+    }
+    END {
+      if (step_id == "") exit 1
+      # Collapse whitespace runs.
+      gsub(/[[:space:]]+/, " ", body)
+      sub(/^[[:space:]]+/, "", body)
+      sub(/[[:space:]]+$/, "", body)
+      if (title == "" && existing != "") title = existing
+      if (title == "") title = "(untitled)"
+      if (body == "") printf "- **%s — %s**\n", step_id, title
+      else printf "- **%s — %s** — %s\n", step_id, title, body
+    }
+  '
+}
+
+# wip_amend_render_round_block <body-on-stdin> — read body from stdin and
+# emit it verbatim, trimmed of trailing blank lines, terminated with one
+# trailing newline. Used by append-round.
+wip_amend_render_round_block() {
+  awk '
+    { lines[NR] = $0 }
+    END {
+      # Find last non-blank line.
+      last = NR
+      while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--
+      for (i = 1; i <= last; i++) print lines[i]
+    }
+  '
+}
+
+# Build a regex-safe literal pattern fragment from <step-id>.
+_wip_amend_sid_pattern() {
+  printf '%s' "$1" | sed 's/[][\/.^$*+?(){}|\\]/\\&/g'
+}
+
+# wip_amend_has_marker <roadmap-path> <hash> — exit 0 if marker line present.
+wip_amend_has_marker() {
+  local path="$1" hash="$2"
+  [[ -f "$path" ]] || return 1
+  grep -F -q "<!-- wip-amend: $hash -->" "$path"
+}
+
+# Find the start (0-indexed) of the bullet block for <step-id> in <lines
+# array name>. Returns the index via stdout; empty when not found.
+_wip_amend_find_step_block_start() {
+  local sid="$1" arr_name="$2"
+  # shellcheck disable=SC2178
+  local -n _A="$arr_name"
+  local sid_re
+  sid_re="$(_wip_amend_sid_pattern "$sid")"
+  local i n=${#_A[@]}
+  for ((i = 0; i < n; i++)); do
+    if [[ "${_A[i]}" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
+      printf '%d\n' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Find the (exclusive) end of the bullet block starting at <start-index>
+# in <lines array name>. The block runs from `start` until the first
+# line that does NOT start with `- ` (continuation, blank, heading, EOF).
+# Continuation lines must begin with whitespace.
+_wip_amend_find_step_block_end() {
+  local start="$1" arr_name="$2"
+  # shellcheck disable=SC2178
+  local -n _A="$arr_name"
+  local i=$((start + 1)) n=${#_A[@]}
+  while ((i < n)); do
+    local L="${_A[i]}"
+    if [[ "$L" =~ ^[[:space:]] ]]; then
+      i=$((i + 1))
+      continue
+    fi
+    break
+  done
+  printf '%d\n' "$i"
+}
+
+# wip_amend_apply_insert_after <roadmap-path> <step-id> <bullet> <marker>
+# Insert <bullet>\n<marker>\n immediately after <step-id>'s block.
+# Returns 1 if the target step bullet is absent.
+wip_amend_apply_insert_after() {
+  local path="$1" step_id="$2" bullet="$3" marker="$4"
+  local lines=()
+  mapfile -t lines <"$path"
+  local start end
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  end="$(_wip_amend_find_step_block_end "$start" lines)"
+  local out=() i n=${#lines[@]}
+  for ((i = 0; i < end; i++)); do out+=("${lines[i]}"); done
+  out+=("$bullet")
+  out+=("$marker")
+  for ((i = end; i < n; i++)); do out+=("${lines[i]}"); done
+  printf '%s\n' "${out[@]}" >"$path"
+  return 0
+}
+
+# wip_amend_apply_replace <roadmap-path> <step-id> <bullet> <marker>
+# Replace <step-id>'s bullet block with <bullet>\n<marker>\n. Strips any
+# pre-existing `<!-- wip-amend: -->` marker lines from the replaced block.
+wip_amend_apply_replace() {
+  local path="$1" step_id="$2" bullet="$3" marker="$4"
+  local lines=()
+  mapfile -t lines <"$path"
+  local start end
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  end="$(_wip_amend_find_step_block_end "$start" lines)"
+  # Strip any wip-amend marker line that immediately follows the replaced
+  # block (it belonged to the previous insert/replace).
+  if ((end < ${#lines[@]})) && [[ "${lines[end]}" =~ \<!--[[:space:]]wip-amend ]]; then
+    end=$((end + 1))
+  fi
+  local out=() i n=${#lines[@]}
+  for ((i = 0; i < start; i++)); do out+=("${lines[i]}"); done
+  out+=("$bullet")
+  out+=("$marker")
+  for ((i = end; i < n; i++)); do out+=("${lines[i]}"); done
+  printf '%s\n' "${out[@]}" >"$path"
+  return 0
+}
+
+# wip_amend_apply_append_round <roadmap-path> <block> <marker>
+# Insert <block>\n<marker>\n before the first `## Deferred` / `## Backlog`
+# heading. If neither is present, append at EOF.
+wip_amend_apply_append_round() {
+  local path="$1" block="$2" marker="$3"
+  local lines=()
+  mapfile -t lines <"$path"
+  local n=${#lines[@]}
+  local insert_at="$n"
+  local i
+  for ((i = 0; i < n; i++)); do
+    if [[ "${lines[i]}" =~ ^\#\#[[:space:]](Deferred|Backlog) ]]; then
+      insert_at=$i
+      break
+    fi
+  done
+  # Walk back over trailing blanks before insert_at to avoid stacking
+  # multiple blank lines around the new block.
+  while ((insert_at > 0)) && [[ -z "${lines[insert_at - 1]}" ]]; do
+    insert_at=$((insert_at - 1))
+  done
+  local out=()
+  for ((i = 0; i < insert_at; i++)); do out+=("${lines[i]}"); done
+  # Blank line, block, marker, blank line, then the rest.
+  out+=("")
+  while IFS= read -r line; do out+=("$line"); done <<<"$block"
+  out+=("$marker")
+  out+=("")
+  for ((i = insert_at; i < n; i++)); do out+=("${lines[i]}"); done
+  printf '%s\n' "${out[@]}" >"$path"
+  return 0
+}

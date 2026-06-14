@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# wip — porcelain over wip-plumbing, with an OpenAI-compatible provider.
+#
+# Owns: ask, provider. Every other verb is exec'd against bin/wip-plumbing
+# verbatim. See engineering/specs/wip-porcelain.md for the contract.
+set -euo pipefail
+
+_WIP_P_SELF="$0"
+export _WIP_P_SELF
+
+# shellcheck disable=SC1007  # CDPATH= prefixes the cd command (neutralize CDPATH), not an assignment
+WIP_LIB="${WIP_LIB:-$(CDPATH= cd -- "$(dirname -- "$0")/../lib/wip" && pwd)}"
+export WIP_LIB
+
+# shellcheck source=lib/wip/wip-porcelain-lib.bash
+source "$WIP_LIB/wip-porcelain-lib.bash"
+# shellcheck source=lib/wip/wip-provider-lib.bash
+source "$WIP_LIB/wip-provider-lib.bash"
+# shellcheck source=lib/wip/wip-intake-shaper-lib.bash
+source "$WIP_LIB/wip-intake-shaper-lib.bash"
+
+WIP_VERBOSE=0
+
+# Porcelain-global flag prelude. Stops at the first verb (or `--`). Anything
+# not recognized here is left for the verb / the plumbing proxy.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help | help)
+      if [[ "${1:-}" == "help" && $# -gt 1 ]]; then
+        # `wip help <verb>` — fall through to verb dispatch for porcelain verbs;
+        # else hand off to plumbing. Keep this simple in v1: always print our
+        # usage, since neither ask nor provider has a sub-help yet.
+        wip_p_usage
+        exit 0
+      fi
+      wip_p_usage
+      exit 0
+      ;;
+    --version)
+      printf 'wip %s\n' "$(wip_p_version)"
+      exit 0
+      ;;
+    -v | --verbose)
+      WIP_VERBOSE=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      # Unknown porcelain-global flag — let the verb / plumbing handle it.
+      break
+      ;;
+    *) break ;;
+  esac
+done
+export WIP_VERBOSE
+
+cmd="${1:-}"
+if [[ -z "$cmd" ]]; then
+  wip_p_usage
+  exit 2
+fi
+shift || true
+
+case "$cmd" in
+  ask)
+    # shellcheck disable=SC1091
+    source "$WIP_LIB/wip-subcommands/ask.bash"
+    wip_cmd_ask "$@"
+    ;;
+  provider)
+    # shellcheck disable=SC1091
+    source "$WIP_LIB/wip-subcommands/provider.bash"
+    wip_cmd_provider "$@"
+    ;;
+  intake)
+    # shellcheck disable=SC1091
+    source "$WIP_LIB/wip-subcommands/intake.bash"
+    wip_cmd_intake "$@"
+    ;;
+  *)
+    # Transparent proxy to wip-plumbing. exec replaces the shell so signals
+    # and exit codes propagate cleanly; no PID layer added.
+    plumbing="$(wip_p_find_plumbing)" || wip_p_die 3 no-plumbing "could not locate wip-plumbing binary"
+    exec "$plumbing" "$cmd" "$@"
+    ;;
+esac

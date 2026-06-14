@@ -53,7 +53,7 @@ features:
   changelog:
     enabled: false              # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
   direnv:
-    enabled: false              # sentinel: .envrc (pinned nix-direnv shim)
+    enabled: true               # sentinel: .envrc (pinned nix-direnv shim)
   prtend:
     enabled: false
   solo:                         # Solo backend config (binding for orchestration.backend: solo)
@@ -74,7 +74,7 @@ initiatives:
     intake: ad-hoc              # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-07            # Round 2: init + intake (detect + doctor shipped)
+    active_step: step-15            # Round 3 complete (step-15 shipped 2026-06-14)
 
 # --- integrations (optional) ------------------------------------------------
 # integrations:

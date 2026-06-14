@@ -20,6 +20,11 @@ and never makes a judgment a human/porcelain should make. v1 ships the verbs bel
 Intake is a pipeline rather than a single verb (ADR-0009); its plumbing surface is three
 subcommands, and two new verbs cover the destinations its `apply` step routes to.
 
+The standalone `wip` porcelain — which exposes this surface verbatim and adds the
+OpenAI-compatible provider seam — is specified in [`wip-porcelain.md`](./wip-porcelain.md)
+(step-10). The `/wip:*` Claude Code plugin — the third frontend, which reads the same
+plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
+
 | Verb | One-line | Roadmap step |
 |------|----------|--------------|
 | `detect` | What features/initiatives exist, per `.wip.yaml`. The mandatory first call. | step-06 |
@@ -34,10 +39,20 @@ subcommands, and two new verbs cover the destinations its `apply` step routes to
 | `workplan init` | Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<slug>.md`. | step-08.5 |
 | `status` | Where am I: current initiative, round, active step, dirty `.wip/`. | step-08 |
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
+| `template show` | Print a canonical template body by id (`intake/preamble`, …). | step-11 |
+| `template list` | Enumerate `templates/prompts/**/*.md` as `{id, path}` records. | step-11 |
+| `glossary assemble` | Render `core` + enabled-feature partials → effective glossary markdown. | step-13 |
+| `glossary check` | Compare on-disk `.wip/GLOSSARY.md` against a fresh assemble; exit 4 on drift. | step-13 |
+| `setup deps` | Write `flake.nix` + `flake.lock` (devShell pinning the bash toolchain). | step-14 |
+| `setup direnv` | Write `.envrc` (nix-direnv shim); flip `features.direnv.enabled`. Requires `flake.nix`. | step-14 |
+| `setup hygiene` | Write `.pre-commit-config.yaml` (local hooks mirroring `make check`). | step-14 |
+| `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
+| `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
+| `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
+| `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
 
-Non-goals for v1: `setup`, `graduate`/`extract`, `orchestrate`/`spawn`, `glossary`
-(assembler), the `wip intake` porcelain (step-10.5). They are later roadmap steps and
-get their own specs.
+Non-goals for v1: `orchestrate`/`spawn`, the `wip intake`
+porcelain (step-10.5). They are later roadmap steps and get their own specs.
 
 ## 2. Global conventions
 
@@ -171,9 +186,10 @@ LLM-driven shaping and routing between them lives in the `wip intake` porcelain
 (roadmap step-10.5). The closed kind vocabulary, per-kind shape rules, and classify
 heuristics are specified in [`intake-kinds.md`](./intake-kinds.md).
 
-v0 (step-07) ships only `intake validate <file>` with a single-kind shape check
-(parseable + title + goal/summary). step-07.5 generalizes to the three subcommands
-below.
+All three subcommands shipped in step-07.5. As of step-08.5, `apply` is also
+end-to-end for `brief` → `init`, `amendment` → `roadmap amend`, and
+`workplan-seed` → `workplan init`. `spec` still exits 3 (LDS seam not yet
+wired); `handoff` exits 4 (not terminal).
 
 #### `wip-plumbing intake classify <file>`
 Best-guess `kind` from front-matter + heading heuristics. Never asks; never makes a
@@ -208,8 +224,11 @@ appropriate writer:
 - `--kind brief` → `init <derived-slug>`.
 - `--kind amendment` → `roadmap amend <target> <directive-from-artifact>`.
 - `--kind workplan-seed` → `workplan init <slug> <step-id> --from <file>`.
-- `--kind spec` → LDS seam (ADR-0006); v1 stub may refuse with exit 3 ("LDS not
-  active") until the LDS verb surface lands.
+- `--kind spec` → LDS seam (ADR-0006). The LDS verb surface ships in step-15
+  as the top-level `graduate` and `extract` verbs. v1 of intake-apply still
+  exits 3 here; routing `spec` artifacts through to `graduate` requires the
+  shaper layer to insert a `graduate-to:` directive, which is a separate
+  porcelain change (backlog: `intake-apply-spec-graduate-dispatch`).
 - `--kind handoff` → exit 4 ("handoff is not a terminal kind; reshape first").
 
 - **Reads:** the artifact; whatever the dispatched verb reads.
@@ -289,21 +308,466 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
 }
 ```
 
+### `wip-plumbing template <show|list>`
+
+Print the canonical templates that ship with `wip`. Shipped in step-11 to
+back the `/wip:*` plugin's prompt-sharing seam (see
+[`wip-plugin.md`](./wip-plugin.md) §4); useful generally for any frontend
+that needs the canonical bytes by name rather than by path.
+
+ID grammar: path under `templates/prompts/` minus the `.md` suffix. E.g.
+`intake/preamble` → `templates/prompts/intake/preamble.md`.
+
+Templates dir resolution: `$WIP_TEMPLATES_DIR` (override) →
+`$WIP_LIB/../../templates`.
+
+#### `wip-plumbing template show <id>`
+
+- **Reads:** the resolved template file.
+- **Writes:** nothing.
+- **Stdout:** the file body **verbatim** (no JSON envelope; this is one of
+  the few plumbing verbs that emits raw bytes — same shape as a future
+  `template render` would render, just without substitution).
+- **Exit:** 0 on success; **2** if no id given, or the id is absolute (`/…`)
+  or contains `..`; **4** if the templates dir is missing
+  (`no-templates`), or the id resolves to no file (`unknown-template`).
+
+```
+$ wip-plumbing template show intake/preamble
+You are the SHAPER stage of the `wip intake` pipeline (ADR-0009).
+…
+```
+
+#### `wip-plumbing template list [--no-json]`
+
+- **Reads:** the resolved templates dir; enumerates
+  `prompts/**/*.md` (`find -type f -name '*.md'`).
+- **Writes:** nothing.
+- **Stdout (JSON, default):**
+  ```json
+  { "ok": true, "templates": [
+      { "id": "intake/preamble", "path": "/abs/templates/prompts/intake/preamble.md" },
+      { "id": "intake/brief",    "path": "…/intake/brief.md" }
+    ] }
+  ```
+  Sorted by id.
+- **Stdout (`--no-json`):** TSV — `<id>\t<path>` per line.
+- **Exit:** 0 on success; **4** `no-templates` if the templates dir is
+  missing.
+
+### `wip-plumbing glossary <assemble|check>`
+
+Render the effective glossary for the project by concatenating
+`templates/glossary/core.md` with the partials whose feature is active in
+`.wip.yaml`. Inclusion rules are declared in
+[`templates/glossary/README.md`](../../templates/glossary/README.md); the
+authoritative table is enforced in `lib/wip/wip-plumbing-glossary-lib.bash`
+(adding a new partial is a one-row addition there). Per
+[ADR-0007](../decisions/0007-orchestration-backend-seam.md), `solo.md` is
+gated on `features.orchestration.backend == "solo"`, NOT on
+`features.solo.enabled`.
+
+Templates dir resolution: `$WIP_TEMPLATES_DIR` (override) →
+`$WIP_LIB/../../templates` (same seam as `template`).
+
+Each partial's leading `<!-- wip glossary partial: … -->` block is stripped
+on emit (the generated header records the inclusion roster once;
+duplicating it three times mid-document is noise). A partial whose
+predicate is true but whose file is not on disk (e.g. `lds.md` / `diataxis.md`
+before they ship) is a **graceful skip** — the assemble output omits its
+body and the JSON ledger lists it under `partials_skipped[]` with
+`reason: "predicate-true; partial-not-shipped"`.
+
+#### `wip-plumbing glossary assemble [--output <path>]`
+
+- **Reads:** `.wip.yaml`; each enabled partial under the resolved
+  templates dir.
+- **Writes:** nothing (stdout-only) by default. With `--output <path>`:
+  the named file via atomic tmpfile + `mv`. `--dry-run` with `--output`:
+  prints the ledger only.
+- **Stdout (no `--output`):** the assembled markdown **verbatim** (no
+  JSON envelope; same shape as `template show`). Body opens with an H1,
+  a `<!-- GENERATED … -->` block recording Source paths + Driven-by
+  predicates + the regen/verify recipes, and a one-paragraph intro
+  blockquote; then per-partial `<!-- partial: NAME  source: PATH  reason: PREDICATE -->`
+  dividers followed by the stripped partial body.
+- **Stdout (with `--output`):** JSON write ledger.
+  ```json
+  { "ok": true, "wrote": [".wip/GLOSSARY.md"],
+    "partials_included": [
+      {"name":"core.md", "source_path":"…/templates/glossary/core.md", "predicate":"always"},
+      {"name":"orchestration.md", "source_path":"…", "predicate":"features.orchestration.enabled"},
+      {"name":"solo.md", "source_path":"…", "predicate":"features.orchestration.backend"}
+    ],
+    "partials_skipped": [
+      {"name":"diataxis.md", "predicate":"features.diataxis.enabled",
+       "reason":"predicate-true; partial-not-shipped"}
+    ] }
+  ```
+- **Exit:** 0 on success; **2** on bad args; **4** `no-templates` if
+  the templates dir is missing, `no-manifest` / `bad-manifest` as usual.
+
+#### `wip-plumbing glossary check`
+
+- **Reads:** `.wip.yaml`, each enabled partial, the on-disk glossary at
+  the path derived from `gitignore.always_commit[]` (looking for
+  `.wip/GLOSSARY.md`; falls back to literal `.wip/GLOSSARY.md`).
+- **Writes:** nothing.
+- **Stdout (no drift):**
+  ```json
+  { "ok": true, "drift": false, "expected_path": ".wip/GLOSSARY.md",
+    "partials": [ {"name":"core.md", "predicate":"always", "status":"included", "reason":"always"}, … ] }
+  ```
+- **Stdout (drift):** error envelope, plus `expected_path`,
+  `actual_path`, `byte_diff_count`, `partials`.
+- **Stderr (drift):** the regen-hint line, then `diff -u` output between
+  on-disk and freshly-assembled. Stderr-only — the JSON envelope does
+  not embed the diff bytes.
+- **Exit:** 0 on agreement; **4** on drift (`glossary-drift`).
+  No `--fix` in v1 (cf. `doctor --fix`'s advisory-only stance).
+
+Pre-commit wiring lives in `.pre-commit-config.yaml` as a `wip-glossary`
+local hook that fires when `.wip.yaml`, `.wip/GLOSSARY.md`, or any
+`templates/glossary/*.md` changes — the three drift modes the seam
+catches: content drift, manifest drift, partial drift.
+
+### `wip-plumbing setup <deps|direnv|hygiene|release|agents> [--force]`
+
+Install-time deterministic scaffold writers, one per capability (step-14).
+Each verb writes verbatim files from `templates/setup/<verb>/` into the
+consumer repo, flips its mapped feature flag in `.wip.yaml` where
+applicable, and verifies its sentinel exists post-write. No `{{key}}`
+substitution — these are infrastructure files, not artifacts.
+
+**Per-file write contract (three-way):**
+
+- **Absent** → write the template bytes; ledger status `wrote`.
+- **Present, byte-equal to template** → silent skip; ledger status
+  `skipped` (under `skipped_idempotent`).
+- **Present, differs** → refuse; **exit 4** `content-drift` with the
+  offending path(s) in `error.paths`. The verb does NOT touch the
+  manifest in this case.
+- **Present, differs, `--force`** → overwrite; ledger status
+  `wrote_forced`.
+
+`flake.lock` is special-cased to **"skip if present, never compare"**:
+locks evolve per consumer (`nix flake update` rolls inputs forward), so
+byte-equal would refuse every consumer who's done one update. Under
+`--force` the lock is still overwritten.
+
+**Composition.** Verbs do not auto-chain. `setup direnv` requires
+`flake.nix` and exits 3 `missing-prereq` with `error.path: "flake.nix"`
+when absent (hint to run `setup deps` first). All verbs exit 3
+`missing-manifest` when `.wip.yaml` is absent (run `init` first).
+
+**Reads:** `templates/setup/<verb>/`; the consumer repo's existing
+files at the destination paths; `.wip.yaml` (for the feature-flag flip).
+
+**Writes:** the destination files per the contract above; `.wip.yaml`
+(for the feature-flag flip; only on a real diff — re-running an
+already-flipped verb is a manifest no-op).
+
+**Exit:**
+
+- **0** — success (including idempotent no-op and `wrote_forced`).
+- **2** — bad subcommand, unknown flag, missing subcommand.
+- **3** — `missing-manifest` (no `.wip.yaml`) or `missing-prereq`
+  (e.g. `setup direnv` without `flake.nix`).
+- **4** — `content-drift` (one or more destination files differ from
+  template and `--force` was not passed).
+
+**Verb → feature flag map:**
+
+| Verb | Feature block flipped | Sentinel checked post-write |
+|---|---|---|
+| `setup deps` | (none) | (none) |
+| `setup direnv` | `features.direnv.enabled: true` | `.envrc` |
+| `setup hygiene` | (none — v1) | (none) |
+| `setup release` | `features.changelog.enabled: true` | `CHANGELOG.md` |
+| `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
+
+`setup agents` deliberately does NOT auto-create the `features.solo`
+block (per ADR-0007, that block carries the consumer's backend-specific
+`agent_tier_policy`; a default would be presumptuous). Stderr emits a
+hint to configure `features.solo.agent_tier_policy` after the verb.
+
+**stdout (success):**
+```json
+{
+  "ok": true,
+  "verb": "setup direnv",
+  "wrote": [".envrc"],
+  "skipped_idempotent": [],
+  "wrote_forced": [],
+  "refused": [],
+  "manifest_updated": ".wip.yaml",
+  "sentinel": ".envrc",
+  "sentinel_present": true
+}
+```
+
+**stdout (content drift):**
+```json
+{
+  "ok": false,
+  "verb": "setup deps",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "infrastructure files differ from template; re-run with --force to overwrite",
+    "paths": ["flake.nix"]
+  }
+}
+```
+
+**stderr:** per-verb one-line hint on success (suppressed by `-q`); error
+diagnostics on failure paths.
+
+**Templates dir resolution:** `$WIP_TEMPLATES_DIR` override → `$WIP_LIB/../../templates`
+(same seam as `template show` / `glossary assemble`). Each verb reads
+`<templates-dir>/setup/<verb>/`.
+
+**`--dry-run`:** prints the ledger (`wrote` lists what *would* be
+written) and touches neither files nor the manifest. Sentinel
+`sentinel_present` is `false` because the ledger reflects pre-write state.
+
+**Plugin file substitution:** `templates/setup/agents/.claude-plugin/`
+references `wip-plumbing` (PATH-resolved) — consumers are expected to
+have `wip` installed. This repo's own `.claude-plugin/` keeps
+`bin/wip-plumbing` (dogfood-local). The divergence is exactly the
+one-substitution rule; the agents template tree is excluded from the
+verbatim-cmp fidelity tests for that reason.
+
+### `wip-plumbing graduate <artifact> [--to <slot>] [--force]`
+
+Promote one wip-internal planning artifact to its LDS canon slot
+(step-15). The single-artifact LDS seam per
+[ADR-0006](../decisions/0006-wip-owns-seams-not-tools.md): the verb
+*invokes the deterministic core* of LDS's extract workflow for the
+one-artifact case and never re-implements the LLM-driven `analyze` /
+`review` phases (those stay in the porcelain).
+
+The target slot comes from the artifact's `graduate-to:` front-matter
+directive (relative to the LDS root, e.g. `decisions/0010-foo.md`),
+overridden by `--to <slot>` when present. The directive itself is
+**stripped** on write; all other front-matter keys (status, date, etc.)
+pass through unchanged.
+
+**Shorthand: `decisions/auto-<slug>.md`.** Resolves to
+`decisions/<next-NNNN>-<slug>.md` where `next-NNNN` is one above the
+highest existing 4-digit prefix in `<eng-docs>/decisions/`. Empty
+directory → `0001`. Auto-numbering is **decisions-only**; using
+`auto-*` outside `decisions/` exits 4 `bad-auto-slot`.
+
+**Layer allowlist.** The first path segment of the target must be one of
+the canonical LDS layers (`decisions`, `product`, `architecture`,
+`specs`, `reference`, `features`, `implementation`) plus `maintenance`
+and `appendices`. Anything else exits 4 `unknown-layer`.
+
+**Write contract: three-way idempotency** (same as `setup`):
+
+- **absent** → write rendered body; status `wrote`.
+- **byte-equal** → silent skip; status `skipped_idempotent`.
+- **differs** → exit 4 `content-drift` with the path in `error.path`;
+  `--force` overwrites and records `wrote_forced`.
+
+**LDS preconditions.**
+
+- `features.lds.enabled: false` → exit 3 `lds-not-enabled`.
+- `enabled: true` but `<eng-docs>/.lds-manifest.yaml` missing → exit 3
+  `lds-sentinel-missing` (hint: install LDS scaffold; `setup lds` is
+  backlog).
+
+**Reads:** the artifact file; `.wip.yaml` (for the LDS root +
+sentinel); `<eng-docs>/decisions/` (for auto-NNNN scanning).
+
+**Writes:** the rendered target file (or just the ledger with
+`--dry-run`).
+
+**Exit:**
+
+- **0** — success (including idempotent skip and `wrote_forced`).
+- **2** — bad args (unknown flag, missing artifact arg, unexpected arg).
+- **3** — `lds-not-enabled` / `lds-sentinel-missing` /
+  `missing-manifest`.
+- **4** — `bad-artifact` (file missing), `no-target` (no directive and
+  no `--to`), `bad-target` (absolute / `..` / not `<layer>/<file>`),
+  `unknown-layer`, `bad-auto-slot`, `content-drift`.
+
+**stdout (success):**
+
+```json
+{
+  "ok": true,
+  "verb": "graduate",
+  "artifact": ".wip/initiatives/distillation/scratch/foo.md",
+  "target": "engineering/decisions/0010-graduate-seam.md",
+  "wrote": ["engineering/decisions/0010-graduate-seam.md"],
+  "skipped_idempotent": [],
+  "wrote_forced": [],
+  "refused": []
+}
+```
+
+**stdout (content drift):**
+
+```json
+{
+  "ok": false,
+  "verb": "graduate",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "target differs from artifact; re-run with --force to overwrite",
+    "path": "engineering/decisions/0010-graduate-seam.md"
+  }
+}
+```
+
+### `wip-plumbing extract [--manifest <path>] [--force]`
+
+Run the deterministic LDS Extract phase against an approved extraction
+manifest (step-15). The bulk-from-manifest LDS seam: reads a
+manifest, walks `entries[]`, writes each target. The LLM-driven
+`analyze` / `review` phases (which generate / approve the manifest)
+stay in the porcelain.
+
+**Manifest discovery.** Default: `<eng-docs>/.lds-manifest.yaml` (the
+same path the `lds` feature's sentinel rule points at, so a single
+source of truth for detect / doctor / extract). Override:
+`--manifest <path>`.
+
+**v1 scope (the minimum viable LDS seam — see workplan step-15 for
+deferral rationale):**
+
+| Aspect | v1 status |
+|---|---|
+| `verbatim` mode | **supported** |
+| `content` mode | **supported** |
+| `transform` mode | **skipped** (`unsupported[]`) |
+| `summarize` mode | **skipped** (`unsupported[]`) |
+| Simple-path source (string) | **supported** |
+| Single-file with line range | **supported** |
+| Multi-file source (`source.files[]`) | **skipped** |
+| SHA-256 source hash verification | **skipped-v1** (ledger flag) |
+| Templates + `field_mappings` | **skipped** (`unsupported[]`) |
+| `--resume` mode | **not implemented** |
+| Extraction report file | **not written** (ledger is stdout-only) |
+
+Skipped (unsupported) entries do **not** fail the run; other entries
+in the same manifest still execute. The ledger names every skip so the
+consumer can see what didn't land.
+
+**Per-entry write contract: three-way idempotency** (same as
+`graduate` and `setup`). A bytes-equal target is silently skipped; a
+drifted target is refused with `exit 4 content-drift` (paths in
+`error.paths`); `--force` overwrites.
+
+**Source attribution comments** (LDS §6.3) are prepended to every
+written target — exact format:
+
+```html
+<!-- Migrated from legacy/foo.md:45-120 -->
+<!-- Extraction ID: vision-main -->
+```
+
+For content mode: `<!-- Generated content - no source file -->` plus
+the Extraction ID line. The attribution is part of the bytes
+idempotency compares.
+
+**Manifest validation** (required-fields only):
+
+- `metadata.schema_version` must match `1.x.x` (any 1.x).
+- `metadata.status == "approved"`.
+- `entries` non-empty.
+- Entry ids unique.
+- Each entry has `id`, `target`, `mode` (one of
+  verbatim/content/transform/summarize), and a `source` when
+  `mode != content`.
+
+**LDS preconditions.** Same as `graduate`:
+`lds-not-enabled` (exit 3) / `lds-sentinel-missing` (exit 3).
+
+**Reads:** `.wip.yaml`; the manifest at the default or `--manifest`
+path; every entry's source file (for `verbatim` mode).
+
+**Writes:** one target per supported entry (or just the ledger with
+`--dry-run`).
+
+**Exit:**
+
+- **0** — success (every entry wrote, skipped, or was logged as
+  unsupported / bad-shape *without any drift*).
+- **2** — bad args (unknown flag, value missing).
+- **3** — `lds-not-enabled` / `lds-sentinel-missing` /
+  `missing-manifest`.
+- **4** — `manifest-missing`, `manifest-unparseable`,
+  `manifest-not-approved`, `incompatible-schema`, `manifest-empty`,
+  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`.
+
+**stdout (success):**
+
+```json
+{
+  "ok": true,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "entries_total": 3,
+  "wrote": ["engineering/decisions/0001-foo.md"],
+  "skipped_idempotent": ["engineering/specs/bar.md"],
+  "wrote_forced": [],
+  "refused": [],
+  "unsupported": [
+    {"id": "spec-with-transform", "mode": "transform", "reason": "transform mode not supported in v1"}
+  ],
+  "bad_entries": [],
+  "hash_verification": "skipped-v1"
+}
+```
+
+**stdout (content drift):**
+
+```json
+{
+  "ok": false,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "error": {
+    "code": 4,
+    "kind": "content-drift",
+    "message": "extracted targets differ from manifest output; re-run with --force to overwrite",
+    "paths": ["engineering/decisions/0001-foo.md"]
+  }
+}
+```
+
+**Templates dir resolution:** not relevant — `extract` does not read
+the `wip` templates dir (the LDS templates referenced in
+`field_mappings` are in the consumer's own LDS install, and v1 skips
+templated entries anyway).
+
+**`--dry-run`:** computes the ledger reflecting what *would* be
+written / skipped / refused; touches neither files nor manifest.
+
 ---
 
 ## 4. Open questions (resolve before/while building step-06–08)
 
-1. **`status` git dependency** — if a consumer's `.wip/` is gitignored (default), `git
-   status -- .wip/` reports nothing. Fall back to mtime-based "recently touched"? Or
-   accept "dirty" is empty for gitignored `.wip/`? *Lean: accept empty; dirty-tracking is
-   a committed-`.wip/` nicety.*
-2. **`roadmap.md` parsing** — Steps are `### step-NN — title` with a `✅` / "shipped"
-   marker. Define the exact grammar `next`/`status` parse, or add lightweight front-matter
-   per step? *Lean: parse the heading + a `Status:` line; avoid front-matter to keep
-   roadmaps human-first.*
-3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*. v0 (step-07)
-   stays at parseable + title + goal/summary; the closed kind vocabulary and per-kind
-   shape rules ship in step-07.5.
-4. **Amendment idempotency hash** — byte-hash the shaped payload, or a normalized
-   structural digest? Bytes are simpler; structural survives whitespace churn. Lean:
-   bytes in v1, revisit if churn proves it. *(see `intake-kinds.md` §6.)*
+1. **`status` git dependency** — *resolved in step-08.* When `.wip/` is gitignored
+   (default), `git status --porcelain -- .wip/` reports nothing → `dirty_wip_files: []`.
+   The porcelain layer may mtime-augment later; plumbing stays git-only.
+2. **`roadmap.md` parsing** — *resolved in step-08.* The bullet form already in use is the
+   v1 grammar: `## Round <N> — <title>` rounds (with optional trailing `✅ shipped
+   <YYYY-MM-DD>`); steps as `- **step-<NN[.5]> — <title>**` bullets (with optional `✅`
+   marker and `shipped <YYYY-MM-DD>` date); `## Backlog` sections parsed as
+   `- **<title>** — <body>` entries. The amendment-form `### step-NN — <title>` heading
+   is recognized too. No front-matter; the parser lives in
+   `lib/wip/wip-plumbing-roadmap-lib.bash`.
+3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*; shipped in
+   step-07.5. The closed kind vocabulary and per-kind shape rules are now enforced by
+   `wip-plumbing intake validate`.
+4. **Amendment idempotency hash** — *resolved in step-08.5.* SHA-256 of the
+   **rendered insertion payload** (bullet line or appended round block), not the source
+   artifact's bytes. Identical inserts shaped from differently-framed artifacts collapse
+   to the same hash. Marker line: `<!-- wip-amend: <sha256> -->` immediately after the
+   inserted block.

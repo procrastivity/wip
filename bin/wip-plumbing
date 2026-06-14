@@ -15,6 +15,14 @@ export WIP_LIB
 source "$WIP_LIB/wip-plumbing-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-registry-lib.bash
 source "$WIP_LIB/wip-plumbing-registry-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-scaffold-lib.bash
+source "$WIP_LIB/wip-plumbing-scaffold-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-intake-lib.bash
+source "$WIP_LIB/wip-plumbing-intake-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-roadmap-lib.bash
+source "$WIP_LIB/wip-plumbing-roadmap-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-amend-lib.bash
+source "$WIP_LIB/wip-plumbing-amend-lib.bash"
 
 WIP_JSON=1
 WIP_VERBOSE=0
@@ -99,13 +107,10 @@ fi
 set -- "${_wip_filtered_args[@]+"${_wip_filtered_args[@]}"}"
 
 case "$cmd" in
-  detect | doctor | project)
+  detect | doctor | project | init | intake | status | next | roadmap | workplan | template | glossary | setup | graduate | extract)
     # shellcheck disable=SC1090
     source "$WIP_LIB/wip-plumbing-subcommands/$cmd.bash"
     "wip_plumbing_cmd_$cmd" "$@"
-    ;;
-  init | intake | status | next)
-    wip_die 1 not-implemented "'$cmd' lands in a later step (see engineering/specs/wip-plumbing-cli.md)"
     ;;
   *) wip_die 2 usage "unknown command: $cmd" ;;
 esac

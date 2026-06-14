@@ -1,0 +1,114 @@
+# Shared Role Behavior
+
+Cross-Role behavior for every wip Role: **Orchestrator**, **Coordinator**,
+**Researcher**, **Builder**. Backend-agnostic — every primitive named
+here is the abstract one from
+[`templates/glossary/orchestration.md`](../templates/glossary/orchestration.md).
+The concrete substrate (which MCP tool implements which abstract
+primitive) lives in the active orchestration backend's binding under
+[`backends/`](./backends/).
+
+On activation, confirm your role via the active backend; see
+[`backends/`](./backends/) for how. Tier selection for any spawn is
+governed by [`tier-policy.md`](./tier-policy.md).
+
+## Role Invariants
+
+- **Orchestrator** and **Coordinator** are never the same agent process.
+- **Coordinator** and **Researcher** are separate agent processes.
+- **Builders** are ephemeral, scoped to a single Chunk/task.
+- **Researcher** is long-lived for the lifetime of a Step and remains
+  available for consultation during build.
+- Never spawn a **Coordinator** without also spawning its **Researcher**.
+
+## Naming Conventions
+
+Process / agent names are role-scoped and slug-namespaced so concurrent
+initiatives never collide.
+
+| Thing | Pattern | Example |
+|---|---|---|
+| Orchestrator process | `orchestrator` | `orchestrator` |
+| Coordinator process | `<slug>-step-NN-coordinator` | `distillation-step-12-coordinator` |
+| Researcher process | `<slug>-step-NN-researcher` | `distillation-step-12-researcher` |
+| Builder process | `<slug>-step-NN-builder-MM` (retries add `-r1`/`-r2`) | `distillation-step-12-builder-03` |
+| Step shared note | `<slug>-step-NN-context` | `distillation-step-12-context` |
+| Step ledger entry | `Step N · Task M — <one-line>` | `Step 12 · Task 3 — Backend grep test` |
+| Escalation ledger entry | `[ESCALATION step-NN/builder-MM] <summary>` | `[ESCALATION step-12/builder-03] Tier resolver ambiguous` |
+
+## Ledger Tags
+
+Used to slice the task ledger by scope:
+
+- `roadmap` — Roadmap-derived entries.
+- `step-NN` — scoped to a single Step (combined with the initiative
+  slug as needed by the backend's tag conventions).
+- `task` — leaf execution units inside a Step.
+- `needs-human` — blocking on a human decision; routed by the
+  Orchestrator.
+- `escalation` — surfaced upward from Builder → Coordinator →
+  Orchestrator.
+- `coordinator-context` — entries the Coordinator owns.
+
+## Pause and Resume
+
+Roles do not poll. Use the backend's **idle-timer** signal to pause
+and resume:
+
+- A timer's body is injected as a **fresh user turn** when it fires, so
+  the next action picks up automatically — no polling loop, no burned
+  context.
+- Timer bodies must be **self-contained**: include the agent's
+  identity, any ids the next action needs, and the action itself. The
+  fresh turn has no implicit memory of what set the timer.
+- Use the "fire when watched agents go idle" variant for **worker
+  quiet periods** (waiting on a Builder, a Researcher, or a batch of
+  Builders to finish their current task). Use a **fixed-duration**
+  timer for time-based waits. Use a **port-bound** wait for service
+  readiness, not for worker idle.
+
+See [`backends/`](./backends/) for the concrete timer tool names.
+
+## Shared-Note Template
+
+Coordinators bootstrap a Step shared note from this template at build
+kickoff. Status lives in the **task ledger** (queried by
+`<slug>/step-NN` tag), not here — this note carries rolling context
+the ledger can't.
+
+```markdown
+# Step N — Rolling Context
+
+**Coordinator**: <agent name and id>
+**Researcher**: <agent name and id>
+**Workplan**: .wip/initiatives/<slug>/workplans/step-NN-<title>.md
+**Build started**: <ISO timestamp>
+
+## Batching plan
+
+| Batch | Tasks | Rationale |
+|---|---|---|
+| (filled by coordinator at setup) | | |
+
+> **Live task status**: query the task ledger by the `<slug>/step-NN`
+> tag rather than maintaining a status table here.
+
+## Decisions made during build
+
+(append during build)
+
+## Escalations
+
+(append as escalations occur)
+
+## Per-task outcomes
+
+(append one outcome paragraph per task completion)
+```
+
+## Tier Selection
+
+When spawning, request a **tier** (`small` / `medium` / `large`), never
+a runtime tool id. The active backend resolves the tier to whatever
+runtime it has available. See [`tier-policy.md`](./tier-policy.md) for
+the per-Role defaults and the escalation guardrails.

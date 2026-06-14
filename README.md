@@ -31,6 +31,45 @@ repos. `wip` detects them (`.wip.yaml` + a sentinel file) and invokes them.
 | `docs/` | **Diátaxis** — user docs for people consuming `wip` |
 | `.wip.yaml`, `.wip/` | this repo dogfooding itself (manifest + in-flight work) |
 
+## Develop
+
+Three commands from a fresh clone:
+
+```sh
+direnv allow      # loads the nix devShell (pinned in flake.nix)
+make hooks        # installs the pre-commit gate
+make check        # lint + tests (the same gate pre-commit runs)
+```
+
+Without nix: install `bash`, `jq`, `yq-go`, `shellcheck`, and `shfmt`
+yourself, then `make check` works the same.
+
+## Porcelain
+
+`bin/wip` is the standalone porcelain over `bin/wip-plumbing`. It exposes every
+deterministic verb of the plumbing transparently and adds three LLM-aware verbs —
+`ask`, `intake`, and `provider show` — that talk to any OpenAI-compatible
+endpoint. The endpoint is configured by env-var pointers in `.wip.yaml`'s
+`provider:` block.
+
+```sh
+# point at your provider (env names come from .wip.yaml's provider: block)
+export WIP_LLM_BASE_URL=https://api.openai.com
+export WIP_LLM_API_KEY=sk-...
+export WIP_LLM_MODEL=gpt-4o-mini
+
+bin/wip provider show          # diagnostic; never prints the api_key
+echo "hello"  | bin/wip ask    # one-shot chat completion
+bin/wip ask "what is wip?"
+
+# Drive the intake pipeline end-to-end: classify → shape (LLM) → validate →
+# route → apply. Real Claude Code plan files round-trip into roadmap edits.
+bin/wip intake path/to/plan.md --kind amendment --target distillation
+bin/wip intake path/to/brief.md --dry-run --output shaped.md   # inspect only
+```
+
+Spec: [`engineering/specs/wip-porcelain.md`](./engineering/specs/wip-porcelain.md).
+
 ## Dogfooding
 
 This repo uses `wip` to build `wip`. The active initiative is
