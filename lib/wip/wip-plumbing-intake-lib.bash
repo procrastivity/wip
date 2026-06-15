@@ -85,9 +85,10 @@ _wip_intake_fm_str() {
 
 # Emit "<count>\n<name>\n" — count of directives present and the last one's
 # name (empty when count is 0). Two lines so callers can parse via `read`.
+# Ranges over the four amendment directives (append-lane added in ADR-0010).
 _wip_intake_amendment_directive() {
   local fm="$1" name="" count=0 d v
-  for d in insert-after replace append-round; do
+  for d in insert-after replace append-round append-lane; do
     v="$(_wip_intake_fm_str "$fm" "$d")"
     if [[ -n "$v" ]]; then
       name="$d"
@@ -303,8 +304,24 @@ _wip_intake_validate_amendment() {
       if ! awk '/^## Round [0-9]+ — / { found=1 } END { exit !found }' "$file"; then
         missing="$(jq -nc --argjson a "$missing" '$a + ["round-heading"]')"
       fi
+      # Steps may be `### step-NN` headings (amendment form) or `- **step-NN —`
+      # bullets (canonical roadmap form, used when the round carries `### Lane`
+      # subheadings per ADR-0010). Either satisfies the step requirement.
+      if ! awk '/^### step-[0-9]/ || /^- \*\*step-[0-9]/ { found=1 } END { exit !found }' "$file"; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["step-headings"]')"
+      fi
+      ;;
+    append-lane)
+      # A new lane in an existing round (ADR-0010): needs target-round + step
+      # headings, and must NOT carry a ## Round heading (that would be append-round).
+      if [[ -z "$(_wip_intake_fm_str "$fm" "target-round")" ]]; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["target-round"]')"
+      fi
       if ! awk '/^### step-[0-9]+/ { found=1 } END { exit !found }' "$file"; then
         missing="$(jq -nc --argjson a "$missing" '$a + ["step-headings"]')"
+      fi
+      if awk '/^## Round [0-9]+ — / { found=1 } END { exit !found }' "$file"; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["unexpected-round-heading"]')"
       fi
       ;;
   esac

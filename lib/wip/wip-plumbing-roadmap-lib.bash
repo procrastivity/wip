@@ -2,12 +2,20 @@
 # Sourced by bin/wip-plumbing. Pure bash + jq. Portable on BSD awk systems —
 # we use bash `=~` rematching, not gawk capture groups.
 #
-# Grammar (per the workplan for step-08):
+# Grammar (per the workplan for step-08; lanes per ADR-0010):
 #   Round heading : ## Round <N> — <title> [✅ shipped <YYYY-MM-DD>]
 #   Step bullet   : - **step-<NN[.5]> — <title>** [✅] [shipped <YYYY-MM-DD>] — <body>
 #   Step heading  : ### step-<NN[.5]> — <title>           (amendment form)
+#   Lane heading  : ### Lane <name>                       (parallel lane in a round)
 #   Sections      : ## Deferred / ## Backlog              (Backlog parsed as entries)
 #   Backlog entry : - **<title>** [— <body>] | (<body>)   (id = slugify(title))
+#
+# Lanes parallelize across; steps within a lane stay sequential. Every step parses
+# with a `lane` field (the `### Lane <name>` it lives under, or null for main lane);
+# every round with a `lanes` array (declared lane names, in order); the document with
+# a `lane_errors` array, empty when well-formed. The round grammar is
+# `main* (lane+)? main*`; the malformed cases recorded in lane_errors are:
+#   lane-outside-round / nested-lane / duplicate-lane / main-step-between-lanes.
 # shellcheck shell=bash
 
 # wip_roadmap_parse <path> — emit a single JSON doc:
@@ -21,10 +29,23 @@ wip_roadmap_parse() {
     return 0
   fi
 
-  local mode="outside" line
-  local doc='{"rounds":[],"backlog":[]}'
+  local mode="outside" line current_lane="" lane_saw_step=0 in_comment=0
+  local doc='{"rounds":[],"backlog":[],"lane_errors":[]}'
 
   while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip HTML comment blocks (`<!-- … -->`) so commented examples (e.g. the
+    # `### Lane` block in templates/roadmap.md.tmpl) and the wip-amend markers
+    # never parse as content.
+    if [[ "$in_comment" == "1" ]]; then
+      [[ "$line" == *"-->"* ]] && in_comment=0
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*\<!-- ]]; then
+      # Open a multi-line skip only when the comment does not also close here.
+      [[ "$line" == *"-->"* ]] || in_comment=1
+      continue
+    fi
+
     # Section heading switches.
     if [[ "$line" =~ ^\#\#\ Round\ ([0-9]+)\ —\ (.+)$ ]]; then
       local n="${BASH_REMATCH[1]}"
@@ -37,51 +58,91 @@ wip_roadmap_parse() {
         .rounds += [{
           n: $n, title: $title, shipped: $shipped,
           shipped_date: (if $shipped_date == "" then null else $shipped_date end),
-          steps: []
+          lanes: [], steps: []
         }]' <<<"$doc")"
       mode="round"
+      current_lane=""
+      lane_saw_step=0
       continue
     fi
     if [[ "$line" =~ ^\#\#\ Backlog ]]; then
       mode="backlog"
+      current_lane=""
+      lane_saw_step=0
       continue
     fi
     if [[ "$line" =~ ^\#\#\ Deferred ]]; then
       mode="deferred"
+      current_lane=""
+      lane_saw_step=0
       continue
     fi
     if [[ "$line" =~ ^\#\#[^\#] ]]; then
       mode="outside"
+      current_lane=""
+      lane_saw_step=0
+      continue
+    fi
+
+    # A `### Lane` heading outside a round is malformed (ADR-0010 §5).
+    if [[ "$mode" != "round" ]] && [[ "$line" =~ ^\#\#\#+\ Lane(\ |$) ]]; then
+      doc="$(jq -c '.lane_errors += [{kind:"lane-outside-round"}]' <<<"$doc")"
       continue
     fi
 
     case "$mode" in
       round)
-        if [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ (.+)\*\*(.*)$ ]]; then
+        if [[ "$line" =~ ^[[:space:]]*$ ]]; then
+          # A blank line terminates a lane block once it has a step (ADR-0010 §5):
+          # subsequent bullets return to the main lane (post-lane sync steps).
+          # A blank line right after the `### Lane` heading (no step yet) does not.
+          if [[ -n "$current_lane" && "$lane_saw_step" == "1" ]]; then
+            current_lane=""
+            lane_saw_step=0
+          fi
+        elif [[ "$line" =~ ^\#\#\#\#+\ Lane ]]; then
+          # H4+ lane heading -> attempted nesting (ADR-0010 §3).
+          doc="$(jq -c '.lane_errors += [{kind:"nested-lane", round:.rounds[-1].n}]' <<<"$doc")"
+        elif [[ "$line" =~ ^\#\#\#\ Lane\ (.+)$ ]]; then
+          local lane_name="${BASH_REMATCH[1]}"
+          # Trim trailing whitespace from the lane name.
+          lane_name="${lane_name%"${lane_name##*[![:space:]]}"}"
+          doc="$(jq -c --arg lane "$lane_name" '
+            if (.rounds[-1].lanes | index($lane)) != null
+            then .lane_errors += [{kind:"duplicate-lane", round:.rounds[-1].n, lane:$lane}]
+            else .rounds[-1].lanes += [$lane]
+            end' <<<"$doc")"
+          current_lane="$lane_name"
+          lane_saw_step=0
+        elif [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ (.+)\*\*(.*)$ ]]; then
           local sid="step-${BASH_REMATCH[1]}"
           local stitle="${BASH_REMATCH[3]}"
           local srest="${BASH_REMATCH[4]}"
           local sshipped="false" sdate="" sdummy="$srest"
           _wip_roadmap_extract_shipped "$srest" sshipped sdate sdummy
           doc="$(jq -c \
-            --arg id "$sid" --arg title "$stitle" \
+            --arg id "$sid" --arg title "$stitle" --arg lane "$current_lane" \
             --argjson shipped "$sshipped" --arg sdate "$sdate" '
             .rounds[-1].steps += [{
               id: $id, title: $title, shipped: $shipped,
-              shipped_date: (if $sdate == "" then null else $sdate end)
+              shipped_date: (if $sdate == "" then null else $sdate end),
+              lane: (if $lane == "" then null else $lane end)
             }]' <<<"$doc")"
+          [[ -n "$current_lane" ]] && lane_saw_step=1
         elif [[ "$line" =~ ^\#\#\#\ step-([0-9]+(\.[0-9]+)?)\ —\ (.+)$ ]]; then
           local sid="step-${BASH_REMATCH[1]}"
           local stitle="${BASH_REMATCH[3]}"
           local sshipped="false" sdate="" sdummy="$stitle"
           _wip_roadmap_extract_shipped "$stitle" sshipped sdate sdummy
           doc="$(jq -c \
-            --arg id "$sid" --arg title "$sdummy" \
+            --arg id "$sid" --arg title "$sdummy" --arg lane "$current_lane" \
             --argjson shipped "$sshipped" --arg sdate "$sdate" '
             .rounds[-1].steps += [{
               id: $id, title: $title, shipped: $shipped,
-              shipped_date: (if $sdate == "" then null else $sdate end)
+              shipped_date: (if $sdate == "" then null else $sdate end),
+              lane: (if $lane == "" then null else $lane end)
             }]' <<<"$doc")"
+          [[ -n "$current_lane" ]] && lane_saw_step=1
         fi
         ;;
       backlog)
@@ -95,6 +156,23 @@ wip_roadmap_parse() {
         ;;
     esac
   done <"$path"
+
+  # Post-pass: a main-lane (lane==null) step sandwiched between lane steps in the
+  # same round is malformed (ADR-0010 §5) — pre/post-lane main steps are fine.
+  doc="$(jq -c '
+    .lane_errors += [
+      .rounds[] as $r
+      | ($r.steps | to_entries) as $es
+      | $es[]
+      | select(.value.lane == null)
+      | . as $e
+      | select(
+          ([$es[] | select(.key < $e.key and .value.lane != null)] | length) > 0 and
+          ([$es[] | select(.key > $e.key and .value.lane != null)] | length) > 0
+        )
+      | {kind:"main-step-between-lanes", round:$r.n, step:$e.value.id}
+    ]
+  ' <<<"$doc")"
 
   printf '%s' "$doc"
 }
@@ -144,23 +222,23 @@ wip_roadmap_active_round() {
   ' <<<"$doc" | head -1
 }
 
-# wip_roadmap_first_unshipped <doc> — emit {round_n,id,title} of the very
+# wip_roadmap_first_unshipped <doc> — emit {round_n,id,title,lane} of the very
 # first unshipped step in declared order, or `null`.
 wip_roadmap_first_unshipped() {
   local doc="$1"
   jq -c '
-    [ .rounds[] as $r | $r.steps[] | select(.shipped == false) | {round_n: $r.n, id, title} ]
+    [ .rounds[] as $r | $r.steps[] | select(.shipped == false) | {round_n: $r.n, id, title, lane} ]
     | (.[0] // null)
   ' <<<"$doc"
 }
 
 # wip_roadmap_unshipped_after <doc> <step_id> — emit a JSON array of unshipped
 # steps strictly AFTER <step_id> in declared order. If <step_id> is empty or
-# not found, emit every unshipped step.
+# not found, emit every unshipped step. Each entry carries its `lane`.
 wip_roadmap_unshipped_after() {
   local doc="$1" sid="$2"
   jq -c --arg sid "$sid" '
-    [ .rounds[] as $r | $r.steps[] | {round_n: $r.n, id, title, shipped} ]
+    [ .rounds[] as $r | $r.steps[] | {round_n: $r.n, id, title, shipped, lane} ]
     | (if ($sid == "" or ([.[].id] | index($sid)) == null)
        then map(select(.shipped == false) | del(.shipped))
        else .[([.[].id] | index($sid)) + 1 :]
@@ -170,10 +248,20 @@ wip_roadmap_unshipped_after() {
 }
 
 # wip_roadmap_step <doc> <step_id> — emit the step record (id,title,shipped,
-# shipped_date) or `null`.
+# shipped_date,lane) or `null`.
 wip_roadmap_step() {
   local doc="$1" sid="$2"
   jq -c --arg sid "$sid" '
     [ .rounds[] | .steps[] | select(.id == $sid) ] | (.[0] // null)
+  ' <<<"$doc"
+}
+
+# wip_roadmap_lanes_in_round <doc> <round_n> — emit a JSON array of the lane
+# names declared in round <round_n> (in declared order), or `[]`. Includes lanes
+# declared with `### Lane <name>` even when they carry no steps yet.
+wip_roadmap_lanes_in_round() {
+  local doc="$1" n="$2"
+  jq -c --argjson n "$n" '
+    [ .rounds[] | select(.n == $n) | .lanes[] ]
   ' <<<"$doc"
 }

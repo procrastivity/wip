@@ -153,6 +153,76 @@ set -e
 assert_eq "4" "$rc" "append-round no steps exit 4"
 assert_eq "1" "$(jq '.missing | map(select(. == "step-headings")) | length' <<<"$out")" "append-round step-headings"
 
+# amendment — append-lane happy (target-round + step heading, no round heading).
+cat >"$tmp/amend-lane.md" <<'MD'
+---
+target: auth
+append-lane: A
+target-round: 1
+---
+# New lane
+
+### step-03 — Track A
+
+Body.
+MD
+out="$(run_v "$tmp/amend-lane.md" --kind amendment)"
+assert_eq "true" "$(jq -r '.valid' <<<"$out")" "amendment append-lane valid"
+
+# amendment — append-lane missing target-round.
+cat >"$tmp/amend-lane-noround.md" <<'MD'
+---
+target: auth
+append-lane: A
+---
+# New lane
+### step-03 — Track A
+Body.
+MD
+set +e
+out="$(run_v "$tmp/amend-lane-noround.md" --kind amendment)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "append-lane no target-round exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "target-round")) | length' <<<"$out")" "append-lane missing target-round"
+
+# amendment — append-lane with an unexpected ## Round heading (should be append-round).
+cat >"$tmp/amend-lane-round.md" <<'MD'
+---
+target: auth
+append-lane: A
+target-round: 1
+---
+# New lane
+## Round 9 — Nope
+### step-03 — Track A
+Body.
+MD
+set +e
+out="$(run_v "$tmp/amend-lane-round.md" --kind amendment)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "append-lane with round heading exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "unexpected-round-heading")) | length' <<<"$out")" "append-lane unexpected-round-heading"
+
+# amendment — append-lane is the fourth directive; two directives still rejected.
+cat >"$tmp/amend-lane-multi.md" <<'MD'
+---
+target: auth
+append-lane: A
+insert-after: step-02
+target-round: 1
+---
+# Multi
+### step-03 — X
+MD
+set +e
+out="$(run_v "$tmp/amend-lane-multi.md" --kind amendment)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "append-lane + insert-after multi exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "multiple-directives")) | length' <<<"$out")" "append-lane counted toward multi"
+
 # workplan-seed — existing step happy.
 cat >"$tmp/wps-ok.md" <<'MD'
 ---

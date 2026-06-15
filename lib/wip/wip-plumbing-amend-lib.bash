@@ -11,7 +11,7 @@
 # the present directive, or "" if none. Caller has already parsed JSON.
 wip_amend_extract_directive_from_fm() {
   local fm="$1" kind v
-  for kind in insert-after replace append-round; do
+  for kind in insert-after replace append-round append-lane; do
     v="$(printf '%s' "$fm" | jq -r --arg k "$kind" '.[$k] // empty' 2>/dev/null)"
     if [[ -n "$v" ]]; then
       printf '%s\t%s\n' "$kind" "$v"
@@ -87,6 +87,50 @@ wip_amend_render_step_bullet() {
       if (body == "") printf "- **%s — %s**\n", step_id, title
       else printf "- **%s — %s** — %s\n", step_id, title, body
     }
+  '
+}
+
+# wip_amend_render_lane_block <name> <body-on-stdin> — read a body of one or
+# more `### step-XX — <title>` sections from stdin and emit a lane block:
+#   ### Lane <name>
+#   - **step-XX — Title** — <body collapsed to one paragraph>
+#   - **step-YY — Title** — <body…>
+# Bullets are contiguous (no blank lines) so the lane block stays intact under
+# the parser's blank-line lane terminator (ADR-0010 §5). Mirrors the canonical
+# bullet rendering used elsewhere. Returns 1 if no step heading is found.
+wip_amend_render_lane_block() {
+  local lane_name="$1"
+  printf '### Lane %s\n' "$lane_name"
+  awk '
+    function flush() {
+      if (step_id != "") {
+        gsub(/[[:space:]]+/, " ", body)
+        sub(/^[[:space:]]+/, "", body)
+        sub(/[[:space:]]+$/, "", body)
+        if (title == "") title = "(untitled)"
+        if (body == "") printf "- **%s — %s**\n", step_id, title
+        else printf "- **%s — %s** — %s\n", step_id, title, body
+        emitted = 1
+      }
+      step_id = ""; title = ""; body = ""
+    }
+    /^### step-/ {
+      flush()
+      s = $0
+      sub(/^### step-/, "", s)
+      i = 0
+      while (i < length(s) && substr(s, i+1, 1) ~ /[0-9.]/) i++
+      step_id = "step-" substr(s, 1, i)
+      rest = substr(s, i + 1)
+      sub(/^[[:space:]]*[—-][[:space:]]*/, "", rest)
+      title = rest
+      next
+    }
+    step_id != "" {
+      if (body == "") body = $0
+      else body = body " " $0
+    }
+    END { flush(); if (!emitted) exit 1 }
   '
 }
 
@@ -222,6 +266,48 @@ wip_amend_apply_append_round() {
   local out=()
   for ((i = 0; i < insert_at; i++)); do out+=("${lines[i]}"); done
   # Blank line, block, marker, blank line, then the rest.
+  out+=("")
+  while IFS= read -r line; do out+=("$line"); done <<<"$block"
+  out+=("$marker")
+  out+=("")
+  for ((i = insert_at; i < n; i++)); do out+=("${lines[i]}"); done
+  printf '%s\n' "${out[@]}" >"$path"
+  return 0
+}
+
+# wip_amend_apply_append_lane <roadmap-path> <round-n> <block> <marker>
+# Insert <block>\n<marker>\n at the END of round <round-n> (after any existing
+# lanes / steps, before the next `## ` heading or EOF). Returns 1 if round
+# <round-n> is not present. ADR-0010: a new lane is appended to an existing round.
+wip_amend_apply_append_lane() {
+  local path="$1" round_n="$2" block="$3" marker="$4"
+  local lines=()
+  mapfile -t lines <"$path"
+  local n=${#lines[@]} i
+  # Locate the round heading.
+  local start=-1
+  for ((i = 0; i < n; i++)); do
+    if [[ "${lines[i]}" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
+      start=$i
+      break
+    fi
+  done
+  ((start >= 0)) || return 1
+  # End of the round = the next H2 (`## `) heading after start, else EOF.
+  local end=$n
+  for ((i = start + 1; i < n; i++)); do
+    if [[ "${lines[i]}" =~ ^\#\#\  ]]; then
+      end=$i
+      break
+    fi
+  done
+  # Walk back over trailing blanks so we do not stack blank lines.
+  local insert_at=$end
+  while ((insert_at > start + 1)) && [[ -z "${lines[insert_at - 1]}" ]]; do
+    insert_at=$((insert_at - 1))
+  done
+  local out=()
+  for ((i = 0; i < insert_at; i++)); do out+=("${lines[i]}"); done
   out+=("")
   while IFS= read -r line; do out+=("$line"); done <<<"$block"
   out+=("$marker")

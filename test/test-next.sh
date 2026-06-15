@@ -112,4 +112,56 @@ rc=$?
 set -e
 assert_eq "3" "$rc" "unknown initiative exit 3"
 
+# ---- Lane-aware ranking (ADR-0010) ----
+tmpL="$(mktemp -d)"
+mkdir -p "$tmpL/.wip/initiatives/demo"
+cat >"$tmpL/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    active_step: step-13
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 4 — Track expansion
+
+- **step-12 — F1 prereq** ✅ shipped 2026-06-01 — done.
+
+### Lane A
+- **step-13 — Track A part 1** — spine.
+- **step-15 — Track A part 2** — provider.
+
+### Lane D
+- **step-14 — Track D** — SPA.
+MD
+
+# Active step in Lane A: rank 1 = manifest active, rank 2 = next-in-lane (A),
+# Lane D step surfaced as concurrent.
+outL="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
+assert_eq "step-13" "$(jq -r '.candidates[0].id' <<<"$outL")" "lane: rank 1 = active step-13"
+assert_eq "manifest active step" "$(jq -r '.candidates[0].reason' <<<"$outL")" "lane: rank 1 reason"
+assert_eq "step-15" "$(jq -r '.candidates[1].id' <<<"$outL")" "lane: rank 2 = step-15 (next in Lane A)"
+assert_eq "next-in-lane" "$(jq -r '.candidates[1].reason' <<<"$outL")" "lane: rank 2 reason next-in-lane"
+assert_eq "null" "$(jq -r '.candidates[1].concurrent // null' <<<"$outL")" "lane: next-in-lane not concurrent"
+assert_eq "step-14" "$(jq -r '.candidates[2].id' <<<"$outL")" "lane: rank 3 = step-14 (Lane D)"
+assert_eq "concurrent lane D" "$(jq -r '.candidates[2].reason' <<<"$outL")" "lane: rank 3 reason concurrent"
+assert_eq "true" "$(jq -r '.candidates[2].concurrent' <<<"$outL")" "lane: sibling lane flagged concurrent"
+
+# No active_step + main-lane prereq unshipped: the prereq ranks first (no concurrency).
+sed 's/active_step: step-13//' "$tmpL/.wip.yaml" >"$tmpL/.wip.yaml.noactive"
+mv "$tmpL/.wip.yaml.noactive" "$tmpL/.wip.yaml"
+sed 's/✅ shipped 2026-06-01 //' "$tmpL/.wip/initiatives/demo/roadmap.md" >"$tmpL/rm.tmp"
+mv "$tmpL/rm.tmp" "$tmpL/.wip/initiatives/demo/roadmap.md"
+outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
+assert_eq "step-12" "$(jq -r '.candidates[0].id' <<<"$outL2")" "lane: main prereq ranks first"
+assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason' <<<"$outL2")" "lane: prereq reason"
+assert_eq "0" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL2")" "lane: no concurrency while in main lane"
+rm -rf "$tmpL"
+
 test_summary

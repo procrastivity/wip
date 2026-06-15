@@ -47,6 +47,11 @@ wip_plumbing_cmd_next() {
 
   local candidates="[]" rank=1
 
+  # Determine the active step (the one lane-awareness keys off): the manifest
+  # active_step when set and unshipped, else the first unshipped step. From it we
+  # derive the active round and active lane (ADR-0010).
+  local active_is_manifest=0 active_round="" active_lane=""
+
   # 1. Manifest active_step if unshipped.
   if [[ -n "$active_step_id" ]]; then
     local step
@@ -58,16 +63,28 @@ wip_plumbing_cmd_next() {
         . + [{rank:$rank, source:"roadmap", id:$step.id, title:$step.title,
               reason:"manifest active step"}]' <<<"$candidates")"
       rank=$((rank + 1))
+      active_is_manifest=1
+      active_lane="$(jq -r '.lane // ""' <<<"$step")"
+      local ar
+      ar="$(wip_roadmap_active_round "$doc" "$active_step_id")"
+      active_round="$(jq -r '.n // ""' <<<"$ar")"
+    fi
+  fi
+
+  # When there is no manifest active step, the first unshipped step is the
+  # actionable one; its round + lane anchor the lane-aware ranking below.
+  if [[ "$active_is_manifest" == "0" ]]; then
+    local first
+    first="$(wip_roadmap_first_unshipped "$doc")"
+    if [[ "$first" != "null" ]]; then
+      active_lane="$(jq -r '.lane // ""' <<<"$first")"
+      active_round="$(jq -r '.round_n // ""' <<<"$first")"
     fi
   fi
 
   # 2/3/4. Walk every unshipped step in declared order; skip the one already
   # surfaced as the manifest active step (if any).
   local first_seen=0
-  local seen_in_round_1=0
-  local active_round_n
-  active_round_n="$(jq -r '.[0].round_n // 0' <<<"$(wip_roadmap_unshipped_after "$doc" "")")"
-  # Use unshipped_after with empty step to get everything.
   local unshipped
   unshipped="$(wip_roadmap_unshipped_after "$doc" "")"
   # Filter out the manifest active step (which we already emitted).
@@ -86,28 +103,40 @@ wip_plumbing_cmd_next() {
   else
     local i
     for ((i = 0; i < count; i++)); do
-      local entry reason rn
+      local entry reason rn lane concurrent=0
       entry="$(jq -c --argjson i "$i" '.[$i]' <<<"$unshipped")"
       rn="$(jq -r '.round_n' <<<"$entry")"
-      if [[ "$first_seen" == "0" ]]; then
+      lane="$(jq -r '.lane // ""' <<<"$entry")"
+      if [[ "$first_seen" == "0" && -z "$active_lane" ]]; then
+        # Linear roadmap (active step is main-lane): the first forward candidate
+        # is the headline next step. Preserves the pre-lane contract.
         reason="first unshipped step in active round"
-        first_seen=1
-        seen_in_round_1="$rn"
-      elif [[ "$rn" == "$seen_in_round_1" ]]; then
+      elif [[ "$rn" == "$active_round" && -n "$active_lane" ]]; then
+        # Active step lives in a lane; the active round's steps disambiguate by
+        # lane (ADR-0010 §7).
+        if [[ "$lane" == "$active_lane" ]]; then
+          reason="next-in-lane"
+        elif [[ -n "$lane" ]]; then
+          reason="concurrent lane $lane"
+          concurrent=1
+        else
+          reason="next sequential step"
+        fi
+      elif [[ "$rn" == "$active_round" ]]; then
         reason="next sequential step"
       else
         reason="upcoming round $rn"
       fi
+      first_seen=1
       candidates="$(jq -c \
-        --argjson rank "$rank" --argjson e "$entry" --arg reason "$reason" '
+        --argjson rank "$rank" --argjson e "$entry" --arg reason "$reason" \
+        --argjson concurrent "$concurrent" '
         . + [{rank:$rank, source:"roadmap", id:$e.id, title:$e.title,
-              reason:$reason}]' <<<"$candidates")"
+              reason:$reason} + (if $concurrent == 1 then {concurrent:true} else {} end)]' \
+        <<<"$candidates")"
       rank=$((rank + 1))
     done
   fi
-  # active_round_n is referenced solely to document intent (top-of-list rank);
-  # the per-row rn comparison already drives the boundary detection.
-  : "$active_round_n"
 
   # 5. Roadmap backlog entries.
   local backlog_count

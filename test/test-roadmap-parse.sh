@@ -92,4 +92,116 @@ empty="$(wip_roadmap_parse "$tmp/missing.md")"
 assert_eq "0" "$(jq -r '.rounds | length' <<<"$empty")" "missing file rounds=0"
 assert_eq "0" "$(jq -r '.backlog | length' <<<"$empty")" "missing file backlog=0"
 
+# Linear roadmap: every step lane is null, lane_errors empty (ADR-0010 regression).
+assert_eq "true" "$(jq -c '[.rounds[].steps[].lane] | all(. == null)' <<<"$doc")" "linear: all lanes null"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$doc")" "linear: no lane errors"
+assert_eq "0" "$(jq -r '.rounds[0].lanes | length' <<<"$doc")" "linear: round lanes empty"
+
+# ---- Lanes (ADR-0010) ----
+cat >"$tmp/lanes.md" <<'MD'
+# Roadmap — lanes fixture
+
+## Round 4 — Track expansion
+
+A prereq landing first, then two parallel tracks, then a sync step.
+
+- **step-12 — F1: taxonomy** — main-lane prereq.
+
+### Lane A
+- **step-13 — Track A part 1** — typed entity spine,
+  continued on a second line.
+- **step-15 — Track A part 2** — external provider.
+
+### Lane D
+- **step-14 — Track D** — SPA usability.
+
+- **step-16 — Sync** — post-lane main-lane sync step.
+
+## Backlog
+
+- **Cleanup** — later.
+MD
+ld="$(wip_roadmap_parse "$tmp/lanes.md")"
+
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$ld")" "lanes: well-formed, no errors"
+# Round records both declared lanes in order.
+assert_eq '["A","D"]' "$(jq -c '.rounds[0].lanes' <<<"$ld")" "lanes: round.lanes = [A,D]"
+# Per-step lane assignment.
+assert_eq "null" "$(jq -r '.rounds[0].steps[0].lane' <<<"$ld")" "step-12 lane null (pre-lane main)"
+assert_eq "A" "$(jq -r '.rounds[0].steps[1].lane' <<<"$ld")" "step-13 lane A"
+assert_eq "A" "$(jq -r '.rounds[0].steps[2].lane' <<<"$ld")" "step-15 lane A (contiguous)"
+assert_eq "D" "$(jq -r '.rounds[0].steps[3].lane' <<<"$ld")" "step-14 lane D"
+assert_eq "null" "$(jq -r '.rounds[0].steps[4].lane' <<<"$ld")" "step-16 lane null (post-lane sync)"
+# Step ids stay globally sequential, not per-lane.
+assert_eq "5" "$(jq -r '.rounds[0].steps | length' <<<"$ld")" "5 steps in the round"
+
+# lanes_in_round helper (includes an empty lane).
+cat >"$tmp/empty-lane.md" <<'MD'
+# R
+## Round 2 — X
+- **step-01 — a** — body.
+### Lane A
+- **step-02 — b** — body.
+### Lane B
+MD
+el="$(wip_roadmap_parse "$tmp/empty-lane.md")"
+assert_eq '["A","B"]' "$(wip_roadmap_lanes_in_round "$el" 2)" "lanes_in_round incl empty lane B"
+assert_eq '[]' "$(wip_roadmap_lanes_in_round "$el" 99)" "lanes_in_round unknown round -> []"
+
+# active_step record carries its lane.
+sa="$(wip_roadmap_step "$ld" "step-13")"
+assert_eq "A" "$(jq -r '.lane' <<<"$sa")" "wip_roadmap_step surfaces lane"
+
+# ---- Malformed cases (ADR-0010 §5) ----
+# nested lane (#### Lane).
+cat >"$tmp/nested.md" <<'MD'
+# R
+## Round 1 — X
+### Lane A
+- **step-01 — a** — body.
+#### Lane B
+- **step-02 — b** — body.
+MD
+nx="$(wip_roadmap_parse "$tmp/nested.md")"
+assert_eq "1" "$(jq '[.lane_errors[] | select(.kind == "nested-lane")] | length' <<<"$nx")" "nested-lane rejected"
+
+# duplicate lane name in one round.
+cat >"$tmp/dup.md" <<'MD'
+# R
+## Round 1 — X
+### Lane A
+- **step-01 — a** — body.
+### Lane A
+- **step-02 — b** — body.
+MD
+dx="$(wip_roadmap_parse "$tmp/dup.md")"
+assert_eq "1" "$(jq '[.lane_errors[] | select(.kind == "duplicate-lane")] | length' <<<"$dx")" "duplicate-lane rejected"
+
+# lane heading outside a round (under Backlog).
+cat >"$tmp/outside.md" <<'MD'
+# R
+## Round 1 — X
+- **step-01 — a** — body.
+## Backlog
+### Lane A
+- **thing** — x.
+MD
+ox="$(wip_roadmap_parse "$tmp/outside.md")"
+assert_eq "1" "$(jq '[.lane_errors[] | select(.kind == "lane-outside-round")] | length' <<<"$ox")" "lane-outside-round rejected"
+
+# bare bullet sandwiched between two lanes.
+cat >"$tmp/sandwich.md" <<'MD'
+# R
+## Round 1 — X
+### Lane A
+- **step-02 — a** — body.
+
+- **step-03 — orphan** — body.
+### Lane D
+- **step-04 — d** — body.
+MD
+sx="$(wip_roadmap_parse "$tmp/sandwich.md")"
+assert_eq "1" "$(jq '[.lane_errors[] | select(.kind == "main-step-between-lanes")] | length' <<<"$sx")" "main-step-between-lanes rejected"
+assert_eq "step-03" "$(jq -r '[.lane_errors[] | select(.kind == "main-step-between-lanes")][0].step' <<<"$sx")" "sandwich names the offending step"
+
 test_summary

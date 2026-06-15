@@ -35,7 +35,8 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `intake classify` | Best-guess `kind` from heuristics; never asks. | step-07.5 |
 | `intake validate` (per-kind) | Per-kind shape rules from `intake-kinds.md`. | step-07.5 |
 | `intake apply` | Terminal write; dispatches to `init` / `roadmap amend` / `workplan init`. | step-07.5 (gated on 08.5) |
-| `roadmap amend` | Deterministic edit to an initiative's `roadmap.md` (insert / replace / append-round). | step-08.5 |
+| `roadmap amend` | Deterministic edit to an initiative's `roadmap.md` (insert / replace / append-round / append-lane). | step-08.5 |
+| `roadmap parse` | Read-only: emit the parsed roadmap JSON document (rounds, steps with `lane`, `lanes[]`, `lane_errors[]`, backlog). | step-08 (lanes) |
 | `workplan init` | Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<slug>.md`. | step-08.5 |
 | `status` | Where am I: current initiative, round, active step, dirty `.wip/`. | step-08 |
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
@@ -241,22 +242,62 @@ appropriate writer:
 { "ok": true, "kind": "amendment", "dispatched": "roadmap amend", "target": "distillation", "result": { "wrote": [".wip/initiatives/distillation/roadmap.md"], "directive": "insert-after step-06" } }
 ```
 
+### `wip-plumbing roadmap parse <file>`
+Read-only emitter for the parsed roadmap document — the same JSON the library produces
+for `status` / `next`. Exists so the roadmap grammar (including lanes, ADR-0010) is
+runnable from the CLI and the parse-regression gate is a real command, not only a
+sourced-library call.
+
+- **Reads:** the named roadmap file. A missing file yields an empty document
+  (`{rounds:[], backlog:[], lane_errors:[]}`).
+- **Writes:** nothing.
+- **Exit:** 0 always (read-only); 2 if no file argument.
+- **stdout:** the parsed document. Every step carries `lane` (the `### Lane <name>`
+  it lives under, or `null` for a main-lane step); every round carries `lanes` (declared
+  lane names in order); the document carries `lane_errors` (empty when the lane structure
+  is well-formed — see ADR-0010 §5 for the malformed cases).
+```json
+{
+  "rounds": [
+    { "n": 4, "title": "Track expansion", "shipped": false, "shipped_date": null,
+      "lanes": ["A", "D"],
+      "steps": [
+        { "id": "step-12", "title": "F1: model-profile taxonomy", "shipped": false, "shipped_date": null, "lane": null },
+        { "id": "step-13", "title": "Track A part 1", "shipped": false, "shipped_date": null, "lane": "A" },
+        { "id": "step-14", "title": "Track D", "shipped": false, "shipped_date": null, "lane": "D" }
+      ] }
+  ],
+  "backlog": [],
+  "lane_errors": []
+}
+```
+
 ### `wip-plumbing roadmap amend <slug>`
 Deterministic edit to `.wip/initiatives/<slug>/roadmap.md`. Reads a shaped `amendment`
 artifact from stdin or `--from <file>`. Idempotent: re-applying the same artifact is a
 no-op, detected via a hash-of-payload comment stamped at the insertion site.
 
 - **Flags:** exactly one of `--insert-after <step-id>`, `--replace <step-id>`,
-  `--append-round <title>`. If `--from` is given and the artifact carries a directive,
-  the CLI flag must match (or be omitted) — mismatch is exit 2.
+  `--append-round <title>`, `--append-lane <name>`. `--append-lane` also requires
+  `--target-round <N>` (or `target-round: <N>` in the artifact front-matter). If `--from`
+  is given and the artifact carries a directive, the CLI flag must match (or be omitted)
+  — mismatch is exit 2.
+- **Lane awareness (ADR-0010):** `insert-after` / `replace` preserve the host step's lane
+  because the step is rendered in place. `append-round` bodies may include `### Lane`
+  subheadings. `append-lane` appends a new `### Lane <name>` block (the artifact body's
+  `### step-NN` entries) at the end of round N. The amend refuses (**exit 4**
+  `lane-malformed`) when the target roadmap already carries a non-empty `lane_errors[]`,
+  so a broken lane structure cannot be amended on top of.
 - **Reads:** the artifact + the target `roadmap.md`.
 - **Writes:** the target `roadmap.md` (or just the ledger with `--dry-run`).
-- **Exit:** 0 on amend or detected-duplicate no-op; **4** if target step doesn't exist,
-  or the artifact fails amendment-shape validation; 2 on bad flags.
+- **Exit:** 0 on amend or detected-duplicate no-op; **4** if target step / round doesn't
+  exist, the artifact fails amendment-shape validation, or the roadmap's lane structure
+  is malformed; 2 on bad flags.
 - **stdout:**
 ```json
 { "ok": true, "slug": "distillation", "directive": "insert-after step-06", "wrote": [".wip/initiatives/distillation/roadmap.md"], "idempotent_noop": false }
 ```
+For `append-lane` the `directive` reads e.g. `"append-lane A (round 4)"`.
 
 ### `wip-plumbing workplan init <slug> <step-id> [--from <file>] [--force]`
 Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from
@@ -279,12 +320,17 @@ Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from
 - **Reads:** `.wip.yaml`; `<initiative>/roadmap.md` (current round, active step, shipping criteria); `git status --porcelain -- .wip/`. *Solo augmentation:* when `features.solo.active`, the **porcelain** layers in live todos/process state — `wip-plumbing status` itself stays git+files only and notes `"solo_available": true`.
 - **Writes:** nothing.
 - **Exit:** 0; **3** if `--initiative` names a slug not in the registry.
+- **Lane awareness (ADR-0010):** the `active_step` object carries a `lane` field (the
+  `### Lane <name>` it lives under, or `null` for a main-lane step). When two or more
+  lanes have unshipped steps in the active round, `lanes_in_flight` lists the next
+  actionable step per in-flight lane; otherwise it is `[]`.
 - **stdout:**
 ```json
 {
   "ok": true, "initiative": "distillation", "status": "in-flight",
-  "round": { "n": 2, "title": "wip-plumbing v1" },
-  "active_step": { "id": "step-05", "title": "CLI contract spec", "shipped": false },
+  "round": { "n": 4, "title": "Track expansion" },
+  "active_step": { "id": "step-13", "title": "Track A part 1", "shipped": false, "lane": "A" },
+  "lanes_in_flight": [ { "lane": "A", "step": "step-13" }, { "lane": "D", "step": "step-14" } ],
   "dirty_wip_files": [".wip/initiatives/distillation/roadmap.md"],
   "solo_available": true
 }
@@ -297,14 +343,19 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
 - **Reads:** `<initiative>/roadmap.md`; `.wip/backlog.md`.
 - **Writes:** nothing.
 - **Exit:** 0 (including "all steps shipped" → candidate to start the next round / close the initiative).
+- **Lane awareness (ADR-0010):** when the active step lives in a lane, the next unshipped
+  step in that lane is the primary forward candidate (`reason: "next-in-lane"`), and
+  unshipped steps in *sibling* lanes of the same round carry `concurrent: true`. Ranks
+  stay a stable total order; the `concurrent` flag — not a duplicated rank — signals
+  "could be worked in parallel." Across-round ranking is unchanged.
 - **stdout:**
 ```json
 {
   "ok": true, "initiative": "distillation",
   "candidates": [
-    { "rank": 1, "source": "roadmap", "id": "step-05", "title": "CLI contract spec", "reason": "first unshipped step in active round" },
-    { "rank": 2, "source": "roadmap", "id": "step-06", "title": "detect + doctor", "reason": "next sequential step" },
-    { "rank": 3, "source": "backlog", "id": "slice-fixes", "title": "in-place study-slice fixes", "reason": "deferred; needs human go-ahead" }
+    { "rank": 1, "source": "roadmap", "id": "step-13", "title": "Track A part 1", "reason": "manifest active step" },
+    { "rank": 2, "source": "roadmap", "id": "step-15", "title": "Track A part 2", "reason": "next-in-lane" },
+    { "rank": 3, "source": "roadmap", "id": "step-14", "title": "Track D", "reason": "concurrent lane D", "concurrent": true }
   ]
 }
 ```
@@ -811,13 +862,18 @@ written / skipped / refused; touches neither files nor manifest.
 1. **`status` git dependency** — *resolved in step-08.* When `.wip/` is gitignored
    (default), `git status --porcelain -- .wip/` reports nothing → `dirty_wip_files: []`.
    The porcelain layer may mtime-augment later; plumbing stays git-only.
-2. **`roadmap.md` parsing** — *resolved in step-08.* The bullet form already in use is the
-   v1 grammar: `## Round <N> — <title>` rounds (with optional trailing `✅ shipped
-   <YYYY-MM-DD>`); steps as `- **step-<NN[.5]> — <title>**` bullets (with optional `✅`
-   marker and `shipped <YYYY-MM-DD>` date); `## Backlog` sections parsed as
-   `- **<title>** — <body>` entries. The amendment-form `### step-NN — <title>` heading
-   is recognized too. No front-matter; the parser lives in
-   `lib/wip/wip-plumbing-roadmap-lib.bash`.
+2. **`roadmap.md` parsing** — *resolved in step-08; extended for lanes by ADR-0010.* The
+   bullet form already in use is the v1 grammar: `## Round <N> — <title>` rounds (with
+   optional trailing `✅ shipped <YYYY-MM-DD>`); steps as `- **step-<NN[.5]> — <title>**`
+   bullets (with optional `✅` marker and `shipped <YYYY-MM-DD>` date); `## Backlog`
+   sections parsed as `- **<title>** — <body>` entries. The amendment-form
+   `### step-NN — <title>` heading is recognized too. **Lanes (ADR-0010):** a round may
+   contain `### Lane <name>` subheadings; every step parses with a `lane` field
+   (`null` for main-lane), every round with a `lanes[]` array, and the document with a
+   `lane_errors[]` array (empty when well-formed; populated for `lane-outside-round`,
+   `nested-lane`, `duplicate-lane`, `main-step-between-lanes`). The grammar within a round
+   is `main* (lane+)? main*` — pre-lane prereqs, lane blocks, post-lane sync steps. No
+   front-matter; the parser lives in `lib/wip/wip-plumbing-roadmap-lib.bash`.
 3. **`intake` validators** — *resolved by ADR-0009 + `intake-kinds.md`*; shipped in
    step-07.5. The closed kind vocabulary and per-kind shape rules are now enforced by
    `wip-plumbing intake validate`.
