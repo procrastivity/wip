@@ -89,4 +89,61 @@ rm -rf "$tmp4"
 # dirty_wip_files is an array (empty on a non-git tree).
 assert_eq "array" "$(jq -r '.dirty_wip_files | type' <<<"$out")" "dirty_wip_files array"
 
+# Linear roadmap: active step lane is null, lanes_in_flight empty.
+assert_eq "null" "$(jq -r '.active_step.lane' <<<"$out")" "linear: active step lane null"
+assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$out")" "linear: no lanes in flight"
+
+# ---- Lane disclosure (ADR-0010) ----
+tmpL="$(mktemp -d)"
+mkdir -p "$tmpL/.wip/initiatives/demo"
+cat >"$tmpL/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    title: Demo
+    status: in-flight
+    active_step: step-13
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 4 — Track expansion
+
+- **step-12 — F1 prereq** ✅ shipped 2026-06-01 — done.
+
+### Lane A
+- **step-13 — Track A part 1** — spine.
+- **step-15 — Track A part 2** — provider.
+
+### Lane D
+- **step-14 — Track D** — SPA.
+MD
+outL="$(WIP_ROOT="$tmpL" bin/wip-plumbing status)"
+assert_eq "A" "$(jq -r '.active_step.lane' <<<"$outL")" "active step discloses lane A"
+assert_eq "2" "$(jq -r '.lanes_in_flight | length' <<<"$outL")" "two lanes in flight"
+assert_eq "A" "$(jq -r '.lanes_in_flight[0].lane' <<<"$outL")" "lanes_in_flight[0] lane A (declared order)"
+assert_eq "step-13" "$(jq -r '.lanes_in_flight[0].step' <<<"$outL")" "lane A next actionable step-13"
+assert_eq "D" "$(jq -r '.lanes_in_flight[1].lane' <<<"$outL")" "lanes_in_flight[1] lane D"
+assert_eq "step-14" "$(jq -r '.lanes_in_flight[1].step' <<<"$outL")" "lane D next actionable step-14"
+
+# Only one lane has unshipped work -> lanes_in_flight empty.
+cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 4 — Track expansion
+
+### Lane A
+- **step-13 — Track A part 1** — spine.
+
+### Lane D
+- **step-14 — Track D** ✅ shipped 2026-06-10 — done.
+MD
+outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing status)"
+assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$outL2")" "single in-flight lane -> empty"
+rm -rf "$tmpL"
+
 test_summary

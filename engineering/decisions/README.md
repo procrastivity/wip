@@ -11,3 +11,7 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0004](./0004-step-not-phase.md) | "Step", not "Phase" |
 | [0005](./0005-roles-vs-playbook.md) | "Roles" (plugin-shipped actor manuals) vs "Playbook" (an initiative's plan) |
 | [0006](./0006-wip-owns-seams-not-tools.md) | `wip` owns the seams; features ship from their own repos |
+| [0007](./0007-orchestration-backend-seam.md) | Orchestration backend seam (`features.orchestration.backend`) |
+| [0008](./0008-global-project-registry.md) | Global project registry + `--project` selector |
+| [0009](./0009-intake-as-pipeline.md) | Intake is a pipeline, not a verb; closed kind vocabulary |
+| [0010](./0010-parallel-lanes-in-roadmaps.md) | Parallel lanes (`### Lane <name>`) as a structural roadmap primitive |

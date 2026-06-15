@@ -15,6 +15,21 @@ _One-sentence shipping criterion for the round._
 
 - **step-01 — _title_** — _scope in a sentence._
 
+<!--
+Parallel lanes (ADR-0010): a round may run tracks in parallel. Put the shared
+prereq in the main lane (a bare bullet), then one `### Lane <name>` subheading
+per track. Lanes run in parallel; steps within a lane stay sequential. Step ids
+stay globally sequential — the lane is a grouping, not a numbering namespace.
+
+- **step-02 — shared prereq** — must land before either lane.
+
+### Lane A
+- **step-03 — track A work** — runs in parallel with Lane B.
+
+### Lane B
+- **step-04 — track B work** — runs in parallel with Lane A.
+-->
+
 ---
 
 ## Deferred (decided-not-now)

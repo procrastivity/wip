@@ -8,13 +8,36 @@ wip_plumbing_cmd_roadmap() {
   shift || true
   case "$sub" in
     amend) _wip_roadmap_cmd_amend "$@" ;;
-    "") wip_die 2 usage "roadmap: missing subcommand (amend)" ;;
+    parse) _wip_roadmap_cmd_parse "$@" ;;
+    "") wip_die 2 usage "roadmap: missing subcommand (amend, parse)" ;;
     *) wip_die 2 usage "roadmap: unknown subcommand: $sub" ;;
   esac
 }
 
+# roadmap parse <file> — emit the parsed roadmap JSON document (read-only).
+# Missing file => empty document (exit 0). The grammar — including lanes
+# (ADR-0010) — is documented in wip-plumbing-roadmap-lib.bash.
+_wip_roadmap_cmd_parse() {
+  local file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) wip_die 2 usage "roadmap parse: unknown flag: $1" ;;
+      *)
+        if [[ -z "$file" ]]; then
+          file="$1"
+          shift
+        else
+          wip_die 2 usage "roadmap parse: unexpected arg: $1"
+        fi
+        ;;
+    esac
+  done
+  [[ -n "$file" ]] || wip_die 2 usage "roadmap parse: missing <file>"
+  wip_roadmap_parse "$file"
+}
+
 _wip_roadmap_cmd_amend() {
-  local slug="" from="" cli_kind="" cli_value=""
+  local slug="" from="" cli_kind="" cli_value="" cli_target_round=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --from)
@@ -26,7 +49,16 @@ _wip_roadmap_cmd_amend() {
         from="${1#--from=}"
         shift
         ;;
-      --insert-after | --insert-after=* | --replace | --replace=* | --append-round | --append-round=*)
+      --target-round)
+        [[ $# -ge 2 ]] || wip_die 2 usage "roadmap amend: --target-round requires an argument"
+        cli_target_round="$2"
+        shift 2
+        ;;
+      --target-round=*)
+        cli_target_round="${1#--target-round=}"
+        shift
+        ;;
+      --insert-after | --insert-after=* | --replace | --replace=* | --append-round | --append-round=* | --append-lane | --append-lane=*)
         _wip_roadmap_amend_parse_dir "$1" "${2:-}" cli_kind cli_value
         if [[ "$1" == *=* ]]; then
           shift
@@ -66,6 +98,18 @@ _wip_roadmap_cmd_amend() {
   local roadmap_abs="$root/$roadmap_path"
   [[ -f "$roadmap_abs" ]] ||
     wip_die 4 no-roadmap "roadmap amend: missing roadmap.md: $roadmap_path" "$roadmap_path"
+
+  # Refuse to amend on top of a malformed lane structure (ADR-0010 §5/§6).
+  local existing_doc lane_err_count
+  existing_doc="$(wip_roadmap_parse "$roadmap_abs")"
+  lane_err_count="$(jq -r '.lane_errors | length' <<<"$existing_doc")"
+  if [[ "$lane_err_count" != "0" ]]; then
+    jq -nc --arg path "$roadmap_path" --argjson errors "$(jq -c '.lane_errors' <<<"$existing_doc")" '
+      { ok: false, error: { code: 4, kind: "lane-malformed",
+        message: "roadmap has a malformed lane structure; fix it before amending",
+        path: $path, lane_errors: $errors } }'
+    exit 4
+  fi
 
   # Validate artifact shape (amendment kind).
   local vresult valid
@@ -131,6 +175,28 @@ _wip_roadmap_cmd_amend() {
       _wip_roadmap_amend_idempotent_or_apply \
         "append-round" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug"
       ;;
+    append-lane)
+      local target_round="${cli_target_round:-$(_wip_intake_fm_str "$fm" target-round)}"
+      [[ -n "$target_round" ]] ||
+        wip_die 2 usage "roadmap amend: append-lane requires --target-round <N> (or target-round: in the artifact)"
+      [[ "$target_round" =~ ^[0-9]+$ ]] ||
+        wip_die 2 usage "roadmap amend: --target-round must be a round number, got: $target_round"
+      payload="$(printf '%s\n' "$body" | wip_amend_render_lane_block "$value")" ||
+        wip_die 4 render-failed "roadmap amend: append-lane body has no step heading" "$from"
+      # Refuse a lane name already present in the target round — appending it would
+      # leave the roadmap malformed (duplicate-lane) on the next parse. Skip this
+      # when the exact same lane block is already stamped (an idempotent re-apply,
+      # which the helper below handles as a no-op rather than a conflict).
+      if ! wip_amend_has_marker "$roadmap_abs" "$(printf '%s' "$payload" | wip_amend_hash)" &&
+        jq -e --argjson n "$target_round" --arg lane "$value" \
+          '[.rounds[] | select(.n == $n) | .lanes[]] | index($lane) != null' \
+          <<<"$existing_doc" >/dev/null 2>&1; then
+        wip_die 4 duplicate-lane \
+          "roadmap amend: lane '$value' already exists in round $target_round" "$roadmap_path"
+      fi
+      _wip_roadmap_amend_idempotent_or_apply \
+        "append-lane" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug" "$target_round"
+      ;;
     *) wip_die 2 usage "roadmap amend: unknown directive: $kind" ;;
   esac
   : "$rendered_step_id"
@@ -168,22 +234,30 @@ _wip_roadmap_amend_step_title() {
 }
 
 # Compute hash + marker; check idempotency; apply if not stamped.
+# <extra> (7th arg) carries the target round for append-lane; unused otherwise.
 _wip_roadmap_amend_idempotent_or_apply() {
   local kind="$1" value="$2" payload="$3"
-  local roadmap_abs="$4" roadmap_path="$5" slug="$6"
-  local hash marker
+  local roadmap_abs="$4" roadmap_path="$5" slug="$6" extra="${7:-}"
+  local hash marker directive
   hash="$(printf '%s' "$payload" | wip_amend_hash)"
   marker="$(wip_amend_marker "$hash")"
 
+  # Human-facing directive label; append-lane names the round it targets.
+  if [[ "$kind" == "append-lane" ]]; then
+    directive="$kind $value (round $extra)"
+  else
+    directive="$kind $value"
+  fi
+
   if wip_amend_has_marker "$roadmap_abs" "$hash"; then
-    jq -nc --arg slug "$slug" --arg directive "$kind $value" --arg path "$roadmap_path" '
+    jq -nc --arg slug "$slug" --arg directive "$directive" --arg path "$roadmap_path" '
       { ok: true, slug: $slug, directive: $directive, wrote: [],
         idempotent_noop: true }'
     return 0
   fi
 
   if [[ "${WIP_DRY_RUN:-0}" == "1" ]]; then
-    jq -nc --arg slug "$slug" --arg directive "$kind $value" --arg path "$roadmap_path" '
+    jq -nc --arg slug "$slug" --arg directive "$directive" --arg path "$roadmap_path" '
       { ok: true, slug: $slug, directive: $directive, wrote: [$path],
         idempotent_noop: false, dry_run: true }'
     return 0
@@ -201,9 +275,13 @@ _wip_roadmap_amend_idempotent_or_apply() {
     append-round)
       wip_amend_apply_append_round "$roadmap_abs" "$payload" "$marker"
       ;;
+    append-lane)
+      wip_amend_apply_append_lane "$roadmap_abs" "$extra" "$payload" "$marker" ||
+        wip_die 4 round-not-in-roadmap "roadmap amend: target round not found: $extra" "$roadmap_path"
+      ;;
   esac
 
-  jq -nc --arg slug "$slug" --arg directive "$kind $value" --arg path "$roadmap_path" '
+  jq -nc --arg slug "$slug" --arg directive "$directive" --arg path "$roadmap_path" '
     { ok: true, slug: $slug, directive: $directive, wrote: [$path],
       idempotent_noop: false }'
 }

@@ -33,8 +33,8 @@ insert-after: step-06
   (overrides heuristics).
 - `target` — initiative slug (for `amendment`, `workplan-seed`) or `<slug>/<step-id>`
   (for `workplan-seed`).
-- `insert-after` / `replace` / `append-round` — amendment-only directives (see
-  `amendment` shape rules).
+- `insert-after` / `replace` / `append-round` / `append-lane` — amendment-only directives
+  (see `amendment` shape rules). `append-lane` additionally requires `target-round: <N>`.
 
 Key name `wip-kind` (namespaced) was chosen over the bare `kind:` so the file can also
 be consumed by other tools that may use `kind:` for their own purposes.
@@ -44,7 +44,7 @@ be consumed by other tools that may use `kind:` for their own purposes.
 | Kind | Required shape (validator rules) | Destination |
 |------|----------------------------------|-------------|
 | `brief` | Title heading (`# <Title>`), one of `## Goal` or `## Summary`, no `target:` referencing an existing initiative slug. | `init <slug>` |
-| `amendment` | `target: <initiative-slug>` in front-matter or first section; **one** of `insert-after: step-NN`, `replace: step-NN`, or `append-round: <title>`. Body sections per amendment directive (see §3). | `roadmap amend <slug>` |
+| `amendment` | `target: <initiative-slug>` in front-matter or first section; **one** of `insert-after: step-NN`, `replace: step-NN`, `append-round: <title>`, or `append-lane: <name>` (the last also needs `target-round: <N>`). Body sections per amendment directive (see §3). | `roadmap amend <slug>` |
 | `workplan-seed` | `target: <slug>/<step-id>` in front-matter; narrative body (no required section set). Step **must** exist in the named initiative's roadmap. | `workplan init <slug> <step-id>` |
 | `spec` | LDS-template conformance — heading set per `docs/specs/_template.md` if present in the consuming repo. Validator delegates to LDS when available (ADR-0006); falls back to a minimal heading check (`## Summary`, `## User stories` or `## Requirements`). | LDS seam |
 | `handoff` | Parseable markdown + a title. Always coerces to `brief` or `amendment` during shaping; **never** applied as `handoff`. | (transient) |
@@ -55,16 +55,26 @@ wip, but I cannot yet tell if it is a new thing or an edit to an existing thing.
 
 ## 3. Amendment directives
 
-Exactly one directive must be present. Each pins the deterministic edit `roadmap amend`
-performs.
+Exactly one directive must be present (the validator's count ranges over all four). Each
+pins the deterministic edit `roadmap amend` performs.
 
 - **`insert-after: step-NN`** — insert a new step immediately after `step-NN`. Body
   requires a single `### step-XX — <title>` heading (where `XX` is the new step's id;
   may be a `.5` slot per the distillation convention) and a one-or-more-paragraph body.
+  Lane-aware (ADR-0010): the new step inherits `step-NN`'s lane (or main lane).
 - **`replace: step-NN`** — replace the body of `step-NN` (keeping its id and heading
   unless the body provides a new `### step-NN — <new title>`). Body is the replacement.
+  The replaced step stays in its existing lane.
 - **`append-round: <title>`** — append a new round to the roadmap. Body requires a
-  `## Round <N> — <title>` heading and one or more `### step-NN — <title>` entries.
+  `## Round <N> — <title>` heading and one or more step entries — either `### step-NN —
+  <title>` headings (amendment form) or `- **step-NN — <title>**` bullets (canonical
+  roadmap form). The body may include `### Lane <name>` subheadings (ADR-0010); when it
+  does, use the bullet form so the lane blocks stay contiguous (the parser ends a lane
+  block at a blank line).
+- **`append-lane: <name>`** with **`target-round: <N>`** — add a new lane to an existing
+  round (ADR-0010). Body requires one or more `### step-NN — <title>` entries and **no**
+  `## Round` heading. The lane block is appended at the end of round N, idempotent via the
+  same hash-of-payload marker.
 
 Re-applying the same amendment artifact to the same roadmap is a **no-op**: `roadmap
 amend` stamps a hash-of-payload comment into the roadmap at the insertion site and
@@ -79,7 +89,7 @@ medium, low}`. Rules, applied in order; first match wins (later rules only contr
 | Rule | Kind | Confidence |
 |------|------|------------|
 | Front-matter `wip-kind:` present and valid | as stated | high |
-| `target:` key + one of `insert-after` / `replace` / `append-round` | `amendment` | high |
+| `target:` key + one of `insert-after` / `replace` / `append-round` / `append-lane` | `amendment` | high |
 | `target:` key matching `<slug>/<step-id>` (existing step) | `workplan-seed` | high |
 | `target:` key matching an existing initiative slug, no amendment directive | `amendment` | medium (porcelain must pick directive) |
 | `### step-NN — ` heading in body + no `target:` | `amendment` (likely) or `handoff` | low |

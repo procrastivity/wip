@@ -65,13 +65,29 @@ wip_plumbing_cmd_status() {
   if [[ -n "$active_step_id" ]]; then
     active_step="$(wip_roadmap_step "$doc" "$active_step_id")"
     if [[ "$active_step" == "null" || -z "$active_step" ]]; then
-      active_step="$(jq -nc --arg id "$active_step_id" '{id:$id,title:null,shipped:false,shipped_date:null}')"
+      active_step="$(jq -nc --arg id "$active_step_id" '{id:$id,title:null,shipped:false,shipped_date:null,lane:null}')"
     fi
     round="$(wip_roadmap_active_round "$doc" "$active_step_id")"
     [[ -n "$round" ]] || round="null"
   else
     active_step="null"
     round="null"
+  fi
+
+  # lanes_in_flight: the next actionable (first unshipped) step per lane that has
+  # unshipped work in the active round — only when two+ lanes are in flight at
+  # once (ADR-0010 §7). Preserves declared lane order; [] otherwise.
+  local lanes_in_flight="[]" active_round_n
+  active_round_n="$(jq -r '.n // empty' <<<"$round")"
+  if [[ -n "$active_round_n" ]]; then
+    lanes_in_flight="$(jq -c --argjson n "$active_round_n" '
+      (.rounds[] | select(.n == $n)) as $r
+      | [ $r.lanes[] as $ln
+          | ($r.steps | map(select(.shipped == false and .lane == $ln)) | (.[0] // null)) as $s
+          | select($s != null)
+          | {lane: $ln, step: $s.id} ]
+      | if length >= 2 then . else [] end
+    ' <<<"$doc")"
   fi
 
   # dirty .wip files via git porcelain. Quietly empty when .wip/ is gitignored.
@@ -96,6 +112,7 @@ wip_plumbing_cmd_status() {
   jq -nc \
     --arg slug "$slug" --arg status "$status_field" \
     --argjson round "$round" --argjson active_step "$active_step" \
+    --argjson lanes_in_flight "$lanes_in_flight" \
     --argjson dirty "$dirty" --argjson solo "$solo_available" \
     --argjson signals "$signals" '
     {
@@ -104,6 +121,7 @@ wip_plumbing_cmd_status() {
       status: $status,
       round: $round,
       active_step: $active_step,
+      lanes_in_flight: $lanes_in_flight,
       dirty_wip_files: $dirty,
       solo_available: $solo,
       signals: $signals

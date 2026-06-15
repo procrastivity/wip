@@ -174,4 +174,184 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "missing --from exit 2"
 
+# ---- append-lane (ADR-0010) ----
+# 11. append-lane happy path (target-round in front-matter) + idempotent re-apply.
+make_roadmap
+cat >"$tmp/lane.md" <<'MD'
+---
+target: demo
+append-lane: A
+target-round: 1
+---
+# Add Lane A
+
+### step-03 — Track A work
+
+Parallel track A.
+MD
+out_l="$(run demo --from "$tmp/lane.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_l")" "append-lane ok"
+assert_eq "append-lane A (round 1)" "$(jq -r '.directive' <<<"$out_l")" "append-lane directive label"
+assert_grep "### Lane A" "$tmp/.wip/initiatives/demo/roadmap.md" "lane heading written"
+assert_grep "step-03 — Track A work" "$tmp/.wip/initiatives/demo/roadmap.md" "lane step written as bullet"
+# The new step parses with lane A.
+lane_of_03="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md" |
+  jq -r '[.rounds[].steps[] | select(.id == "step-03")][0].lane')"
+assert_eq "A" "$lane_of_03" "step-03 parses into lane A"
+out_l2="$(run demo --from "$tmp/lane.md")"
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_l2")" "append-lane idempotent re-apply"
+
+# 12. append-lane via CLI --target-round flag (matching front-matter).
+make_roadmap
+out_l3="$(run demo --from "$tmp/lane.md" --target-round 1)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_l3")" "append-lane --target-round flag ok"
+
+# 13. append-lane with a non-existent target round -> exit 4.
+make_roadmap
+cat >"$tmp/lane-badround.md" <<'MD'
+---
+target: demo
+append-lane: A
+target-round: 9
+---
+# Add Lane A
+### step-03 — X
+Body.
+MD
+set +e
+run demo --from "$tmp/lane-badround.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "4" "$rc" "append-lane missing round exit 4"
+
+# 14. append-lane missing target-round -> shape failure exit 4.
+make_roadmap
+cat >"$tmp/lane-noround.md" <<'MD'
+---
+target: demo
+append-lane: A
+---
+# Add Lane A
+### step-03 — X
+Body.
+MD
+set +e
+run demo --from "$tmp/lane-noround.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "4" "$rc" "append-lane no target-round exit 4"
+
+# 14b. append-round whose body carries parallel lanes (bullet form) round-trips
+# through parse with correct lane assignment (ADR-0010 decision 6).
+make_roadmap
+cat >"$tmp/round-lanes.md" <<'MD'
+---
+target: demo
+append-round: Track expansion
+---
+# Track expansion
+
+## Round 2 — Track expansion
+
+- **step-12 — prereq** — lands first.
+
+### Lane A
+- **step-13 — track A** — spine.
+- **step-15 — track A part 2** — provider.
+
+### Lane D
+- **step-14 — track D** — SPA.
+MD
+out_rl="$(run demo --from "$tmp/round-lanes.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_rl")" "append-round-with-lanes ok"
+rl_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
+assert_eq '["A","D"]' "$(jq -c '[.rounds[] | select(.n==2) | .lanes[]]' <<<"$rl_parse")" "round 2 lanes [A,D]"
+assert_eq "A" "$(jq -r '[.rounds[].steps[] | select(.id=="step-13")][0].lane' <<<"$rl_parse")" "step-13 lane A via append-round"
+assert_eq "D" "$(jq -r '[.rounds[].steps[] | select(.id=="step-14")][0].lane' <<<"$rl_parse")" "step-14 lane D via append-round"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$rl_parse")" "append-round lanes: no lane errors"
+
+# 14c. append-lane into a round that already has lanes + a post-lane main sync
+# step must insert BEFORE the sync step, preserving `main* (lane+)? main*`.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — Track expansion
+
+- **step-01 — prereq** — lands first.
+
+### Lane A
+- **step-02 — track A** — spine.
+
+- **step-03 — sync** — post-lane main sync step.
+
+## Deferred
+- nothing.
+MD
+cat >"$tmp/lane-b.md" <<'MD'
+---
+target: demo
+append-lane: B
+target-round: 1
+---
+# Add Lane B
+### step-04 — track B
+Body.
+MD
+out_lb="$(run demo --from "$tmp/lane-b.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_lb")" "append-lane before sync ok"
+lb_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$lb_parse")" "append-lane before sync: no lane errors"
+assert_eq "B" "$(jq -r '[.rounds[].steps[] | select(.id=="step-04")][0].lane' <<<"$lb_parse")" "step-04 lane B"
+assert_eq "null" "$(jq -r '[.rounds[].steps[] | select(.id=="step-03")][0].lane' <<<"$lb_parse")" "sync step-03 stays main-lane"
+# step-04 (Lane B) precedes the sync step-03 in declared order.
+order="$(jq -r '[.rounds[].steps[].id] | (index("step-04")) < (index("step-03"))' <<<"$lb_parse")"
+assert_eq "true" "$order" "new lane inserted before the sync step"
+
+# 14d. append-lane with a name already present in the target round -> exit 4.
+set +e
+out_dup="$(run demo --from "$tmp/lane-b.md" --target-round 1 2>/dev/null)"
+rc=$?
+set -e
+# (re-applying the SAME Lane B is an idempotent no-op, not a duplicate.)
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_dup")" "re-apply same lane is idempotent, not duplicate"
+cat >"$tmp/lane-b-dup.md" <<'MD'
+---
+target: demo
+append-lane: B
+target-round: 1
+---
+# Add Lane B again (different content)
+### step-05 — different track B
+Body.
+MD
+set +e
+out_dup2="$(run demo --from "$tmp/lane-b-dup.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "duplicate lane name exit 4"
+assert_eq "duplicate-lane" "$(jq -r '.error.kind' <<<"$out_dup2")" "duplicate-lane error kind"
+
+# 15. Refuse to amend a roadmap with a malformed lane structure (exit 4 lane-malformed).
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+## Round 1 — Build
+
+### Lane A
+- **step-01 — a** — body.
+
+- **step-02 — orphan** — body.
+### Lane D
+- **step-03 — d** — body.
+
+## Deferred
+- nothing.
+MD
+set +e
+out_m="$(run demo --from "$tmp/insert.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "malformed lane refuses amend exit 4"
+assert_eq "lane-malformed" "$(jq -r '.error.kind' <<<"$out_m")" "lane-malformed error kind"
+
 test_summary
