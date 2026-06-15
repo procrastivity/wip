@@ -270,6 +270,67 @@ assert_eq "A" "$(jq -r '[.rounds[].steps[] | select(.id=="step-13")][0].lane' <<
 assert_eq "D" "$(jq -r '[.rounds[].steps[] | select(.id=="step-14")][0].lane' <<<"$rl_parse")" "step-14 lane D via append-round"
 assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$rl_parse")" "append-round lanes: no lane errors"
 
+# 14c. append-lane into a round that already has lanes + a post-lane main sync
+# step must insert BEFORE the sync step, preserving `main* (lane+)? main*`.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — Track expansion
+
+- **step-01 — prereq** — lands first.
+
+### Lane A
+- **step-02 — track A** — spine.
+
+- **step-03 — sync** — post-lane main sync step.
+
+## Deferred
+- nothing.
+MD
+cat >"$tmp/lane-b.md" <<'MD'
+---
+target: demo
+append-lane: B
+target-round: 1
+---
+# Add Lane B
+### step-04 — track B
+Body.
+MD
+out_lb="$(run demo --from "$tmp/lane-b.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_lb")" "append-lane before sync ok"
+lb_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$lb_parse")" "append-lane before sync: no lane errors"
+assert_eq "B" "$(jq -r '[.rounds[].steps[] | select(.id=="step-04")][0].lane' <<<"$lb_parse")" "step-04 lane B"
+assert_eq "null" "$(jq -r '[.rounds[].steps[] | select(.id=="step-03")][0].lane' <<<"$lb_parse")" "sync step-03 stays main-lane"
+# step-04 (Lane B) precedes the sync step-03 in declared order.
+order="$(jq -r '[.rounds[].steps[].id] | (index("step-04")) < (index("step-03"))' <<<"$lb_parse")"
+assert_eq "true" "$order" "new lane inserted before the sync step"
+
+# 14d. append-lane with a name already present in the target round -> exit 4.
+set +e
+out_dup="$(run demo --from "$tmp/lane-b.md" --target-round 1 2>/dev/null)"
+rc=$?
+set -e
+# (re-applying the SAME Lane B is an idempotent no-op, not a duplicate.)
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_dup")" "re-apply same lane is idempotent, not duplicate"
+cat >"$tmp/lane-b-dup.md" <<'MD'
+---
+target: demo
+append-lane: B
+target-round: 1
+---
+# Add Lane B again (different content)
+### step-05 — different track B
+Body.
+MD
+set +e
+out_dup2="$(run demo --from "$tmp/lane-b-dup.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "duplicate lane name exit 4"
+assert_eq "duplicate-lane" "$(jq -r '.error.kind' <<<"$out_dup2")" "duplicate-lane error kind"
+
 # 15. Refuse to amend a roadmap with a malformed lane structure (exit 4 lane-malformed).
 cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap

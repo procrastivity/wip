@@ -87,10 +87,12 @@ assert_eq "step-03.5" "$(jq -r '.[0].id' <<<"$all")" "all unshipped first"
 s="$(wip_roadmap_step "$doc" "step-01")"
 assert_eq "Skeleton" "$(jq -r '.title' <<<"$s")" "step lookup title"
 
-# Missing file -> empty doc.
+# Missing file -> empty doc (same shape as a parsed doc, incl. lane_errors).
 empty="$(wip_roadmap_parse "$tmp/missing.md")"
 assert_eq "0" "$(jq -r '.rounds | length' <<<"$empty")" "missing file rounds=0"
 assert_eq "0" "$(jq -r '.backlog | length' <<<"$empty")" "missing file backlog=0"
+assert_eq "array" "$(jq -r '.lane_errors | type' <<<"$empty")" "missing file lane_errors is array"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$empty")" "missing file lane_errors=[]"
 
 # Linear roadmap: every step lane is null, lane_errors empty (ADR-0010 regression).
 assert_eq "true" "$(jq -c '[.rounds[].steps[].lane] | all(. == null)' <<<"$doc")" "linear: all lanes null"

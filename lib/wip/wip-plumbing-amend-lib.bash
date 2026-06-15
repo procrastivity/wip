@@ -276,9 +276,12 @@ wip_amend_apply_append_round() {
 }
 
 # wip_amend_apply_append_lane <roadmap-path> <round-n> <block> <marker>
-# Insert <block>\n<marker>\n at the END of round <round-n> (after any existing
-# lanes / steps, before the next `## ` heading or EOF). Returns 1 if round
-# <round-n> is not present. ADR-0010: a new lane is appended to an existing round.
+# Insert <block>\n<marker>\n into round <round-n> at the END of its lane section —
+# after the last existing lane block, but BEFORE any post-lane main-lane sync
+# steps — so the round stays `main* (lane+)? main*` (ADR-0010 §5). When the round
+# has no lanes yet, insert at the round's end (its main steps become pre-lane
+# prereqs). Returns 1 if round <round-n> is not present. Assumes the round is
+# already well-formed (the amend command refuses malformed roadmaps first).
 wip_amend_apply_append_lane() {
   local path="$1" round_n="$2" block="$3" marker="$4"
   local lines=()
@@ -301,11 +304,44 @@ wip_amend_apply_append_lane() {
       break
     fi
   done
-  # Walk back over trailing blanks so we do not stack blank lines.
-  local insert_at=$end
-  while ((insert_at > start + 1)) && [[ -z "${lines[insert_at - 1]}" ]]; do
-    insert_at=$((insert_at - 1))
+  # Find the end of the round's lane section by mirroring the parser's lane
+  # tracking (blank line terminates a lane block). last_lane_line is the last
+  # line that belongs to any lane block; we insert right after it so the new
+  # lane lands before any trailing main-lane sync steps.
+  local cur_lane="" saw_step=0 last_lane_line=-1 j L
+  for ((j = start + 1; j < end; j++)); do
+    L="${lines[j]}"
+    if [[ "$L" =~ ^[[:space:]]*$ ]]; then
+      if [[ -n "$cur_lane" && "$saw_step" == "1" ]]; then
+        cur_lane=""
+        saw_step=0
+      fi
+    elif [[ "$L" =~ ^\#\#\#\ Lane\  ]]; then
+      cur_lane="lane"
+      saw_step=0
+      last_lane_line=$j
+    elif [[ "$L" =~ ^-\ \*\*step- || "$L" =~ ^\#\#\#\ step- ]]; then
+      if [[ -n "$cur_lane" ]]; then
+        saw_step=1
+        last_lane_line=$j
+      fi
+    elif [[ -n "$cur_lane" ]]; then
+      # A continuation/body line within the current lane block.
+      last_lane_line=$j
+    fi
   done
+
+  local insert_at
+  if ((last_lane_line >= 0)); then
+    # Insert immediately after the last lane block (before post-lane sync steps).
+    insert_at=$((last_lane_line + 1))
+  else
+    # No lanes yet: insert at the round's end, walking back over trailing blanks.
+    insert_at=$end
+    while ((insert_at > start + 1)) && [[ -z "${lines[insert_at - 1]}" ]]; do
+      insert_at=$((insert_at - 1))
+    done
+  fi
   local out=()
   for ((i = 0; i < insert_at; i++)); do out+=("${lines[i]}"); done
   out+=("")

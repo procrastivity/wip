@@ -183,6 +183,17 @@ _wip_roadmap_cmd_amend() {
         wip_die 2 usage "roadmap amend: --target-round must be a round number, got: $target_round"
       payload="$(printf '%s\n' "$body" | wip_amend_render_lane_block "$value")" ||
         wip_die 4 render-failed "roadmap amend: append-lane body has no step heading" "$from"
+      # Refuse a lane name already present in the target round — appending it would
+      # leave the roadmap malformed (duplicate-lane) on the next parse. Skip this
+      # when the exact same lane block is already stamped (an idempotent re-apply,
+      # which the helper below handles as a no-op rather than a conflict).
+      if ! wip_amend_has_marker "$roadmap_abs" "$(printf '%s' "$payload" | wip_amend_hash)" &&
+        jq -e --argjson n "$target_round" --arg lane "$value" \
+          '[.rounds[] | select(.n == $n) | .lanes[]] | index($lane) != null' \
+          <<<"$existing_doc" >/dev/null 2>&1; then
+        wip_die 4 duplicate-lane \
+          "roadmap amend: lane '$value' already exists in round $target_round" "$roadmap_path"
+      fi
       _wip_roadmap_amend_idempotent_or_apply \
         "append-lane" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug" "$target_round"
       ;;

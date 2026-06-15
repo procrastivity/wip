@@ -19,13 +19,17 @@
 # shellcheck shell=bash
 
 # wip_roadmap_parse <path> — emit a single JSON doc:
-#   {rounds:[{n,title,shipped,shipped_date,steps:[{id,title,shipped,shipped_date}]}],
-#    backlog:[{id,title}]}
-# Missing path => empty doc.
+#   {rounds:[{n, title, shipped, shipped_date, lanes:[<name>],
+#             steps:[{id, title, shipped, shipped_date, lane}]}],
+#    backlog:[{id, title}],
+#    lane_errors:[{kind, round?, lane?, step?}]}
+# `lane` is null for a main-lane step; `lanes` lists a round's declared lanes in
+# order (incl. empty lanes); `lane_errors` is empty when the lane structure is
+# well-formed (ADR-0010). Missing path => empty doc (same shape, all arrays empty).
 wip_roadmap_parse() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
-    jq -nc '{rounds:[], backlog:[]}'
+    jq -nc '{rounds:[], backlog:[], lane_errors:[]}'
     return 0
   fi
 
