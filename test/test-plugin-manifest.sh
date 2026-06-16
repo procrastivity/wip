@@ -108,6 +108,17 @@ assert_grep \
   'Do NOT begin editing code until the user says' \
   commands/start.md \
   "start.md does not auto-run"
+# On `go`, the hand-off is role-aware: it routes through the Orchestrator role
+# (Roles path) rather than silently working solo. Guard both the new pointer and
+# the absence of the old "you are the agent" silent-solo phrasing.
+assert_grep \
+  'roles/orchestrator.md' \
+  commands/start.md \
+  "start.md routes go through the Orchestrator role, not silent-solo"
+assert_not_grep \
+  'you are the agent' \
+  commands/start.md \
+  "start.md drops the silent-solo 'you are the agent' phrasing"
 
 # agents/ contains the four wip role agent files + README (step-12).
 # Detailed agent-file contract (front-matter, @-file pointers,

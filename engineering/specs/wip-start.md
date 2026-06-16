@@ -1,6 +1,7 @@
 # `/wip:start` + `workplan init --activate` (spec)
 
-Status: shipped 2026-06-16.
+Status: shipped 2026-06-16. Amended 2026-06-16: on-go is role-aware (ask
+solo-vs-orchestrate); orchestration runs via the shipped Roles.
 
 Closes the "how do I actually kick off a step by name?" gap. Today `/wip:next` is
 advisory and `workplan init` (the scaffold) is plumbing-only with no plugin surface, and
@@ -49,11 +50,14 @@ Procedure:
 4. **Brief the step** — read the roadmap step's title + body and the workplan file; print a
    tight summary: one line on what `<step-id>` is, plus the workplan path.
 5. **Offer, don't auto-run.** End with exactly: **"Say `go` and I'll start working on it."**
-   Do not begin editing code until the user says go. On `go`, work the step against the
-   workplan (Claude is the agent), asking clarifying questions inline as needed.
+   Do not begin editing code until the user says go. On `go`, establish role first — do
+   not assume you're the worker: if you already hold a WIP role, defer to it; if you're a
+   plain session, ask the user to run it solo here or orchestrate it (become the
+   Orchestrator and spawn a Coordinator via the Roles / Solo backend).
 
-This is set-up + hand-off, not orchestration — the future `wip spawn`/`wip orchestrate`
-(deferred) remain the path for fanning work across agents.
+This is set-up + hand-off. Orchestration runs through the shipped Roles (`roles/`,
+`agents/`); a `wip orchestrate` verb would be a future ergonomic wrapper, not a
+prerequisite.
 
 ## 3. Tests
 

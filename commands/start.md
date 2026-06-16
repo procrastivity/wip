@@ -7,10 +7,11 @@ allowed-tools: [Bash, Read, Write, Edit]
 # /wip:start — kick off a roadmap step by name
 
 Turns "start `<step-id>`" into a deterministic activation plus a tight brief.
-This is **set-up + hand-off, not orchestration** — it activates the step
-(`initiatives.<slug>.active_step`), scaffolds/locates its workplan, and briefs
-you. It does NOT begin editing code; the future `wip spawn` / `wip orchestrate`
-(deferred) remain the path for fanning work across agents.
+This is **set-up + hand-off** — it activates the step
+(`initiatives.<slug>.active_step`), scaffolds/locates its workplan, briefs you,
+and then waits for your `go`. How the work runs once you say `go` — solo in this
+session, or fanned across agents via the Roles — is decided at hand-off (step 6),
+not here.
 
 The activation is deterministic plumbing (`wip-plumbing workplan init …
 --activate`); Claude only orchestrates the call and does the LLM brief on top.
@@ -59,9 +60,21 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
 
    Say `go` and I'll start working on it.
 
-   Do NOT begin editing code until the user says `go`. On `go`, work the step
-   against the workplan (you are the agent), asking clarifying questions inline
-   as needed.
+   Do NOT begin editing code until the user says `go`. On `go`, establish your
+   role first — do not assume you are the worker:
+
+   - **Check whether you already hold a WIP role** via the active orchestration
+     backend (e.g. Solo `whoami` / your process name; see `roles/backends/`).
+   - **If you already hold a WIP role**, defer: keep acting in that role per its
+     manual (`roles/<role>.md`); do not re-drive a start from inside a
+     Coordinator/Researcher/Builder.
+   - **If you're a plain session** (no WIP role), you own this step — ask the
+     user how to run it instead of choosing silently:
+       - **Solo here** — work the step yourself against the workplan, asking
+         clarifying questions inline.
+       - **Orchestrate** — become the Orchestrator (`roles/orchestrator.md` +
+         `roles/backends/solo.md`): confirm identity, then spawn a Coordinator
+         for the active step via Solo.
 
 ## Notes
 
