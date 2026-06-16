@@ -80,6 +80,11 @@ case "$cmd" in
     source "$WIP_LIB/wip-subcommands/intake.bash"
     wip_cmd_intake "$@"
     ;;
+  bundle)
+    # shellcheck disable=SC1091
+    source "$WIP_LIB/wip-subcommands/bundle.bash"
+    wip_cmd_bundle "$@"
+    ;;
   *)
     # Transparent proxy to wip-plumbing. exec replaces the shell so signals
     # and exit codes propagate cleanly; no PID layer added.

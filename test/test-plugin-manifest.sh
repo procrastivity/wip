@@ -30,9 +30,9 @@ case "$ver" in
     ;;
 esac
 
-# Commands: next, status, intake. Each has a description in front-matter,
-# each references at least one `wip-plumbing` shell-out.
-for cmd in next status intake; do
+# Commands: next, status, intake, bundle. Each has a description in
+# front-matter, each references at least one `wip-plumbing` shell-out.
+for cmd in next status intake bundle; do
   path="commands/$cmd.md"
   assert_file "$path" "commands/$cmd.md present"
   if head -10 "$path" | grep -qE '^description:'; then
@@ -70,6 +70,24 @@ assert_grep \
   commands/intake.md \
   "intake.md forbids ASK fence"
 
+# /wip:bundle must reference the bundle assembler's prompt-sharing seam — it
+# fetches the assembly rules via `wip-plumbing template show bundle/assemble`,
+# and the CLAUDE_PLUGIN_ROOT resolution idiom (copied from intake.md).
+assert_grep \
+  'template show bundle/assemble' \
+  commands/bundle.md \
+  "bundle.md fetches assembly rules via template verb"
+assert_grep \
+  'CLAUDE_PLUGIN_ROOT' \
+  commands/bundle.md \
+  "bundle.md resolves the bundled wip-plumbing"
+# It must also instruct against the ---ASK--- fence (Claude asks inline).
+# shellcheck disable=SC2016  # literal text we're grepping for, no expansion intended
+assert_grep \
+  'do NOT emit `---ASK---`' \
+  commands/bundle.md \
+  "bundle.md forbids ASK fence"
+
 # agents/ contains the four wip role agent files + README (step-12).
 # Detailed agent-file contract (front-matter, @-file pointers,
 # backend-agnostic invariant) is pinned in test-roles-backend-seam.sh.
@@ -80,8 +98,8 @@ done
 extras="$(find agents -mindepth 1 -not -name README.md -not -name 'orchestrator.md' -not -name 'coordinator.md' -not -name 'researcher.md' -not -name 'builder.md' 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "0" "$extras" "agents/ contains only README + the four role files"
 
-# README mentions all three commands (catches a missed-command-in-docs).
-for cmd in next status intake; do
+# README mentions all four commands (catches a missed-command-in-docs).
+for cmd in next status intake bundle; do
   assert_grep "/wip:$cmd" .claude-plugin/README.md "README mentions /wip:$cmd"
 done
 

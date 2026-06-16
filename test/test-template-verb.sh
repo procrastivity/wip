@@ -16,18 +16,27 @@ file_md5="$(md5sum templates/prompts/intake/preamble.md | awk '{print $1}')"
 verb_md5="$(bin/wip-plumbing template show intake/preamble | md5sum | awk '{print $1}')"
 assert_eq "$file_md5" "$verb_md5" "show byte-equiv md5"
 
+# bundle/assemble — the bundle assembler's shared prompt (ADR-0011 / step-11
+# prompt-sharing seam). Both `wip bundle` and /wip:bundle read it via this verb.
+b_out="$(bin/wip-plumbing template show bundle/assemble)"
+b_expected="$(cat templates/prompts/bundle/assemble.md)"
+assert_eq "$b_expected" "$b_out" "show bundle/assemble bytes"
+b_file_md5="$(md5sum templates/prompts/bundle/assemble.md | awk '{print $1}')"
+b_verb_md5="$(bin/wip-plumbing template show bundle/assemble | md5sum | awk '{print $1}')"
+assert_eq "$b_file_md5" "$b_verb_md5" "show bundle/assemble byte-equiv md5"
+
 # `list` (JSON, default) — returns an array of {id, path} sorted by id.
 list_json="$(bin/wip-plumbing template list)"
 assert_eq "true" "$(jq -r '.ok' <<<"$list_json")" "list ok"
 ids="$(jq -r '.templates[].id' <<<"$list_json" | tr '\n' ',' | sed 's/,$//')"
 assert_eq \
-  "intake/amendment,intake/brief,intake/bundle,intake/handoff,intake/preamble,intake/spec,intake/workplan-seed" \
+  "bundle/assemble,intake/amendment,intake/brief,intake/bundle,intake/handoff,intake/preamble,intake/spec,intake/workplan-seed" \
   "$ids" "list ids sorted"
 
 # `list --no-json` — TSV-style fallback.
 list_tsv="$(bin/wip-plumbing --no-json template list)"
 first="$(printf '%s\n' "$list_tsv" | head -1 | awk -F'\t' '{print $1}')"
-assert_eq "intake/amendment" "$first" "list --no-json id col"
+assert_eq "bundle/assemble" "$first" "list --no-json id col"
 
 # `show` with no arg → exit 2 (usage).
 set +e

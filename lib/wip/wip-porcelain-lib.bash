@@ -21,6 +21,11 @@ porcelain commands (LLM-aware):
               usage: intake <file> [--kind <k>] [--target <slug|slug/step>]
                             [--yes] [--dry-run] [--output <path>]
                             [--max-rounds <n>]
+  bundle      assemble N handoff files into one bundle lead manifest, then
+              optionally chain into the intake explode
+              usage: bundle <file>... [--target <slug>]
+                            [--lead-as brief|amendment] [-o <manifest>]
+                            [--intake] [--dry-run] [--yes]
   provider    inspect provider config
               usage: provider show [--json|--no-json]
 

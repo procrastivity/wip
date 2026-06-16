@@ -13,6 +13,7 @@ let Claude do the prose / shape / route work.
 | `/wip:next` | Ranked candidates for what to do next, plus a recommendation. Backed by `wip-plumbing next`. |
 | `/wip:status` | "Where am I" — initiative / round / active step / dirty `.wip/` files. Backed by `wip-plumbing status`. |
 | `/wip:intake <file>` | Drives the full intake pipeline (classify → shape → validate → apply). Claude is the shaper; clarifications happen inline in chat. |
+| `/wip:bundle <files…>` | Assembles two or more handoff files into one `bundle` lead manifest, then runs the existing intake explode inline. Claude is the shaper; clarifications happen inline in chat. |
 
 ## Prerequisites
 
@@ -24,10 +25,11 @@ let Claude do the prose / shape / route work.
 ## Prompt-sharing seam (step-11)
 
 The `/wip:intake` shape rules come from `templates/prompts/intake/*.md`,
-the same files the CLI porcelain's shaper reads at runtime. The plugin
-fetches them via `wip-plumbing template show intake/<id>` so command
-bodies say *what they want*, not *where the bytes live*. Equivalence is
-pinned by `test/test-shaper-templates.sh`.
+and `/wip:bundle`'s assembly rules from `templates/prompts/bundle/assemble.md`
+— the same files the CLI porcelain (`wip intake` / `wip bundle`) reads at
+runtime. The plugin fetches them via `wip-plumbing template show <id>` so
+command bodies say *what they want*, not *where the bytes live*. Equivalence
+is pinned by `test/test-shaper-templates.sh` and `test/test-template-verb.sh`.
 
 ## What's deliberately not here
 
