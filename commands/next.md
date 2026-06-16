@@ -12,11 +12,24 @@ judgment lives here that the CLI doesn't also have).
 
 ## Procedure
 
-1. **Resolve plumbing.** Run `command -v wip-plumbing`. If absent and
-   `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop:
-   > `wip-plumbing` is not on PATH. Install wip first (see the project README) or set $WIP_PLUMBING_BIN.
+1. **Resolve `wip-plumbing`.** The plugin bundles the CLI; prefer the bundled
+   copy, then an explicit override, then PATH. Run once:
+   ```bash
+   if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -x "$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing" ]]; then
+     WIP="$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing"
+   elif [[ -n "${WIP_PLUMBING_BIN:-}" && -x "${WIP_PLUMBING_BIN}" ]]; then
+     WIP="$WIP_PLUMBING_BIN"
+   elif command -v wip-plumbing >/dev/null 2>&1; then
+     WIP="wip-plumbing"
+   else
+     echo "wip-plumbing not found — enable the wip plugin or install it (see the project README)"
+   fi
+   ```
+   If the resolver printed the not-found message (`$WIP` unset), stop. Use
+   `"$WIP"` in place of `wip-plumbing` for every command below; re-run this
+   resolver if a later step starts in a fresh shell.
 
-2. **Run `wip-plumbing next`.** If the user passed `--initiative <slug>`
+2. **Run `"$WIP" next`.** If the user passed `--initiative <slug>`
    in `$ARGUMENTS`, forward it verbatim. Capture the JSON envelope on
    stdout.
 

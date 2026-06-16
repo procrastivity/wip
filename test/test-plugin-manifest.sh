@@ -55,11 +55,11 @@ done
 # fetch its shape rules via `wip-plumbing template show intake/...`. This
 # catches accidental detachment of the plugin from the canonical prompts.
 assert_grep \
-  'wip-plumbing template show intake/preamble' \
+  'template show intake/preamble' \
   commands/intake.md \
   "intake.md fetches preamble via template verb"
 assert_grep \
-  'wip-plumbing template show intake/<kind>' \
+  'template show intake/<kind>' \
   commands/intake.md \
   "intake.md fetches per-kind rules via template verb"
 

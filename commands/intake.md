@@ -24,14 +24,28 @@ authoritative until `apply` returns or the flow errors out.
 
 ## Procedure
 
-1. **Resolve plumbing.** Run `command -v wip-plumbing`. If absent and
-   `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop.
+1. **Resolve `wip-plumbing`.** The plugin bundles the CLI; prefer the bundled
+   copy, then an explicit override, then PATH. Run once:
+   ```bash
+   if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -x "$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing" ]]; then
+     WIP="$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing"
+   elif [[ -n "${WIP_PLUMBING_BIN:-}" && -x "${WIP_PLUMBING_BIN}" ]]; then
+     WIP="$WIP_PLUMBING_BIN"
+   elif command -v wip-plumbing >/dev/null 2>&1; then
+     WIP="wip-plumbing"
+   else
+     echo "wip-plumbing not found — enable the wip plugin or install it (see the project README)"
+   fi
+   ```
+   If the resolver printed the not-found message (`$WIP` unset), stop. Use
+   `"$WIP"` in place of `wip-plumbing` for every command below; re-run this
+   resolver if a later step starts in a fresh shell.
 
 2. **Parse `$ARGUMENTS`.** Extract the positional `<file>` plus optional
    `--kind <k>` and `--target <t>`. `<file>` is required; if missing,
    stop and ask the user which file to shape.
 
-3. **Classify (plumbing).** Run `wip-plumbing intake classify <file>`.
+3. **Classify (plumbing).** Run `"$WIP" intake classify <file>`.
    On exit ≠ 0, surface the error envelope verbatim and stop.
 
 4. **Pick the kind.**
@@ -42,8 +56,8 @@ authoritative until `apply` returns or the flow errors out.
      ask: "Use kind `<guess>`, or override (brief/amendment/workplan-seed/spec/handoff)?"
 
 5. **Fetch shaper prompts.** Run, in order:
-   - `wip-plumbing template show intake/preamble`
-   - `wip-plumbing template show intake/<kind>`
+   - `"$WIP" template show intake/preamble`
+   - `"$WIP" template show intake/<kind>`
 
    Concatenate (preamble + blank line + per-kind rules) — that's the
    shape contract you must follow. Do NOT skip this step or paraphrase
@@ -63,7 +77,7 @@ authoritative until `apply` returns or the flow errors out.
    artifact naming each guess.
 
 7. **Validate (plumbing).** Run
-   `wip-plumbing intake validate --kind <k> <tempfile>`. On `missing[]`,
+   `"$WIP" intake validate --kind <k> <tempfile>`. On `missing[]`,
    patch the tempfile to address the gap and re-validate. Cap at **2**
    reshape attempts (CLI parity). After 2 failed validates, stop and
    report the validation envelope to the user.
@@ -83,7 +97,7 @@ authoritative until `apply` returns or the flow errors out.
      respectively; do not try to coerce).
 
 9. **Apply (plumbing).** Run
-   `wip-plumbing intake apply --kind <k> [--target <t>] <tempfile>`.
+   `"$WIP" intake apply --kind <k> [--target <t>] <tempfile>`.
    Echo the resulting write ledger (the JSON output) in a code block,
    plus a one-line prose summary like "amended distillation/roadmap.md:
    insert-after step-06". On exit-4 from apply, report the envelope
