@@ -32,7 +32,7 @@ esac
 
 # Commands: next, status, intake, bundle. Each has a description in
 # front-matter, each references at least one `wip-plumbing` shell-out.
-for cmd in next status intake bundle; do
+for cmd in next status intake bundle start; do
   path="commands/$cmd.md"
   assert_file "$path" "commands/$cmd.md present"
   if head -10 "$path" | grep -qE '^description:'; then
@@ -88,6 +88,27 @@ assert_grep \
   commands/bundle.md \
   "bundle.md forbids ASK fence"
 
+# /wip:start must resolve the bundled wip-plumbing (CLAUDE_PLUGIN_ROOT idiom),
+# drive the deterministic activation (workplan init … --activate), end with the
+# literal "Say `go`" offer, and explicitly NOT auto-run.
+assert_grep \
+  'CLAUDE_PLUGIN_ROOT' \
+  commands/start.md \
+  "start.md resolves the bundled wip-plumbing"
+assert_grep \
+  'workplan init <slug> <step-id> --activate' \
+  commands/start.md \
+  "start.md activates via workplan init --activate"
+# shellcheck disable=SC2016  # literal offer line we're grepping for, no expansion intended
+assert_grep \
+  'Say `go` and I'"'"'ll start working on it.' \
+  commands/start.md \
+  "start.md ends with the literal go offer"
+assert_grep \
+  'Do NOT begin editing code until the user says' \
+  commands/start.md \
+  "start.md does not auto-run"
+
 # agents/ contains the four wip role agent files + README (step-12).
 # Detailed agent-file contract (front-matter, @-file pointers,
 # backend-agnostic invariant) is pinned in test-roles-backend-seam.sh.
@@ -99,7 +120,7 @@ extras="$(find agents -mindepth 1 -not -name README.md -not -name 'orchestrator.
 assert_eq "0" "$extras" "agents/ contains only README + the four role files"
 
 # README mentions all four commands (catches a missed-command-in-docs).
-for cmd in next status intake bundle; do
+for cmd in next status intake bundle start; do
   assert_grep "/wip:$cmd" .claude-plugin/README.md "README mentions /wip:$cmd"
 done
 

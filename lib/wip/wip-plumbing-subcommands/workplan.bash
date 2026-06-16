@@ -13,7 +13,7 @@ wip_plumbing_cmd_workplan() {
 }
 
 _wip_workplan_cmd_init() {
-  local slug="" step_id="" from="" slug_override="" force=0
+  local slug="" step_id="" from="" slug_override="" force=0 activate=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --from)
@@ -36,6 +36,10 @@ _wip_workplan_cmd_init() {
         ;;
       --force)
         force=1
+        shift
+        ;;
+      --activate)
+        activate=1
         shift
         ;;
       -*) wip_die 2 usage "workplan init: unknown flag: $1" ;;
@@ -104,45 +108,117 @@ _wip_workplan_cmd_init() {
   local rel_path=".wip/initiatives/$slug/workplans/$step_id-$derived.md"
   local abs_path="$root/$rel_path"
 
-  # Pre-existing file gates on --force.
-  if [[ -e "$abs_path" && "$force" != "1" ]]; then
+  local file_exists=0
+  [[ -e "$abs_path" ]] && file_exists=1
+
+  # Pre-existing file gates on --force. WITHOUT --activate, an existing
+  # workplan refuses (exit 4). WITH --activate, an existing workplan is NOT an
+  # error: we skip the write but still set active_step, so "start" is
+  # re-runnable for a step whose workplan already exists.
+  if [[ "$file_exists" == "1" && "$force" != "1" && "$activate" != "1" ]]; then
     wip_die 4 file-exists "workplan init: workplan already exists: $rel_path" "$rel_path"
   fi
 
-  local templates_dir
-  templates_dir="$(_wip_workplan_templates_dir)" ||
-    wip_die 1 internal "workplan init: templates/ not found"
-
-  local content date
-  date="$(wip_scaffold_now)"
-  content="$(wip_scaffold_render "$templates_dir/workplan.md.tmpl" \
-    "slug=$slug" "step_id=$step_id" "step_title=$step_title" "date=$date")" ||
-    wip_die 1 internal "workplan init: render failed"
-
-  # Append seed body (if present) under a "## Seed (from intake)" section.
-  if [[ -n "$from" ]]; then
-    local seed_body
-    seed_body="$(wip_amend_extract_body "$from")"
-    content="$content"$'\n## Seed (from intake)\n\n'"$seed_body"
+  # Decide whether the workplan file is (re)written. Existing + --activate (and
+  # not --force) keeps the file untouched.
+  local will_write=1
+  if [[ "$file_exists" == "1" && "$force" != "1" ]]; then
+    will_write=0
   fi
 
-  if [[ "${WIP_DRY_RUN:-0}" == "1" ]]; then
-    jq -nc --arg slug "$slug" --arg step "$step_id" --arg path "$rel_path" '
-      { ok: true, slug: $slug, step: $step, wrote: [$path], dry_run: true }'
-    return 0
+  # Render the workplan body up front (needed for both the dry-run ledger and
+  # the real write).
+  local content=""
+  if [[ "$will_write" == "1" ]]; then
+    local templates_dir date
+    templates_dir="$(_wip_workplan_templates_dir)" ||
+      wip_die 1 internal "workplan init: templates/ not found"
+    date="$(wip_scaffold_now)"
+    content="$(wip_scaffold_render "$templates_dir/workplan.md.tmpl" \
+      "slug=$slug" "step_id=$step_id" "step_title=$step_title" "date=$date")" ||
+      wip_die 1 internal "workplan init: render failed"
+
+    # Append seed body (if present) under a "## Seed (from intake)" section.
+    if [[ -n "$from" ]]; then
+      local seed_body
+      seed_body="$(wip_amend_extract_body "$from")"
+      content="$content"$'\n## Seed (from intake)\n\n'"$seed_body"
+    fi
+  fi
+
+  # Activation: set initiatives.<slug>.active_step in .wip.yaml — the same key
+  # detect/status read. Honors $WIP_DRY_RUN (touches nothing under --dry-run).
+  local manifest_updated=""
+  if [[ "$activate" == "1" ]]; then
+    local astatus
+    astatus="$(_wip_workplan_set_active_step "$root/.wip.yaml" "$slug" "$step_id")" ||
+      wip_die 1 internal "workplan init: could not set active_step in .wip.yaml"
+    [[ "$astatus" == "updated" ]] && manifest_updated=".wip.yaml"
   fi
 
   # Write (overwrite when --force, else write_or_skip would refuse — but we
-  # already gated that above).
-  if [[ "$force" == "1" && -e "$abs_path" ]]; then
-    rm -f "$abs_path"
+  # already gated that above). Skipped under --dry-run.
+  if [[ "$will_write" == "1" && "${WIP_DRY_RUN:-0}" != "1" ]]; then
+    if [[ "$force" == "1" && -e "$abs_path" ]]; then
+      rm -f "$abs_path"
+    fi
+    wip_scaffold_write_or_skip "$abs_path" "$content" >/dev/null || {
+      wip_die 1 internal "workplan init: write failed: $rel_path"
+    }
   fi
-  wip_scaffold_write_or_skip "$abs_path" "$content" >/dev/null || {
-    wip_die 1 internal "workplan init: write failed: $rel_path"
-  }
 
-  jq -nc --arg slug "$slug" --arg step "$step_id" --arg path "$rel_path" '
-    { ok: true, slug: $slug, step: $step, wrote: [$path] }'
+  # Ledger. `wrote` lists the workplan when (re)written; `skipped` lists it when
+  # an existing workplan is kept under --activate. `active_step` is present only
+  # with --activate.
+  local wrote="[]" skipped="[]"
+  if [[ "$will_write" == "1" ]]; then
+    wrote="$(jq -nc --arg p "$rel_path" '[$p]')"
+  else
+    skipped="$(jq -nc --arg p "$rel_path" '[$p]')"
+  fi
+  jq -nc \
+    --arg slug "$slug" --arg step "$step_id" \
+    --argjson wrote "$wrote" --argjson skipped "$skipped" \
+    --arg activate "$activate" --arg mu "$manifest_updated" \
+    --arg dry "${WIP_DRY_RUN:-0}" '
+    { ok: true, slug: $slug, step: $step, wrote: $wrote }
+    + (if ($skipped | length) > 0 then { skipped: $skipped } else {} end)
+    + (if $activate == "1" then { active_step: $step } else {} end)
+    + (if $mu != "" then { manifest_updated: $mu } else {} end)
+    + (if $dry == "1" then { dry_run: true } else {} end)
+  '
+}
+
+# _wip_workplan_set_active_step <manifest> <slug> <step-id>
+#
+# Idempotently set initiatives[slug].active_step = <step-id> via yq -i — the
+# same key detect/status read. Mirrors the deterministic yq machinery in
+# `_wip_init_append_initiative` / `wip_setup_set_feature_flag`. Honors
+# $WIP_DRY_RUN (no write). Prints "updated" or "noop"; returns 1 on yq error.
+_wip_workplan_set_active_step() {
+  local manifest="$1" slug="$2" step="$3"
+  [[ -f "$manifest" ]] || {
+    printf 'wip-plumbing: workplan: manifest missing: %s\n' "$manifest" >&2
+    return 1
+  }
+  local current
+  current="$(SLUG="$slug" yq -r '
+    (.initiatives[] | select(.slug == strenv(SLUG)) | .active_step) // ""
+  ' "$manifest" 2>/dev/null)" || current=""
+  [[ "$current" == "null" ]] && current=""
+  if [[ "$current" == "$step" ]]; then
+    printf 'noop'
+    return 0
+  fi
+  if [[ "${WIP_DRY_RUN:-0}" == "1" ]]; then
+    printf 'updated'
+    return 0
+  fi
+  SLUG="$slug" STEP="$step" yq -i '
+    (.initiatives[] | select(.slug == strenv(SLUG)) | .active_step) = strenv(STEP)
+  ' "$manifest" || return 1
+  printf 'updated'
+  return 0
 }
 
 # Echo the absolute templates/ path; same lookup init.bash uses.

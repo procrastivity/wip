@@ -1,6 +1,6 @@
 # `/wip:start` + `workplan init --activate` (spec)
 
-Status: draft.
+Status: shipped 2026-06-16.
 
 Closes the "how do I actually kick off a step by name?" gap. Today `/wip:next` is
 advisory and `workplan init` (the scaffold) is plumbing-only with no plugin surface, and
