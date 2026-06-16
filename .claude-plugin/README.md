@@ -12,6 +12,7 @@ let Claude do the prose / shape / route work.
 |---------------|--------------|
 | `/wip:next` | Ranked candidates for what to do next, plus a recommendation. Backed by `wip-plumbing next`. |
 | `/wip:status` | "Where am I" — initiative / round / active step / dirty `.wip/` files. Backed by `wip-plumbing status`. |
+| `/wip:start <step-id>` | Activate a roadmap step (`active_step`), scaffold/locate its workplan, and brief it. Offers to start; never auto-runs. Backed by `wip-plumbing workplan init … --activate`. |
 | `/wip:intake <file>` | Drives the full intake pipeline (classify → shape → validate → apply). Claude is the shaper; clarifications happen inline in chat. |
 | `/wip:bundle <files…>` | Assembles two or more handoff files into one `bundle` lead manifest, then runs the existing intake explode inline. Claude is the shaper; clarifications happen inline in chat. |
 

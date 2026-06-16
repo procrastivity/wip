@@ -307,18 +307,32 @@ no-op, detected via a hash-of-payload comment stamped at the insertion site.
 For `append-lane` / `insert-step-in-lane` the `directive` reads e.g. `"append-lane A
 (round 4)"` / `"insert-step-in-lane A (round 4)"`.
 
-### `wip-plumbing workplan init <slug> <step-id> [--from <file>] [--force]`
+### `wip-plumbing workplan init <slug> <step-id> [--from <file>] [--slug <s>] [--force] [--activate]`
 Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from
 `templates/workplan.md.tmpl`. Step must exist in the initiative's roadmap.
 
+- `--activate` — after the workplan is in place, set `initiatives.<slug>.active_step` in
+  `.wip.yaml` (deterministic yq manifest edit, the same key `detect`/`status` read).
+  **Idempotent with an existing workplan:** without `--activate` an existing workplan is
+  still `file-exists` (exit 4); *with* `--activate` an existing workplan is **not** an
+  error — the write is skipped (ledger lists it under `skipped`), `active_step` is still
+  set, so "start" is re-runnable. The ledger gains `active_step: <step-id>`;
+  `manifest_updated` is present only when the key actually changed. `--dry-run --activate`
+  reports the would-be activation and touches neither the file nor the manifest.
 - **Reads:** `.wip.yaml`, the initiative's `roadmap.md`, the optional seed file, the
   template.
-- **Writes:** the workplan file (or just the ledger with `--dry-run`).
-- **Exit:** 0 on write; **4** if the file exists (without `--force`) or the step doesn't
-  exist; 2 on bad args.
+- **Writes:** the workplan file and (with `--activate`) `.wip.yaml`'s `active_step` (or
+  just the ledger with `--dry-run`).
+- **Exit:** 0 on write; **4** if the file exists (without `--force` and without
+  `--activate`) or the step doesn't exist (`step-not-in-roadmap`); **3** if the initiative
+  is not in the manifest (`unknown-initiative`); 2 on bad args.
 - **stdout:**
 ```json
 { "ok": true, "slug": "distillation", "step": "step-07.5", "wrote": [".wip/initiatives/distillation/workplans/step-07.5-intake-kinds.md"] }
+```
+With `--activate` (existing workplan kept):
+```json
+{ "ok": true, "slug": "distillation", "step": "step-07.5", "wrote": [], "skipped": [".wip/initiatives/distillation/workplans/step-07.5-intake-kinds.md"], "active_step": "step-07.5" }
 ```
 
 ### `wip-plumbing status [--initiative <slug>]`

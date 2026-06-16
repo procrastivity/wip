@@ -111,4 +111,43 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "missing step-id exit 2"
 
+# 10. --activate (fresh workplan): writes the file AND sets active_step.
+out10="$(run demo step-02.5 --slug fresh-activate --activate)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out10")" "activate ok"
+assert_eq "step-02.5" "$(jq -r '.active_step' <<<"$out10")" "activate ledger active_step"
+assert_file "$tmp/.wip/initiatives/demo/workplans/step-02.5-fresh-activate.md" "activate wrote workplan"
+assert_eq "step-02.5" \
+  "$(WIP_ROOT="$tmp" bin/wip-plumbing status 2>/dev/null | jq -r '.active_step.id')" \
+  "status reflects active_step"
+
+# 11. --activate on an existing workplan: no exit 4, skips the write, still activates.
+before="$(cat "$tmp/.wip/initiatives/demo/workplans/step-02-refresh-tokens.md")"
+out11="$(run demo step-02 --activate)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out11")" "activate existing ok (no exit 4)"
+assert_eq "step-02" "$(jq -r '.active_step' <<<"$out11")" "activate existing active_step"
+assert_eq "[]" "$(jq -c '.wrote' <<<"$out11")" "activate existing wrote empty"
+assert_eq ".wip/initiatives/demo/workplans/step-02-refresh-tokens.md" \
+  "$(jq -r '.skipped[0]' <<<"$out11")" "activate existing lists skipped"
+after="$(cat "$tmp/.wip/initiatives/demo/workplans/step-02-refresh-tokens.md")"
+assert_eq "$before" "$after" "existing workplan untouched"
+assert_eq "step-02" \
+  "$(WIP_ROOT="$tmp" bin/wip-plumbing status 2>/dev/null | jq -r '.active_step.id')" \
+  "status now step-02"
+
+# 12. --dry-run --activate touches nothing (no file, manifest unchanged).
+man_before="$(cat "$tmp/.wip.yaml")"
+out12="$(WIP_ROOT="$tmp" bin/wip-plumbing --dry-run workplan init demo step-01 --slug dryactivate --activate)"
+assert_eq "true" "$(jq -r '.dry_run' <<<"$out12")" "dry-run activate flag"
+assert_eq "step-01" "$(jq -r '.active_step' <<<"$out12")" "dry-run activate reports active_step"
+assert_absent "$tmp/.wip/initiatives/demo/workplans/step-01-dryactivate.md" "dry-run activate no file"
+assert_eq "$man_before" "$(cat "$tmp/.wip.yaml")" "dry-run activate manifest unchanged"
+
+# 13. Non-roadmap step still exits 4, even with --activate.
+set +e
+out13="$(run demo step-99 --activate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "activate non-roadmap exit 4"
+assert_eq "step-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out13")" "activate non-roadmap kind"
+
 test_summary
