@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.4] - 2026-06-16
+
+### Internal
+
+- Roadmap: fix greedy **…** match swallowing step titles (+ ship marker)
+
+### Other
+
+- Hooks: drop the per-commit full-test-suite gate (keep lint + hygiene)
+- Start: spec for /wip:start + workplan init --activate (plan)
+- Hooks: sync hygiene template after dropping the per-commit test hook
+- Start: workplan init --activate + /wip:start command
+- Start: mark wip-start-command shipped 2026-06-16
+
 ## [0.0.3] - 2026-06-16
 
 ### Added
