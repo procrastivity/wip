@@ -7,9 +7,10 @@ orchestration backend resolves each request to a concrete runtime. See
 
 ## Request capability, not runtime id
 
-Callers — Orchestrator, Coordinator, the (future) `wip spawn` /
-`wip orchestrate` verbs — request a **Tier**: a capability level, not
-a runtime tool id. The backend owns the mapping. This is the abstract
+Callers — Orchestrator, Coordinator, the orchestrate entrypoint
+(`/wip:orchestrate`; ADR-0012), and any future `wip spawn` helper —
+request a **Tier**: a capability level, not a runtime tool id. The
+backend owns the mapping. This is the abstract
 substrate row from
 [`templates/glossary/orchestration.md`](../templates/glossary/orchestration.md);
 it exists so role files and porcelain verbs never hardcode

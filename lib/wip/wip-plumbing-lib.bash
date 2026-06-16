@@ -31,6 +31,9 @@ commands:
                    [--insert-after <step-id> | --replace <step-id> | --append-round <title>]
   workplan  scaffold a step workplan from templates/workplan.md.tmpl
             usage: workplan init <slug> <step-id> [--from <seed>] [--slug <s>] [--force]
+  orchestrate  deterministic prep for booting orchestration (ADR-0012; never
+            spawns — that is /wip:orchestrate's job)
+            usage: orchestrate prep [--initiative <slug>]
   template  show / list the canonical templates that ship with wip
             usage: template show <id>          (e.g. intake/preamble)
                    template list [--no-json]

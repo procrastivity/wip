@@ -38,6 +38,7 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `roadmap amend` | Deterministic edit to an initiative's `roadmap.md` (insert / replace / append-round / append-lane). | step-08.5 |
 | `roadmap parse` | Read-only: emit the parsed roadmap JSON document (rounds, steps with `lane`, `lanes[]`, `lane_errors[]`, backlog). | step-08 (lanes) |
 | `workplan init` | Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<slug>.md`. | step-08.5 |
+| `orchestrate prep` | Deterministic readiness + brief for booting orchestration of the active step (never spawns — that is `/wip:orchestrate`). The plumbing half of [ADR-0012](../decisions/0012-orchestrate-entrypoint-is-a-plugin-command.md). | orchestrate |
 | `status` | Where am I: current initiative, round, active step, dirty `.wip/`. | step-08 |
 | `next` | Ranked candidates for what to do next (no choice — that's the porcelain). | step-08 |
 | `template show` | Print a canonical template body by id (`intake/preamble`, …). | step-11 |
@@ -53,8 +54,11 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
 | `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
 
-Non-goals for v1: `orchestrate`/`spawn`, the `wip intake`
-porcelain (step-10.5). They are later roadmap steps and get their own specs.
+Non-goals for v1: a `orchestrate`/`spawn` **fan-out** verb (impossible at this layer —
+spawning Claude agents needs MCP, only reachable from the plugin; see
+[ADR-0012](../decisions/0012-orchestrate-entrypoint-is-a-plugin-command.md), which adds the
+deterministic `orchestrate prep` readiness verb but routes the actual boot through
+`/wip:orchestrate`), and the `wip intake` porcelain (step-10.5). They get their own specs.
 
 ## 2. Global conventions
 
@@ -333,6 +337,43 @@ Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from
 With `--activate` (existing workplan kept):
 ```json
 { "ok": true, "slug": "distillation", "step": "step-07.5", "wrote": [], "skipped": [".wip/initiatives/distillation/workplans/step-07.5-intake-kinds.md"], "active_step": "step-07.5" }
+```
+
+### `wip-plumbing orchestrate prep [--initiative <slug>]`
+Deterministic readiness check + "what to orchestrate" brief for the active step. The
+plumbing half of [ADR-0012](../decisions/0012-orchestrate-entrypoint-is-a-plugin-command.md):
+`/wip:orchestrate` calls this for facts + gating, then becomes the Orchestrator and spawns a
+Coordinator via the backend. **This verb never spawns and never names a backend tool** — it
+emits the *facts* about the work (initiative / step / workplan), not the *staffing* (Tier,
+process names, `agent_tool_id` stay in the Roles + backend binding, ADR-0007).
+
+- Resolves the initiative like `status` (default `current_initiative`; `--initiative`
+  overrides), then resolves that initiative's `active_step`.
+- A **missing workplan is not an error**: it reports `workplan.exists: false` and exits 0,
+  because the Coordinator's Researcher produces the workplan in Phase 1. The emitted
+  `workplan.path` is the existing file if present (glob `<step-id>-*.md`), else the canonical
+  path derived from the step title the same way `workplan init` derives it.
+- **Reads:** `.wip.yaml`; the initiative's `roadmap.md`; the `workplans/` directory listing.
+- **Writes:** nothing.
+- **Exit:** 0 on a ready brief; **3** if `features.orchestration.enabled` is not true
+  (`orchestration-not-enabled`), if there is no `current_initiative` and no `--initiative`
+  (`no-initiative`), or if `--initiative` names an unknown slug (`unknown-initiative`); **4**
+  if the initiative has no `active_step` (`no-active-step` — run `/wip:start` first) or the
+  `active_step` is not in the roadmap (`step-not-in-roadmap`); 2 on bad args.
+- **Signals (advisory, non-fatal):** `active-step-shipped` when the active step is already
+  marked shipped (mirrors `status`' divergence reporting — surfaced, not refused).
+- **stdout:**
+```json
+{
+  "ok": true,
+  "initiative": "distillation",
+  "orchestration": { "enabled": true, "backend": "solo" },
+  "round": { "n": 4, "title": "Track expansion" },
+  "active_step": { "id": "step-16", "title": "Orchestrate verb", "shipped": false, "lane": null },
+  "workplan": { "path": ".wip/initiatives/distillation/workplans/step-16-orchestrate-verb.md", "exists": true },
+  "roadmap": ".wip/initiatives/distillation/roadmap.md",
+  "signals": []
+}
 ```
 
 ### `wip-plumbing status [--initiative <slug>]`
