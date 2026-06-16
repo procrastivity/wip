@@ -21,7 +21,7 @@ list_json="$(bin/wip-plumbing template list)"
 assert_eq "true" "$(jq -r '.ok' <<<"$list_json")" "list ok"
 ids="$(jq -r '.templates[].id' <<<"$list_json" | tr '\n' ',' | sed 's/,$//')"
 assert_eq \
-  "intake/amendment,intake/brief,intake/handoff,intake/preamble,intake/spec,intake/workplan-seed" \
+  "intake/amendment,intake/brief,intake/bundle,intake/handoff,intake/preamble,intake/spec,intake/workplan-seed" \
   "$ids" "list ids sorted"
 
 # `list --no-json` — TSV-style fallback.

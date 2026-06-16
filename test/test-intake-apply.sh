@@ -122,6 +122,29 @@ set -e
 assert_eq "4" "$rc" "handoff exit 4"
 assert_eq "not-terminal" "$(jq -r '.error.kind' <<<"$out")" "handoff not-terminal"
 
+# 6b. bundle -> exit 4 not-terminal (explode happens at the porcelain layer).
+cat >"$tmp/childA.md" <<'MD'
+# Track A
+Body.
+MD
+cat >"$tmp/bundle.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: brief
+children:
+  - path: childA.md
+---
+# New thing
+## Goal
+Do it.
+MD
+set +e
+out="$(run "$tmp/bundle.md" --kind bundle 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "bundle exit 4"
+assert_eq "not-terminal" "$(jq -r '.error.kind' <<<"$out")" "bundle not-terminal"
+
 # 7. missing --kind -> exit 2.
 set +e
 run "$tmp/brief-slug.md" >/dev/null 2>&1

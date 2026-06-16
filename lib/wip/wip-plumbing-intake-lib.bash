@@ -3,7 +3,7 @@
 # Implements engineering/specs/intake-kinds.md (ADR-0009).
 # shellcheck shell=bash
 
-WIP_INTAKE_KINDS="brief amendment workplan-seed spec handoff"
+WIP_INTAKE_KINDS="brief amendment workplan-seed spec handoff bundle"
 
 wip_intake_kind_valid() {
   local k="$1" x
@@ -85,10 +85,11 @@ _wip_intake_fm_str() {
 
 # Emit "<count>\n<name>\n" — count of directives present and the last one's
 # name (empty when count is 0). Two lines so callers can parse via `read`.
-# Ranges over the four amendment directives (append-lane added in ADR-0010).
+# Ranges over the five amendment directives (append-lane added in ADR-0010;
+# insert-step-in-lane added with the bundle kind).
 _wip_intake_amendment_directive() {
   local fm="$1" name="" count=0 d v
-  for d in insert-after replace append-round append-lane; do
+  for d in insert-after replace append-round append-lane insert-step-in-lane; do
     v="$(_wip_intake_fm_str "$fm" "$d")"
     if [[ -n "$v" ]]; then
       name="$d"
@@ -192,10 +193,19 @@ wip_intake_classify_payload() {
 
   # Body-heading heuristics.
   local has_step_heading has_user_stories has_requirements has_goal_or_summary
+  local has_tracks has_sequence
   has_step_heading=$(awk '/^### step-[0-9]+/ { print "1"; exit }' "$file")
   has_user_stories=$(awk '/^## User stories([[:space:]]|$)/ { print "1"; exit }' "$file")
   has_requirements=$(awk '/^## Requirements([[:space:]]|$)/ { print "1"; exit }' "$file")
   has_goal_or_summary=$(awk '/^## (Goal|Summary)([[:space:]]|$)/ { print "1"; exit }' "$file")
+  # Roadmap-shaped (bundle) signals: a tracks/roadmap/children/foundational
+  # section AND a sequence section (intake-kinds.md §4). Matched
+  # case-insensitively on the leading heading word; `track` matches both a
+  # single `## Tracks` section and per-track `## Track A` / `## Track D`
+  # headings, and `foundational` catches a "## Foundational items" prereq
+  # section — the real post-phase-0 roadmap shape.
+  has_tracks=$(awk 'tolower($0) ~ /^## (track|roadmap|children|foundational)/ { print "1"; exit }' "$file")
+  has_sequence=$(awk 'tolower($0) ~ /^## (sequence|recommended sequence)/ { print "1"; exit }' "$file")
 
   # 5. ### step-NN heading in body + no target -> amendment likely / handoff low.
   if [[ -z "$kind" && "$has_step_heading" == "1" && -z "$tgt" ]]; then
@@ -209,6 +219,15 @@ wip_intake_classify_payload() {
     kind="spec"
     confidence="medium"
     signals="$(jq -nc --argjson a "$signals" '$a + ["spec body sections"]')"
+  fi
+
+  # 6b. roadmap-shaped bundle heuristic (intake-kinds.md §4): tracks/roadmap/
+  # children + sequence section, no target, no amendment directive. Low
+  # confidence — the porcelain confirms before exploding.
+  if [[ -z "$kind" && "$has_tracks" == "1" && "$has_sequence" == "1" && -z "$tgt" && -z "$dir_name" ]]; then
+    kind="bundle"
+    confidence="low"
+    signals="$(jq -nc --argjson a "$signals" '$a + ["roadmap-shaped-handoff"]')"
   fi
 
   # 7. brief heuristic.
@@ -239,6 +258,7 @@ wip_intake_validate_kind() {
     workplan-seed) _wip_intake_validate_workplan_seed "$file" ;;
     spec) _wip_intake_validate_spec "$file" ;;
     handoff) _wip_intake_validate_handoff "$file" ;;
+    bundle) _wip_intake_validate_bundle "$file" ;;
     *) jq -nc '{valid:false, missing:["unknown-kind"], signals:[]}' ;;
   esac
 }
@@ -324,6 +344,20 @@ _wip_intake_validate_amendment() {
         missing="$(jq -nc --argjson a "$missing" '$a + ["unexpected-round-heading"]')"
       fi
       ;;
+    insert-step-in-lane)
+      # A single step into an already-declared lane of an existing round
+      # (ADR-0010 §6, bundle's emit pattern): same shape rules as append-lane —
+      # needs target-round + a step heading, and must NOT carry a ## Round heading.
+      if [[ -z "$(_wip_intake_fm_str "$fm" "target-round")" ]]; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["target-round"]')"
+      fi
+      if ! awk '/^### step-[0-9]+/ { found=1 } END { exit !found }' "$file"; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["step-headings"]')"
+      fi
+      if awk '/^## Round [0-9]+ — / { found=1 } END { exit !found }' "$file"; then
+        missing="$(jq -nc --argjson a "$missing" '$a + ["unexpected-round-heading"]')"
+      fi
+      ;;
   esac
 
   _wip_intake_emit_result "$missing" "$signals"
@@ -378,6 +412,102 @@ _wip_intake_validate_handoff() {
   local h1 missing="[]" signals="[]"
   h1="$(wip_intake_read_h1 "$file")"
   [[ -n "$h1" ]] || missing="$(jq -nc --argjson a "$missing" '$a + ["title"]')"
+  _wip_intake_emit_result "$missing" "$signals"
+}
+
+# _wip_intake_strip_bundle_keys <file> — write a copy of <file> with the
+# bundle-only front-matter keys (wip-kind, lead-as, children, cross-cuts)
+# removed to a fresh tempfile; emit the tempfile path on stdout. Caller rm's it.
+# The body is preserved verbatim so the lead validates as a plain brief/amendment.
+_wip_intake_strip_bundle_keys() {
+  local file="$1" tmp fm_yaml body stripped_yaml
+  tmp="$(mktemp -t wip-bundle-lead.XXXXXX)"
+  fm_yaml="$(awk '
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { exit }
+    in_fm { print }
+  ' "$file")"
+  body="$(awk '
+    NR == 1 && /^---[[:space:]]*$/ { fm = 1; next }
+    fm && !past && /^---[[:space:]]*$/ { past = 1; next }
+    fm && !past { next }
+    { print }
+  ' "$file")"
+  if [[ -n "$fm_yaml" ]]; then
+    stripped_yaml="$(printf '%s\n' "$fm_yaml" |
+      yq -o=yaml 'del(.["wip-kind"]) | del(.["lead-as"]) | del(.children) | del(.["cross-cuts"])' 2>/dev/null)"
+  fi
+  {
+    if [[ -n "$stripped_yaml" && "$stripped_yaml" != "{}" && "$stripped_yaml" != "null" ]]; then
+      printf -- '---\n%s\n---\n' "$stripped_yaml"
+    fi
+    printf '%s\n' "$body"
+  } >"$tmp"
+  printf '%s' "$tmp"
+}
+
+# _wip_intake_validate_bundle <file> — structural check for a bundle artifact
+# (intake-kinds.md §2/§3a): wip-kind: bundle, lead-as ∈ {brief, amendment},
+# non-empty children[] of readable paths (relative to the lead), and the lead
+# body satisfying its lead-as kind's rules.
+_wip_intake_validate_bundle() {
+  local file="$1"
+  local fm wk lead_as missing="[]" signals="[]"
+  fm="$(wip_intake_read_front_matter "$file")"
+
+  wk="$(_wip_intake_fm_str "$fm" "wip-kind")"
+  [[ "$wk" == "bundle" ]] ||
+    missing="$(jq -nc --argjson a "$missing" '$a + ["wip-kind-bundle"]')"
+
+  lead_as="$(_wip_intake_fm_str "$fm" "lead-as")"
+  case "$lead_as" in
+    brief | amendment) ;;
+    *) missing="$(jq -nc --argjson a "$missing" '$a + ["lead-as"]')" ;;
+  esac
+
+  # children: a non-empty array of readable paths (relative to the lead file).
+  local children_n base
+  base="$(dirname "$file")"
+  children_n="$(jq -r '(.children // null) | if type=="array" then length elif type=="null" then 0 else -1 end' <<<"$fm" 2>/dev/null || printf -- '-1')"
+  if [[ "$children_n" == "-1" ]]; then
+    missing="$(jq -nc --argjson a "$missing" '$a + ["children-not-list"]')"
+  elif [[ "$children_n" == "0" ]]; then
+    missing="$(jq -nc --argjson a "$missing" '$a + ["children"]')"
+  else
+    local paths cpath bad_paths="[]" missing_path=0
+    paths="$(jq -r '.children[] | if type=="string" then . else (.path // "") end' <<<"$fm" 2>/dev/null)"
+    while IFS= read -r cpath; do
+      if [[ -z "$cpath" ]]; then
+        missing_path=1
+        continue
+      fi
+      local abs
+      if [[ "$cpath" == /* ]]; then abs="$cpath"; else abs="$base/$cpath"; fi
+      if [[ ! -f "$abs" || ! -r "$abs" ]]; then
+        bad_paths="$(jq -nc --argjson a "$bad_paths" --arg p "$cpath" '$a + [$p]')"
+      fi
+    done <<<"$paths"
+    if [[ "$missing_path" == "1" ]]; then
+      missing="$(jq -nc --argjson a "$missing" '$a + ["child-path"]')"
+    fi
+    if [[ "$(jq -r 'length' <<<"$bad_paths")" != "0" ]]; then
+      missing="$(jq -nc --argjson a "$missing" '$a + ["child-unreadable"]')"
+      signals="$(jq -nc --argjson a "$signals" --argjson b "$bad_paths" '$a + [("unreadable: " + ($b | join(", ")))]')"
+    fi
+  fi
+
+  # Lead body must satisfy its lead-as kind, checked on a bundle-key-stripped copy.
+  if [[ "$lead_as" == "brief" || "$lead_as" == "amendment" ]]; then
+    local stripped lead_result lead_missing
+    stripped="$(_wip_intake_strip_bundle_keys "$file")"
+    lead_result="$(wip_intake_validate_kind "$stripped" "$lead_as")"
+    rm -f "$stripped"
+    lead_missing="$(jq -c '.missing // []' <<<"$lead_result" 2>/dev/null || printf '[]')"
+    if [[ "$(jq -r 'length' <<<"$lead_missing")" != "0" ]]; then
+      missing="$(jq -nc --argjson a "$missing" --argjson lm "$lead_missing" '$a + ($lm | map("lead:" + .))')"
+    fi
+  fi
+
   _wip_intake_emit_result "$missing" "$signals"
 }
 

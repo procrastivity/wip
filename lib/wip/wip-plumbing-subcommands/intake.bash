@@ -166,6 +166,9 @@ _wip_intake_cmd_apply() {
     handoff)
       wip_die 4 not-terminal "intake apply: handoff is not a terminal kind; reshape first"
       ;;
+    bundle)
+      wip_die 4 not-terminal "intake apply: bundle is not a terminal kind; explode at the porcelain layer"
+      ;;
   esac
 }
 
