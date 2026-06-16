@@ -185,4 +185,56 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "bad --kind exit 2 (flag list still rejects nonsense)"
 
+# 7. A child that names its lane via an explicit `insert-step-in-lane:` hint
+#    (instead of `lane:`) is APPLIED, not silently folded — and the lead still
+#    declares that lane so the insert lands. (regression: PR review P2)
+mk_repo
+isil_bundle=$'---\nwip-kind: bundle\nlead-as: amendment\ntarget: tc\nappend-round: Track expansion\nchildren:\n  - path: spine.md\n    kind: amendment\n    insert-step-in-lane: A\n---\n# Track expansion\n\n## Round 2 — Track expansion\n\n- **step-03 — F1 prereq** — shared.\n'
+mk "$isil_bundle" >"$tmp/respIsil.json"
+cat >"$tmp/dispatch-isil.sh" <<EOF
+req="\$(cat)"
+if printf '%s' "\$req" | grep -q SPINEDOC; then cat "$tmp/respA.json"
+else cat "$tmp/respIsil.json"; fi
+EOF
+out7="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
+  WIP_PROVIDER_CMD="bash $tmp/dispatch-isil.sh" \
+  bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out7")" "isil-hint child: explode ok"
+assert_eq "null" "$(jq -r '.children[0].skipped' <<<"$out7")" "isil-hint child not folded"
+assert_eq "true" "$(jq -r '.children[0].ok' <<<"$out7")" "isil-hint child applied"
+P7="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$roadmap")"
+assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-04")][0].lane' <<<"$P7")" "isil-hint step-04 in lane A"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$P7")" "isil-hint: no lane errors"
+
+# 8. A brief lead carries no target:; children still get the slug the lead
+#    creates (derived from the lead artifact). (regression: PR review P1)
+rm -rf "$tmp/.wip"
+mkdir -p "$tmp/.wip"
+cat >"$tmp/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip } }
+initiatives: []
+provider:
+  kind: openai-compatible
+  base_url_env: TEST_BASE_URL
+  api_key_env:  TEST_API_KEY
+  model_env:    TEST_MODEL
+YAML
+brief_bundle=$'---\nwip-kind: bundle\nlead-as: brief\nslug: newproj\nchildren:\n  - path: spine.md\n    kind: amendment\n    append-round: Track expansion\n---\n# New Proj\n\n## Goal\n\nStand up the new project.\n'
+brief_child=$'---\nwip-kind: amendment\ntarget: newproj\nappend-round: Track expansion\n---\n# Track A\n\n## Round 1 — Track expansion\n\n### step-01 — Track A spine\n\nSpine.\n'
+mk "$brief_bundle" >"$tmp/respBrief.json"
+mk "$brief_child" >"$tmp/respBriefChild.json"
+cat >"$tmp/dispatch-brief.sh" <<EOF
+req="\$(cat)"
+if printf '%s' "\$req" | grep -q SPINEDOC; then cat "$tmp/respBriefChild.json"
+else cat "$tmp/respBrief.json"; fi
+EOF
+out8="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
+  WIP_PROVIDER_CMD="bash $tmp/dispatch-brief.sh" \
+  bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out8")" "brief-lead bundle ok"
+assert_eq "newproj" "$(jq -r '.target' <<<"$out8")" "brief-lead derives slug newproj"
+assert_eq "newproj" "$(jq -r '.children[0].result.target' <<<"$out8")" "child targets the derived slug (not empty)"
+assert_grep "step-01 — Track A spine" "$tmp/.wip/initiatives/newproj/roadmap.md" "child applied to the new initiative"
+
 test_summary

@@ -503,8 +503,10 @@ _wip_intake_derive_slug() {
 # lead artifact: the bundle body with bundle-only front-matter keys stripped,
 # plus (for an amendment lead) one empty `### Lane <name>` per distinct child
 # lane and a `## Cross-cuts (from bundle)` section from cross-cuts.shared-seams.
-# The lanes/Cross-cuts go AFTER the round's main steps so they don't split the
-# round (a `## ` heading would otherwise end it).
+# Order matters to the parser: the `### Lane` subheadings (H3) belong INSIDE the
+# round, so they follow the main steps; the `## Cross-cuts` (H2) is emitted LAST
+# because an H2 ends the round — placing it last closes the round cleanly after
+# the lanes, with nothing round-bearing after it.
 _wip_intake_materialize_lead() {
   local shaped="$1" fm="$2" lead_as="$3"
   local fm_yaml stripped body
@@ -519,11 +521,14 @@ _wip_intake_materialize_lead() {
 
   [[ "$lead_as" == "amendment" ]] || return 0
 
+  # One empty lane per distinct lane a child fills — named via either a `lane:`
+  # hint or an explicit `insert-step-in-lane:` directive hint (both reach the
+  # insert-step-in-lane apply, so both need the lane declared in the lead).
   local lane
   while IFS= read -r lane; do
     [[ -n "$lane" && "$lane" != "null" ]] || continue
     printf '\n### Lane %s\n' "$lane"
-  done < <(jq -r '[.children[]? | if type=="object" then (.lane // empty) else empty end] | unique[]' <<<"$fm" 2>/dev/null)
+  done < <(jq -r '[.children[]? | select(type=="object") | (.lane // .["insert-step-in-lane"] // empty)] | unique[]' <<<"$fm" 2>/dev/null)
 
   local seams s
   seams="$(jq -r '(.["cross-cuts"].["shared-seams"] // [])[]?' <<<"$fm" 2>/dev/null)"
@@ -625,6 +630,13 @@ _wip_intake_explode_bundle() {
   local round_n
   round_n="$(awk '/^## Round [0-9]+ —/ { print $3; exit }' "$lead_tmp")"
 
+  # A `brief` lead carries no `target:`; its initiative slug is whatever `init`
+  # derives from the lead artifact. Derive the same slug here so amendment
+  # children get a real target (works under --dry-run too, before any apply).
+  if [[ -z "$slug" && "$lead_as" == "brief" ]]; then
+    slug="$(_wip_intake_derive_slug "$lead_tmp")"
+  fi
+
   local lead_env lead_ok="false" lead_rc
   if [[ "$dry_run" == "1" ]]; then
     set +e
@@ -638,6 +650,13 @@ _wip_intake_explode_bundle() {
     lead_rc=$?
     set -e
     [[ "$lead_rc" == "0" ]] && lead_ok="true"
+    # Prefer the slug the lead apply actually wrote (authoritative for a brief
+    # lead routed through `init`), so children target exactly what landed.
+    if [[ "$lead_ok" == "true" ]]; then
+      local applied_target
+      applied_target="$(jq -r '.target // empty' <<<"$lead_env" 2>/dev/null)"
+      [[ -n "$applied_target" ]] && slug="$applied_target"
+    fi
   fi
   [[ -n "$lead_env" ]] || lead_env='{}'
   rm -f "$lead_tmp"
@@ -666,13 +685,17 @@ _wip_intake_explode_bundle() {
     # Resolve the bundle-assigned directive for an amendment child.
     local directive="" tround=""
     if [[ "$ckind" == "amendment" ]]; then
-      local hint_ia hint_rep hint_ar hint_al
+      local hint_ia hint_rep hint_ar hint_al hint_isil
       hint_ia="$(jq -r 'if type=="object" then (.["insert-after"] // "") else "" end' <<<"$centry")"
       hint_rep="$(jq -r 'if type=="object" then (.replace // "") else "" end' <<<"$centry")"
       hint_ar="$(jq -r 'if type=="object" then (.["append-round"] // "") else "" end' <<<"$centry")"
       hint_al="$(jq -r 'if type=="object" then (.["append-lane"] // "") else "" end' <<<"$centry")"
+      hint_isil="$(jq -r 'if type=="object" then (.["insert-step-in-lane"] // "") else "" end' <<<"$centry")"
       if [[ -n "$clane" ]]; then
         directive="insert-step-in-lane: $clane"
+        tround="$round_n"
+      elif [[ -n "$hint_isil" ]]; then
+        directive="insert-step-in-lane: $hint_isil"
         tround="$round_n"
       elif [[ -n "$hint_ia" ]]; then
         directive="insert-after: $hint_ia"

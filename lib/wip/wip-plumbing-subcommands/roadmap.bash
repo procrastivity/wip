@@ -176,7 +176,15 @@ _wip_roadmap_cmd_amend() {
         "append-round" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug"
       ;;
     append-lane)
-      local target_round="${cli_target_round:-$(_wip_intake_fm_str "$fm" target-round)}"
+      local fm_round target_round
+      fm_round="$(_wip_intake_fm_str "$fm" target-round)"
+      # The round is part of the shaped directive contract; refuse a CLI flag that
+      # disagrees with the artifact (parity with the directive-mismatch check).
+      if [[ -n "$cli_target_round" && -n "$fm_round" && "$cli_target_round" != "$fm_round" ]]; then
+        wip_die 2 directive-mismatch \
+          "roadmap amend: --target-round $cli_target_round disagrees with artifact target-round: $fm_round"
+      fi
+      target_round="${cli_target_round:-$fm_round}"
       [[ -n "$target_round" ]] ||
         wip_die 2 usage "roadmap amend: append-lane requires --target-round <N> (or target-round: in the artifact)"
       [[ "$target_round" =~ ^[0-9]+$ ]] ||
@@ -198,7 +206,13 @@ _wip_roadmap_cmd_amend() {
         "append-lane" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug" "$target_round"
       ;;
     insert-step-in-lane)
-      local target_round="${cli_target_round:-$(_wip_intake_fm_str "$fm" target-round)}"
+      local fm_round target_round
+      fm_round="$(_wip_intake_fm_str "$fm" target-round)"
+      if [[ -n "$cli_target_round" && -n "$fm_round" && "$cli_target_round" != "$fm_round" ]]; then
+        wip_die 2 directive-mismatch \
+          "roadmap amend: --target-round $cli_target_round disagrees with artifact target-round: $fm_round"
+      fi
+      target_round="${cli_target_round:-$fm_round}"
       [[ -n "$target_round" ]] ||
         wip_die 2 usage "roadmap amend: insert-step-in-lane requires --target-round <N> (or target-round: in the artifact)"
       [[ "$target_round" =~ ^[0-9]+$ ]] ||

@@ -407,6 +407,18 @@ set -e
 assert_eq "4" "$rc" "insert-step-in-lane absent round exit 4"
 assert_eq "round-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out_ir")" "round-not-in-roadmap error kind"
 
+# 14g-ii. insert-step-in-lane: --target-round disagreeing with the artifact's
+# target-round: -> exit 2 directive-mismatch (the round is part of the contract).
+set +e
+out_im="$(run demo --from "$tmp/isil-a.md" --target-round 5 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "insert-step-in-lane target-round mismatch exit 2"
+assert_eq "directive-mismatch" "$(jq -r '.error.kind' <<<"$out_im")" "isil target-round mismatch kind"
+# A matching --target-round flag is accepted (round 2 matches the artifact).
+out_iok="$(run demo --from "$tmp/isil-a.md" --target-round 2)"
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_iok")" "isil matching --target-round ok (idempotent)"
+
 # 14h. insert-step-in-lane missing target-round -> shape failure exit 4.
 cat >"$tmp/isil-noround.md" <<'MD'
 ---
