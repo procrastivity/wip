@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.3] - 2026-06-16
+
+### Added
+
+- Bundle: ADR-0011 + spec for the multi-file bundle assembler (plan)
+- Bundle: wip bundle assembler verb + /wip:bundle command + shared prompt
+- Bundle: accept ADR-0011, mark bundle-assembler shipped 2026-06-16
+
+### Other
+
+- Plugin: resolve bundled wip-plumbing via CLAUDE_PLUGIN_ROOT
+
 ## [0.0.2] - 2026-06-16
 
 ### Added
