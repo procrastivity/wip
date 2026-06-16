@@ -56,8 +56,10 @@ Procedure:
    Orchestrator and spawn a Coordinator via the Roles / Solo backend).
 
 This is set-up + hand-off. Orchestration runs through the shipped Roles (`roles/`,
-`agents/`); a `wip orchestrate` verb would be a future ergonomic wrapper, not a
-prerequisite.
+`agents/`); the ergonomic wrapper for the on-`go` "Orchestrate" branch is the
+`/wip:orchestrate` plugin command ([`wip-orchestrate.md`](./wip-orchestrate.md),
+[ADR-0012](../decisions/0012-orchestrate-entrypoint-is-a-plugin-command.md)) — a plugin
+command, not a CLI verb, because spawning needs MCP.
 
 ## 3. Tests
 

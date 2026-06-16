@@ -32,7 +32,7 @@ esac
 
 # Commands: next, status, intake, bundle. Each has a description in
 # front-matter, each references at least one `wip-plumbing` shell-out.
-for cmd in next status intake bundle start; do
+for cmd in next status intake bundle start orchestrate; do
   path="commands/$cmd.md"
   assert_file "$path" "commands/$cmd.md present"
   if head -10 "$path" | grep -qE '^description:'; then
@@ -119,6 +119,37 @@ assert_not_grep \
   'you are the agent' \
   commands/start.md \
   "start.md drops the silent-solo 'you are the agent' phrasing"
+# start.md's on-`go` Orchestrate branch hands off to /wip:orchestrate (the
+# ergonomic wrapper) rather than re-describing the boot inline.
+assert_grep \
+  '/wip:orchestrate' \
+  commands/start.md \
+  "start.md Orchestrate branch hands off to /wip:orchestrate"
+
+# /wip:orchestrate must resolve the bundled wip-plumbing (CLAUDE_PLUGIN_ROOT idiom),
+# drive the deterministic prep (orchestrate prep), route the boot through the
+# Orchestrator role + Solo backend binding, and — per ADR-0007 — name NO backend
+# MCP tool in the command body (spawn mechanics live only in roles/backends/solo.md).
+assert_grep \
+  'CLAUDE_PLUGIN_ROOT' \
+  commands/orchestrate.md \
+  "orchestrate.md resolves the bundled wip-plumbing"
+assert_grep \
+  'orchestrate prep' \
+  commands/orchestrate.md \
+  "orchestrate.md preps via orchestrate prep"
+assert_grep \
+  'roles/orchestrator.md' \
+  commands/orchestrate.md \
+  "orchestrate.md routes the boot through the Orchestrator role"
+assert_grep \
+  'roles/backends/solo.md' \
+  commands/orchestrate.md \
+  "orchestrate.md points at the Solo backend binding"
+assert_not_grep \
+  'mcp__solo__' \
+  commands/orchestrate.md \
+  "orchestrate.md names no backend MCP tool (seam intact)"
 
 # agents/ contains the four wip role agent files + README (step-12).
 # Detailed agent-file contract (front-matter, @-file pointers,
@@ -130,8 +161,8 @@ done
 extras="$(find agents -mindepth 1 -not -name README.md -not -name 'orchestrator.md' -not -name 'coordinator.md' -not -name 'researcher.md' -not -name 'builder.md' 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "0" "$extras" "agents/ contains only README + the four role files"
 
-# README mentions all four commands (catches a missed-command-in-docs).
-for cmd in next status intake bundle start; do
+# README mentions every command (catches a missed-command-in-docs).
+for cmd in next status intake bundle start orchestrate; do
   assert_grep "/wip:$cmd" .claude-plugin/README.md "README mentions /wip:$cmd"
 done
 

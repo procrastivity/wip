@@ -72,9 +72,11 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
      user how to run it instead of choosing silently:
        - **Solo here** — work the step yourself against the workplan, asking
          clarifying questions inline.
-       - **Orchestrate** — become the Orchestrator (`roles/orchestrator.md` +
-         `roles/backends/solo.md`): confirm identity, then spawn a Coordinator
-         for the active step via Solo.
+       - **Orchestrate** — hand off to **`/wip:orchestrate`**, the ergonomic
+         wrapper for this branch: it preps the active step and has you become
+         the Orchestrator (`roles/orchestrator.md` + `roles/backends/solo.md`)
+         to spawn a Coordinator for the active step via Solo. (Run it now, or
+         invoke `/wip:orchestrate` directly later.)
 
 ## Notes
 
