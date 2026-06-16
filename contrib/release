@@ -86,6 +86,12 @@ jq --arg v "$NEW_VERSION" '.version = $v' "$MANIFEST" >"$tmp" && mv "$tmp" "$MAN
 # commits as belonging to this release.
 echo "Updating CHANGELOG.md..."
 git-cliff --tag "$TAG" -o CHANGELOG.md
+# Normalize to exactly one trailing newline. git-cliff's per-version bodies
+# leave trailing blank lines at EOF (needed mid-file for version separation),
+# which the pre-commit end-of-file-fixer would otherwise rewrite *after* we
+# stage — failing the release commit. Command substitution strips the trailing
+# newlines; printf adds exactly one back.
+printf '%s\n' "$(<CHANGELOG.md)" >CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
 
 # --- Gate BEFORE committing — a broken release commit is worse than none ---
 
