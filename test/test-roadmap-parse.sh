@@ -206,4 +206,23 @@ sx="$(wip_roadmap_parse "$tmp/sandwich.md")"
 assert_eq "1" "$(jq '[.lane_errors[] | select(.kind == "main-step-between-lanes")] | length' <<<"$sx")" "main-step-between-lanes rejected"
 assert_eq "step-03" "$(jq -r '[.lane_errors[] | select(.kind == "main-step-between-lanes")][0].step' <<<"$sx")" "sandwich names the offending step"
 
+# --- Regression: bold (**…**) in a step body must not swallow the title -------
+# The step-bullet title is matched non-greedily ([^*]+), so a **bold** run in the
+# body can't capture the whole bullet. This also keeps the documented ship-marker
+# position (right after the title's closing **) working when the body has bold.
+cat >"$tmp/bold-body.md" <<'MD'
+# Roadmap — bold body
+
+## Round 1 — Tracks
+
+- **step-01 — F1: taxonomy** ✅ shipped 2026-06-16 — shared prereq; touches **Track A** and **Track D**.
+- **step-02 — Vertical spine** — big work on **core.document**; depends on **step-01**.
+MD
+bb="$(wip_roadmap_parse "$tmp/bold-body.md")"
+assert_eq "F1: taxonomy" "$(jq -r '.rounds[0].steps[0].title' <<<"$bb")" "bold-body: title stops at first ** (not greedy)"
+assert_eq "true" "$(jq -r '.rounds[0].steps[0].shipped' <<<"$bb")" "bold-body: ship marker after title ** still detected"
+assert_eq "2026-06-16" "$(jq -r '.rounds[0].steps[0].shipped_date' <<<"$bb")" "bold-body: shipped_date parsed"
+assert_eq "Vertical spine" "$(jq -r '.rounds[0].steps[1].title' <<<"$bb")" "bold-body: unshipped step title clean despite body bold"
+assert_eq "false" "$(jq -r '.rounds[0].steps[1].shipped' <<<"$bb")" "bold-body: unshipped step not shipped"
+
 test_summary

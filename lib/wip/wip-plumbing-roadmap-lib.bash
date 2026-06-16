@@ -118,7 +118,7 @@ wip_roadmap_parse() {
             end' <<<"$doc")"
           current_lane="$lane_name"
           lane_saw_step=0
-        elif [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ (.+)\*\*(.*)$ ]]; then
+        elif [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ ([^*]+)\*\*(.*)$ ]]; then
           local sid="step-${BASH_REMATCH[1]}"
           local stitle="${BASH_REMATCH[3]}"
           local srest="${BASH_REMATCH[4]}"
