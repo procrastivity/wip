@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.6] - 2026-06-16
+
+### Added
+
+- Feat(orchestrate): add deterministic 'orchestrate prep' plumbing verb
+- Feat(orchestrate): add /wip:orchestrate plugin command
+
+### Documentation
+
+- Docs(orchestrate): ADR-0012 + spec — orchestrate entrypoint is a plugin command, not a CLI verb
+- Docs(roadmap): amend wip-start-command entry — go is role-aware, orchestrate shipped
+
+### Fixed
+
+- Fix(start): make /wip:start go hand-off role-aware, not silent-solo
+
 ## [0.0.5] - 2026-06-16
 
 ### Other
