@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.5] - 2026-06-16
+
+### Other
+
+- Build: add install.sh, uninstall.sh, and Makefile install targets
+
 ## [0.0.4] - 2026-06-16
 
 ### Internal
