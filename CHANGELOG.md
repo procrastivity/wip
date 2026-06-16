@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.2] - 2026-06-16
+
+### Added
+
+- Bundle: sixth intake kind — explode lead + children into lanes (ADR-0009 + ADR-0010)
+- Bundle: address PR review — slug propagation, isil hint, target-round mismatch
+
+### Other
+
+- Plugin: move commands/ + agents/ to the plugin root so they register
+
 ## [0.0.1] - 2026-06-16
 
 ### Added
