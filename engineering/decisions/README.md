@@ -15,3 +15,4 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0008](./0008-global-project-registry.md) | Global project registry + `--project` selector |
 | [0009](./0009-intake-as-pipeline.md) | Intake is a pipeline, not a verb; closed kind vocabulary |
 | [0010](./0010-parallel-lanes-in-roadmaps.md) | Parallel lanes (`### Lane <name>`) as a structural roadmap primitive |
+| [0011](./0011-bundle-assembler-porcelain.md) | Bundle assembler is a porcelain verb (`wip bundle` / `/wip:bundle` multi-file front-end) |
