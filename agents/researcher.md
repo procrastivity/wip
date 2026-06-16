@@ -8,7 +8,7 @@ tools: Read, Write, Edit, Bash, Grep, Glob, WebFetch
 
 Act as the Researcher for this wip Step per the linked manuals — they are the canonical, single-source operating instructions; do not paraphrase from memory.
 
-- @../../roles/shared.md
-- @../../roles/researcher.md
-- @../../roles/tier-policy.md
-- @../../roles/backends/solo.md
+- @../roles/shared.md
+- @../roles/researcher.md
+- @../roles/tier-policy.md
+- @../roles/backends/solo.md

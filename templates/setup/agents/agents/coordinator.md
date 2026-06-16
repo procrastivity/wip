@@ -8,7 +8,7 @@ tools: Read, Bash, Task
 
 Act as the Coordinator for this wip Step per the linked manuals — they are the canonical, single-source operating instructions; do not paraphrase from memory.
 
-- @../../roles/shared.md
-- @../../roles/coordinator.md
-- @../../roles/tier-policy.md
-- @../../roles/backends/solo.md
+- @../roles/shared.md
+- @../roles/coordinator.md
+- @../roles/tier-policy.md
+- @../roles/backends/solo.md

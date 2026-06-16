@@ -27,7 +27,7 @@ assert_cmp templates/setup/hygiene/.pre-commit-config.yaml .pre-commit-config.ya
 assert_eq "0" "$(grep -rl 'bin/wip-plumbing' templates/setup/agents/ 2>/dev/null | wc -l | tr -d ' ')" \
   "no bin/wip-plumbing references in agents/ template"
 assert_grep 'wip-plumbing' \
-  "templates/setup/agents/.claude-plugin/commands/next.md" \
+  "templates/setup/agents/commands/next.md" \
   "agents/ template references wip-plumbing"
 
 # --- 3. Missing manifest → exit 3 missing-manifest. ----------------------------

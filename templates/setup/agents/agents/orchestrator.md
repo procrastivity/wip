@@ -8,7 +8,7 @@ tools: Read, Bash, Task
 
 Act as the Orchestrator for this wip initiative per the linked manuals — they are the canonical, single-source operating instructions; do not paraphrase from memory.
 
-- @../../roles/shared.md
-- @../../roles/orchestrator.md
-- @../../roles/tier-policy.md
-- @../../roles/backends/solo.md
+- @../roles/shared.md
+- @../roles/orchestrator.md
+- @../roles/tier-policy.md
+- @../roles/backends/solo.md

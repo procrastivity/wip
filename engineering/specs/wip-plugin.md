@@ -38,25 +38,31 @@ Non-goals for v1, all deferred to a later step:
 - `/wip:project list/register/forget` — operational, not in-session.
 - Skills (`skills/<name>/SKILL.md`) — model-auto-invoked surfaces. v1
   ships only user-invoked commands.
-- Agents (`.claude-plugin/agents/`) — reserved for orchestration Roles
+- Agents (`agents/`) — reserved for orchestration Roles
   per ADR-0007; lands in step-12.
 - A marketplace package — defer until distribution matters.
 
 ## 2. Plugin layout
 
-Repository-rooted under `.claude-plugin/`, following the convention in
-the official Anthropic example plugin:
+The plugin root is the repository root. Per the Claude Code plugin
+convention, `.claude-plugin/` holds **only** the manifest (plus a plugin
+overview README); every other directory — `commands/`, `agents/` — must
+live at the plugin root or Claude Code will not discover it:
 
 ```
 .claude-plugin/
   plugin.json               # name, description, version, author
-  commands/
-    next.md                 # /wip:next
-    status.md               # /wip:status
-    intake.md               # /wip:intake
-  agents/
-    README.md               # stub; role files land step-12
   README.md                 # plugin overview
+commands/
+  next.md                   # /wip:next
+  status.md                 # /wip:status
+  intake.md                 # /wip:intake
+agents/
+  README.md                 # role bindings index
+  orchestrator.md           # wip-orchestrator   (role files, step-12)
+  coordinator.md            # wip-coordinator
+  researcher.md             # wip-researcher
+  builder.md                # wip-builder
 ```
 
 `plugin.json` v1:
@@ -159,7 +165,7 @@ these files at runtime via a `WIP_TEMPLATES_DIR`-honoring resolver. The
 public API (`wip_shaper_system_prompt <kind>`) is unchanged from
 step-10.5.
 
-**Plugin access:** `.claude-plugin/commands/intake.md` instructs Claude
+**Plugin access:** `commands/intake.md` instructs Claude
 to fetch them via the new plumbing verb (§5):
 
 ```

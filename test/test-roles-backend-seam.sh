@@ -65,17 +65,17 @@ assert_not_grep '🚧 Not yet authored' "roles/README.md" "roles/README.md statu
 # --- Plugin agent files --------------------------------------------------
 PLUGIN_AGENTS=(orchestrator coordinator researcher builder)
 for a in "${PLUGIN_AGENTS[@]}"; do
-  path=".claude-plugin/agents/$a.md"
+  path="agents/$a.md"
   assert_file "$path" "$path present"
   # Front-matter required fields.
   assert_grep '^name: wip-' "$path" "$a has wip-prefixed name"
   assert_grep '^description:' "$path" "$a has description"
   # Each plugin agent references shared, its own role, tier-policy, and
   # the active backend binding via @-file pointers.
-  assert_grep '@../../roles/shared.md' "$path" "$a references roles/shared.md"
-  assert_grep "@../../roles/$a.md" "$path" "$a references roles/$a.md"
-  assert_grep '@../../roles/tier-policy.md' "$path" "$a references roles/tier-policy.md"
-  assert_grep '@../../roles/backends/solo.md' "$path" "$a references roles/backends/solo.md"
+  assert_grep '@../roles/shared.md' "$path" "$a references roles/shared.md"
+  assert_grep "@../roles/$a.md" "$path" "$a references roles/$a.md"
+  assert_grep '@../roles/tier-policy.md' "$path" "$a references roles/tier-policy.md"
+  assert_grep '@../roles/backends/solo.md' "$path" "$a references roles/backends/solo.md"
   # Plugin agent body must NOT name Solo MCP tools — same forbidden set
   # as the behavior files (plugin agents are thin pointers).
   bad="$(grep -En -- "$FORBIDDEN" "$path" 2>/dev/null | grep -v '^[0-9]*:.*roles/backends/solo.md' || true)"
@@ -108,7 +108,7 @@ done
 
 # Plugin agents README mentions every agent.
 for a in "${PLUGIN_AGENTS[@]}"; do
-  assert_grep "wip-$a" ".claude-plugin/agents/README.md" "agents/README mentions wip-$a"
+  assert_grep "wip-$a" "agents/README.md" "agents/README mentions wip-$a"
 done
 
 test_summary

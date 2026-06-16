@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# test-plugin-manifest — smoke-check the .claude-plugin/ layout (step-11).
+# test-plugin-manifest — smoke-check the plugin layout (step-11): the
+# .claude-plugin/ manifest plus root-level commands/ and agents/ dirs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 _WIP_TEST_NAME="plugin-manifest"
@@ -32,7 +33,7 @@ esac
 # Commands: next, status, intake. Each has a description in front-matter,
 # each references at least one `wip-plumbing` shell-out.
 for cmd in next status intake; do
-  path=".claude-plugin/commands/$cmd.md"
+  path="commands/$cmd.md"
   assert_file "$path" "commands/$cmd.md present"
   if head -10 "$path" | grep -qE '^description:'; then
     _WIP_PASS=$((_WIP_PASS + 1))
@@ -55,28 +56,28 @@ done
 # catches accidental detachment of the plugin from the canonical prompts.
 assert_grep \
   'wip-plumbing template show intake/preamble' \
-  .claude-plugin/commands/intake.md \
+  commands/intake.md \
   "intake.md fetches preamble via template verb"
 assert_grep \
   'wip-plumbing template show intake/<kind>' \
-  .claude-plugin/commands/intake.md \
+  commands/intake.md \
   "intake.md fetches per-kind rules via template verb"
 
 # /wip:intake must instruct against the ---ASK--- fence (Claude asks inline).
 # shellcheck disable=SC2016  # literal text we're grepping for, no expansion intended
 assert_grep \
   'do NOT emit `---ASK---`' \
-  .claude-plugin/commands/intake.md \
+  commands/intake.md \
   "intake.md forbids ASK fence"
 
 # agents/ contains the four wip role agent files + README (step-12).
 # Detailed agent-file contract (front-matter, @-file pointers,
 # backend-agnostic invariant) is pinned in test-roles-backend-seam.sh.
-assert_file ".claude-plugin/agents/README.md" "agents/README.md present"
+assert_file "agents/README.md" "agents/README.md present"
 for a in orchestrator coordinator researcher builder; do
-  assert_file ".claude-plugin/agents/$a.md" "agents/$a.md present"
+  assert_file "agents/$a.md" "agents/$a.md present"
 done
-extras="$(find .claude-plugin/agents -mindepth 1 -not -name README.md -not -name 'orchestrator.md' -not -name 'coordinator.md' -not -name 'researcher.md' -not -name 'builder.md' 2>/dev/null | wc -l | tr -d ' ')"
+extras="$(find agents -mindepth 1 -not -name README.md -not -name 'orchestrator.md' -not -name 'coordinator.md' -not -name 'researcher.md' -not -name 'builder.md' 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "0" "$extras" "agents/ contains only README + the four role files"
 
 # README mentions all three commands (catches a missed-command-in-docs).

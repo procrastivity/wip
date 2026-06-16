@@ -7,7 +7,7 @@
 #
 # Used by:
 #   - lib/wip/wip-intake-shaper-lib.bash (CLI shaper, indirectly via disk read)
-#   - .claude-plugin/commands/intake.md  (the /wip:intake skill body)
+#   - commands/intake.md  (the /wip:intake skill body)
 #
 # Templates dir resolution lives in `wip_templates_dir` (lib). $WIP_TEMPLATES_DIR
 # overrides; otherwise resolves to templates/ next to lib/wip/.

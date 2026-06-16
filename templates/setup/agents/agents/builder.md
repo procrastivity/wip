@@ -8,7 +8,7 @@ tools: Read, Write, Edit, Bash
 
 Act as the assigned Builder for this wip Step per the linked manuals — they are the canonical, single-source operating instructions; do not paraphrase from memory.
 
-- @../../roles/shared.md
-- @../../roles/builder.md
-- @../../roles/tier-policy.md
-- @../../roles/backends/solo.md
+- @../roles/shared.md
+- @../roles/builder.md
+- @../roles/tier-policy.md
+- @../roles/backends/solo.md

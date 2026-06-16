@@ -6,7 +6,7 @@ allowed-tools: [Bash, Read, Write, Edit]
 
 # /wip:intake — round-trip an inbound plan file into the canonical kind
 
-Drives the intake pipeline ([ADR-0009](../../engineering/decisions/0009-intake-as-pipeline.md))
+Drives the intake pipeline ([ADR-0009](../engineering/decisions/0009-intake-as-pipeline.md))
 end-to-end, with **Claude as the shaper** (no `wip ask` / provider call — you
 are the LLM). The state machine is the same as the CLI porcelain's
 `wip intake`; the only differences are:
@@ -39,10 +39,7 @@ authoritative until `apply` returns or the flow errors out.
    - Else if classify returned `"confidence": "high"`, use that kind
      silently.
    - Else surface classify's guess + signals to the user in one line and
-     ask: "Use kind `<guess>`, or override (brief/amendment/workplan-seed/spec/handoff/bundle)?"
-   - A roadmap-shaped lead doc (parallel tracks + a foundational prereq + a
-     recommended sequence, no `target:`) classifies as `bundle` at low
-     confidence — confirm before exploding.
+     ask: "Use kind `<guess>`, or override (brief/amendment/workplan-seed/spec/handoff)?"
 
 5. **Fetch shaper prompts.** Run, in order:
    - `wip-plumbing template show intake/preamble`
@@ -84,32 +81,6 @@ authoritative until `apply` returns or the flow errors out.
      shaped front-matter.
    - For `spec`/`handoff`: pass through (apply will exit 3/4
      respectively; do not try to coerce).
-   - For `bundle`: do NOT route or apply here — bundle is non-terminal
-     (`apply --kind bundle` exits 4). Go to step 8b instead.
-
-8b. **Explode (bundle only).** A bundle's shaped artifact is a LEAD doc plus
-   a `children:` manifest. Recurse — invoke THIS pipeline (steps 5-10) once
-   for the lead and once per child:
-   - **Lead.** Materialize a lead artifact = the bundle body with the
-     bundle-only front-matter keys (`wip-kind`, `lead-as`, `children`,
-     `cross-cuts`) stripped, then (for `lead-as: amendment`) append one
-     empty `### Lane <name>` per distinct `children[].lane` and a
-     `## Cross-cuts (from bundle)` section from `cross-cuts.shared-seams`.
-     Apply it as its `lead-as` kind (`amendment` → `roadmap amend`,
-     `brief` → `init`). Note the round number `N` from the lead's
-     `## Round N` heading.
-   - **Children.** Topo-sort by `depends-on`. For each child, seed an
-     amendment whose directive is `insert-step-in-lane: <lane>` +
-     `target-round: N` (lane-fillers) or the child's explicit directive
-     hint, prepend it to the child doc's body, then run steps 5-10 on that
-     seed with the forced `--kind`. A child with neither a `lane` nor a
-     directive is already folded into the lead body — skip it. Never let a
-     child be `bundle` (nested bundles are refused).
-   - **Aggregate.** Report one envelope: `{ok, kind: "bundle", target,
-     lead: {...}, children: [...], summary}`. `ok` is true iff the lead and
-     every applied child succeeded. Per-child apply is independent
-     (non-atomic): a failed child is reported, not rolled back; re-running
-     is safe via the amendment hash markers.
 
 9. **Apply (plumbing).** Run
    `wip-plumbing intake apply --kind <k> [--target <t>] <tempfile>`.
@@ -118,8 +89,7 @@ authoritative until `apply` returns or the flow errors out.
    insert-after step-06". On exit-4 from apply, report the envelope
    verbatim.
 
-10. **Cleanup.** Remove the tempfile (`rm -- <tempfile>`) on success. For a
-    bundle, remove the lead + per-child seed tempfiles too.
+10. **Cleanup.** Remove the tempfile (`rm -- <tempfile>`) on success.
 
 ## Notes
 
