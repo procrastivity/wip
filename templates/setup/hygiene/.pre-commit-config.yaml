@@ -1,7 +1,10 @@
-# .pre-commit-config.yaml — gates that mirror `make check`.
-# All wip-specific hooks are LOCAL (no upstream `repo:` deps) so the pre-commit
-# graph matches what `make check` already runs. Stock hygiene hooks come from
-# pre-commit-hooks and are zero-config.
+# .pre-commit-config.yaml — fast per-commit gates.
+# All wip-specific hooks are LOCAL (no upstream `repo:` deps). These mirror the
+# *fast* half of `make check` (lint) plus hygiene + glossary drift. The full
+# test suite is intentionally NOT run per-commit — it's slow, and "run tests
+# before you commit" is a norm, not a per-commit enforcement. Run `make test`
+# (or `make check`) before pushing; `contrib/release` gates on `make check`.
+# Stock hygiene hooks come from pre-commit-hooks and are zero-config.
 #
 # Bootstrap once: `make hooks` (runs `pre-commit install`).
 # Run on demand:  `pre-commit run --all-files`.
@@ -28,13 +31,6 @@ repos:
         entry: shellcheck -x
         language: system
         files: '^(bin/wip-plumbing|lib/wip/.*\.bash|test/.*\.sh)$'
-
-      - id: wip-tests
-        name: make test
-        entry: make test
-        language: system
-        pass_filenames: false
-        always_run: true
 
       - id: wip-glossary
         name: wip-plumbing glossary check
