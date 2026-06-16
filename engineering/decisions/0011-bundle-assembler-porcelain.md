@@ -1,6 +1,6 @@
 # 0011 — Bundle assembler is a porcelain verb
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-06-16
 - Source: planning session (2026-06-16); ADR-0001, ADR-0009, ADR-0010; `.wip/scratch/kickoff-intake-bundle-kind.md` §"Hard exclusions"
 
