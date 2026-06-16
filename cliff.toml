@@ -1,0 +1,51 @@
+# cliff.toml — git-cliff config for wip's CHANGELOG.md.
+#
+# wip's history is area-prefixed (`step-15:`, `bundle:`, `lanes:`), NOT
+# conventional commits, so conventional parsing is off and the parsers below map
+# wip's prefixes onto Keep-a-Changelog groups. The trailing catch-all guarantees
+# no commit is silently dropped. Regenerated in full on each `contrib/release`.
+
+[changelog]
+header = "# Changelog\n\nAll notable changes to this project are documented here.\n"
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | upper_first | trim }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+split_commits = false
+commit_parsers = [
+  { message = "^release", skip = true },
+  { message = "^Merge ", skip = true },
+  { message = "^feat", group = "Added" },
+  { message = "^step-", group = "Added" },
+  { message = "^bundle", group = "Added" },
+  { message = "^lanes", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^followup", group = "Changed" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^perf", group = "Changed" },
+  { message = "^docs?", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^roadmap", group = "Internal" },
+  { message = "^chore", group = "Internal" },
+  { message = ".*", group = "Other" },
+]
+filter_commits = false
+tag_pattern = "v[0-9]*"
+ignore_tags = ""
+topo_order = false
+sort_commits = "oldest"

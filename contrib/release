@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# contrib/release — bump the plugin version, regenerate CHANGELOG.md via
+# git-cliff, run gates, commit, push, then create and push the annotated
+# v{version} tag. Marketplaces pointing at this repo pick up the new tag;
+# the trailing best-effort dispatch nudges procrastivity/claude-plugins to
+# refresh its metadata immediately.
+set -Eeuo pipefail
+
+DIR=$(cd "$(dirname "${0}")" && pwd)
+PROJECT_ROOT=$(cd "$DIR/.." && pwd)
+cd "$PROJECT_ROOT"
+
+MANIFEST=".claude-plugin/plugin.json"
+MARKETPLACE_REPO="procrastivity/claude-plugins"
+
+usage() {
+  echo "Usage: contrib/release --major | --minor | --patch"
+  echo
+  echo "Bumps the version in ${MANIFEST}, regenerates CHANGELOG.md via"
+  echo "git-cliff, runs 'make check', commits 'release: vX.Y.Z', pushes the"
+  echo "branch, then creates and pushes the annotated 'vX.Y.Z' tag."
+  exit 1
+}
+
+# --- Parse arguments ---
+
+case "${1:-}" in
+  --major) BUMP="major" ;;
+  --minor) BUMP="minor" ;;
+  --patch) BUMP="patch" ;;
+  *) usage ;;
+esac
+
+# --- Preconditions ---
+
+for tool in jq git git-cliff make; do
+  command -v "$tool" >/dev/null || {
+    echo "error: '$tool' not found on PATH (are you in the dev shell? 'direnv allow' / 'nix develop')" >&2
+    exit 1
+  }
+done
+
+# Refuse to release from a dirty tree — the release commit must contain only
+# the version bump + changelog.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "error: working tree has uncommitted changes; commit or stash them first." >&2
+  git status --short
+  exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+CURRENT_VERSION=$(jq -r .version "$MANIFEST")
+
+# --- Bump version (pure bash semver, no Node) ---
+
+IFS='.' read -r MAJOR MINOR PATCH <<<"$CURRENT_VERSION"
+if ! [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]]; then
+  echo "error: ${MANIFEST} version '$CURRENT_VERSION' is not a clean X.Y.Z semver." >&2
+  exit 1
+fi
+case "$BUMP" in
+  major)
+    MAJOR=$((MAJOR + 1))
+    MINOR=0
+    PATCH=0
+    ;;
+  minor)
+    MINOR=$((MINOR + 1))
+    PATCH=0
+    ;;
+  patch) PATCH=$((PATCH + 1)) ;;
+esac
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+TAG="v${NEW_VERSION}"
+
+echo "Releasing ${CURRENT_VERSION} -> ${NEW_VERSION} (tag ${TAG}) on branch ${BRANCH}"
+
+# Write the new version back (temp + mv so a jq error can't truncate the file).
+tmp=$(mktemp)
+jq --arg v "$NEW_VERSION" '.version = $v' "$MANIFEST" >"$tmp" && mv "$tmp" "$MANIFEST"
+
+# --- Regenerate changelog ---
+#
+# Full regeneration (not --prepend) keeps the file deterministic: past versions
+# are sectioned from their tags, and --tag treats the not-yet-created tag's
+# commits as belonging to this release.
+echo "Updating CHANGELOG.md..."
+git-cliff --tag "$TAG" -o CHANGELOG.md
+
+# --- Gate BEFORE committing — a broken release commit is worse than none ---
+
+echo "Running gates (make check)..."
+make check
+
+# --- Commit the bump (before tagging) ---
+#
+# 'release: vX.Y.Z' matches the cliff skip rule so the release commit itself
+# stays out of the changelog.
+git add "$MANIFEST" CHANGELOG.md
+git commit -m "release: v${NEW_VERSION}"
+
+# --- Push branch, then create and push the annotated tag ---
+#
+# Push the branch first so the tag references a commit already on the remote.
+echo "Pushing ${BRANCH}..."
+git push
+
+echo "Tagging ${TAG}..."
+git tag -a "$TAG" -m "$TAG"
+git push origin "$TAG"
+
+# --- Notify the marketplace repo ---
+#
+# Best-effort: ping procrastivity/claude-plugins so it regenerates its README /
+# marketplace metadata against this plugin's new version. Uses the releaser's
+# local 'gh' auth (no stored secrets). The tag is already pushed at this point,
+# so a failure here must not fail the release — warn and continue.
+if ! command -v gh >/dev/null; then
+  echo "note: 'gh' not installed; skipping ${MARKETPLACE_REPO} notification (it will catch up on its next scheduled run)." >&2
+elif ! gh auth status >/dev/null 2>&1; then
+  echo "note: 'gh' not authenticated; skipping ${MARKETPLACE_REPO} notification (it will catch up on its next scheduled run)." >&2
+else
+  echo "Notifying ${MARKETPLACE_REPO} of the release..."
+  gh api "repos/${MARKETPLACE_REPO}/dispatches" -f event_type=plugin-released ||
+    echo "warning: could not notify ${MARKETPLACE_REPO} (it will catch up on its next scheduled run)." >&2
+fi
+
+cat <<EOF
+
+Pushed ${TAG}. Marketplaces pointing at this repo will pick up the new tag.
+
+Verify:
+  git show ${TAG}
+  jq -r .version ${MANIFEST}
+EOF

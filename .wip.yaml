@@ -51,7 +51,7 @@ features:
     root: docs
     # MUST stay distinct from any lds root (no two features share a root).
   changelog:
-    enabled: false              # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
+    enabled: true               # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
   direnv:
     enabled: true               # sentinel: .envrc (pinned nix-direnv shim)
   prtend:

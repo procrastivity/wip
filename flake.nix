@@ -18,6 +18,7 @@
             coreutils
             curl
             git
+            git-cliff
             gnumake
             jq
             yq-go
