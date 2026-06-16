@@ -149,6 +149,75 @@ assert_eq "handoff" "$(jq -r '.kind' <<<"$out")" "unknown target -> handoff"
 assert_eq "low" "$(jq -r '.confidence' <<<"$out")" "unknown target low"
 assert_eq "1" "$(jq '.signals | map(select(. == "unknown-target")) | length' <<<"$out")" "unknown-target signal"
 
+# 9b. roadmap-shaped lead doc -> bundle low (intake-kinds.md §4).
+cat >"$tmp/roadmapish.md" <<'MD'
+# Post phase-0 roadmap
+
+## Tracks
+
+- Track A — spine
+- Track D — SPA
+
+## Recommended sequence
+
+F1 first, then A and D in parallel.
+MD
+out="$(run_classify "$tmp/roadmapish.md")"
+assert_eq "bundle" "$(jq -r '.kind' <<<"$out")" "roadmap-shaped -> bundle"
+assert_eq "low" "$(jq -r '.confidence' <<<"$out")" "bundle low"
+assert_eq "1" "$(jq '.signals | map(select(. == "roadmap-shaped-handoff")) | length' <<<"$out")" "roadmap-shaped signal"
+
+# 9b-ii. per-track headings (## Track A / ## Track D) + foundational + sequence,
+# the real post-phase-0 roadmap shape, also trip the bundle heuristic.
+cat >"$tmp/pertrack.md" <<'MD'
+# Post phase-0 roadmap
+
+## Foundational items
+
+- F1 — model-profile taxonomy.
+
+## Track A — the vertical spine
+
+Spine work.
+
+## Track D — daily-driver usability
+
+SPA work.
+
+## Recommended sequence
+
+F1, then A and D in parallel.
+MD
+out="$(run_classify "$tmp/pertrack.md")"
+assert_eq "bundle" "$(jq -r '.kind' <<<"$out")" "per-track headings -> bundle"
+assert_eq "low" "$(jq -r '.confidence' <<<"$out")" "per-track bundle low"
+
+# 9c. wip-kind: bundle front-matter -> bundle high.
+cat >"$tmp/bundle-fm.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: amendment
+---
+# Lead
+
+## Tracks
+- A
+MD
+out="$(run_classify "$tmp/bundle-fm.md")"
+assert_eq "bundle" "$(jq -r '.kind' <<<"$out")" "wip-kind bundle -> bundle"
+assert_eq "high" "$(jq -r '.confidence' <<<"$out")" "wip-kind bundle high"
+
+# 9d. tracks WITHOUT a sequence section does NOT trip the bundle heuristic.
+cat >"$tmp/tracks-only.md" <<'MD'
+# Just tracks
+
+## Tracks
+- A
+- D
+MD
+out="$(run_classify "$tmp/tracks-only.md")"
+assert_eq "handoff" "$(jq -r '.kind' <<<"$out")" "tracks-only stays handoff (no sequence)"
+
 # 10. no manifest reachable -> signal no-manifest.
 mkdir -p "$tmp/empty"
 out="$(WIP_ROOT="$tmp/empty" bin/wip-plumbing intake classify "$tmp/d.md" 2>/dev/null || true)"

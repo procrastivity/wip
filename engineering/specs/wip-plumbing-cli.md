@@ -278,16 +278,23 @@ artifact from stdin or `--from <file>`. Idempotent: re-applying the same artifac
 no-op, detected via a hash-of-payload comment stamped at the insertion site.
 
 - **Flags:** exactly one of `--insert-after <step-id>`, `--replace <step-id>`,
-  `--append-round <title>`, `--append-lane <name>`. `--append-lane` also requires
-  `--target-round <N>` (or `target-round: <N>` in the artifact front-matter). If `--from`
-  is given and the artifact carries a directive, the CLI flag must match (or be omitted)
-  — mismatch is exit 2.
+  `--append-round <title>`, `--append-lane <name>`, `--insert-step-in-lane <name>`.
+  `--append-lane` and `--insert-step-in-lane` also require `--target-round <N>` (or
+  `target-round: <N>` in the artifact front-matter). If `--from` is given and the artifact
+  carries a directive, the CLI flag must match (or be omitted) — mismatch is exit 2.
 - **Lane awareness (ADR-0010):** `insert-after` / `replace` preserve the host step's lane
   because the step is rendered in place. `append-round` bodies may include `### Lane`
   subheadings. `append-lane` appends a new `### Lane <name>` block (the artifact body's
-  `### step-NN` entries) at the end of round N. The amend refuses (**exit 4**
-  `lane-malformed`) when the target roadmap already carries a non-empty `lane_errors[]`,
-  so a broken lane structure cannot be amended on top of.
+  `### step-NN` entries) at the end of round N; it refuses (**exit 4** `duplicate-lane`)
+  when that lane name already exists in round N. `insert-step-in-lane` appends a single
+  step bullet (one `### step-NN` body, like `insert-after`) to the end of an
+  **already-declared** lane in round N — including an *empty* lane, which `append-lane`
+  cannot target. It refuses with **exit 4** `round-not-in-roadmap` (round absent) or
+  `lane-not-in-round` (lane absent from the round). This is the directive ADR-0010 §6
+  deferred and the `bundle` kind promoted: a bundle lead declares empty lanes via
+  `append-round`, then each child fills its lane via `insert-step-in-lane`. The amend
+  refuses (**exit 4** `lane-malformed`) when the target roadmap already carries a non-empty
+  `lane_errors[]`, so a broken lane structure cannot be amended on top of.
 - **Reads:** the artifact + the target `roadmap.md`.
 - **Writes:** the target `roadmap.md` (or just the ledger with `--dry-run`).
 - **Exit:** 0 on amend or detected-duplicate no-op; **4** if target step / round doesn't
@@ -297,7 +304,8 @@ no-op, detected via a hash-of-payload comment stamped at the insertion site.
 ```json
 { "ok": true, "slug": "distillation", "directive": "insert-after step-06", "wrote": [".wip/initiatives/distillation/roadmap.md"], "idempotent_noop": false }
 ```
-For `append-lane` the `directive` reads e.g. `"append-lane A (round 4)"`.
+For `append-lane` / `insert-step-in-lane` the `directive` reads e.g. `"append-lane A
+(round 4)"` / `"insert-step-in-lane A (round 4)"`.
 
 ### `wip-plumbing workplan init <slug> <step-id> [--from <file>] [--force]`
 Scaffold `.wip/initiatives/<slug>/workplans/<step-id>-<derived-slug>.md` from

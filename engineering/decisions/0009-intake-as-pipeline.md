@@ -51,6 +51,13 @@ and is allowed to ask the user. This preserves ADR-0001's seam.
 - `spec` — an LDS-shaped feature spec; consumed by the LDS seam (ADR-0006).
 - `handoff` — loose narrative; always coerced to `brief` or `amendment` during shaping,
   never applied directly.
+- `bundle` — a roadmap-shaped *lead* doc plus a manifest of N concrete child handoffs;
+  consumed by neither layer directly. Like `handoff` it is **non-terminal** at plumbing
+  (`apply --kind bundle` exits 4); the porcelain *explodes* it into one lead intake plus
+  per-child intake calls that reuse the single-file pipeline. The lead routes to a `brief`
+  or `amendment` that persists cross-cuts as on-disk content and uses the first-class
+  parallel-lanes primitive ([ADR-0010](0010-parallel-lanes-in-roadmaps.md)) to express
+  `A ‖ D` structurally. `bundle` depends on ADR-0010 having shipped.
 
 Each kind has a minimum shape the plumbing validator enforces. The canonical reference
 for kinds, shapes, and classification heuristics is
@@ -66,7 +73,8 @@ for kinds, shapes, and classification heuristics is
   step-07 and step-08.
 - New artifact kinds can be added later without re-litigating the pipeline shape; the
   vocabulary is closed in v1 to keep the validator deterministic, but the spec is where
-  additions land.
+  additions land. `bundle` (added once ADR-0010 shipped lanes) is the first such addition:
+  it lands in `intake-kinds.md` with no new ADR, exactly as this consequence anticipates.
 - ADR-0006 (wip owns seams, not tools) is preserved: `spec` validation delegates to LDS's
   own validator when available; intake itself never re-implements an LDS check.
 - An LLM-driven shaper is now an explicit, named layer — not a hidden implication of

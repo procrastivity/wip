@@ -33,8 +33,11 @@ insert-after: step-06
   (overrides heuristics).
 - `target` — initiative slug (for `amendment`, `workplan-seed`) or `<slug>/<step-id>`
   (for `workplan-seed`).
-- `insert-after` / `replace` / `append-round` / `append-lane` — amendment-only directives
-  (see `amendment` shape rules). `append-lane` additionally requires `target-round: <N>`.
+- `insert-after` / `replace` / `append-round` / `append-lane` / `insert-step-in-lane` —
+  amendment-only directives (see `amendment` shape rules). `append-lane` and
+  `insert-step-in-lane` additionally require `target-round: <N>`.
+- `bundle`-only keys (`wip-kind: bundle`, `lead-as`, `children`, `cross-cuts`) — see the
+  `bundle` row in §2 and the directives subsection in §3.
 
 Key name `wip-kind` (namespaced) was chosen over the bare `kind:` so the file can also
 be consumed by other tools that may use `kind:` for their own purposes.
@@ -44,18 +47,23 @@ be consumed by other tools that may use `kind:` for their own purposes.
 | Kind | Required shape (validator rules) | Destination |
 |------|----------------------------------|-------------|
 | `brief` | Title heading (`# <Title>`), one of `## Goal` or `## Summary`, no `target:` referencing an existing initiative slug. | `init <slug>` |
-| `amendment` | `target: <initiative-slug>` in front-matter or first section; **one** of `insert-after: step-NN`, `replace: step-NN`, `append-round: <title>`, or `append-lane: <name>` (the last also needs `target-round: <N>`). Body sections per amendment directive (see §3). | `roadmap amend <slug>` |
+| `amendment` | `target: <initiative-slug>` in front-matter or first section; **one** of `insert-after: step-NN`, `replace: step-NN`, `append-round: <title>`, `append-lane: <name>`, or `insert-step-in-lane: <name>` (the last two also need `target-round: <N>`). Body sections per amendment directive (see §3). | `roadmap amend <slug>` |
 | `workplan-seed` | `target: <slug>/<step-id>` in front-matter; narrative body (no required section set). Step **must** exist in the named initiative's roadmap. | `workplan init <slug> <step-id>` |
 | `spec` | LDS-template conformance — heading set per `docs/specs/_template.md` if present in the consuming repo. Validator delegates to LDS when available (ADR-0006); falls back to a minimal heading check (`## Summary`, `## User stories` or `## Requirements`). | LDS seam |
+| `bundle` | Front-matter `wip-kind: bundle`, `lead-as: {brief\|amendment}`, and a non-empty `children:` list of readable child paths (relative to the lead). Lead body must satisfy the `lead-as` kind's rules (validated against a bundle-key-stripped copy). See §3. | (porcelain explode) |
 | `handoff` | Parseable markdown + a title. Always coerces to `brief` or `amendment` during shaping; **never** applied as `handoff`. | (transient) |
 
-`handoff` is the only kind without a terminal `apply` path. Its presence in the
-vocabulary is deliberate: classify needs a label for "I can tell this is intended for
+`handoff` and `bundle` are the kinds without a terminal `apply` path. `handoff`'s
+presence is deliberate: classify needs a label for "I can tell this is intended for
 wip, but I cannot yet tell if it is a new thing or an edit to an existing thing."
+`bundle` is non-terminal for a different reason: it is *structurally* a lead plus N
+children, so the porcelain explodes it into one lead intake plus per-child intake calls
+(each reusing the single-file pipeline) rather than applying it atomically. `apply --kind
+bundle` exits 4 `not-terminal`, mirroring `handoff`.
 
 ## 3. Amendment directives
 
-Exactly one directive must be present (the validator's count ranges over all four). Each
+Exactly one directive must be present (the validator's count ranges over all five). Each
 pins the deterministic edit `roadmap amend` performs.
 
 - **`insert-after: step-NN`** — insert a new step immediately after `step-NN`. Body
@@ -74,11 +82,53 @@ pins the deterministic edit `roadmap amend` performs.
 - **`append-lane: <name>`** with **`target-round: <N>`** — add a new lane to an existing
   round (ADR-0010). Body requires one or more `### step-NN — <title>` entries and **no**
   `## Round` heading. The lane block is appended at the end of round N, idempotent via the
-  same hash-of-payload marker.
+  same hash-of-payload marker. Refuses if the lane name already exists in round N
+  (`duplicate-lane`).
+- **`insert-step-in-lane: <name>`** with **`target-round: <N>`** — append a single step to
+  the end of an **already-declared** lane in round N (ADR-0010 §6, promoted when the
+  `bundle` kind shipped). Body requires exactly one `### step-NN — <title>` heading + body
+  (same shape as `insert-after`) and **no** `## Round` heading. Unlike `append-lane`, the
+  target lane must already exist — including an **empty** lane (a `### Lane <name>` heading
+  with no steps yet), which is precisely a `bundle` lead's emit pattern: the lead declares
+  empty lanes via `append-round`, and each child fills its lane via `insert-step-in-lane`.
+  Idempotent via the same hash-of-payload marker. Refuses if the lane is absent from round
+  N (`lane-not-in-round`) or the round is absent (`round-not-in-roadmap`).
 
 Re-applying the same amendment artifact to the same roadmap is a **no-op**: `roadmap
 amend` stamps a hash-of-payload comment into the roadmap at the insertion site and
 detects duplicates on re-apply.
+
+## 3a. Bundle directives
+
+A `bundle` is a *lead* doc plus a manifest of children. Its front-matter, not a body
+section, carries the structure:
+
+- **`wip-kind: bundle`** — authoritative; required (a bundle is never inferred to
+  high confidence without it, only proposed at low confidence — see §4).
+- **`lead-as: {brief | amendment}`** — what kind the *lead* doc is shaped and applied as.
+  v1 restricts lead kinds to `brief` and `amendment`; `workplan-seed` / `spec` / `handoff`
+  leads are out of scope.
+- **`children:`** — a non-empty list. Each entry is a map:
+  - `path:` — **required**, relative to the lead doc; must resolve to a readable file. The
+    validator rejects a missing or unreadable child path. Globs are never present in a
+    *validated* bundle (the shaper resolves them to concrete paths first).
+  - optional hints consumed by the porcelain explode: `kind` (`brief`/`amendment`; never
+    `bundle` — nested bundles are refused), `target`, an amendment directive
+    (`insert-after` / `replace` / `append-round` / `append-lane` / `insert-step-in-lane`),
+    `id`, `lane`, `depends-on` (a child path or id; orders the explode), and
+    `shares-seam-with`.
+- **`cross-cuts:`** — optional. `shared-seams[]` records cross-track concerns;
+  `parallel-groups[]` records `[[A, D]]`-style parallelism the explode maps to lanes.
+
+The validator enforces only the *structural* minimum (`wip-kind: bundle`, a valid
+`lead-as`, a non-empty `children[]` with readable paths) plus the lead body satisfying its
+`lead-as` kind's rules (checked against a copy with the bundle-only keys stripped). The
+porcelain explode (ADR-0009 phase 2/4) owns everything else: materializing the lead
+tempfile (injecting a `## Cross-cuts (from bundle)` section and `### Lane <name>`
+subheadings from `parallel-groups`), topo-sorting children by `depends-on`, and applying
+the lead + each child through the single-file pipeline. Per-child apply is **independent
+and non-atomic**: partial failure is reported in the aggregate envelope, not rolled back;
+re-apply is safe via the existing amendment hash markers.
 
 ## 4. Classification heuristics
 
@@ -94,6 +144,7 @@ medium, low}`. Rules, applied in order; first match wins (later rules only contr
 | `target:` key matching an existing initiative slug, no amendment directive | `amendment` | medium (porcelain must pick directive) |
 | `### step-NN — ` heading in body + no `target:` | `amendment` (likely) or `handoff` | low |
 | `## User stories` or `## Requirements` heading | `spec` | medium |
+| Roadmap-shaped: a `## Track…`/`## Roadmap`/`## Children`/`## Foundational…` heading (a single `## Tracks` section or per-track `## Track A`/`## Track D` headings both count) **and** a `## Sequence`/`## Recommended sequence` heading, no `target:`, no amendment directive | `bundle` | low |
 | Title heading + `## Goal`/`## Summary`, no `target:` | `brief` | medium |
 | Parseable markdown, title present, none of the above | `handoff` | low |
 | Unparseable / no title | (invalid; classify exits 4) | — |
@@ -112,6 +163,19 @@ reports its guess and the signals that led there.
 - **Claude Desktop handoff** "here's where I left off on the auth rewrite" → classify:
   `handoff` (low); porcelain decides `brief` (new initiative) or `amendment` (existing
   `auth-rewrite` slug) and reshapes accordingly before re-validation.
+- **Roadmap-shaped lead doc** `handoff-post-phase0-roadmap.md` (a `## Tracks` section
+  naming Track A ‖ Track D plus a foundational F1, a `## Recommended sequence` section, no
+  `target:`) → classify: `bundle` (low); porcelain confirms (low confidence), then shapes
+  it into a bundle with `lead-as: amendment`, `target: typed-context`, three concrete
+  `children:` (F1 in the main lane, Track A → Lane A, Track D → Lane D),
+  `cross-cuts.shared-seams: [ChatRespondLoop prompt-assembly]`, and
+  `cross-cuts.parallel-groups: [[track-A, track-D]]`. Validate confirms the structure +
+  readable child paths + the lead body satisfies `amendment` rules. Explode (topo order
+  `[lead, F1, track-A, track-D]`): the lead `append-round`s a "Track expansion" round with
+  a `## Cross-cuts (from bundle)` section and empty `### Lane A` / `### Lane D`
+  subheadings; F1 `insert-after`s into the main lane; Track A / Track D each
+  `insert-step-in-lane` their lane. Envelope: `{ok, kind: bundle, lead, children[],
+  summary}`, `ok` iff the lead and every child applied.
 
 ## 6. Open questions
 

@@ -20,7 +20,7 @@ source test/helpers.sh
 # shellcheck source=lib/wip/wip-intake-shaper-lib.bash
 WIP_LIB="$PWD/lib/wip" source lib/wip/wip-intake-shaper-lib.bash
 
-KINDS=(preamble brief amendment workplan-seed spec handoff)
+KINDS=(preamble brief amendment workplan-seed spec handoff bundle)
 
 # (a) verb-show byte-equiv against the source files.
 for k in "${KINDS[@]}"; do
@@ -31,7 +31,7 @@ done
 
 # (b) lib's system-prompt contains both halves verbatim.
 preamble_bytes="$(cat templates/prompts/intake/preamble.md)"
-for k in brief amendment workplan-seed spec handoff; do
+for k in brief amendment workplan-seed spec handoff bundle; do
   prompt="$(WIP_LIB="$PWD/lib/wip" wip_shaper_system_prompt "$k")"
   rules_bytes="$(cat "templates/prompts/intake/$k.md")"
   if [[ "$prompt" == *"$preamble_bytes"* ]]; then

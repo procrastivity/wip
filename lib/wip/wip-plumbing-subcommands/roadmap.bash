@@ -58,7 +58,7 @@ _wip_roadmap_cmd_amend() {
         cli_target_round="${1#--target-round=}"
         shift
         ;;
-      --insert-after | --insert-after=* | --replace | --replace=* | --append-round | --append-round=* | --append-lane | --append-lane=*)
+      --insert-after | --insert-after=* | --replace | --replace=* | --append-round | --append-round=* | --append-lane | --append-lane=* | --insert-step-in-lane | --insert-step-in-lane=*)
         _wip_roadmap_amend_parse_dir "$1" "${2:-}" cli_kind cli_value
         if [[ "$1" == *=* ]]; then
           shift
@@ -176,7 +176,15 @@ _wip_roadmap_cmd_amend() {
         "append-round" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug"
       ;;
     append-lane)
-      local target_round="${cli_target_round:-$(_wip_intake_fm_str "$fm" target-round)}"
+      local fm_round target_round
+      fm_round="$(_wip_intake_fm_str "$fm" target-round)"
+      # The round is part of the shaped directive contract; refuse a CLI flag that
+      # disagrees with the artifact (parity with the directive-mismatch check).
+      if [[ -n "$cli_target_round" && -n "$fm_round" && "$cli_target_round" != "$fm_round" ]]; then
+        wip_die 2 directive-mismatch \
+          "roadmap amend: --target-round $cli_target_round disagrees with artifact target-round: $fm_round"
+      fi
+      target_round="${cli_target_round:-$fm_round}"
       [[ -n "$target_round" ]] ||
         wip_die 2 usage "roadmap amend: append-lane requires --target-round <N> (or target-round: in the artifact)"
       [[ "$target_round" =~ ^[0-9]+$ ]] ||
@@ -196,6 +204,25 @@ _wip_roadmap_cmd_amend() {
       fi
       _wip_roadmap_amend_idempotent_or_apply \
         "append-lane" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug" "$target_round"
+      ;;
+    insert-step-in-lane)
+      local fm_round target_round
+      fm_round="$(_wip_intake_fm_str "$fm" target-round)"
+      if [[ -n "$cli_target_round" && -n "$fm_round" && "$cli_target_round" != "$fm_round" ]]; then
+        wip_die 2 directive-mismatch \
+          "roadmap amend: --target-round $cli_target_round disagrees with artifact target-round: $fm_round"
+      fi
+      target_round="${cli_target_round:-$fm_round}"
+      [[ -n "$target_round" ]] ||
+        wip_die 2 usage "roadmap amend: insert-step-in-lane requires --target-round <N> (or target-round: in the artifact)"
+      [[ "$target_round" =~ ^[0-9]+$ ]] ||
+        wip_die 2 usage "roadmap amend: --target-round must be a round number, got: $target_round"
+      # Renders a single step bullet (same body shape as insert-after); the apply
+      # places it at the end of the named lane.
+      payload="$(printf '%s\n' "$body" | wip_amend_render_step_bullet "")" ||
+        wip_die 4 render-failed "roadmap amend: insert-step-in-lane body has no step heading" "$from"
+      _wip_roadmap_amend_idempotent_or_apply \
+        "insert-step-in-lane" "$value" "$payload" "$roadmap_abs" "$roadmap_path" "$slug" "$target_round"
       ;;
     *) wip_die 2 usage "roadmap amend: unknown directive: $kind" ;;
   esac
@@ -242,8 +269,8 @@ _wip_roadmap_amend_idempotent_or_apply() {
   hash="$(printf '%s' "$payload" | wip_amend_hash)"
   marker="$(wip_amend_marker "$hash")"
 
-  # Human-facing directive label; append-lane names the round it targets.
-  if [[ "$kind" == "append-lane" ]]; then
+  # Human-facing directive label; lane-targeting directives name the round.
+  if [[ "$kind" == "append-lane" || "$kind" == "insert-step-in-lane" ]]; then
     directive="$kind $value (round $extra)"
   else
     directive="$kind $value"
@@ -278,6 +305,15 @@ _wip_roadmap_amend_idempotent_or_apply() {
     append-lane)
       wip_amend_apply_append_lane "$roadmap_abs" "$extra" "$payload" "$marker" ||
         wip_die 4 round-not-in-roadmap "roadmap amend: target round not found: $extra" "$roadmap_path"
+      ;;
+    insert-step-in-lane)
+      local isil_rc=0
+      wip_amend_apply_insert_step_in_lane "$roadmap_abs" "$extra" "$value" "$payload" "$marker" || isil_rc=$?
+      if [[ "$isil_rc" == "2" ]]; then
+        wip_die 4 round-not-in-roadmap "roadmap amend: target round not found: $extra" "$roadmap_path"
+      elif [[ "$isil_rc" != "0" ]]; then
+        wip_die 4 lane-not-in-round "roadmap amend: lane '$value' not found in round $extra" "$roadmap_path"
+      fi
       ;;
   esac
 

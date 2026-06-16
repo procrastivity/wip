@@ -55,7 +55,7 @@ _wip_shaper_preamble() {
 _wip_shaper_rules() {
   local kind="$1"
   case "$kind" in
-    brief | amendment | workplan-seed | spec | handoff)
+    brief | amendment | workplan-seed | spec | handoff | bundle)
       _wip_shaper_read_template "$kind"
       ;;
     *)

@@ -331,6 +331,110 @@ set -e
 assert_eq "4" "$rc" "duplicate lane name exit 4"
 assert_eq "duplicate-lane" "$(jq -r '.error.kind' <<<"$out_dup2")" "duplicate-lane error kind"
 
+# ---- insert-step-in-lane (ADR-0010 §6, bundle promotion) ----
+# 14e. insert-step-in-lane into an EMPTY declared lane (the bundle's emit
+# pattern) + idempotent re-apply. Lane A is declared but has no steps yet.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 2 — Track expansion
+
+- **step-12 — F1 prereq** — lands first.
+
+### Lane A
+
+### Lane D
+
+## Cross-cuts (from bundle)
+
+- shared seam.
+
+## Deferred
+- nothing.
+MD
+cat >"$tmp/isil-a.md" <<'MD'
+---
+target: demo
+insert-step-in-lane: A
+target-round: 2
+---
+# Track A
+### step-13 — Track A spine
+Spine work.
+MD
+out_i="$(run demo --from "$tmp/isil-a.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_i")" "insert-step-in-lane ok"
+assert_eq "insert-step-in-lane A (round 2)" "$(jq -r '.directive' <<<"$out_i")" "isil directive label"
+isil_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
+assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-13")][0].lane' <<<"$isil_parse")" "step-13 parses into empty lane A"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$isil_parse")" "isil: no lane errors"
+out_i2="$(run demo --from "$tmp/isil-a.md")"
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_i2")" "insert-step-in-lane idempotent re-apply"
+
+# 14f. insert-step-in-lane targeting a lane absent from the round -> exit 4.
+cat >"$tmp/isil-z.md" <<'MD'
+---
+target: demo
+insert-step-in-lane: Z
+target-round: 2
+---
+# Track Z
+### step-99 — nope
+Body.
+MD
+set +e
+out_iz="$(run demo --from "$tmp/isil-z.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "insert-step-in-lane absent lane exit 4"
+assert_eq "lane-not-in-round" "$(jq -r '.error.kind' <<<"$out_iz")" "lane-not-in-round error kind"
+
+# 14g. insert-step-in-lane targeting an absent round -> exit 4 round-not-in-roadmap.
+cat >"$tmp/isil-r9.md" <<'MD'
+---
+target: demo
+insert-step-in-lane: A
+target-round: 9
+---
+# Track A
+### step-98 — nope
+Body.
+MD
+set +e
+out_ir="$(run demo --from "$tmp/isil-r9.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "insert-step-in-lane absent round exit 4"
+assert_eq "round-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out_ir")" "round-not-in-roadmap error kind"
+
+# 14g-ii. insert-step-in-lane: --target-round disagreeing with the artifact's
+# target-round: -> exit 2 directive-mismatch (the round is part of the contract).
+set +e
+out_im="$(run demo --from "$tmp/isil-a.md" --target-round 5 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "insert-step-in-lane target-round mismatch exit 2"
+assert_eq "directive-mismatch" "$(jq -r '.error.kind' <<<"$out_im")" "isil target-round mismatch kind"
+# A matching --target-round flag is accepted (round 2 matches the artifact).
+out_iok="$(run demo --from "$tmp/isil-a.md" --target-round 2)"
+assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_iok")" "isil matching --target-round ok (idempotent)"
+
+# 14h. insert-step-in-lane missing target-round -> shape failure exit 4.
+cat >"$tmp/isil-noround.md" <<'MD'
+---
+target: demo
+insert-step-in-lane: A
+---
+# Track A
+### step-97 — x
+Body.
+MD
+set +e
+run demo --from "$tmp/isil-noround.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "4" "$rc" "insert-step-in-lane no target-round exit 4"
+
 # 15. Refuse to amend a roadmap with a malformed lane structure (exit 4 lane-malformed).
 cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap

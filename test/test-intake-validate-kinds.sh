@@ -283,6 +283,188 @@ MD
 out="$(run_v "$tmp/handoff-ok.md" --kind handoff)"
 assert_eq "true" "$(jq -r '.valid' <<<"$out")" "handoff valid"
 
+# amendment — insert-step-in-lane happy (target-round + step heading, no round).
+cat >"$tmp/amend-isil.md" <<'MD'
+---
+target: auth
+insert-step-in-lane: A
+target-round: 1
+---
+# Track A
+### step-03 — Track A
+Body.
+MD
+out="$(run_v "$tmp/amend-isil.md" --kind amendment)"
+assert_eq "true" "$(jq -r '.valid' <<<"$out")" "amendment insert-step-in-lane valid"
+
+# amendment — insert-step-in-lane missing target-round.
+cat >"$tmp/amend-isil-noround.md" <<'MD'
+---
+target: auth
+insert-step-in-lane: A
+---
+# Track A
+### step-03 — Track A
+Body.
+MD
+set +e
+out="$(run_v "$tmp/amend-isil-noround.md" --kind amendment)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "insert-step-in-lane no target-round exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "target-round")) | length' <<<"$out")" "isil missing target-round"
+
+# amendment — insert-step-in-lane counts toward the multi-directive guard.
+cat >"$tmp/amend-isil-multi.md" <<'MD'
+---
+target: auth
+insert-step-in-lane: A
+insert-after: step-02
+target-round: 1
+---
+# Multi
+### step-03 — X
+MD
+set +e
+out="$(run_v "$tmp/amend-isil-multi.md" --kind amendment)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "isil + insert-after multi exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "multiple-directives")) | length' <<<"$out")" "isil counted toward multi"
+
+# ---- bundle (intake-kinds.md §2/§3a) ----
+# Child docs the bundle references (relative to the lead).
+cat >"$tmp/childA.md" <<'MD'
+# Track A
+Body.
+MD
+cat >"$tmp/childD.md" <<'MD'
+# Track D
+Body.
+MD
+
+# bundle — valid (lead-as amendment, readable children, valid lead body).
+cat >"$tmp/bundle-ok.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: amendment
+target: auth
+append-round: Track expansion
+children:
+  - path: childA.md
+    lane: A
+  - path: childD.md
+    lane: D
+cross-cuts:
+  shared-seams:
+    - shared seam
+  parallel-groups:
+    - [A, D]
+---
+# Track expansion
+
+## Round 2 — Track expansion
+
+- **step-03 — F1 prereq** — shared.
+MD
+out="$(run_v "$tmp/bundle-ok.md" --kind bundle)"
+assert_eq "true" "$(jq -r '.valid' <<<"$out")" "bundle valid"
+
+# bundle — lead-as brief is also valid.
+cat >"$tmp/bundle-brief.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: brief
+children:
+  - path: childA.md
+---
+# New initiative
+
+## Goal
+
+Do the thing.
+MD
+out="$(run_v "$tmp/bundle-brief.md" --kind bundle)"
+assert_eq "true" "$(jq -r '.valid' <<<"$out")" "bundle lead-as brief valid"
+
+# bundle — empty children.
+cat >"$tmp/bundle-empty.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: brief
+children: []
+---
+# X
+## Goal
+y
+MD
+set +e
+out="$(run_v "$tmp/bundle-empty.md" --kind bundle)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "bundle empty children exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "children")) | length' <<<"$out")" "bundle empty children flag"
+
+# bundle — unreadable child path.
+cat >"$tmp/bundle-badchild.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: amendment
+target: auth
+append-round: X
+children:
+  - path: nope-missing.md
+---
+# X
+## Round 2 — X
+### step-03 — a
+MD
+set +e
+out="$(run_v "$tmp/bundle-badchild.md" --kind bundle)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "bundle unreadable child exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "child-unreadable")) | length' <<<"$out")" "bundle child-unreadable flag"
+
+# bundle — bad lead-as.
+cat >"$tmp/bundle-badleadas.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: spec
+children:
+  - path: childA.md
+---
+# X
+## Goal
+y
+MD
+set +e
+out="$(run_v "$tmp/bundle-badleadas.md" --kind bundle)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "bundle bad lead-as exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "lead-as")) | length' <<<"$out")" "bundle lead-as flag"
+
+# bundle — invalid lead body (amendment lead with no directive) -> lead:directive.
+cat >"$tmp/bundle-badbody.md" <<'MD'
+---
+wip-kind: bundle
+lead-as: amendment
+target: auth
+children:
+  - path: childA.md
+---
+# X
+
+No directive at all.
+MD
+set +e
+out="$(run_v "$tmp/bundle-badbody.md" --kind bundle)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "bundle invalid lead body exit 4"
+assert_eq "1" "$(jq '.missing | map(select(. == "lead:directive")) | length' <<<"$out")" "bundle lead:directive flag"
+
 # --kind unknown -> exit 2.
 set +e
 run_v "$tmp/brief-ok.md" --kind nope >/dev/null 2>&1

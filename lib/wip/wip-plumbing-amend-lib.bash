@@ -11,7 +11,7 @@
 # the present directive, or "" if none. Caller has already parsed JSON.
 wip_amend_extract_directive_from_fm() {
   local fm="$1" kind v
-  for kind in insert-after replace append-round append-lane; do
+  for kind in insert-after replace append-round append-lane insert-step-in-lane; do
     v="$(printf '%s' "$fm" | jq -r --arg k "$kind" '.[$k] // empty' 2>/dev/null)"
     if [[ -n "$v" ]]; then
       printf '%s\t%s\n' "$kind" "$v"
@@ -349,6 +349,80 @@ wip_amend_apply_append_lane() {
   out+=("$marker")
   out+=("")
   for ((i = insert_at; i < n; i++)); do out+=("${lines[i]}"); done
+  printf '%s\n' "${out[@]}" >"$path"
+  return 0
+}
+
+# wip_amend_apply_insert_step_in_lane <roadmap-path> <round-n> <lane-name>
+#   <bullet> <marker>
+# Append <bullet>\n<marker> at the END of the already-declared lane <lane-name>
+# in round <round-n> (ADR-0010 §6, promoted for the bundle kind). The bullet
+# lands contiguous with the lane's existing steps (no blank line) so the lane
+# block stays intact under the parser's blank-line terminator. Works on an
+# EMPTY lane (a `### Lane <name>` heading with no steps), inserting right after
+# the heading — the bundle's lead-emits-empty-lanes pattern. Exit codes:
+#   0 inserted, 2 round <round-n> not found, 1 lane not found in the round.
+wip_amend_apply_insert_step_in_lane() {
+  local path="$1" round_n="$2" lane_name="$3" bullet="$4" marker="$5"
+  local lines=()
+  mapfile -t lines <"$path"
+  local n=${#lines[@]} i
+  # Locate the round heading.
+  local start=-1
+  for ((i = 0; i < n; i++)); do
+    if [[ "${lines[i]}" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
+      start=$i
+      break
+    fi
+  done
+  ((start >= 0)) || return 2
+  # End of the round = the next H2 (`## `) heading after start, else EOF.
+  local end=$n
+  for ((i = start + 1; i < n; i++)); do
+    if [[ "${lines[i]}" =~ ^\#\#\  ]]; then
+      end=$i
+      break
+    fi
+  done
+  # Walk to the target lane heading, then track the lane block's last line.
+  # Mirrors the parser: a blank line terminates the block once it has a step;
+  # a blank right after the heading (empty lane) does not. Another `### Lane`
+  # heading also ends the block.
+  local j L in_lane=0 saw_step=0 last_line=-1
+  for ((j = start + 1; j < end; j++)); do
+    L="${lines[j]}"
+    if [[ "$in_lane" == "0" ]]; then
+      if [[ "$L" =~ ^\#\#\#\ Lane\ (.+)$ ]]; then
+        local nm="${BASH_REMATCH[1]}"
+        nm="${nm%"${nm##*[![:space:]]}"}"
+        if [[ "$nm" == "$lane_name" ]]; then
+          in_lane=1
+          last_line=$j
+          saw_step=0
+        fi
+      fi
+      continue
+    fi
+    if [[ "$L" =~ ^[[:space:]]*$ ]]; then
+      [[ "$saw_step" == "1" ]] && break
+      continue
+    elif [[ "$L" =~ ^\#\#\#\ Lane\  || "$L" =~ ^\#\#\#\#+\ Lane ]]; then
+      break
+    elif [[ "$L" =~ ^-\ \*\*step- || "$L" =~ ^\#\#\#\ step- ]]; then
+      saw_step=1
+      last_line=$j
+    else
+      # Continuation/body line within the lane block.
+      last_line=$j
+    fi
+  done
+  ((in_lane == 1)) || return 1
+  local insert_at=$((last_line + 1))
+  local out=() k
+  for ((k = 0; k < insert_at; k++)); do out+=("${lines[k]}"); done
+  out+=("$bullet")
+  out+=("$marker")
+  for ((k = insert_at; k < n; k++)); do out+=("${lines[k]}"); done
   printf '%s\n' "${out[@]}" >"$path"
   return 0
 }
