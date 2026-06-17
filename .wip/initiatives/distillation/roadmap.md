@@ -1,5 +1,11 @@
 # Roadmap — distillation
 
+**Status: in-flight.** Rounds 1–3 shipped (Round 1 → 2026-06-12, Round 2 → 2026-06-13,
+Round 3 → 2026-06-14). On 2026-06-17 the initiative reopened with **Round 4 — Extract
+polish & LDS completion**, promoting the four P2 follow-ups out of §Backlog. The remaining
+§Backlog items are P3/nit — opt-in, not sequential (prioritization captured in
+[`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)).
+
 The plan of record for building `wip` by distilling the collected workflows. Promoted
 from the remaining-items scratchpad (now this file is the source of truth; the scratchpad
 is just a live mirror). Brief: [`BRIEF.md`](./BRIEF.md) · Decisions:
@@ -46,6 +52,21 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 
 ---
 
+
+## Round 4 — Extract polish & LDS completion
+
+The P2 follow-ups promoted from §Backlog after Rounds 1–3 shipped: finish the LDS
+glossary partial, make `extract` spec-conformant + integrity-checked, then take on the
+one large capability gap (transform mode). Ordered quick-wins-first; the round closes
+when `extract`'s remaining v1 `unsupported[]` shrinks to the genuinely-speculative items.
+
+- **step-16 — `glossary` LDS partial** (xs) — Author `templates/glossary/lds.md`. The inclusion rule is already declared in `wip-plumbing-glossary-lib.bash` (predicate `features.lds.enabled == true`) with graceful skip when the partial is absent; this just ships the partial bytes. (was backlog `glossary-partial-lds`.)
+- **step-17 — `extract` extraction report** (small) — Write `extraction-report.{md,yaml}` to disk per LDS §7 (metadata + summary + per-entry rows). The data already exists in the stdout ledger; serialize it. (was backlog `extract-extraction-report`.)
+- **step-18 — `extract --verify-hashes`** (small) — `--verify-hashes` flag enabling SHA-256 source hash verification (v1 ledger advertises `hash_verification: "skipped-v1"`). Requires `sha256sum`/`shasum` in the flake (add to `setup deps` template). (was backlog `extract-verify-hashes`.)
+- **step-19 — `extract` transform mode** (large) — LDS `transform` mode (heading_adjust / link_rewrite / markdown_format), currently routed to `unsupported[]`. Requires a small markdown engine in bash + per-transform options. Spike scope before committing. (was backlog `extract-transform-mode`.)
+<!-- wip-amend: ea4e8cba28197833d43d6b9fca6de6263f8c7bfc9f38b75c47a182a890f74cc3 -->
+
+
 ## Deferred (decided-not-now)
 
 - Plural LDS installs / monorepo support (v1 = scalar single root).
@@ -54,19 +75,18 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 
 ## Backlog
 
+_The four P2 follow-ups (`glossary-partial-lds`, `extract-extraction-report`,
+`extract-verify-hashes`, `extract-transform-mode`) were promoted to Round 4 on 2026-06-17.
+What remains is P3/nit — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
   human call — these are reference copies and prtend is a useful counter-example.
-- **extract-transform-mode** — LDS `transform` mode (heading_adjust / link_rewrite / markdown_format).
-  v1 routes these to `unsupported[]`. Requires a small markdown engine in bash + per-transform options; ship when a consumer needs it.
 - **extract-summarize-mode** — LDS `summarize` mode. Inherently LLM-driven (LDS itself says "NEVER automatic"); belongs in porcelain, not plumbing. v1 routes to `unsupported[]`.
-- **extract-verify-hashes** — `--verify-hashes` flag to enable SHA-256 source hash verification. Requires `sha256sum`/`shasum` in the flake (add to `setup deps` template). v1 ledger advertises `hash_verification: "skipped-v1"`.
 - **extract-multi-file-source** — Multi-file source specs (`source.files[]` with separator + `combined_hash`). v1 routes to `unsupported[]`. Add when a real manifest needs concatenation.
 - **extract-templates-field-mappings** — LDS template + `field_mappings` support per `extract.md` §4 (literal + `source:<path>:<lines>` references). v1 skips templated entries. Add when a consumer adopts MADR/PRD-Lite templates with field maps.
 - **extract-resume-mode** — `--resume` flag for partial-failure recovery (skip-if-exists per entry). Three-way idempotency already gives re-runs a sensible shape; full resume is a separate contract.
-- **extract-extraction-report** — Write `extraction-report.{md,yaml}` to disk per LDS §7 (metadata + summary + per-entry rows). v1 ledger is stdout-only.
 - ✅ **setup-lds-verb** — Sixth `setup` verb to install the LDS scaffold (manifest skeleton, layer directories, `maintenance/` workflow copies) and flip `features.lds.enabled`. The hint in `lds-not-enabled` / `lds-sentinel-missing` errors from `graduate`/`extract` points at this item. **✅ shipped 2026-06-14** ([followup workplan](./workplans/followup-setup-lds.md)) — `setup lds` writes 13 files into `engineering/` (manifest + 8 `.gitkeep` across the nine canonical layers + 4 maintenance workflow copies), flips `features.lds.{enabled, root: engineering}`, supports `--sentinel-only` for repos with an existing `engineering/` tree, and refuses (`lds-already-installed-elsewhere`) when `features.lds.root` is set elsewhere. Consumer end-to-end (`init` → `setup deps` → `setup lds` → `graduate`) verified by `test/test-setup.sh`'s dogfood case (58 new assertions; 132 total).
-- **glossary-partial-lds** — Author `templates/glossary/lds.md`. The inclusion rule is already declared in `wip-plumbing-glossary-lib.bash` (predicate `features.lds.enabled == true`) with graceful skip when the partial file is absent; this just ships the partial bytes.
 - **intake-apply-spec-graduate-dispatch** — Route `intake apply --kind spec` through to `graduate` when the artifact carries a `graduate-to:` directive (currently still exits 3 stub). Needs the porcelain spec-shaper to insert the directive — porcelain change, not plumbing.
 - ✅ **wip-start-command** — Close the "kick off a step by name" gap: a `/wip:start <step-id>` plugin command on top of a new `workplan init --activate` plumbing flag that scaffolds the step's workplan and sets `initiatives.<slug>.active_step` (deterministic manifest edit; status/next already read it). The command briefs the step + workplan path, then ends with "Say `go` and I'll start working on it" — set-up + hand-off, not orchestration. No ADR (additive). Contract: [`engineering/specs/wip-start.md`](../../../engineering/specs/wip-start.md). **✅ shipped 2026-06-16** — `workplan init … --activate` flips `initiatives.<slug>.active_step` in `.wip.yaml` via the existing deterministic yq machinery (the same key `detect`/`status` read), with re-runnable idempotency: WITHOUT `--activate` an existing workplan still refuses (`file-exists`, exit 4); WITH `--activate` an existing workplan is no longer an error — the write is skipped (ledger lists it under `skipped`), `active_step` is still set, so "start" works for a step whose workplan already exists. The ledger gains `active_step` (and `manifest_updated` only when the key actually changed); `--dry-run --activate` reports the would-be activation and touches neither file nor manifest. Existing validation is unchanged (`step-not-in-roadmap` exit 4, `unknown-initiative` exit 3). The new `commands/start.md` resolves the bundled `wip-plumbing` (the `CLAUDE_PLUGIN_ROOT` idiom from `/wip:intake`), resolves the initiative the way `/wip:status` does (`--initiative <slug>` or `detect`'s `current_initiative`), runs `workplan init <slug> <step-id> --activate` surfacing error envelopes verbatim, reads the roadmap step body + workplan and prints a tight one-line brief plus the workplan path, then ends with the literal offer and does NOT auto-run. Tests: `test/test-workplan-init.sh` gains the `--activate` cases (sets `active_step`; existing-workplan no-op write that still activates with no exit 4; `--dry-run --activate` touches nothing; non-roadmap step still exits 4) for 36 assertions; `test/test-plugin-manifest.sh` gains a `/wip:start` case (present, front-matter, bundled-binary resolution, the literal "Say `go`" offer, no auto-run) for 40. Lint clean. **Amended 2026-06-16:** the on-`go` hand-off is now **role-aware** — a plain session is asked solo-vs-orchestrate rather than silently working solo (commit `ff99f46`) — and the orchestrate entrypoint it hands off to is **no longer deferred**: it shipped via this work as the `/wip:orchestrate` plugin command on top of a new deterministic `wip-plumbing orchestrate prep` readiness verb. The entrypoint is a plugin command, **not** a CLI verb, because spawning Claude agents needs MCP (only reachable from the plugin) — [ADR-0012](../../../engineering/decisions/0012-orchestrate-entrypoint-is-a-plugin-command.md), [`engineering/specs/wip-orchestrate.md`](../../../engineering/specs/wip-orchestrate.md).
 - ✅ **bundle-assembler** — Porcelain `wip bundle <files…>` + `/wip:bundle` that assemble N handoff files into one `bundle` lead manifest, then hand to the existing `intake --kind bundle` explode. LLM front-end only (no new plumbing); narrowly revisits the kickoff's "no multi-file CLI" exclusion at the porcelain layer per [ADR-0011](../../../engineering/decisions/0011-bundle-assembler-porcelain.md). Contract: [`engineering/specs/wip-bundle.md`](../../../engineering/specs/wip-bundle.md). **✅ shipped 2026-06-16** — `wip bundle <f1> <f2> … [--target <slug>] [--lead-as brief|amendment] [-o <manifest>] [--intake] [--dry-run] [--yes]` validates ≥2 readable inputs, picks a manifest location (the inputs' longest common parent dir, `-o <path>`, or `-` for raw stdout), computes each `children[].path` relative to that location, and runs a provider-shaper (ASK + validate-retry loop, reusing the intake shaper's response extractor + message builders) that assembles ONE bundle lead manifest. The manifest is gated by the **unchanged** plumbing `intake validate --kind bundle`; `--intake` then chains into the **unchanged** `wip intake <manifest> --kind bundle` explode (re-exec'd so its envelope nests under `.intake`). Review-first default writes the manifest and stops. JSON envelope `{ok, verb, manifest, lead_as, target, children[], wrote[], intake?}`; new error kinds `bundle-too-few-inputs` / `bundle-input-unreadable` (exit 2), assembly reuses `shape-failed` / `ask-without-tty` / `bad-shape-response`. Assembly rules live in `templates/prompts/bundle/assemble.md`, fetched by both frontends via `wip-plumbing template show bundle/assemble` (same prompt-sharing seam as the intake shapers, prepended with the shared preamble). New `lib/wip/wip-subcommands/bundle.bash` (wired into the porcelain dispatcher + usage) + `commands/bundle.md` (mirrors `/wip:intake`, incl. the `CLAUDE_PLUGIN_ROOT` resolution) + the shared prompt. No new plumbing verb; nested bundles stay refused (caught by the existing explode). Tests: `test/test-wip-bundle.sh` (42 assertions — assemble, relative child paths, `--intake` fan-out, `<2`/unreadable inputs, `--dry-run`, nested-bundle refusal, `-o -`), plus a `bundle/assemble` byte-equiv case in `test-template-verb.sh` and a `/wip:bundle` case in `test-plugin-manifest.sh`. All 32 suites green; lint clean. ADR-0011 flipped proposed → accepted.
