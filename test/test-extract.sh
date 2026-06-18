@@ -133,6 +133,12 @@ mh="$(jq -r '.extraction_report.metadata.manifest_hash' <<<"$rj1")"
 assert_eq "ok" "$mh_ok" "[report] manifest_hash present (hash or null)"
 
 # --- 2. Unsupported modes get skipped (not failed). ---------------------------
+# step-19 REQUIRED MIGRATION: skip-transform was `type: heading_adjust` (the
+# step-18 fixture asserting the transform SKIP path). heading_adjust is now a
+# SUPPORTED transform (step-19), so this fixture is repointed to
+# `type: markdown_format` — a still-unsupported transform type — to keep
+# exercising the skip path. Not a regression: the supported heading_adjust
+# behavior is covered by the new transform tests below.
 d2="$tmp/c2"
 build_lds_enabled_root "$d2"
 echo "src" >"$d2/legacy/x.md"
@@ -154,9 +160,7 @@ entries:
     confidence: high
     classification_reason: testing
     transform_config:
-      type: heading_adjust
-      options:
-        level_offset: 1
+      type: markdown_format
   - id: skip-summarize
     source: legacy/x.md
     target: decisions/0003-sum.md
@@ -178,9 +182,9 @@ assert_absent "$d2/engineering/decisions/0002-tr.md" "[unsupported] transform no
 rj2="$(yq -o=json '.' "$d2/engineering/extraction-report.yaml")"
 assert_eq "1" "$(jq -r '.extraction_report.summary.successful' <<<"$rj2")" "[report-unsup] successful=1"
 assert_eq "2" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj2")" "[report-unsup] unsupported=2"
-assert_eq "transform mode not supported in v1" \
+assert_eq "markdown_format transform not supported in v1" \
   "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-transform") | .reason' <<<"$rj2")" \
-  "[report-unsup] transform reason"
+  "[report-unsup] markdown_format transform reason"
 assert_eq "summarize mode not supported in v1" \
   "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-summarize") | .reason' <<<"$rj2")" \
   "[report-unsup] summarize reason"
@@ -772,5 +776,234 @@ assert_eq "4" "$rc" "[verify-dry-mismatch] exit 4"
 assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-dry-mismatch] kind"
 assert_absent "$d21/engineering/decisions/0001-v.md" "[verify-dry-mismatch] no target"
 assert_absent "$d21/engineering/extraction-report.yaml" "[verify-dry-mismatch] no report"
+
+# --- 22. transform/heading_adjust e2e: +1 shift, skip_first, fence + indent
+#         untouched, verbatim-style attribution, §7 report reconciliation. ----
+d22="$tmp/c22"
+build_lds_enabled_root "$d22"
+cat >"$d22/legacy/doc.md" <<'EOF'
+# Title
+intro text
+## Section
+```
+# fenced not a heading
+```
+    # indented not a heading
+### Sub
+EOF
+write_manifest "$d22" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-shift
+    source: legacy/doc.md
+    target: specs/shifted.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+        skip_first: true
+'
+out="$(WIP_ROOT="$d22" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-shift] ok:true"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[tr-shift] wrote=1"
+assert_eq "0" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-shift] none unsupported"
+tgt22="$d22/engineering/specs/shifted.md"
+assert_file "$tgt22" "[tr-shift] target written"
+assert_grep '<!-- Migrated from legacy/doc.md -->' "$tgt22" "[tr-shift] verbatim-style attribution"
+assert_grep '<!-- Extraction ID: tr-shift -->' "$tgt22" "[tr-shift] extraction id"
+assert_grep '^# Title$' "$tgt22" "[tr-shift] skip_first leaves first heading"
+assert_grep '^### Section$' "$tgt22" "[tr-shift] ## -> ### (+1)"
+assert_grep '^#### Sub$' "$tgt22" "[tr-shift] ### -> #### (+1)"
+assert_grep '^# fenced not a heading$' "$tgt22" "[tr-shift] fenced # untouched"
+assert_grep '^    # indented not a heading$' "$tgt22" "[tr-shift] indented # untouched"
+# §7 report reconciliation: transform success counts in summary.successful +
+# files_created (not unsupported), and reconciles with the stdout ledger.
+rj22="$(yq -o=json '.' "$d22/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.successful' <<<"$rj22")" "[tr-shift] report successful=1"
+assert_eq "0" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj22")" "[tr-shift] report unsupported=0"
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/specs/shifted.md") | .status' <<<"$rj22")" \
+  "[tr-shift] report success row"
+assert_eq "$(jq -r '.wrote | length' <<<"$out")" \
+  "$(jq -r '.extraction_report.summary.successful' <<<"$rj22")" "[tr-shift] wrote count reconciles"
+
+# --- 23. transform/heading_adjust -1 shift + clamp floor (# stays #). --------
+d23="$tmp/c23"
+build_lds_enabled_root "$d23"
+printf '# Stays at one\n## Down to one\n### Down to two\n' >"$d23/legacy/doc.md"
+write_manifest "$d23" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-down
+    source: legacy/doc.md
+    target: specs/down.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: -1
+'
+out="$(WIP_ROOT="$d23" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[tr-down] wrote=1"
+tgt23="$d23/engineering/specs/down.md"
+assert_grep '^# Stays at one$' "$tgt23" "[tr-down] # -1 clamps to #"
+assert_grep '^# Down to one$' "$tgt23" "[tr-down] ## -> #"
+assert_grep '^## Down to two$' "$tgt23" "[tr-down] ### -> ##"
+
+# --- 24. transform/heading_adjust clamp ceiling (###### +1 stays ######). ----
+d24="$tmp/c24"
+build_lds_enabled_root "$d24"
+printf '##### Five\n###### Six\n' >"$d24/legacy/doc.md"
+write_manifest "$d24" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-up
+    source: legacy/doc.md
+    target: specs/up.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+out="$(WIP_ROOT="$d24" bin/wip-plumbing extract 2>/dev/null)"
+tgt24="$d24/engineering/specs/up.md"
+assert_grep '^###### Five$' "$tgt24" "[tr-up] ##### -> ######"
+assert_grep '^###### Six$' "$tgt24" "[tr-up] ###### +1 clamps to ######"
+assert_not_grep '#######' "$tgt24" "[tr-up] never emits 7 hashes"
+
+# --- 25. transform/heading_adjust idempotent re-run (three-way). -------------
+d25="$tmp/c25"
+build_lds_enabled_root "$d25"
+printf '# A\n## B\n' >"$d25/legacy/doc.md"
+write_manifest "$d25" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-idem
+    source: legacy/doc.md
+    target: specs/idem.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+WIP_ROOT="$d25" bin/wip-plumbing extract >/dev/null 2>&1
+out="$(WIP_ROOT="$d25" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-idem] ok"
+assert_eq "0" "$(jq -r '.wrote | length' <<<"$out")" "[tr-idem] wrote=0 on re-run"
+assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out")" "[tr-idem] skipped_idempotent=1"
+
+# --- 26. transform link_rewrite / custom still unsupported (skip, not fail). -
+d26="$tmp/c26"
+build_lds_enabled_root "$d26"
+echo "x" >"$d26/legacy/x.md"
+write_manifest "$d26" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-link
+    source: legacy/x.md
+    target: specs/link.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: link_rewrite
+      options:
+        base_path: "../"
+  - id: tr-custom
+    source: legacy/x.md
+    target: specs/custom.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: custom
+'
+out="$(WIP_ROOT="$d26" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-unsup] ok:true (skip not fail)"
+assert_eq "2" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-unsup] count=2"
+assert_eq "link_rewrite transform not supported in v1" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-link") | .reason' <<<"$out")" "[tr-unsup] link_rewrite reason"
+assert_eq "custom transform not supported in v1" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-custom") | .reason' <<<"$out")" "[tr-unsup] custom reason"
+assert_absent "$d26/engineering/specs/link.md" "[tr-unsup] link_rewrite not written"
+assert_absent "$d26/engineering/specs/custom.md" "[tr-unsup] custom not written"
+
+# --- 27. transform on multi-file source → unsupported-source:multi-file. -----
+#     (multi-file takes precedence over the transform type, per D6.)
+d27="$tmp/c27"
+build_lds_enabled_root "$d27"
+echo "a" >"$d27/legacy/a.md"
+echo "b" >"$d27/legacy/b.md"
+write_manifest "$d27" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-multi
+    source:
+      files:
+        - file: legacy/a.md
+        - file: legacy/b.md
+    target: specs/multi.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+out="$(WIP_ROOT="$d27" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-multi] ok:true"
+assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-multi] unsupported=1"
+assert_eq "multi-file" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-multi") | .source_kind' <<<"$out")" \
+  "[tr-multi] multi-file source_kind (not transform_type)"
+assert_absent "$d27/engineering/specs/multi.md" "[tr-multi] not written"
+
+# --- 28. transform with absent transform_config → bad-entry-shape. ----------
+d28="$tmp/c28"
+build_lds_enabled_root "$d28"
+echo "x" >"$d28/legacy/x.md"
+write_manifest "$d28" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-noconfig
+    source: legacy/x.md
+    target: specs/noconfig.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+'
+set +e
+out="$(WIP_ROOT="$d28" bin/wip-plumbing extract 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[tr-badshape] exit 4"
+assert_eq "bad-entry-shape" "$(jq -r '.error.kind' <<<"$out")" "[tr-badshape] kind"
+assert_absent "$d28/engineering/specs/noconfig.md" "[tr-badshape] not written"
 
 test_summary
