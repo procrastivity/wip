@@ -256,6 +256,63 @@ wip_plumbing_cmd_extract() {
     fi
   fi
 
+  # LDS §7 extraction report — serialize the ledger to disk as
+  # <eng-docs>/extraction-report.{yaml,md} (step-17). Additive: the stdout
+  # JSON envelope and stderr one-liner above are unchanged. The report is
+  # written in BOTH the ok:true and ok:false branches and BEFORE the exit 4
+  # below, so §7.3 (report on partial failure) holds. It is a PLAIN
+  # OVERWRITE — explicitly NOT wip_setup_write_idempotent: the report
+  # embeds a fresh executed_at, so routing it through the idempotency helper
+  # would make every second run report spurious content-drift on the report
+  # file itself. --dry-run (WIP_DRY_RUN=1) writes nothing.
+  if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+    local report_executed_at report_hash
+    report_executed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    set +e
+    report_hash="$(shasum -a 256 "$mabs" 2>/dev/null | awk '{print $1}')"
+    set -e
+
+    # file_existence_check (§7.2): stat each successful target live.
+    local _p existence_missing="[]" existence_expected=0 existence_created=0
+    for _p in "${wrote[@]+"${wrote[@]}"}" "${wrote_forced[@]+"${wrote_forced[@]}"}"; do
+      existence_expected=$((existence_expected + 1))
+      if [[ -f "$root/$_p" ]]; then
+        existence_created=$((existence_created + 1))
+      else
+        existence_missing="$(printf '%s' "$existence_missing" | jq -c --arg p "$_p" '. + [$p]')"
+      fi
+    done
+    local existence_status="pass"
+    [[ "$existence_created" -lt "$existence_expected" ]] && existence_status="fail"
+    local existence_json
+    existence_json="$(jq -nc \
+      --arg s "$existence_status" \
+      --argjson e "$existence_expected" \
+      --argjson c "$existence_created" \
+      --argjson m "$existence_missing" \
+      '{status:$s, expected_files:$e, created_files:$c, missing_files:$m}')"
+
+    local report_wrote report_skipped report_forced report_refused
+    report_wrote="$(wip_json_string_array "${wrote[@]+"${wrote[@]}"}")"
+    report_skipped="$(wip_json_string_array "${skipped[@]+"${skipped[@]}"}")"
+    report_forced="$(wip_json_string_array "${wrote_forced[@]+"${wrote_forced[@]}"}")"
+    report_refused="$(wip_json_string_array "${refused[@]+"${refused[@]}"}")"
+
+    local eng_abs="$root/$eng" report_yaml report_md
+    set +e
+    report_yaml="$(wip_extract_report_yaml \
+      "$mpath" "$total" "$report_wrote" "$report_skipped" "$report_forced" \
+      "$report_refused" "$unsupported_json" "$bad_json" "$force" \
+      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json")"
+    report_md="$(wip_extract_report_md \
+      "$mpath" "$total" "$report_wrote" "$report_skipped" "$report_forced" \
+      "$report_refused" "$unsupported_json" "$bad_json" "$force" \
+      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json")"
+    set -e
+    printf '%s\n' "$report_yaml" >"$eng_abs/extraction-report.yaml"
+    printf '%s\n' "$report_md" >"$eng_abs/extraction-report.md"
+  fi
+
   if [[ "$ok" != "true" ]]; then
     printf 'wip-plumbing: extract: %s\n' "$err_msg" >&2
     exit 4
