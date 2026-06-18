@@ -256,3 +256,176 @@ wip_extract_classify_entry() {
     *) printf 'bad-shape:unknown mode: %s' "$mode" ;;
   esac
 }
+
+# --- LDS §7 extraction report renderers (pure, no I/O) ----------------------
+#
+# Both renderers are side-effect-free: they take the already-computed
+# ledger data and emit report text to stdout. The command layer
+# (extract.bash) owns every filesystem write. Governing rule:
+# FAITHFUL-SUBSET SERIALIZATION — render the §7 shape, populate every
+# field derivable from the ledger plus the caller's cheap stat, and set
+# genuinely-unavailable fields (source/output line counts, source-hash
+# verification) to null / "skipped-v1". Never fabricate numbers. See
+# workplan step-17 §"Ledger → §7 vocabulary mapping" for the field map.
+#
+# Shared positional args (identical order for both functions):
+#   $1  manifest          manifest path (metadata.manifest_file)
+#   $2  entries_total     integer
+#   $3  wrote_json        JSON array of success target paths
+#   $4  skipped_json      JSON array of idempotent-skip target paths
+#   $5  wrote_forced_json JSON array of forced-overwrite target paths
+#   $6  refused_json      JSON array of content-drift target paths
+#   $7  unsupported_json  JSON array of unsupported entry objects (ledger verbatim)
+#   $8  bad_json          JSON array of {id, reason} bad-entry objects
+#   $9  force             "0" | "1"
+#   $10 executed_at       ISO-8601 timestamp (caller computes once)
+#   $11 manifest_hash     sha256 hex of the manifest file, or "" → null
+#   $12 eng               eng-docs root (for layer_breakdown prefix strip)
+#   $13 existence_json    file_existence_check object (caller stats live)
+
+# wip_extract_report_yaml — render the §7.2 machine-readable YAML report.
+wip_extract_report_yaml() {
+  local manifest="$1" total="$2" wrote="$3" skipped="$4" forced="$5" \
+    refused="$6" unsupported="$7" bad="$8" force="$9" executed_at="${10}" \
+    manifest_hash="${11}" eng="${12}" existence="${13}"
+  jq -n \
+    --arg manifest "$manifest" \
+    --argjson total "$total" \
+    --argjson wrote "$wrote" \
+    --argjson skipped "$skipped" \
+    --argjson forced "$forced" \
+    --argjson refused "$refused" \
+    --argjson unsupported "$unsupported" \
+    --argjson bad "$bad" \
+    --arg force "$force" \
+    --arg executed_at "$executed_at" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg eng "$eng" \
+    --argjson existence "$existence" '
+    ($force == "1") as $forced_flag
+    | ($wrote + $forced) as $created
+    | {
+        extraction_report: {
+          metadata: {
+            manifest_file: $manifest,
+            manifest_hash: (if $manifest_hash == "" then null else $manifest_hash end),
+            executed_at: $executed_at,
+            executed_by: null,
+            flags: { force: $forced_flag, resume: false }
+          },
+          summary: {
+            total_entries: $total,
+            successful: ($created | length),
+            failed: (($refused | length) + ($bad | length)),
+            skipped: ($skipped | length),
+            unsupported: ($unsupported | length)
+          },
+          line_statistics: {
+            source_lines_processed: null,
+            output_lines_generated: null,
+            variance_percentage: null
+          },
+          layer_breakdown: (
+            $created
+            | map(ltrimstr($eng + "/") | split("/")[0])
+            | group_by(.)
+            | map({ key: .[0], value: { files_created: length, total_lines: null } })
+            | from_entries
+          ),
+          files_created: (
+            ($wrote   | map({ target: ., source: null, source_lines: null, output_lines: null, template: null, status: "success" }))
+            + ($forced | map({ target: ., source: null, source_lines: null, output_lines: null, template: null, status: "success" }))
+            + ($refused | map({ target: ., source: null, source_lines: null, output_lines: null, template: null, status: "failed", error: "content-drift" }))
+            + ($bad | map({ target: null, id: .id, source: null, source_lines: null, output_lines: null, template: null, status: "failed", error: .reason }))
+          ),
+          unsupported: $unsupported,
+          verification_results: {
+            line_count_check: { status: "skipped-v1" },
+            file_existence_check: $existence,
+            content_hash_check: { status: "skipped-v1" }
+          },
+          warnings: [],
+          errors: (
+            ($refused | map({ entry: ., type: "content-drift", message: "extracted target differs from manifest output" }))
+            + ($bad | map({ entry: .id, type: "bad-entry-shape", message: .reason }))
+          ),
+          source_changes: { detected: false, files_changed: [], force_flag_used: $forced_flag }
+        }
+      }
+  ' | yq -P -o=yaml '.'
+}
+
+# wip_extract_report_md — render the §7.4 human-readable summary to a file.
+# The final `Status:` line is COMPLETED when no entries failed, else
+# COMPLETED WITH ERRORS (failed = refused + bad, the same data ok:false
+# is derived from in extract.bash).
+wip_extract_report_md() {
+  local manifest="$1" total="$2" wrote="$3" skipped="$4" forced="$5" \
+    refused="$6" unsupported="$7" bad="$8" force="$9" executed_at="${10}" \
+    manifest_hash="${11}" eng="${12}" existence="${13}"
+
+  local created successful failed skipped_n unsupported_n
+  created="$(jq -cn --argjson w "$wrote" --argjson f "$forced" '$w + $f')"
+  successful="$(printf '%s' "$created" | jq 'length')"
+  failed="$(jq -n --argjson r "$refused" --argjson b "$bad" '($r | length) + ($b | length)')"
+  skipped_n="$(printf '%s' "$skipped" | jq 'length')"
+  unsupported_n="$(printf '%s' "$unsupported" | jq 'length')"
+
+  local force_flag="false"
+  [[ "$force" == "1" ]] && force_flag="true"
+  local status_line="COMPLETED"
+  [[ "$failed" -gt 0 ]] && status_line="COMPLETED WITH ERRORS"
+
+  local ex_status ex_expected ex_created
+  ex_status="$(printf '%s' "$existence" | jq -r '.status')"
+  ex_expected="$(printf '%s' "$existence" | jq -r '.expected_files')"
+  ex_created="$(printf '%s' "$existence" | jq -r '.created_files')"
+
+  printf 'EXTRACTION REPORT\n'
+  printf '=================\n\n'
+  printf 'Date: %s\n' "$executed_at"
+  printf 'Manifest: %s\n' "$manifest"
+  printf 'Manifest hash: %s\n' "${manifest_hash:-(none)}"
+  printf 'Flags: force=%s, resume=false\n\n' "$force_flag"
+
+  printf 'FILES CREATED\n'
+  printf -- '-------------\n'
+  if [[ "$successful" -gt 0 ]]; then
+    printf '%s' "$created" | jq -r '.[]'
+  else
+    printf '(none)\n'
+  fi
+  printf '\n'
+
+  printf 'LAYER SUMMARY\n'
+  printf -- '-------------\n'
+  if [[ "$successful" -gt 0 ]]; then
+    printf '%s' "$created" | jq -r --arg eng "$eng" '
+      map(ltrimstr($eng + "/") | split("/")[0])
+      | group_by(.)
+      | map("\(.[0]): \(length) files (lines: n/a)")[]'
+  else
+    printf '(none)\n'
+  fi
+  printf '\n'
+
+  printf 'SUMMARY\n'
+  printf -- '-------\n'
+  printf 'Total entries processed: %s\n' "$total"
+  printf 'Files created: %s\n' "$successful"
+  printf 'Errors: %s\n' "$failed"
+  printf 'Skipped (idempotent): %s\n' "$skipped_n"
+  printf 'Unsupported: %s\n' "$unsupported_n"
+  printf 'Warnings: 0\n\n'
+  printf 'Source lines: not tracked in v1\n'
+  printf 'Output lines: not tracked in v1\n\n'
+
+  printf 'VERIFICATION\n'
+  printf -- '------------\n'
+  printf 'Line count check:     skipped-v1\n'
+  printf 'File existence check: %s (%s/%s files)\n' "$ex_status" "$ex_created" "$ex_expected"
+  printf 'Content hash check:   skipped-v1\n\n'
+
+  printf 'Report saved to: %s/extraction-report.yaml\n\n' "$eng"
+  printf 'Status: %s\n' "$status_line"
+}
