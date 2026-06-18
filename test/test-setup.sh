@@ -356,13 +356,17 @@ assert_eq "0" "$(jq -r '.wrote | length' <<<"$out2")" "[dogfood] graduate re-run
 assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out2")" \
   "[dogfood] graduate re-run skipped"
 
-# --- 24. glossary assemble after setup lds: lds.md skipped gracefully -------
+# --- 24. glossary assemble after setup lds: lds.md included -----------------
 # glossary assemble emits markdown to stdout by default; --output yields a
 # JSON ledger we can inspect for the lds partial's skip-vs-include state.
+# lds.md now ships (step-16), so an lds install includes it rather than
+# skipping it as a future-row.
 out="$(WIP_ROOT="$workdir" bin/wip-plumbing glossary assemble \
   --output "$workdir/.wip/GLOSSARY.md" 2>/dev/null)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dogfood] glossary assemble ok"
-assert_eq "1" "$(jq -r '[.partials_skipped[]? | select(.name == "lds.md")] | length' <<<"$out")" \
-  "[dogfood] glossary lists lds partial as skipped"
+assert_eq "1" "$(jq -r '[.partials_included[]? | select(.name == "lds.md")] | length' <<<"$out")" \
+  "[dogfood] glossary lists lds partial as included"
+assert_eq "0" "$(jq -r '[.partials_skipped[]? | select(.name == "lds.md")] | length' <<<"$out")" \
+  "[dogfood] lds partial not in skipped"
 
 test_summary
