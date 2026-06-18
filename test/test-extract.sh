@@ -31,6 +31,15 @@ write_manifest() {
   printf '%s' "$2" >"$1/engineering/.lds-manifest.yaml"
 }
 
+# range_sha256 <file> <start> <end> — compute the expected source.hash with
+# the SAME recipe the impl uses (OQ1, locked): the extracted range body bytes
+# exactly as wip_extract_source_body emits them — awk range, trailing newline
+# included — through sha256sum. Keeps test and impl self-consistent without a
+# magic digest.
+range_sha256() {
+  awk -v s="$2" -v e="$3" 'NR >= s && NR <= e' "$1" | sha256sum | awk '{print $1}'
+}
+
 # --- 1. Happy path: verbatim + content modes both write. ----------------------
 d1="$tmp/c1"
 build_lds_enabled_root "$d1"
@@ -495,5 +504,273 @@ assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dry-run] ok"
 assert_absent "$d14/engineering/extraction-report.yaml" "[dry-run] no report yaml"
 assert_absent "$d14/engineering/extraction-report.md" "[dry-run] no report md"
 assert_absent "$d14/engineering/decisions/0001-x.md" "[dry-run] no target written"
+
+# --- 15. --verify-hashes match → pass. ----------------------------------------
+d15="$tmp/c15"
+build_lds_enabled_root "$d15"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d15/legacy/source.md"
+h15="$(range_sha256 "$d15/legacy/source.md" 2 4)"
+cat >"$d15/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 2
+      end_line: 4
+      hash: "$h15"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d15" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-match] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-match] hash_verification verified"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[verify-match] wrote=1"
+assert_file "$d15/engineering/decisions/0001-v.md" "[verify-match] target written"
+rj15="$(yq -o=json '.' "$d15/engineering/extraction-report.yaml")"
+assert_eq "pass" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj15")" \
+  "[verify-match] report content hash pass"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_checked' <<<"$rj15")" \
+  "[verify-match] entries_checked=1"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_matched' <<<"$rj15")" \
+  "[verify-match] entries_matched=1"
+assert_grep 'Content hash check:   pass' "$d15/engineering/extraction-report.md" \
+  "[verify-match] md content hash line"
+
+# --- 16. --verify-hashes mismatch → exit 4 pre-write gate. --------------------
+d16="$tmp/c16"
+build_lds_enabled_root "$d16"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d16/legacy/source.md"
+cat >"$d16/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 2
+      end_line: 4
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d16" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-mismatch] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-mismatch] kind"
+assert_eq "legacy/source.md" "$(jq -r '.error.paths[0]' <<<"$out")" "[verify-mismatch] source in error.paths"
+assert_eq "mismatch" "$(jq -r '.error.mismatches[0].status' <<<"$out")" "[verify-mismatch] mismatch row status"
+assert_absent "$d16/engineering/decisions/0001-v.md" "[verify-mismatch] no target written (gate)"
+assert_file "$d16/engineering/extraction-report.yaml" "[verify-mismatch] report written despite exit 4"
+rj16="$(yq -o=json '.' "$d16/engineering/extraction-report.yaml")"
+assert_eq "fail" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj16")" \
+  "[verify-mismatch] report content hash fail"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.mismatches | length' <<<"$rj16")" \
+  "[verify-mismatch] one report mismatch row"
+
+# --- 17. --verify-hashes missing hashed source → missing mismatch. -----------
+d17="$tmp/c17"
+build_lds_enabled_root "$d17"
+# legacy/gone.md is never created.
+cat >"$d17/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/gone.md
+      start_line: 2
+      end_line: 4
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d17" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-missing] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-missing] kind"
+assert_eq "missing" "$(jq -r '.error.mismatches[0].status' <<<"$out")" "[verify-missing] status missing"
+assert_absent "$d17/engineering/decisions/0001-v.md" "[verify-missing] no target written"
+rj17="$(yq -o=json '.' "$d17/engineering/extraction-report.yaml")"
+assert_eq "missing" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.mismatches[0].status' <<<"$rj17")" \
+  "[verify-missing] report missing row"
+
+# --- 18. --verify-hashes no declared hash → skipped, not failed. -------------
+d18="$tmp/c18"
+build_lds_enabled_root "$d18"
+printf 'line 1\nline 2\nline 3\n' >"$d18/legacy/source.md"
+cat >"$d18/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d18" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-nohash] ok:true"
+assert_eq "no-hashes" "$(jq -r '.hash_verification' <<<"$out")" "[verify-nohash] hash_verification no-hashes"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[verify-nohash] wrote=1"
+assert_file "$d18/engineering/decisions/0001-v.md" "[verify-nohash] target still written"
+rj18="$(yq -o=json '.' "$d18/engineering/extraction-report.yaml")"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_no_hash' <<<"$rj18")" \
+  "[verify-nohash] entries_no_hash=1"
+assert_eq "1" "$(jq -r '.extraction_report.warnings | length' <<<"$rj18")" "[verify-nohash] one warning"
+assert_eq "no-verifiable-hashes" \
+  "$(jq -r '.extraction_report.warnings[0].type' <<<"$rj18")" "[verify-nohash] warning type"
+
+# --- 19. --verify-hashes mixed manifest (one hashed, one not). ---------------
+d19="$tmp/c19"
+build_lds_enabled_root "$d19"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d19/legacy/a.md"
+printf 'alpha\nbeta\ngamma\n' >"$d19/legacy/b.md"
+h19="$(range_sha256 "$d19/legacy/a.md" 2 4)"
+cat >"$d19/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: hashed
+    source:
+      file: legacy/a.md
+      start_line: 2
+      end_line: 4
+      hash: "$h19"
+    target: decisions/0001-a.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+  - id: nohash
+    source:
+      file: legacy/b.md
+    target: decisions/0002-b.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d19" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-mixed] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-mixed] verified"
+assert_eq "2" "$(jq -r '.wrote | length' <<<"$out")" "[verify-mixed] wrote=2"
+assert_file "$d19/engineering/decisions/0001-a.md" "[verify-mixed] hashed target written"
+assert_file "$d19/engineering/decisions/0002-b.md" "[verify-mixed] no-hash target written"
+rj19="$(yq -o=json '.' "$d19/engineering/extraction-report.yaml")"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_checked' <<<"$rj19")" \
+  "[verify-mixed] entries_checked=1"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_no_hash' <<<"$rj19")" \
+  "[verify-mixed] entries_no_hash=1"
+
+# --- 20. Flag off regression — a present hash is ignored; skipped-v1. --------
+d20="$tmp/c20"
+build_lds_enabled_root "$d20"
+printf 'line 1\nline 2\nline 3\n' >"$d20/legacy/source.md"
+h20="$(range_sha256 "$d20/legacy/source.md" 1 2)"
+cat >"$d20/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 2
+      hash: "$h20"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d20" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-off] ok:true"
+assert_eq "skipped-v1" "$(jq -r '.hash_verification' <<<"$out")" "[verify-off] hash_verification skipped-v1"
+rj20="$(yq -o=json '.' "$d20/engineering/extraction-report.yaml")"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj20")" \
+  "[verify-off] content_hash_check skipped-v1"
+assert_eq "0" "$(jq -r '.extraction_report.warnings | length' <<<"$rj20")" "[verify-off] no warnings"
+assert_grep 'Content hash check:   skipped-v1' "$d20/engineering/extraction-report.md" \
+  "[verify-off] md line skipped-v1"
+
+# --- 21. --dry-run + --verify-hashes: check runs, writes nothing. ------------
+d21="$tmp/c21"
+build_lds_enabled_root "$d21"
+printf 'line 1\nline 2\nline 3\nline 4\n' >"$d21/legacy/source.md"
+h21="$(range_sha256 "$d21/legacy/source.md" 1 3)"
+cat >"$d21/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 3
+      hash: "$h21"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d21" bin/wip-plumbing --dry-run extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-dry-match] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-dry-match] verified in stdout"
+assert_absent "$d21/engineering/decisions/0001-v.md" "[verify-dry-match] no target"
+assert_absent "$d21/engineering/extraction-report.yaml" "[verify-dry-match] no report"
+# Same fixture, now a wrong hash: dry-run still surfaces the mismatch as exit 4,
+# but writes neither target nor report.
+cat >"$d21/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 3
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d21" bin/wip-plumbing --dry-run extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-dry-mismatch] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-dry-mismatch] kind"
+assert_absent "$d21/engineering/decisions/0001-v.md" "[verify-dry-mismatch] no target"
+assert_absent "$d21/engineering/extraction-report.yaml" "[verify-dry-mismatch] no report"
 
 test_summary
