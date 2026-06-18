@@ -149,23 +149,58 @@ wip_extract_attribution_lines() {
   esac
 }
 
-# wip_extract_render_verbatim <entry-json> <repo-root>
+# wip_extract_sha256 [<file-path>]
 #
-# Read the source file (simple-path or single-file with optional
-# start/end line range), prepend attribution, emit the bytes to stdout.
-# 1-indexed inclusive line ranges per LDS §3.1. Missing end_line = EOF.
-# Missing start_line = 1.
+# Echo the lowercase SHA-256 hex digest of a file (when $1 is given) or
+# of stdin (when no arg). Leads with `sha256sum` (provided by coreutils,
+# already a flake dep) and falls back to `shasum -a 256` (the perl tool);
+# returns non-zero + a stderr diagnostic if neither hasher is on PATH.
+# Side-effect-free: the only output on success is the bare digest.
+# shellcheck disable=SC2120  # $1 is an optional file path; stdin callers pass none
+wip_extract_sha256() {
+  local src="${1:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    if [[ -n "$src" ]]; then
+      sha256sum -- "$src" | awk '{print $1}'
+    else
+      sha256sum | awk '{print $1}'
+    fi
+  elif command -v shasum >/dev/null 2>&1; then
+    if [[ -n "$src" ]]; then
+      shasum -a 256 -- "$src" | awk '{print $1}'
+    else
+      shasum -a 256 | awk '{print $1}'
+    fi
+  else
+    printf 'wip-plumbing: extract: no SHA-256 hasher (sha256sum/shasum) found\n' >&2
+    return 1
+  fi
+}
+
+# wip_extract_source_body <entry-json> <repo-root>
+#
+# Emit just the extracted source-range bytes — the `cat`/`awk` body that
+# `wip_extract_render_verbatim` wraps with attribution — and NOTHING else
+# (no attribution comment block, no separating blank line). 1-indexed
+# inclusive line ranges per LDS §3.1; missing end_line = EOF, missing
+# start_line = 1; no range at all = whole file (raw `cat` bytes).
+#
+# This is the single source of truth for "what bytes count as the source"
+# — both the verbatim renderer and the `--verify-hashes` hash recipe
+# (OQ1: hash these exact bytes, trailing newline included for ranges)
+# read through it, so the rendered target and the verified digest can
+# never drift apart.
 #
 # Returns 0 on success; 2 + stderr diagnostic on a missing source file
-# or unreadable range.
-wip_extract_render_verbatim() {
+# or a source kind that carries no body.
+wip_extract_source_body() {
   local ej="$1" root="$2" kind file abs start end
   kind="$(wip_extract_source_kind "$ej")"
   case "$kind" in
     simple-path) file="$(printf '%s' "$ej" | jq -r '.source')" ;;
     single-file) file="$(printf '%s' "$ej" | jq -r '.source.file')" ;;
     *)
-      printf 'wip-plumbing: extract: render_verbatim called with kind=%s\n' "$kind" >&2
+      printf 'wip-plumbing: extract: source_body called with kind=%s\n' "$kind" >&2
       return 2
       ;;
   esac
@@ -176,8 +211,6 @@ wip_extract_render_verbatim() {
   fi
   start="$(printf '%s' "$ej" | jq -r '.source.start_line // empty' 2>/dev/null)"
   end="$(printf '%s' "$ej" | jq -r '.source.end_line // empty' 2>/dev/null)"
-  wip_extract_attribution_lines "$ej"
-  printf '\n'
   if [[ -z "$start" && -z "$end" ]]; then
     cat -- "$abs"
   else
@@ -188,6 +221,30 @@ wip_extract_render_verbatim() {
       awk -v s="$start" -v e="$end" 'NR >= s && NR <= e' "$abs"
     fi
   fi
+}
+
+# wip_extract_render_verbatim <entry-json> <repo-root>
+#
+# Read the source file (simple-path or single-file with optional
+# start/end line range), prepend attribution, emit the bytes to stdout.
+# The body bytes come from wip_extract_source_body so the rendered target
+# and the verified hash stay in lock-step (see that helper).
+#
+# Returns 0 on success; 2 + stderr diagnostic on a missing source file
+# or unreadable range.
+wip_extract_render_verbatim() {
+  local ej="$1" root="$2" kind
+  kind="$(wip_extract_source_kind "$ej")"
+  case "$kind" in
+    simple-path | single-file) ;;
+    *)
+      printf 'wip-plumbing: extract: render_verbatim called with kind=%s\n' "$kind" >&2
+      return 2
+      ;;
+  esac
+  wip_extract_attribution_lines "$ej"
+  printf '\n'
+  wip_extract_source_body "$ej" "$root"
 }
 
 # wip_extract_render_content <entry-json>
@@ -255,6 +312,77 @@ wip_extract_classify_entry() {
     summarize) printf 'unsupported-mode:summarize' ;;
     *) printf 'bad-shape:unknown mode: %s' "$mode" ;;
   esac
+}
+
+# wip_extract_verify_hashes <manifest-json> <repo-root>
+#
+# Pure source-hash verification pass (LDS source_hash_mismatch_handling).
+# Walks the manifest entries, selects the verifiable ones — an entry is
+# verifiable iff it classifies `ok-verbatim` AND its source is the
+# single-file object form AND that object carries a non-empty `hash` —
+# computes the body digest via the OQ1 recipe (`wip_extract_source_body`
+# bytes through `wip_extract_sha256`), compares it to the declared hash,
+# and echoes the §7 `content_hash_check` JSON object:
+#
+#   { status: pass|fail,
+#     entries_checked, entries_matched, entries_no_hash,
+#     mismatches: [ {id, source, expected_hash, actual_hash, status} ] }
+#
+# where a mismatch row's `status` is "mismatch" (digests differ) or
+# "missing" (hashed source file absent). Non-verifiable entries (simple-path
+# strings, single-file without a hash, content mode, unsupported/bad
+# entries) are counted in `entries_no_hash` and never fail. `status` is
+# "fail" iff there is at least one mismatch row, else "pass" (including the
+# zero-verifiable-hash case — the no-op signal is carried by the caller's
+# `hash_verification: "no-hashes"` enum + the report warning). The flag-off
+# `{status:"skipped-v1"}` object is supplied by the command layer, never by
+# this function. Side-effect-free and unit-testable.
+wip_extract_verify_hashes() {
+  local mj="$1" root="$2"
+  local total i ej cls kind hash id source_file actual
+  local checked=0 matched=0 no_hash=0 mismatches="[]"
+  total="$(printf '%s' "$mj" | jq -r '(.entries // []) | length')"
+  for ((i = 0; i < total; i++)); do
+    ej="$(printf '%s' "$mj" | jq -c ".entries[$i]")"
+    cls="$(wip_extract_classify_entry "$ej")"
+    kind="$(wip_extract_source_kind "$ej")"
+    if [[ "$cls" != "ok-verbatim" || "$kind" != "single-file" ]]; then
+      no_hash=$((no_hash + 1))
+      continue
+    fi
+    hash="$(printf '%s' "$ej" | jq -r '.source.hash // ""')"
+    if [[ -z "$hash" ]]; then
+      no_hash=$((no_hash + 1))
+      continue
+    fi
+    checked=$((checked + 1))
+    id="$(printf '%s' "$ej" | jq -r '.id // ""')"
+    source_file="$(printf '%s' "$ej" | jq -r '.source.file')"
+    if [[ ! -f "$root/$source_file" ]]; then
+      mismatches="$(printf '%s' "$mismatches" | jq -c \
+        --arg id "$id" --arg source "$source_file" --arg expected "$hash" \
+        '. + [{id:$id, source:$source, expected_hash:$expected, actual_hash:null, status:"missing"}]')"
+      continue
+    fi
+    # shellcheck disable=SC2119  # hashing stdin, not forwarding our own args
+    actual="$(wip_extract_source_body "$ej" "$root" 2>/dev/null | wip_extract_sha256)"
+    if [[ "$actual" != "$hash" ]]; then
+      mismatches="$(printf '%s' "$mismatches" | jq -c \
+        --arg id "$id" --arg source "$source_file" --arg expected "$hash" --arg actual "$actual" \
+        '. + [{id:$id, source:$source, expected_hash:$expected, actual_hash:$actual, status:"mismatch"}]')"
+    else
+      matched=$((matched + 1))
+    fi
+  done
+  local status="pass"
+  [[ "$(printf '%s' "$mismatches" | jq 'length')" -gt 0 ]] && status="fail"
+  jq -nc \
+    --arg status "$status" \
+    --argjson checked "$checked" \
+    --argjson matched "$matched" \
+    --argjson no_hash "$no_hash" \
+    --argjson mismatches "$mismatches" \
+    '{status:$status, entries_checked:$checked, entries_matched:$matched, entries_no_hash:$no_hash, mismatches:$mismatches}'
 }
 
 # --- LDS §7 extraction report renderers (pure, no I/O) ----------------------
