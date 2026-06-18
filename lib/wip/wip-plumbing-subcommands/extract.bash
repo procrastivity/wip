@@ -165,6 +165,7 @@ wip_plumbing_cmd_extract() {
     case "$cls" in
       ok-verbatim) action="verbatim" ;;
       ok-content) action="content" ;;
+      ok-transform) action="transform" ;;
       unsupported-mode:*)
         local m="${cls#unsupported-mode:}"
         unsupported_json="$(printf '%s' "$unsupported_json" | jq -c \
@@ -181,6 +182,15 @@ wip_plumbing_cmd_extract() {
           --arg source_kind "$s" \
           --arg reason "$s source not supported in v1" \
           '. + [{id:$id, source_kind:$source_kind, reason:$reason}]')"
+        continue
+        ;;
+      unsupported-transform:*)
+        local tt="${cls#unsupported-transform:}"
+        unsupported_json="$(printf '%s' "$unsupported_json" | jq -c \
+          --arg id "$(printf '%s' "$ej" | jq -r '.id // ""')" \
+          --arg transform_type "$tt" \
+          --arg reason "$tt transform not supported in v1" \
+          '. + [{id:$id, mode:"transform", transform_type:$transform_type, reason:$reason}]')"
         continue
         ;;
       unsupported-template)
@@ -214,13 +224,20 @@ wip_plumbing_cmd_extract() {
       wip_die 1 internal "extract: mktemp failed"
 
     set +e
-    if [[ "$action" == "verbatim" ]]; then
-      wip_extract_render_verbatim "$ej" "$root" >"$tmp" 2>/tmp/wip-extract-$$.err
-      rc=$?
-    else
-      wip_extract_render_content "$ej" >"$tmp" 2>/tmp/wip-extract-$$.err
-      rc=$?
-    fi
+    case "$action" in
+      verbatim)
+        wip_extract_render_verbatim "$ej" "$root" >"$tmp" 2>/tmp/wip-extract-$$.err
+        rc=$?
+        ;;
+      transform)
+        wip_extract_render_transform "$ej" "$root" >"$tmp" 2>/tmp/wip-extract-$$.err
+        rc=$?
+        ;;
+      content)
+        wip_extract_render_content "$ej" >"$tmp" 2>/tmp/wip-extract-$$.err
+        rc=$?
+        ;;
+    esac
     set -e
     if [[ "$rc" != "0" ]]; then
       local rmsg

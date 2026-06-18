@@ -329,14 +329,51 @@ wip_extract_render_content() {
   [[ "$content" == *$'\n' ]] || printf '\n'
 }
 
+# wip_extract_render_transform <entry-json> <repo-root>
+#
+# Render a `transform` + `heading_adjust` entry: attribution (IDENTICAL to
+# verbatim — a transform has a real source, D2) + a blank line + the extracted
+# source body piped through wip_extract_heading_adjust. `level_offset` /
+# `skip_first` are read from `transform_config.options` with the faithful
+# defaults (0 / false, D5): a missing options block is a no-op shift, not a
+# failure.
+#
+# The source body is captured (not streamed) so a missing-source failure from
+# wip_extract_source_body still surfaces as this function's return code — a
+# bare `source_body | heading_adjust` pipeline would mask it behind awk's
+# exit 0. awk normalizes the body's trailing newline regardless, so the
+# captured-vs-streamed distinction is byte-invisible in the output.
+#
+# Returns 0 on success; 2 + stderr diagnostic on a missing source file or a
+# source kind that carries no body (same contract as render_verbatim).
+wip_extract_render_transform() {
+  local ej="$1" root="$2" kind offset skip_first body
+  kind="$(wip_extract_source_kind "$ej")"
+  case "$kind" in
+    simple-path | single-file) ;;
+    *)
+      printf 'wip-plumbing: extract: render_transform called with kind=%s\n' "$kind" >&2
+      return 2
+      ;;
+  esac
+  offset="$(printf '%s' "$ej" | jq -r '.transform_config.options.level_offset // 0')"
+  skip_first="$(printf '%s' "$ej" | jq -r '.transform_config.options.skip_first // false')"
+  body="$(wip_extract_source_body "$ej" "$root")" || return 2
+  wip_extract_attribution_lines "$ej"
+  printf '\n'
+  printf '%s' "$body" | wip_extract_heading_adjust "$offset" "$skip_first"
+}
+
 # wip_extract_classify_entry <entry-json>
 #
 # Decide how the dispatcher should handle this entry. Echo one of:
 #   ok-verbatim
 #   ok-content
+#   ok-transform
 #   bad-shape:<message>
 #   unsupported-mode:<mode>
 #   unsupported-source:<source-kind>
+#   unsupported-transform:<transform-type>
 #   unsupported-template
 #
 # The dispatcher routes ok-* to the renderer, bad-shape to the error
@@ -371,7 +408,29 @@ wip_extract_classify_entry() {
       esac
       ;;
     content) printf 'ok-content' ;;
-    transform) printf 'unsupported-mode:transform' ;;
+    transform)
+      # D5: only an absent/non-map transform_config is bad-shape; a present
+      # map with missing options defaults faithfully (handled at render).
+      local tc_kind ttype
+      tc_kind="$(printf '%s' "$ej" | jq -r '.transform_config | type')"
+      if [[ "$tc_kind" != "object" ]]; then
+        printf 'bad-shape:transform mode requires a transform_config map'
+      else
+        ttype="$(printf '%s' "$ej" | jq -r '.transform_config.type // ""')"
+        case "$src" in
+          multi-file) printf 'unsupported-source:multi-file' ;;
+          simple-path | single-file)
+            if [[ "$ttype" == "heading_adjust" ]]; then
+              printf 'ok-transform'
+            else
+              printf 'unsupported-transform:%s' "$ttype"
+            fi
+            ;;
+          none) printf 'bad-shape:transform mode requires a source' ;;
+          *) printf 'unsupported-source:%s' "$src" ;;
+        esac
+      fi
+      ;;
     summarize) printf 'unsupported-mode:summarize' ;;
     *) printf 'bad-shape:unknown mode: %s' "$mode" ;;
   esac
