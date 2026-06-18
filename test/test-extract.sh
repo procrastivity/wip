@@ -81,6 +81,47 @@ assert_not_grep '^line 5' "$d1/engineering/decisions/0001-verbatim.md" "[happy] 
 assert_grep '<!-- Generated content - no source file -->' \
   "$d1/engineering/specs/inline.md" "[happy] content attribution"
 assert_grep '^# Inline spec body' "$d1/engineering/specs/inline.md" "[happy] content body"
+# Extraction report (LDS §7): on-disk YAML reconciles with the stdout ledger.
+assert_file "$d1/engineering/extraction-report.yaml" "[report] yaml written"
+assert_file "$d1/engineering/extraction-report.md" "[report] md written"
+rj1="$(yq -o=json '.' "$d1/engineering/extraction-report.yaml")"
+assert_eq "2" "$(jq -r '.extraction_report.summary.total_entries' <<<"$rj1")" "[report] total=2"
+assert_eq "2" "$(jq -r '.extraction_report.summary.successful' <<<"$rj1")" "[report] successful=2"
+assert_eq "0" "$(jq -r '.extraction_report.summary.failed' <<<"$rj1")" "[report] failed=0"
+assert_eq "0" "$(jq -r '.extraction_report.summary.skipped' <<<"$rj1")" "[report] skipped=0"
+# count reconciliation: stdout .wrote length == report successful.
+assert_eq "$(jq -r '.wrote | length' <<<"$out")" \
+  "$(jq -r '.extraction_report.summary.successful' <<<"$rj1")" "[report] wrote count reconciles"
+# per-target reconciliation: each stdout .wrote[] target is a success row.
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/decisions/0001-verbatim.md") | .status' <<<"$rj1")" \
+  "[report] verbatim target success row"
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/specs/inline.md") | .status' <<<"$rj1")" \
+  "[report] content target success row"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj1")" \
+  "[report] content hash check skipped-v1"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.line_count_check.status' <<<"$rj1")" \
+  "[report] line count check skipped-v1"
+# v1 null fields (keys present, values null) — assert null, never a value.
+assert_eq "null" "$(jq -r '.extraction_report.line_statistics.source_lines_processed' <<<"$rj1")" \
+  "[report] line_statistics null"
+assert_eq "null" "$(jq -r '.extraction_report.layer_breakdown.decisions.total_lines' <<<"$rj1")" \
+  "[report] layer total_lines null"
+# md carries the §7.4 Status line.
+assert_grep '^Status: COMPLETED$' "$d1/engineering/extraction-report.md" "[report] md status COMPLETED"
+# Non-determinism guards: never assert exact executed_at; treat hash as presence/null.
+ea="$(jq -r '.extraction_report.metadata.executed_at' <<<"$rj1")"
+case "$ea" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ea_shape=ok ;;
+  *) ea_shape=bad ;;
+esac
+assert_eq "ok" "$ea_shape" "[report] executed_at is ISO-8601 shaped"
+mh="$(jq -r '.extraction_report.metadata.manifest_hash' <<<"$rj1")"
+[[ -n "$mh" ]] && mh_ok=ok || mh_ok=bad
+assert_eq "ok" "$mh_ok" "[report] manifest_hash present (hash or null)"
 
 # --- 2. Unsupported modes get skipped (not failed). ---------------------------
 d2="$tmp/c2"
@@ -124,6 +165,19 @@ assert_eq "summarize" "$(jq -r '.unsupported[] | select(.id=="skip-summarize") |
   "[unsupported] summarize mode"
 assert_file "$d2/engineering/decisions/0001-ok.md" "[unsupported] supported wrote"
 assert_absent "$d2/engineering/decisions/0002-tr.md" "[unsupported] transform not written"
+# Report: unsupported entries land in their own block (not files_created/errors).
+rj2="$(yq -o=json '.' "$d2/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.successful' <<<"$rj2")" "[report-unsup] successful=1"
+assert_eq "2" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj2")" "[report-unsup] unsupported=2"
+assert_eq "transform mode not supported in v1" \
+  "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-transform") | .reason' <<<"$rj2")" \
+  "[report-unsup] transform reason"
+assert_eq "summarize mode not supported in v1" \
+  "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-summarize") | .reason' <<<"$rj2")" \
+  "[report-unsup] summarize reason"
+assert_eq "0" \
+  "$(jq -r '[.extraction_report.files_created[] | select(.id=="skip-transform")] | length' <<<"$rj2")" \
+  "[report-unsup] not in files_created"
 
 # --- 3. Multi-file source → unsupported-source. -------------------------------
 d3="$tmp/c3"
@@ -150,6 +204,14 @@ out="$(WIP_ROOT="$d3" bin/wip-plumbing extract 2>/dev/null)"
 assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[multi-file] unsupported=1"
 assert_eq "multi-file" "$(jq -r '.unsupported[0].source_kind' <<<"$out")" "[multi-file] kind"
 assert_absent "$d3/engineering/specs/multi.md" "[multi-file] not written"
+# Report: the multi-file entry is unsupported, not a created file.
+rj3="$(yq -o=json '.' "$d3/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj3")" "[report-multi] unsupported=1"
+assert_eq "multi-file" "$(jq -r '.extraction_report.unsupported[0].source_kind' <<<"$rj3")" \
+  "[report-multi] source_kind"
+assert_eq "0" \
+  "$(jq -r '[.extraction_report.files_created[] | select(.target=="engineering/specs/multi.md")] | length' <<<"$rj3")" \
+  "[report-multi] not in files_created"
 
 # --- 4. Manifest not approved → exit 4 manifest-not-approved. -----------------
 d4="$tmp/c4"
@@ -232,6 +294,12 @@ out="$(WIP_ROOT="$d7" bin/wip-plumbing extract 2>/dev/null)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[idem] ok"
 assert_eq "0" "$(jq -r '.wrote | length' <<<"$out")" "[idem] wrote=0"
 assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out")" "[idem] skipped=1"
+# Report bypasses idempotency: 2nd run regenerates it (no content-drift refusal
+# on the report file itself), reflecting the all-skipped ledger.
+assert_file "$d7/engineering/extraction-report.yaml" "[report-idem] report regenerated on re-run"
+rj7="$(yq -o=json '.' "$d7/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.skipped' <<<"$rj7")" "[report-idem] skipped=1"
+assert_eq "0" "$(jq -r '.extraction_report.summary.successful' <<<"$rj7")" "[report-idem] successful=0"
 
 # --- 8. Content drift → exit 4; --force overwrites. ---------------------------
 d8="$tmp/c8"
@@ -258,6 +326,13 @@ set -e
 assert_eq "4" "$rc" "[drift] exit 4"
 assert_eq "content-drift" "$(jq -r '.error.kind' <<<"$out")" "[drift] kind"
 assert_eq "1" "$(jq -r '.error.paths | length' <<<"$out")" "[drift] paths=1"
+# §7.3: the report is written before exit 4; the drifted target shows failed.
+assert_file "$d8/engineering/extraction-report.yaml" "[report-drift] written despite exit 4"
+rj8="$(yq -o=json '.' "$d8/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.failed' <<<"$rj8")" "[report-drift] failed=1"
+assert_eq "failed" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/decisions/0001-h.md") | .status' <<<"$rj8")" \
+  "[report-drift] drifted target status failed"
 out="$(WIP_ROOT="$d8" bin/wip-plumbing extract --force 2>/dev/null)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[--force] ok"
 assert_eq "1" "$(jq -r '.wrote_forced | length' <<<"$out")" "[--force] wrote_forced=1"
@@ -364,6 +439,14 @@ rc=$?
 set -e
 assert_eq "4" "$rc" "[bad-shape] exit 4"
 assert_eq "bad-entry-shape" "$(jq -r '.error.kind' <<<"$out")" "[bad-shape] kind"
+# §7.3: report written before exit 4; bad entry mirrored into errors[] + failed row.
+assert_file "$d12/engineering/extraction-report.yaml" "[report-bad] written despite exit 4"
+rj12="$(yq -o=json '.' "$d12/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.failed' <<<"$rj12")" "[report-bad] failed=1"
+assert_eq "bad" "$(jq -r '.extraction_report.errors[0].entry' <<<"$rj12")" "[report-bad] bad entry in errors"
+assert_eq "failed" \
+  "$(jq -r '.extraction_report.files_created[] | select(.id=="bad") | .status' <<<"$rj12")" \
+  "[report-bad] bad entry status failed"
 
 # --- 13. Template field bumps entry to unsupported (v1 deferral). -------------
 d13="$tmp/c13"
@@ -390,5 +473,27 @@ assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[template] unsupport
 assert_eq "template/field_mappings not supported in v1" \
   "$(jq -r '.unsupported[0].reason' <<<"$out")" "[template] reason"
 assert_absent "$d13/engineering/decisions/0001-tpl.md" "[template] not written"
+
+# --- 14. --dry-run writes neither targets nor report. -------------------------
+d14="$tmp/c14"
+build_lds_enabled_root "$d14"
+printf 'x\ny\nz\n' >"$d14/legacy/s.md"
+write_manifest "$d14" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: one
+    source: legacy/s.md
+    target: decisions/0001-x.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+'
+out="$(WIP_ROOT="$d14" bin/wip-plumbing --dry-run extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dry-run] ok"
+assert_absent "$d14/engineering/extraction-report.yaml" "[dry-run] no report yaml"
+assert_absent "$d14/engineering/extraction-report.md" "[dry-run] no report md"
+assert_absent "$d14/engineering/decisions/0001-x.md" "[dry-run] no target written"
 
 test_summary
