@@ -410,12 +410,15 @@ wip_extract_verify_hashes() {
 #   $11 manifest_hash     sha256 hex of the manifest file, or "" → null
 #   $12 eng               eng-docs root (for layer_breakdown prefix strip)
 #   $13 existence_json    file_existence_check object (caller stats live)
+#   $14 content_hash_json content_hash_check object (caller computes; the
+#                         literal {status:"skipped-v1"} when --verify-hashes
+#                         is off, so flag-off output is byte-identical)
 
 # wip_extract_report_yaml — render the §7.2 machine-readable YAML report.
 wip_extract_report_yaml() {
   local manifest="$1" total="$2" wrote="$3" skipped="$4" forced="$5" \
     refused="$6" unsupported="$7" bad="$8" force="$9" executed_at="${10}" \
-    manifest_hash="${11}" eng="${12}" existence="${13}"
+    manifest_hash="${11}" eng="${12}" existence="${13}" content_hash="${14}"
   jq -n \
     --arg manifest "$manifest" \
     --argjson total "$total" \
@@ -429,7 +432,8 @@ wip_extract_report_yaml() {
     --arg executed_at "$executed_at" \
     --arg manifest_hash "$manifest_hash" \
     --arg eng "$eng" \
-    --argjson existence "$existence" '
+    --argjson existence "$existence" \
+    --argjson content_hash "$content_hash" '
     ($force == "1") as $forced_flag
     | ($wrote + $forced) as $created
     | {
@@ -470,9 +474,14 @@ wip_extract_report_yaml() {
           verification_results: {
             line_count_check: { status: "skipped-v1" },
             file_existence_check: $existence,
-            content_hash_check: { status: "skipped-v1" }
+            content_hash_check: $content_hash
           },
-          warnings: [],
+          warnings: (
+            if ($content_hash.status != "skipped-v1") and (($content_hash.entries_checked // 0) == 0)
+            then [{ type: "no-verifiable-hashes", message: "--verify-hashes was set but no entry carried a verifiable source.hash; hash verification was a no-op" }]
+            else []
+            end
+          ),
           errors: (
             ($refused | map({ entry: ., type: "content-drift", message: "extracted target differs from manifest output" }))
             + ($bad | map({ entry: .id, type: "bad-entry-shape", message: .reason }))
@@ -490,7 +499,7 @@ wip_extract_report_yaml() {
 wip_extract_report_md() {
   local manifest="$1" total="$2" wrote="$3" skipped="$4" forced="$5" \
     refused="$6" unsupported="$7" bad="$8" force="$9" executed_at="${10}" \
-    manifest_hash="${11}" eng="${12}" existence="${13}"
+    manifest_hash="${11}" eng="${12}" existence="${13}" content_hash="${14}"
 
   local created successful failed skipped_n unsupported_n
   created="$(jq -cn --argjson w "$wrote" --argjson f "$forced" '$w + $f')"
@@ -508,6 +517,23 @@ wip_extract_report_md() {
   ex_status="$(printf '%s' "$existence" | jq -r '.status')"
   ex_expected="$(printf '%s' "$existence" | jq -r '.expected_files')"
   ex_created="$(printf '%s' "$existence" | jq -r '.created_files')"
+
+  # Content hash check line — mirrors the File existence line. Dynamic from
+  # the threaded content_hash object: skipped-v1 verbatim when the flag is
+  # off (byte-identical to step-17), else a pass/fail summary with counts.
+  local ch_status ch_line
+  ch_status="$(printf '%s' "$content_hash" | jq -r '.status')"
+  case "$ch_status" in
+    pass)
+      ch_line="$(printf '%s' "$content_hash" | jq -r '"pass (\(.entries_matched)/\(.entries_checked) entries matched)"')"
+      ;;
+    fail)
+      ch_line="$(printf '%s' "$content_hash" | jq -r '"fail (\(.entries_matched)/\(.entries_checked) matched, \(.mismatches | length) mismatch)"')"
+      ;;
+    *)
+      ch_line="$ch_status"
+      ;;
+  esac
 
   printf 'EXTRACTION REPORT\n'
   printf '=================\n\n'
@@ -552,7 +578,7 @@ wip_extract_report_md() {
   printf -- '------------\n'
   printf 'Line count check:     skipped-v1\n'
   printf 'File existence check: %s (%s/%s files)\n' "$ex_status" "$ex_created" "$ex_expected"
-  printf 'Content hash check:   skipped-v1\n\n'
+  printf 'Content hash check:   %s\n\n' "$ch_line"
 
   printf 'Report saved to: %s/extraction-report.yaml\n\n' "$eng"
   printf 'Status: %s\n' "$status_line"

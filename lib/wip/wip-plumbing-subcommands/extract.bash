@@ -112,6 +112,11 @@ wip_plumbing_cmd_extract() {
   local total
   total="$(printf '%s' "$extract_mj" | jq -r '.entries | length')"
 
+  # content_hash_check object threaded into the §7 report. Default (flag off)
+  # is the literal "skipped-v1" so the report stays byte-identical to step-17;
+  # the --verify-hashes pre-write gate (below) replaces it with a real verdict.
+  local content_hash_json='{"status":"skipped-v1"}'
+
   local wrote=() skipped=() wrote_forced=() refused=()
   local unsupported_json="[]" bad_json="[]"
   local i ej cls action rc status tmp dest target_rel
@@ -303,11 +308,13 @@ wip_plumbing_cmd_extract() {
     report_yaml="$(wip_extract_report_yaml \
       "$mpath" "$total" "$report_wrote" "$report_skipped" "$report_forced" \
       "$report_refused" "$unsupported_json" "$bad_json" "$force" \
-      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json")"
+      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json" \
+      "$content_hash_json")"
     report_md="$(wip_extract_report_md \
       "$mpath" "$total" "$report_wrote" "$report_skipped" "$report_forced" \
       "$report_refused" "$unsupported_json" "$bad_json" "$force" \
-      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json")"
+      "$report_executed_at" "${report_hash:-}" "$eng" "$existence_json" \
+      "$content_hash_json")"
     set -e
     printf '%s\n' "$report_yaml" >"$eng_abs/extraction-report.yaml"
     printf '%s\n' "$report_md" >"$eng_abs/extraction-report.md"
