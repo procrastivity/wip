@@ -3,12 +3,15 @@
 # does the deterministic core; the LLM-driven analyze/review phases stay
 # in the porcelain layer.
 #
-# Usage: extract [--manifest <path>] [--force]
+# Usage: extract [--manifest <path>] [--force] [--verify-hashes]
 #
 # v1 supports verbatim + content modes against simple-path /
 # single-file-with-range sources. transform/summarize and multi-file
-# sources land in `unsupported[]` (skip, don't fail). Hash verification
-# is parsed-but-skipped; ledger records `hash_verification: "skipped-v1"`.
+# sources land in `unsupported[]` (skip, don't fail). Source-hash
+# verification is opt-in via `--verify-hashes`: off by default (ledger
+# records `hash_verification: "skipped-v1"`), and when on it runs as a
+# pre-write gate — a mismatch fails the run (`exit 4 hash-mismatch`)
+# before any target is written.
 # shellcheck shell=bash
 
 # shellcheck source=lib/wip/wip-plumbing-extract-lib.bash
@@ -17,7 +20,7 @@ source "$WIP_LIB/wip-plumbing-extract-lib.bash"
 source "$WIP_LIB/wip-plumbing-setup-lib.bash"
 
 wip_plumbing_cmd_extract() {
-  local manifest_override="" force=0
+  local manifest_override="" force=0 verify_hashes=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --manifest)
@@ -31,6 +34,10 @@ wip_plumbing_cmd_extract() {
         ;;
       --force)
         force=1
+        shift
+        ;;
+      --verify-hashes)
+        verify_hashes=1
         shift
         ;;
       -*) wip_die 2 usage "extract: unknown flag: $1" ;;
@@ -117,11 +124,42 @@ wip_plumbing_cmd_extract() {
   # the --verify-hashes pre-write gate (below) replaces it with a real verdict.
   local content_hash_json='{"status":"skipped-v1"}'
 
+  # --verify-hashes pre-write gate (LDS source_hash_mismatch_handling): runs
+  # AFTER manifest validation and BEFORE the entry write loop. It is read-only,
+  # so it runs even under --dry-run. On any mismatch the run writes ZERO targets
+  # (the loop is skipped) and fails exit 4 hash-mismatch — the §7 report is still
+  # written first (below). hash_verification reflects the enum on the ok:true
+  # path: skipped-v1 (off) | verified (≥1 hash checked, all matched) | no-hashes
+  # (flag on, zero verifiable hashes).
+  local hash_verification_value="skipped-v1"
+  local hash_mismatch=0
+  local hash_mismatch_paths_json="[]" hash_mismatches_json="[]"
+  if [[ "$verify_hashes" == "1" ]]; then
+    set +e
+    content_hash_json="$(wip_extract_verify_hashes "$extract_mj" "$root")"
+    set -e
+    local ch_status ch_checked
+    ch_status="$(printf '%s' "$content_hash_json" | jq -r '.status')"
+    ch_checked="$(printf '%s' "$content_hash_json" | jq -r '.entries_checked')"
+    if [[ "$ch_status" == "fail" ]]; then
+      hash_mismatch=1
+      hash_mismatches_json="$(printf '%s' "$content_hash_json" | jq -c '.mismatches')"
+      hash_mismatch_paths_json="$(printf '%s' "$content_hash_json" | jq -c '[.mismatches[].source] | unique')"
+    elif [[ "$ch_checked" -gt 0 ]]; then
+      hash_verification_value="verified"
+    else
+      hash_verification_value="no-hashes"
+    fi
+  fi
+
   local wrote=() skipped=() wrote_forced=() refused=()
   local unsupported_json="[]" bad_json="[]"
   local i ej cls action rc status tmp dest target_rel
 
-  for ((i = 0; i < total; i++)); do
+  # The pre-write gate: when --verify-hashes found a mismatch the loop body
+  # runs zero iterations, so ZERO targets are written (LDS "never partial").
+  # The loop body itself is unchanged.
+  for ((i = 0; i < total && hash_mismatch == 0; i++)); do
     ej="$(printf '%s' "$extract_mj" | jq -c ".entries[$i]")"
     cls="$(wip_extract_classify_entry "$ej")"
     case "$cls" in
@@ -218,7 +256,13 @@ wip_plumbing_cmd_extract() {
 
   local ok="true"
   local err_kind="" err_msg="" err_paths_json="[]"
-  if ((refused_count > 0)); then
+  if ((hash_mismatch == 1)); then
+    # Pre-write gate tripped: no targets were written (loop skipped above).
+    ok="false"
+    err_kind="hash-mismatch"
+    err_msg="source hash verification failed; no targets written (run with the correct source or regenerate the manifest hashes)"
+    err_paths_json="$hash_mismatch_paths_json"
+  elif ((refused_count > 0)); then
     ok="false"
     err_kind="content-drift"
     err_msg="extracted targets differ from manifest output; re-run with --force to overwrite"
@@ -240,12 +284,13 @@ wip_plumbing_cmd_extract() {
         --argjson wrote_forced "$(wip_json_string_array "${wrote_forced[@]+"${wrote_forced[@]}"}")" \
         --argjson refused "$(wip_json_string_array "${refused[@]+"${refused[@]}"}")" \
         --argjson unsupported "$unsupported_json" \
-        --argjson bad "$bad_json" '
+        --argjson bad "$bad_json" \
+        --arg hash_verification "$hash_verification_value" '
         {ok:true, verb:$verb, manifest:$manifest, entries_total:$entries_total,
          wrote:$wrote, skipped_idempotent:$skipped,
          wrote_forced:$wrote_forced, refused:$refused,
          unsupported:$unsupported, bad_entries:$bad,
-         hash_verification:"skipped-v1"}'
+         hash_verification:$hash_verification}'
     else
       jq -nc \
         --arg verb "extract" \
@@ -253,11 +298,13 @@ wip_plumbing_cmd_extract() {
         --arg kind "$err_kind" \
         --arg message "$err_msg" \
         --argjson paths "$err_paths_json" \
-        --argjson bad "$bad_json" '
+        --argjson bad "$bad_json" \
+        --argjson mismatches "$hash_mismatches_json" '
         {ok:false, verb:$verb, manifest:$manifest,
          error:({code:4, kind:$kind, message:$message}
                 + (if ($paths | length) > 0 then {paths:$paths} else {} end)
-                + (if ($bad | length) > 0 then {bad_entries:$bad} else {} end))}'
+                + (if ($bad | length) > 0 then {bad_entries:$bad} else {} end)
+                + (if ($mismatches | length) > 0 then {mismatches:$mismatches} else {} end))}'
     fi
   fi
 
