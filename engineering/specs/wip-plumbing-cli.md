@@ -572,6 +572,12 @@ locks evolve per consumer (`nix flake update` rolls inputs forward), so
 byte-equal would refuse every consumer who's done one update. Under
 `--force` the lock is still overwritten.
 
+The `setup deps` devShell already lists **`coreutils`**, which provides
+**`sha256sum`** — so `extract --verify-hashes` works in the pure nix dev
+shell with **no new package**. (`shasum` is the perl tool, not a flake
+package; the hasher leads with `sha256sum` and falls back to
+`shasum -a 256` outside nix.)
+
 **Composition.** Verbs do not auto-chain. `setup direnv` requires
 `flake.nix` and exits 3 `missing-prereq` with `error.path: "flake.nix"`
 when absent (hint to run `setup deps` first). All verbs exit 3
@@ -793,7 +799,7 @@ sentinel); `<eng-docs>/decisions/` (for auto-NNNN scanning).
 }
 ```
 
-### `wip-plumbing extract [--manifest <path>] [--force]`
+### `wip-plumbing extract [--manifest <path>] [--force] [--verify-hashes]`
 
 Run the deterministic LDS Extract phase against an approved extraction
 manifest (step-15). The bulk-from-manifest LDS seam: reads a
@@ -818,7 +824,7 @@ deferral rationale):**
 | Simple-path source (string) | **supported** |
 | Single-file with line range | **supported** |
 | Multi-file source (`source.files[]`) | **skipped** |
-| SHA-256 source hash verification | **skipped-v1** (ledger flag) |
+| SHA-256 source hash verification | **opt-in** via `--verify-hashes` (default skipped-v1; see below) |
 | Templates + `field_mappings` | **skipped** (`unsupported[]`) |
 | `--resume` mode | **not implemented** |
 | Extraction report file | **written** (`extraction-report.{yaml,md}`; see below) |
@@ -858,11 +864,66 @@ self-documenting:
 
 - `line_statistics` fields and `layer_breakdown.<layer>.total_lines` are
   `null` (v1 does not count source/output lines).
-- `verification_results.line_count_check.status` and
-  `content_hash_check.status` are `"skipped-v1"` (mirroring the ledger's
-  `hash_verification`); only `file_existence_check` is computed live.
+- `verification_results.line_count_check.status` is `"skipped-v1"`.
+  `content_hash_check.status` is `"skipped-v1"` by default and becomes a
+  real `"pass"` / `"fail"` verdict under `--verify-hashes` (see
+  **Source-hash verification** below); `file_existence_check` is always
+  computed live.
 - `metadata.manifest_hash` is a SHA-256 of the manifest file (`shasum -a
   256`), or `null` if `shasum` is unavailable.
+
+**Source-hash verification (`--verify-hashes`).** Off by default; when
+set, `extract` verifies declared source hashes as a **pre-write gate**
+before any target is written (LDS `source_hash_mismatch_handling`:
+verify at the start, *"never silently proceed when source has changed"*).
+
+- **What is verified.** Only `entries[].source.hash` on **single-file**
+  sources that classify `ok-verbatim`. Simple-path (string) sources,
+  single-file entries with no `hash`, `content`-mode entries, and anything
+  already routed to `unsupported[]` / `bad_entries[]` are **not verifiable**
+  and are counted in `content_hash_check.entries_no_hash` — never failed.
+  The top-level whole-file `sources.<path>.hash` registry and multi-file
+  `combined_hash` are **out of v1 scope** (multi-file never reaches the
+  write path).
+- **Hash recipe (locked).** The digest covers the **extracted source-range
+  body bytes exactly as written to the target, minus the attribution block**
+  — i.e. the `cat` / `awk` output for the entry's source range. For a line
+  range this includes the **trailing newline** the extractor emits (range
+  bytes are `awk 'NR>=start && NR<=end'`); for a whole-file source it is the
+  raw file bytes (`cat`). The reference computation is
+  `awk 'NR>=S && NR<=E' <src> | sha256sum` (range) or `sha256sum <src>`
+  (whole file). The hasher is `sha256sum` (from `coreutils`), falling back
+  to `shasum -a 256`. A manifest producer that wants its hashes to verify
+  must hash these same bytes.
+- **Pre-write gate.** If every declared hash matches, the write loop runs
+  unchanged and the run exits 0 with `hash_verification: "verified"`. If any
+  hash mismatches — or a hashed source file is **missing** — the run writes
+  **no target at all** (no partial extraction), sets
+  `error.kind: "hash-mismatch"`, and `exit 4`. The §7 report is still
+  written **first** (with `content_hash_check.status: "fail"`), before the
+  exit.
+- **No-op signal.** A `--verify-hashes` run where *no* entry carries a
+  verifiable hash exits 0 with `hash_verification: "no-hashes"` and a
+  report `warnings[]` entry (`type: "no-verifiable-hashes"`) so the consumer
+  knows the flag did nothing.
+- **`--dry-run` interaction.** Verification still runs (it is read-only) and
+  a mismatch still yields `exit 4 hash-mismatch` in the ledger — but, like
+  every dry-run path, **neither targets nor the report are written**.
+
+The populated `content_hash_check` object (in `verification_results`):
+
+```yaml
+content_hash_check:
+  status: skipped-v1 | pass | fail   # skipped-v1 when the flag is off
+  entries_checked: 2                 # entries with a verifiable hash
+  entries_matched: 2
+  entries_no_hash: 1                 # verifiable-shape entries lacking a hash + non-verifiable entries
+  mismatches:                        # [] unless status == fail
+    - { id, source, expected_hash, actual_hash, status }  # status: mismatch | missing
+```
+
+The `.md` report's `Content hash check:` line renders this dynamically:
+`skipped-v1`, `pass (2/2 entries matched)`, or `fail (1/2 matched, 1 mismatch)`.
 
 **Per-entry write contract: three-way idempotency** (same as
 `graduate` and `setup`). A bytes-equal target is silently skipped; a
@@ -911,7 +972,8 @@ report).
   `missing-manifest`.
 - **4** — `manifest-missing`, `manifest-unparseable`,
   `manifest-not-approved`, `incompatible-schema`, `manifest-empty`,
-  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`.
+  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`,
+  `hash-mismatch` (only with `--verify-hashes`).
 
 **stdout (success):**
 
@@ -933,6 +995,10 @@ report).
 }
 ```
 
+`hash_verification` is `"skipped-v1"` by default, `"verified"` when
+`--verify-hashes` checked ≥1 hash and all matched, or `"no-hashes"` when
+`--verify-hashes` found zero verifiable hashes.
+
 **stdout (content drift):**
 
 ```json
@@ -948,6 +1014,29 @@ report).
   }
 }
 ```
+
+**stdout (hash mismatch — only with `--verify-hashes`):**
+
+```json
+{
+  "ok": false,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "error": {
+    "code": 4,
+    "kind": "hash-mismatch",
+    "message": "source hash verification failed; no targets written (run with the correct source or regenerate the manifest hashes)",
+    "paths": ["legacy/foo.md"],
+    "mismatches": [
+      {"id": "vision-main", "source": "legacy/foo.md", "expected_hash": "abc…", "actual_hash": "def…", "status": "mismatch"}
+    ]
+  }
+}
+```
+
+A `status` of `"missing"` (with `actual_hash: null`) marks a hashed source
+file that does not exist. No target is written on this path; the §7 report
+is written first (with `content_hash_check.status: "fail"`).
 
 **Templates dir resolution:** not relevant — `extract` does not read
 the `wip` templates dir (the LDS templates referenced in
