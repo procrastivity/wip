@@ -1,10 +1,12 @@
 # Roadmap — distillation
 
-**Status: in-flight.** Rounds 1–3 shipped (Round 1 → 2026-06-12, Round 2 → 2026-06-13,
-Round 3 → 2026-06-14). On 2026-06-17 the initiative reopened with **Round 4 — Extract
-polish & LDS completion**, promoting the four P2 follow-ups out of §Backlog. The remaining
-§Backlog items are P3/nit — opt-in, not sequential (prioritization captured in
-[`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)).
+**Status: shipped.** All four rounds shipped (Round 1 → 2026-06-12, Round 2 → 2026-06-13,
+Round 3 → 2026-06-14, Round 4 → 2026-06-18). Round 4 (reopened 2026-06-17) promoted the
+four P2 follow-ups out of §Backlog and closed them, shrinking `extract`'s `unsupported[]`
+to genuinely-speculative items. The roadmap is again complete; the remaining §Backlog is
+P3/nit + the deferred-transform items — opt-in, not sequential (prioritization in
+[`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)). Reopen with a new round to
+continue.
 
 The plan of record for building `wip` by distilling the collected workflows. Promoted
 from the remaining-items scratchpad (now this file is the source of truth; the scratchpad
@@ -53,17 +55,19 @@ The deterministic core. Shipping criterion for the Round: `wip-plumbing` answers
 ---
 
 
-## Round 4 — Extract polish & LDS completion
+## Round 4 — Extract polish & LDS completion  ✅ shipped 2026-06-18
 
 The P2 follow-ups promoted from §Backlog after Rounds 1–3 shipped: finish the LDS
 glossary partial, make `extract` spec-conformant + integrity-checked, then take on the
 one large capability gap (transform mode). Ordered quick-wins-first; the round closes
 when `extract`'s remaining v1 `unsupported[]` shrinks to the genuinely-speculative items.
+Closing criterion met: `unsupported[]` now holds only `link_rewrite` / `markdown_format` /
+`custom` transforms + multi-file sources — all genuinely-speculative/underspecified.
 
 - **step-16 — `glossary` LDS partial** (xs) ✅ shipped 2026-06-17 — `templates/glossary/lds.md` authored: LDS vocabulary (LDS / Layer / 7-layer table with Behaviors at 6 / eng-docs root / `.lds-manifest.yaml` sentinel / ADR / Appendix / LDS-sense Drift) + a Graduation section binding core's Graduation verb to its LDS realization (`wip extract` against an approved extraction manifest, ADR-0006). House style matches the shipped partials (strippable comment header, no H1, `##` sections, term tables, tie-back to `core.md`); assembles behind `solo.md` in declaration order. The inclusion rule + graceful body-absent skip already existed in `wip-plumbing-glossary-lib.bash` — **no lib/subcommand change**. Added a positive lds-inclusion + header-strip case to `test/test-glossary.sh` (54/54 green) and flipped the now-satisfied future-row dogfood assertion in `test/test-setup.sh` §24. This repo keeps `features.lds.enabled: false`, so `.wip/GLOSSARY.md` is unchanged and `glossary check` stays `drift:false`. Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `glossary-partial-lds`.)
 - **step-17 — `extract` extraction report** (small) ✅ shipped 2026-06-18 — `wip-plumbing extract` now serializes its stdout ledger to disk as `<eng-docs>/extraction-report.{yaml,md}` per LDS §7 (`.yaml` = §7.2 machine shape, `.md` = §7.4 human summary). Governing rule **faithful-subset serialization**: render the §7 shape, populate what the ledger + a cheap `stat` give, set genuinely-unavailable fields to `null` / `status:"skipped-v1"`, never fabricate (LDS §7 specs line-stats / real hash verification / source-change detection that v1 deliberately doesn't compute). Always written (incl. on `exit 4` partial-failure paths), honors `--dry-run`/`WIP_DRY_RUN` (writes nothing), and is a **plain overwrite that bypasses `wip_setup_write_idempotent`** (the embedded timestamp would otherwise self-report `content-drift`). Purely additive — stdout JSON envelope + stderr one-liner byte-identical, exit codes + extraction semantics unchanged, extracted targets keep three-way idempotency. New pure renderers `wip_extract_report_{yaml,md}` in `wip-plumbing-extract-lib.bash`; emission wired into `extract.bash` (both branches, before `exit 4`); CLI spec line 824 flipped "not written"→written + §7 subsection. Tests in `test/test-extract.sh` assert on-disk YAML↔stdout-ledger reconciliation (extract 51→89 assertions; all 34 suites green). All 7 workplan open-question leans honored. Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `extract-extraction-report`.)
 - **step-18 — `extract --verify-hashes`** (small) ✅ shipped 2026-06-18 — opt-in `--verify-hashes` flag runs a read-only SHA-256 **pre-write gate** (per LDS "verify before any write / never silently proceed") over `entries[].source.hash` on single-file sources (multi-file already `unsupported[]`; whole-file registry + `combined_hash` deferred). All match → the existing write loop runs **unmodified**, ledger flips `hash_verification` `"skipped-v1"`→`"verified"` (or `"no-hashes"` no-op + report warning); any mismatch/missing → **zero targets written**, `exit 4` kind `hash-mismatch`, but the §7 report (step-17) is written first with a real `content_hash_check`. Flag **off → byte-identical to step-17**; honors `--dry-run` (writes nothing, mismatch still exits 4). Hash recipe locked to "the extracted source-range body bytes as our extractor produces them" (self-consistent + documented; no analyze phase exists to define it externally — standing escalation if a real external manifest appears). New pure helpers `wip_extract_sha256` / `wip_extract_source_body` / `wip_extract_verify_hashes`; `content_hash_check` threaded through the report renderers; CLI spec documents the flag + `hash-mismatch` kind. No flake edit — `coreutils` already provides `sha256sum` (helper falls back to `shasum -a 256`). Tests in `test/test-extract.sh` (137 assertions; all 34 suites green). All 7 workplan leans honored. Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `extract-verify-hashes`.)
-- **step-19 — `extract` transform mode** (large) — LDS `transform` mode (heading_adjust / link_rewrite / markdown_format), currently routed to `unsupported[]`. Requires a small markdown engine in bash + per-transform options. Spike scope before committing. (was backlog `extract-transform-mode`.)
+- **step-19 — `extract` transform mode** (large) ✅ shipped 2026-06-18 — scoped via a Phase-1 spike to a **viable subset: `heading_adjust` only**; `link_rewrite` + `markdown_format` deferred to §Backlog (under/un-specified + risky/new-dep), `custom` out of scope per LDS. New pure `wip_extract_heading_adjust` (fence-aware `awk` ATX level-shifter: `level_offset` clamped `[1,6]`, `skip_first`, code fences + indented code + setext left untouched) + `wip_extract_render_transform` (attribution + `source_body | heading_adjust`); classify routing adds `ok-transform` and `unsupported-transform:<type>`. CLI-spec transform row flipped `skipped`→**partial** + a "Transform mode (v1)" subsection. `transform` on unsupported types or multi-file sources stays in `unsupported[]` (run still `ok:true`); transform output is three-way idempotent; `--verify-hashes` stays `ok-verbatim`-only (transform → `entries_no_hash`); verbatim/content/no-transform byte-identical to step-18. Tests in `test/test-extract.sh` (extract 175; all 34 suites green) incl. the required step-18 fixture migration (its `heading_adjust` unsupported-case repointed, since that path is now supported). **Round 4 closes here.** Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `extract-transform-mode`.)
 <!-- wip-amend: ea4e8cba28197833d43d6b9fca6de6263f8c7bfc9f38b75c47a182a890f74cc3 -->
 
 
@@ -76,8 +80,20 @@ when `extract`'s remaining v1 `unsupported[]` shrinks to the genuinely-speculati
 ## Backlog
 
 _The four P2 follow-ups (`glossary-partial-lds`, `extract-extraction-report`,
-`extract-verify-hashes`, `extract-transform-mode`) were promoted to Round 4 on 2026-06-17.
-What remains is P3/nit — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+`extract-verify-hashes`, `extract-transform-mode`) were promoted to Round 4 (2026-06-17)
+and all shipped by 2026-06-18. What remains is P3/nit + the two deferred-transform items
+below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+
+- **extract-transform-link-rewrite** (deferred from step-19): LDS `transform` `link_rewrite`
+  (`base_path`) — rewrite relative links. **Underspecified** (LDS gives no rewrite algorithm)
+  and high silent-failure risk (rich markdown link syntax: inline/ref/images/autolinks/code
+  spans). Tighten the `base_path` semantics first, then implement a link-aware rewriter; until
+  then it stays in `extract`'s `unsupported[]`.
+- **extract-transform-markdown-format** (deferred from step-19): LDS `transform` `markdown_format`
+  — normalize/clean markdown. **Undefined target** ("normalize" has no canonical meaning;
+  formatters disagree) and would need a **new flake formatter dep**, conflicting with LDS's
+  deterministic/mechanical principle. **May belong in porcelain, not plumbing** (LLM/tool-driven),
+  or never. Stays in `unsupported[]`.
 
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
