@@ -821,11 +821,48 @@ deferral rationale):**
 | SHA-256 source hash verification | **skipped-v1** (ledger flag) |
 | Templates + `field_mappings` | **skipped** (`unsupported[]`) |
 | `--resume` mode | **not implemented** |
-| Extraction report file | **not written** (ledger is stdout-only) |
+| Extraction report file | **written** (`extraction-report.{yaml,md}`; see below) |
 
 Skipped (unsupported) entries do **not** fail the run; other entries
 in the same manifest still execute. The ledger names every skip so the
 consumer can see what didn't land.
+
+**Extraction report (LDS §7).** Every run serializes the stdout ledger to
+two files at the eng-docs root:
+
+- `<eng-docs>/extraction-report.yaml` — the §7.2 machine-readable
+  structure (`extraction_report:` with `metadata` / `summary` /
+  `files_created[]` / `unsupported[]` / `verification_results` / `errors[]`
+  / `source_changes`).
+- `<eng-docs>/extraction-report.md` — the §7.4 human-readable summary
+  (FILES CREATED / LAYER SUMMARY / SUMMARY / VERIFICATION / `Status:` line,
+  where `Status:` is `COMPLETED` or `COMPLETED WITH ERRORS`).
+
+The report is **always written, including on partial failure** — on the
+`exit 4` drift / bad-shape paths it is written **before** the exit, so a
+failed run still leaves a report (§7.3). It honors `--dry-run`: under
+`--dry-run` (`WIP_DRY_RUN=1`) **nothing** is written (no report, no
+targets), consistent with the global flag's touch-nothing contract.
+
+The report write is a **plain overwrite — it is *not* three-way
+idempotent** and bypasses the idempotency helper that guards extracted
+targets. The report embeds a fresh `executed_at` timestamp, so it differs
+every run by construction; routing it through idempotency would make every
+second run report spurious `content-drift` on the report file itself.
+Re-running `extract` on an unchanged tree therefore regenerates the report
+while the extracted *targets* stay idempotent.
+
+**v1 field-availability caveats.** The report is a faithful subset of what
+v1 tracks — it never fabricates numbers. Genuinely-unavailable fields are
+self-documenting:
+
+- `line_statistics` fields and `layer_breakdown.<layer>.total_lines` are
+  `null` (v1 does not count source/output lines).
+- `verification_results.line_count_check.status` and
+  `content_hash_check.status` are `"skipped-v1"` (mirroring the ledger's
+  `hash_verification`); only `file_existence_check` is computed live.
+- `metadata.manifest_hash` is a SHA-256 of the manifest file (`shasum -a
+  256`), or `null` if `shasum` is unavailable.
 
 **Per-entry write contract: three-way idempotency** (same as
 `graduate` and `setup`). A bytes-equal target is silently skipped; a
@@ -860,8 +897,10 @@ idempotency compares.
 **Reads:** `.wip.yaml`; the manifest at the default or `--manifest`
 path; every entry's source file (for `verbatim` mode).
 
-**Writes:** one target per supported entry (or just the ledger with
-`--dry-run`).
+**Writes:** one target per supported entry, plus the extraction report
+files `<eng-docs>/extraction-report.{yaml,md}` (always, including on
+partial failure); or, with `--dry-run`, just the ledger (no targets, no
+report).
 
 **Exit:**
 
