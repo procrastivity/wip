@@ -223,6 +223,69 @@ wip_extract_source_body() {
   fi
 }
 
+# wip_extract_heading_adjust [<level_offset> [<skip_first>]]
+#
+# Pure, fence-aware ATX-heading level shifter: reads markdown on stdin,
+# writes the shifted markdown to stdout, NOTHING else. The `heading_adjust`
+# transform engine (LDS extract.md §3.3) — the deterministic "small markdown
+# engine" the roadmap envisioned. Side-effect-free and unit-testable in
+# isolation, exactly like wip_extract_source_body / wip_extract_sha256.
+#
+# Args (both optional, faithful defaults per D5):
+#   level_offset  integer added to each ATX heading level; default 0 (no-op).
+#   skip_first    "true" leaves the first document-wide ATX heading at its
+#                 original level (LDS "useful for document titles");
+#                 anything else (default) shifts every heading.
+#
+# Behavior:
+#   - Only ATX headings (≤3 leading spaces, 1–6 `#`, then space/tab or EOL)
+#     outside fenced code are adjusted. `new_level = clamp(level+offset, 1, 6)`
+#     (D4) — never emits `#######` or drops below `#`.
+#   - Fence-aware (D3, OQ5): a line whose first non-space run (≤3 leading
+#     spaces) is ≥3 backticks or ≥3 tildes toggles fenced-code state; `#`
+#     lines inside a fence are left untouched. This is the simplified fence
+#     rule — info strings and exact open/close fence-length matching are not
+#     modeled (unnecessary for a heading shifter).
+#   - A 4-space-indented `#` (code, not a heading), a `#tag` with no following
+#     space (not a heading), and 7+ `#` (not a heading) are all left untouched.
+#   - Setext headings (`===` / `---` underline) are left unchanged in v1
+#     (OQ2): a numeric offset on an underline form is ill-defined.
+wip_extract_heading_adjust() {
+  local offset="${1:-0}" skip_first="${2:-false}"
+  awk -v off="$offset" -v skipfirst="$skip_first" '
+    BEGIN { infence = 0; firstseen = 0 }
+    {
+      line = $0
+      match(line, /^ */); nsp = RLENGTH
+      body = substr(line, nsp + 1)
+      # Fenced-code toggle: <=3 leading spaces then >=3 backticks or tildes.
+      if (nsp <= 3 && (body ~ /^```/ || body ~ /^~~~/)) {
+        infence = !infence; print line; next
+      }
+      if (infence) { print line; next }
+      # ATX heading candidate: <=3 leading spaces then a run of `#`.
+      if (nsp <= 3 && body ~ /^#/) {
+        match(body, /^#+/); level = RLENGTH
+        after = substr(body, level + 1)
+        if (level >= 1 && level <= 6 && (after == "" || after ~ /^[ \t]/)) {
+          if (skipfirst == "true" && firstseen == 0) {
+            firstseen = 1; print line; next
+          }
+          firstseen = 1
+          newlevel = level + off
+          if (newlevel < 1) newlevel = 1
+          if (newlevel > 6) newlevel = 6
+          hashes = ""
+          for (i = 0; i < newlevel; i++) hashes = hashes "#"
+          print substr(line, 1, nsp) hashes after
+          next
+        }
+      }
+      print line
+    }
+  '
+}
+
 # wip_extract_render_verbatim <entry-json> <repo-root>
 #
 # Read the source file (simple-path or single-file with optional
