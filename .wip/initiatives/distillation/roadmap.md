@@ -60,7 +60,7 @@ glossary partial, make `extract` spec-conformant + integrity-checked, then take 
 one large capability gap (transform mode). Ordered quick-wins-first; the round closes
 when `extract`'s remaining v1 `unsupported[]` shrinks to the genuinely-speculative items.
 
-- **step-16 — `glossary` LDS partial** (xs) — Author `templates/glossary/lds.md`. The inclusion rule is already declared in `wip-plumbing-glossary-lib.bash` (predicate `features.lds.enabled == true`) with graceful skip when the partial is absent; this just ships the partial bytes. (was backlog `glossary-partial-lds`.)
+- **step-16 — `glossary` LDS partial** (xs) ✅ shipped 2026-06-17 — `templates/glossary/lds.md` authored: LDS vocabulary (LDS / Layer / 7-layer table with Behaviors at 6 / eng-docs root / `.lds-manifest.yaml` sentinel / ADR / Appendix / LDS-sense Drift) + a Graduation section binding core's Graduation verb to its LDS realization (`wip extract` against an approved extraction manifest, ADR-0006). House style matches the shipped partials (strippable comment header, no H1, `##` sections, term tables, tie-back to `core.md`); assembles behind `solo.md` in declaration order. The inclusion rule + graceful body-absent skip already existed in `wip-plumbing-glossary-lib.bash` — **no lib/subcommand change**. Added a positive lds-inclusion + header-strip case to `test/test-glossary.sh` (54/54 green) and flipped the now-satisfied future-row dogfood assertion in `test/test-setup.sh` §24. This repo keeps `features.lds.enabled: false`, so `.wip/GLOSSARY.md` is unchanged and `glossary check` stays `drift:false`. Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `glossary-partial-lds`.)
 - **step-17 — `extract` extraction report** (small) — Write `extraction-report.{md,yaml}` to disk per LDS §7 (metadata + summary + per-entry rows). The data already exists in the stdout ledger; serialize it. (was backlog `extract-extraction-report`.)
 - **step-18 — `extract --verify-hashes`** (small) — `--verify-hashes` flag enabling SHA-256 source hash verification (v1 ledger advertises `hash_verification: "skipped-v1"`). Requires `sha256sum`/`shasum` in the flake (add to `setup deps` template). (was backlog `extract-verify-hashes`.)
 - **step-19 — `extract` transform mode** (large) — LDS `transform` mode (heading_adjust / link_rewrite / markdown_format), currently routed to `unsupported[]`. Requires a small markdown engine in bash + per-transform options. Spike scope before committing. (was backlog `extract-transform-mode`.)
@@ -82,6 +82,11 @@ What remains is P3/nit — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZ
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
   human call — these are reference copies and prtend is a useful counter-example.
+- **lds-scaffold-layer-6-naming** (surfaced by step-16 Q1): `templates/setup/lds/engineering/`
+  ships `features/` at LDS layer 6, but the canonical layer set (playbook `DOCUMENTATION-GUIDE.md`
+  + xcind ADR-0011, now also `templates/glossary/lds.md`) names layer 6 **`behaviors/`**. Align the
+  `setup lds` scaffold to `behaviors/` (or document the divergence intentionally). Scaffold/template
+  change + `test/test-setup.sh` update; deliberately out of scope for step-16.
 - **extract-summarize-mode** — LDS `summarize` mode. Inherently LLM-driven (LDS itself says "NEVER automatic"); belongs in porcelain, not plumbing. v1 routes to `unsupported[]`.
 - **extract-multi-file-source** — Multi-file source specs (`source.files[]` with separator + `combined_hash`). v1 routes to `unsupported[]`. Add when a real manifest needs concatenation.
 - **extract-templates-field-mappings** — LDS template + `field_mappings` support per `extract.md` §4 (literal + `source:<path>:<lines>` references). v1 skips templated entries. Add when a consumer adopts MADR/PRD-Lite templates with field maps.

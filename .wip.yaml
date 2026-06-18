@@ -10,26 +10,23 @@
 # example. See .wip/GLOSSARY.md for every term used here.
 
 version: 1
-
 # --- gitignore policy -------------------------------------------------------
 # Default: .wip/ content is ignored; only .wip.yaml (root) + the always-committed
 # tooling files inside .wip/ are tracked. Per-initiative override allowed.
 gitignore:
-  commit: false                 # false = ephemeral (default); true = track all of .wip/
-  always_commit:                # tracked even when commit=false
+  commit: false # false = ephemeral (default); true = track all of .wip/
+  always_commit: # tracked even when commit=false
     - .wip/GLOSSARY.md
     - .wip/backlog.md
-
 # --- wip porcelain provider -------------------------------------------------
 # Used ONLY by the standalone `wip` porcelain (not by /wip:* under Claude Code,
 # which uses Claude Code's own model). Points at any OpenAI-compatible endpoint.
 # Omit this block to run plumbing-only (no judgment commands from a plain shell).
 provider:
   kind: openai-compatible
-  base_url_env: WIP_LLM_BASE_URL   # read from env, never inline secrets
+  base_url_env: WIP_LLM_BASE_URL # read from env, never inline secrets
   api_key_env: WIP_LLM_API_KEY
   model_env: WIP_LLM_MODEL
-
 # --- features ---------------------------------------------------------------
 # A feature is ACTIVE iff: enabled here AND its sentinel file exists on disk.
 # `wip doctor` reports drift (declared-but-missing / present-but-undeclared).
@@ -38,44 +35,41 @@ features:
   wip:
     enabled: true
     root: .wip
-  orchestration:                # the Roles capability (orchestrator/coordinator/researcher/builder)
-    enabled: true               # roles ship WITH the wip plugin; backend-agnostic (ADR-0007)
-    backend: solo               # which orchestration backend binds the roles (see solo: below)
-    source: plugin              # plugin | vendored
+  orchestration: # the Roles capability (orchestrator/coordinator/researcher/builder)
+    enabled: true # roles ship WITH the wip plugin; backend-agnostic (ADR-0007)
+    backend: solo # which orchestration backend binds the roles (see solo: below)
+    source: plugin # plugin | vendored
   lds:
-    enabled: false              # this repo is the distribution source, not an install
+    enabled: false # this repo is the distribution source, not an install
     # When enabled, scalar single root for v1 (monorepo plural deferred):
     # root: engineering         # OR docs (old-style). sentinel: {root}/.lds-manifest.yaml
   diataxis:
-    enabled: true               # we ship user docs under docs/ (Diátaxis). sentinel: docs/README.md
+    enabled: true # we ship user docs under docs/ (Diátaxis). sentinel: docs/README.md
     root: docs
     # MUST stay distinct from any lds root (no two features share a root).
   changelog:
-    enabled: true               # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
+    enabled: true # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
   direnv:
-    enabled: true               # sentinel: .envrc (pinned nix-direnv shim)
+    enabled: true # sentinel: .envrc (pinned nix-direnv shim)
   prtend:
     enabled: false
-  solo:                         # Solo backend config (binding for orchestration.backend: solo)
-    enabled: true               # sentinel: Solo project registration
-    agent_tier_policy:          # Tier→agent_tool_id is backend-specific, so it lives here
-      force_tier: large         # this project: Opus-only (agent_tool_id=3)
-
+  solo: # Solo backend config (binding for orchestration.backend: solo)
+    enabled: true # sentinel: Solo project registration
+    agent_tier_policy: # Tier→agent_tool_id is backend-specific, so it lives here
+      force_tier: large # this project: Opus-only (agent_tool_id=3)
 # --- initiative registry ----------------------------------------------------
 # One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
 # Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
 # <slug>-step-NN-coordinator) so concurrent initiatives never collide.
 current_initiative: distillation
-
 initiatives:
   - slug: distillation
     title: Workflow Distillation
-    status: in-flight           # proposed | in-flight | shipped | archived | paused (reopened 2026-06-17 for Round 4)
-    intake: ad-hoc              # ad-hoc | spec-generator
+    status: in-flight # proposed | in-flight | shipped | archived | paused (reopened 2026-06-17 for Round 4)
+    intake: ad-hoc # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-15            # Round 3 complete (step-15 shipped 2026-06-14)
-
+    active_step: step-16 # step-16 shipped 2026-06-17 (Round 4, first step)
 # --- integrations (optional) ------------------------------------------------
 # integrations:
 #   github:
