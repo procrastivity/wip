@@ -819,7 +819,7 @@ deferral rationale):**
 |---|---|
 | `verbatim` mode | **supported** |
 | `content` mode | **supported** |
-| `transform` mode | **skipped** (`unsupported[]`) |
+| `transform` mode | **partial** — `heading_adjust` supported; `link_rewrite` / `markdown_format` / `custom` skipped (`unsupported[]`); see **Transform mode (v1)** below |
 | `summarize` mode | **skipped** (`unsupported[]`) |
 | Simple-path source (string) | **supported** |
 | Single-file with line range | **supported** |
@@ -832,6 +832,49 @@ deferral rationale):**
 Skipped (unsupported) entries do **not** fail the run; other entries
 in the same manifest still execute. The ledger names every skip so the
 consumer can see what didn't land.
+
+**Transform mode (v1).** `mode: transform` is supported for exactly one
+transform type — `transform_config.type: heading_adjust` — over a
+verbatim-able single-file / simple-path source. Such an entry classifies
+`ok-transform`: its body is the extracted source range with **ATX heading
+levels shifted**, and it carries the same attribution block as a verbatim
+entry (it has a real source). It flows through the same idempotency helper
+as every other target, so an unchanged re-run is reported under
+`skipped_idempotent`.
+
+`heading_adjust` honors two `transform_config.options`:
+
+- `level_offset` (integer, default `0`) — added to every ATX heading
+  level. `# H` with `level_offset: 1` becomes `## H`; `## H` with
+  `level_offset: -1` becomes `# H`. The new level is **clamped to `[1, 6]`**
+  — a shift never emits invalid `#######` (7) and never drops a heading
+  below `#` (1). A missing or `0` offset writes the body faithfully (a
+  no-op shift, not a failure).
+- `skip_first` (boolean, default `false`) — when `true`, the **first ATX
+  heading in the document** (the first one outside any fenced code block)
+  is left at its original level; the offset applies from the second
+  heading on. Useful for preserving a document title.
+
+The shifter is **fence-aware**: a `#` inside a fenced code block (a line
+whose first non-space run, with ≤3 leading spaces, is ≥3 backticks or ≥3
+tildes toggles fence state) or a 4-space-indented `#` is left untouched.
+**Setext headings** (a title underlined with `===` / `---`) are **not
+adjusted in v1** — applying a numeric offset to an underline form is
+ill-defined; this is a documented limitation.
+
+`transform` with `transform_config.type` ∈ {`link_rewrite`,
+`markdown_format`, `custom`}, or on a multi-file source, stays in
+`unsupported[]` (skip, don't fail). A still-unsupported transform type is
+named in the ledger with the reason string `unsupported-transform:<type>`
+(rendered as `"<type> transform not supported in v1"`); a transform on a
+multi-file source keeps reporting `unsupported-source:multi-file`. An entry
+whose `mode: transform` has an absent or non-map `transform_config` is a
+`bad-entry-shape` failure, not a skip.
+
+`--verify-hashes` (below) remains **`ok-verbatim`-only** in v1: transform
+entries are counted in `content_hash_check.entries_no_hash` and never
+failed by the gate. The source-byte recipe is identical, so extending the
+gate to transform entries later is a one-line change.
 
 **Extraction report (LDS §7).** Every run serializes the stdout ledger to
 two files at the eng-docs root:
