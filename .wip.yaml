@@ -65,7 +65,7 @@ current_initiative: distillation
 initiatives:
   - slug: distillation
     title: Workflow Distillation
-    status: shipped # proposed | in-flight | shipped | archived | paused (Round 4 closed 2026-06-18; all 4 rounds shipped)
+    status: in-flight # proposed | in-flight | shipped | archived | paused (reopened 2026-06-19 for Round 5)
     intake: ad-hoc # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
