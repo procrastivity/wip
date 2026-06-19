@@ -69,6 +69,24 @@ and resume:
 
 See [`backends/`](./backends/) for the concrete timer tool names.
 
+### An idle edge is not a completion signal
+
+The "fire when watched agents go idle" timer can fire on a *between-step*
+idle — a watched agent momentarily quiet between tool calls, not finished.
+Before routing any watched agent or task as **complete**, apply the
+**liveness-and-report gate**:
+
+1. **Liveness re-check** — re-read the backend's **liveness signal**. If
+   the agent is still active, producing output, or only briefly quiet,
+   treat it as a between-step lull: **re-arm the wait and take no routing
+   action.**
+2. **Explicit terminal signal** — require an explicit **final-report
+   comment or a completed ledger entry** authored by the watched agent.
+
+Route to "complete" / close a process only when **both** hold. Never
+route on the bare idle edge. See [`backends/`](./backends/) for the
+concrete liveness signal.
+
 ## Shared-Note Template
 
 Coordinators bootstrap a Step shared note from this template at build

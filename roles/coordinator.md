@@ -65,16 +65,23 @@ the routing hub.
 
 ## Wake-up Routing (Builder idle)
 
-When a Builder goes idle:
+When a Builder's watch timer fires, **first apply the
+liveness-and-report gate** ([`shared.md`](./shared.md) §Pause and
+Resume): re-check the liveness signal, and require an explicit
+final-report comment — a bare idle edge routes nothing.
 
-1. Read the Builder's ledger entry + comments.
-2. **Completed with results comment** → append the per-task outcome
-   to the shared note and close the Builder.
-3. **`needs-human` tag** → create a Coordinator escalation ledger
-   entry and pause further spawning until the human resolves.
-4. **Idle / no comment** → send a status-check prompt and re-arm a
-   short timer.
-5. **Dead process** → respawn once, then escalate.
+1. Read the Builder's ledger entry + comments **and** re-check the
+   liveness signal.
+2. **Still active / only briefly quiet** → between-step lull; re-arm the
+   watch timer and wait. Do not route.
+3. **Quiet + final-report results comment** → append the per-task
+   outcome to the shared note and close the Builder.
+4. **Quiet, no final-report comment** → send a status-check prompt and
+   re-arm a short timer (do **not** treat as done).
+5. **`needs-human` tag** → create a Coordinator escalation ledger entry
+   and pause further spawning until the human resolves.
+6. **Dead process** (not running, no terminal signal) → respawn once,
+   then escalate.
 
 ## Retry / Escalation Policy
 

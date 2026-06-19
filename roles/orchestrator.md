@@ -39,6 +39,10 @@ Use bounded checks only:
 2. Check the Coordinator's process status.
 3. Re-arm the idle timer if no action is needed.
 
+On any idle-timer wake, apply the **liveness-and-report gate**
+([`shared.md`](./shared.md) §Pause and Resume) before routing the
+Coordinator as complete — a bare idle edge routes nothing.
+
 Do not inspect Coordinator internals unless an escalation or crash
 demands it.
 

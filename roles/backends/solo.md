@@ -51,6 +51,25 @@ Use the task ledger (Todos) as the **primary durable coordination
 surface**. Use the shared note (Scratchpad) for rolling context, not
 as a replacement for ledger state.
 
+## Liveness signal (re-check before routing)
+
+The abstract **liveness signal** (see [`shared.md`](../shared.md)
+§Pause and Resume — the liveness-and-report gate) binds to
+`mcp__solo__get_process_status`:
+
+- `agent_state.idle` — `false` means the agent is actively producing
+  (thinking/planning/emitting); **re-arm and wait**, do not route.
+- `agent_state.idle_seconds` — how long the agent has been quiet. A small
+  value after an idle-timer fire indicates a **between-step lull**, not
+  completion. There is no magic threshold: the explicit final-report
+  comment is the real completion signal; this read is the cheap fast-path
+  that catches a premature wake.
+- `status` — `"Running"` distinguishes a live process from a dead one
+  (the Wake-up Routing "dead process" branch).
+
+Re-check this signal on every idle-timer fire before treating a watched
+agent as done.
+
 ## Tier resolver
 
 Solo resolves a requested **Tier** (`small` / `medium` / `large` —
