@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.7] - 2026-06-19
+
+Round 4 — Extract polish & LDS completion. All four steps shipped.
+
+### Added
+
+- `extract` now writes an on-disk extraction report `<eng-docs>/extraction-report.{yaml,md}` per LDS §7 (faithful-subset serialization of the run ledger; always written incl. on partial failure, skipped under `--dry-run`).
+- `extract --verify-hashes` — opt-in SHA-256 source-hash pre-write gate over single-file `source.hash`; a mismatch writes zero targets and exits 4 (`hash-mismatch`). Off by default and byte-identical to prior behavior.
+- `extract` `transform` mode (`heading_adjust`) — fence-aware ATX heading-level shifter (`level_offset` clamped 1–6, `skip_first`); `link_rewrite` / `markdown_format` remain unsupported (deferred to backlog).
+- `templates/glossary/lds.md` — the LDS glossary partial (LDS vocabulary + the Extract graduation mechanism).
+
+### Documentation
+
+- Docs(roadmap): open Round 4 (extract polish) and prioritize backlog
+- Docs(roadmap): mark step-16 shipped; file lds-scaffold-layer-6 backlog item
+- Docs(roadmap): mark step-17 shipped; file idle-routing backlog item
+- Docs(roadmap): mark step-18 shipped (extract --verify-hashes)
+- Docs(roadmap): mark step-19 shipped; close Round 4
+
+### Other
+
+- Step 16 · Task 1: add LDS glossary partial + inclusion tests
+- Step 17 · Task 1: add pure LDS §7 extraction-report renderers
+- Step 17 · Task 1: write LDS §7 extraction report to disk
+- Step 17 · Task 1: document extraction report in CLI spec
+- Step 17 · Task 1: test extraction-report YAML↔ledger reconciliation
+- Step 18 · Task 1: pure hash helpers (sha256, source_body, verify)
+- Step 18 · Task 1: thread content_hash_check through report renderers
+- Step 18 · Task 1: wire --verify-hashes flag + pre-write gate
+- Step 18 · Task 1: document extract --verify-hashes in CLI spec
+- Step 18 · Task 1: test extract --verify-hashes (match/gate/dry-run)
+- Step 19 · Chunk 1: flip extract transform row + document Transform mode (v1)
+- Step 19 · Chunk 2: add pure wip_extract_heading_adjust engine helper
+- Step 19 · Chunk 3: render + classify + wire transform/heading_adjust
+- Step 19 · Chunk 4: transform/heading_adjust tests + step-18 fixture migration
+
 ## [0.0.6] - 2026-06-16
 
 ### Added
