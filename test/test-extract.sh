@@ -31,6 +31,15 @@ write_manifest() {
   printf '%s' "$2" >"$1/engineering/.lds-manifest.yaml"
 }
 
+# range_sha256 <file> <start> <end> — compute the expected source.hash with
+# the SAME recipe the impl uses (OQ1, locked): the extracted range body bytes
+# exactly as wip_extract_source_body emits them — awk range, trailing newline
+# included — through sha256sum. Keeps test and impl self-consistent without a
+# magic digest.
+range_sha256() {
+  awk -v s="$2" -v e="$3" 'NR >= s && NR <= e' "$1" | sha256sum | awk '{print $1}'
+}
+
 # --- 1. Happy path: verbatim + content modes both write. ----------------------
 d1="$tmp/c1"
 build_lds_enabled_root "$d1"
@@ -81,8 +90,55 @@ assert_not_grep '^line 5' "$d1/engineering/decisions/0001-verbatim.md" "[happy] 
 assert_grep '<!-- Generated content - no source file -->' \
   "$d1/engineering/specs/inline.md" "[happy] content attribution"
 assert_grep '^# Inline spec body' "$d1/engineering/specs/inline.md" "[happy] content body"
+# Extraction report (LDS §7): on-disk YAML reconciles with the stdout ledger.
+assert_file "$d1/engineering/extraction-report.yaml" "[report] yaml written"
+assert_file "$d1/engineering/extraction-report.md" "[report] md written"
+rj1="$(yq -o=json '.' "$d1/engineering/extraction-report.yaml")"
+assert_eq "2" "$(jq -r '.extraction_report.summary.total_entries' <<<"$rj1")" "[report] total=2"
+assert_eq "2" "$(jq -r '.extraction_report.summary.successful' <<<"$rj1")" "[report] successful=2"
+assert_eq "0" "$(jq -r '.extraction_report.summary.failed' <<<"$rj1")" "[report] failed=0"
+assert_eq "0" "$(jq -r '.extraction_report.summary.skipped' <<<"$rj1")" "[report] skipped=0"
+# count reconciliation: stdout .wrote length == report successful.
+assert_eq "$(jq -r '.wrote | length' <<<"$out")" \
+  "$(jq -r '.extraction_report.summary.successful' <<<"$rj1")" "[report] wrote count reconciles"
+# per-target reconciliation: each stdout .wrote[] target is a success row.
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/decisions/0001-verbatim.md") | .status' <<<"$rj1")" \
+  "[report] verbatim target success row"
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/specs/inline.md") | .status' <<<"$rj1")" \
+  "[report] content target success row"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj1")" \
+  "[report] content hash check skipped-v1"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.line_count_check.status' <<<"$rj1")" \
+  "[report] line count check skipped-v1"
+# v1 null fields (keys present, values null) — assert null, never a value.
+assert_eq "null" "$(jq -r '.extraction_report.line_statistics.source_lines_processed' <<<"$rj1")" \
+  "[report] line_statistics null"
+assert_eq "null" "$(jq -r '.extraction_report.layer_breakdown.decisions.total_lines' <<<"$rj1")" \
+  "[report] layer total_lines null"
+# md carries the §7.4 Status line.
+assert_grep '^Status: COMPLETED$' "$d1/engineering/extraction-report.md" "[report] md status COMPLETED"
+# Non-determinism guards: never assert exact executed_at; treat hash as presence/null.
+ea="$(jq -r '.extraction_report.metadata.executed_at' <<<"$rj1")"
+case "$ea" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ea_shape=ok ;;
+  *) ea_shape=bad ;;
+esac
+assert_eq "ok" "$ea_shape" "[report] executed_at is ISO-8601 shaped"
+mh="$(jq -r '.extraction_report.metadata.manifest_hash' <<<"$rj1")"
+[[ -n "$mh" ]] && mh_ok=ok || mh_ok=bad
+assert_eq "ok" "$mh_ok" "[report] manifest_hash present (hash or null)"
 
 # --- 2. Unsupported modes get skipped (not failed). ---------------------------
+# step-19 REQUIRED MIGRATION: skip-transform was `type: heading_adjust` (the
+# step-18 fixture asserting the transform SKIP path). heading_adjust is now a
+# SUPPORTED transform (step-19), so this fixture is repointed to
+# `type: markdown_format` — a still-unsupported transform type — to keep
+# exercising the skip path. Not a regression: the supported heading_adjust
+# behavior is covered by the new transform tests below.
 d2="$tmp/c2"
 build_lds_enabled_root "$d2"
 echo "src" >"$d2/legacy/x.md"
@@ -104,9 +160,7 @@ entries:
     confidence: high
     classification_reason: testing
     transform_config:
-      type: heading_adjust
-      options:
-        level_offset: 1
+      type: markdown_format
   - id: skip-summarize
     source: legacy/x.md
     target: decisions/0003-sum.md
@@ -124,6 +178,19 @@ assert_eq "summarize" "$(jq -r '.unsupported[] | select(.id=="skip-summarize") |
   "[unsupported] summarize mode"
 assert_file "$d2/engineering/decisions/0001-ok.md" "[unsupported] supported wrote"
 assert_absent "$d2/engineering/decisions/0002-tr.md" "[unsupported] transform not written"
+# Report: unsupported entries land in their own block (not files_created/errors).
+rj2="$(yq -o=json '.' "$d2/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.successful' <<<"$rj2")" "[report-unsup] successful=1"
+assert_eq "2" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj2")" "[report-unsup] unsupported=2"
+assert_eq "markdown_format transform not supported in v1" \
+  "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-transform") | .reason' <<<"$rj2")" \
+  "[report-unsup] markdown_format transform reason"
+assert_eq "summarize mode not supported in v1" \
+  "$(jq -r '.extraction_report.unsupported[] | select(.id=="skip-summarize") | .reason' <<<"$rj2")" \
+  "[report-unsup] summarize reason"
+assert_eq "0" \
+  "$(jq -r '[.extraction_report.files_created[] | select(.id=="skip-transform")] | length' <<<"$rj2")" \
+  "[report-unsup] not in files_created"
 
 # --- 3. Multi-file source → unsupported-source. -------------------------------
 d3="$tmp/c3"
@@ -150,6 +217,14 @@ out="$(WIP_ROOT="$d3" bin/wip-plumbing extract 2>/dev/null)"
 assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[multi-file] unsupported=1"
 assert_eq "multi-file" "$(jq -r '.unsupported[0].source_kind' <<<"$out")" "[multi-file] kind"
 assert_absent "$d3/engineering/specs/multi.md" "[multi-file] not written"
+# Report: the multi-file entry is unsupported, not a created file.
+rj3="$(yq -o=json '.' "$d3/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj3")" "[report-multi] unsupported=1"
+assert_eq "multi-file" "$(jq -r '.extraction_report.unsupported[0].source_kind' <<<"$rj3")" \
+  "[report-multi] source_kind"
+assert_eq "0" \
+  "$(jq -r '[.extraction_report.files_created[] | select(.target=="engineering/specs/multi.md")] | length' <<<"$rj3")" \
+  "[report-multi] not in files_created"
 
 # --- 4. Manifest not approved → exit 4 manifest-not-approved. -----------------
 d4="$tmp/c4"
@@ -232,6 +307,12 @@ out="$(WIP_ROOT="$d7" bin/wip-plumbing extract 2>/dev/null)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[idem] ok"
 assert_eq "0" "$(jq -r '.wrote | length' <<<"$out")" "[idem] wrote=0"
 assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out")" "[idem] skipped=1"
+# Report bypasses idempotency: 2nd run regenerates it (no content-drift refusal
+# on the report file itself), reflecting the all-skipped ledger.
+assert_file "$d7/engineering/extraction-report.yaml" "[report-idem] report regenerated on re-run"
+rj7="$(yq -o=json '.' "$d7/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.skipped' <<<"$rj7")" "[report-idem] skipped=1"
+assert_eq "0" "$(jq -r '.extraction_report.summary.successful' <<<"$rj7")" "[report-idem] successful=0"
 
 # --- 8. Content drift → exit 4; --force overwrites. ---------------------------
 d8="$tmp/c8"
@@ -258,6 +339,13 @@ set -e
 assert_eq "4" "$rc" "[drift] exit 4"
 assert_eq "content-drift" "$(jq -r '.error.kind' <<<"$out")" "[drift] kind"
 assert_eq "1" "$(jq -r '.error.paths | length' <<<"$out")" "[drift] paths=1"
+# §7.3: the report is written before exit 4; the drifted target shows failed.
+assert_file "$d8/engineering/extraction-report.yaml" "[report-drift] written despite exit 4"
+rj8="$(yq -o=json '.' "$d8/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.failed' <<<"$rj8")" "[report-drift] failed=1"
+assert_eq "failed" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/decisions/0001-h.md") | .status' <<<"$rj8")" \
+  "[report-drift] drifted target status failed"
 out="$(WIP_ROOT="$d8" bin/wip-plumbing extract --force 2>/dev/null)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[--force] ok"
 assert_eq "1" "$(jq -r '.wrote_forced | length' <<<"$out")" "[--force] wrote_forced=1"
@@ -364,6 +452,14 @@ rc=$?
 set -e
 assert_eq "4" "$rc" "[bad-shape] exit 4"
 assert_eq "bad-entry-shape" "$(jq -r '.error.kind' <<<"$out")" "[bad-shape] kind"
+# §7.3: report written before exit 4; bad entry mirrored into errors[] + failed row.
+assert_file "$d12/engineering/extraction-report.yaml" "[report-bad] written despite exit 4"
+rj12="$(yq -o=json '.' "$d12/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.failed' <<<"$rj12")" "[report-bad] failed=1"
+assert_eq "bad" "$(jq -r '.extraction_report.errors[0].entry' <<<"$rj12")" "[report-bad] bad entry in errors"
+assert_eq "failed" \
+  "$(jq -r '.extraction_report.files_created[] | select(.id=="bad") | .status' <<<"$rj12")" \
+  "[report-bad] bad entry status failed"
 
 # --- 13. Template field bumps entry to unsupported (v1 deferral). -------------
 d13="$tmp/c13"
@@ -390,5 +486,524 @@ assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[template] unsupport
 assert_eq "template/field_mappings not supported in v1" \
   "$(jq -r '.unsupported[0].reason' <<<"$out")" "[template] reason"
 assert_absent "$d13/engineering/decisions/0001-tpl.md" "[template] not written"
+
+# --- 14. --dry-run writes neither targets nor report. -------------------------
+d14="$tmp/c14"
+build_lds_enabled_root "$d14"
+printf 'x\ny\nz\n' >"$d14/legacy/s.md"
+write_manifest "$d14" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: one
+    source: legacy/s.md
+    target: decisions/0001-x.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+'
+out="$(WIP_ROOT="$d14" bin/wip-plumbing --dry-run extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[dry-run] ok"
+assert_absent "$d14/engineering/extraction-report.yaml" "[dry-run] no report yaml"
+assert_absent "$d14/engineering/extraction-report.md" "[dry-run] no report md"
+assert_absent "$d14/engineering/decisions/0001-x.md" "[dry-run] no target written"
+
+# --- 15. --verify-hashes match → pass. ----------------------------------------
+d15="$tmp/c15"
+build_lds_enabled_root "$d15"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d15/legacy/source.md"
+h15="$(range_sha256 "$d15/legacy/source.md" 2 4)"
+cat >"$d15/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 2
+      end_line: 4
+      hash: "$h15"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d15" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-match] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-match] hash_verification verified"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[verify-match] wrote=1"
+assert_file "$d15/engineering/decisions/0001-v.md" "[verify-match] target written"
+rj15="$(yq -o=json '.' "$d15/engineering/extraction-report.yaml")"
+assert_eq "pass" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj15")" \
+  "[verify-match] report content hash pass"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_checked' <<<"$rj15")" \
+  "[verify-match] entries_checked=1"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_matched' <<<"$rj15")" \
+  "[verify-match] entries_matched=1"
+assert_grep 'Content hash check:   pass' "$d15/engineering/extraction-report.md" \
+  "[verify-match] md content hash line"
+
+# --- 16. --verify-hashes mismatch → exit 4 pre-write gate. --------------------
+d16="$tmp/c16"
+build_lds_enabled_root "$d16"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d16/legacy/source.md"
+cat >"$d16/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 2
+      end_line: 4
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d16" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-mismatch] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-mismatch] kind"
+assert_eq "legacy/source.md" "$(jq -r '.error.paths[0]' <<<"$out")" "[verify-mismatch] source in error.paths"
+assert_eq "mismatch" "$(jq -r '.error.mismatches[0].status' <<<"$out")" "[verify-mismatch] mismatch row status"
+assert_absent "$d16/engineering/decisions/0001-v.md" "[verify-mismatch] no target written (gate)"
+assert_file "$d16/engineering/extraction-report.yaml" "[verify-mismatch] report written despite exit 4"
+rj16="$(yq -o=json '.' "$d16/engineering/extraction-report.yaml")"
+assert_eq "fail" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj16")" \
+  "[verify-mismatch] report content hash fail"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.mismatches | length' <<<"$rj16")" \
+  "[verify-mismatch] one report mismatch row"
+
+# --- 17. --verify-hashes missing hashed source → missing mismatch. -----------
+d17="$tmp/c17"
+build_lds_enabled_root "$d17"
+# legacy/gone.md is never created.
+cat >"$d17/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/gone.md
+      start_line: 2
+      end_line: 4
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d17" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-missing] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-missing] kind"
+assert_eq "missing" "$(jq -r '.error.mismatches[0].status' <<<"$out")" "[verify-missing] status missing"
+assert_absent "$d17/engineering/decisions/0001-v.md" "[verify-missing] no target written"
+rj17="$(yq -o=json '.' "$d17/engineering/extraction-report.yaml")"
+assert_eq "missing" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.mismatches[0].status' <<<"$rj17")" \
+  "[verify-missing] report missing row"
+
+# --- 18. --verify-hashes no declared hash → skipped, not failed. -------------
+d18="$tmp/c18"
+build_lds_enabled_root "$d18"
+printf 'line 1\nline 2\nline 3\n' >"$d18/legacy/source.md"
+cat >"$d18/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d18" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-nohash] ok:true"
+assert_eq "no-hashes" "$(jq -r '.hash_verification' <<<"$out")" "[verify-nohash] hash_verification no-hashes"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[verify-nohash] wrote=1"
+assert_file "$d18/engineering/decisions/0001-v.md" "[verify-nohash] target still written"
+rj18="$(yq -o=json '.' "$d18/engineering/extraction-report.yaml")"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_no_hash' <<<"$rj18")" \
+  "[verify-nohash] entries_no_hash=1"
+assert_eq "1" "$(jq -r '.extraction_report.warnings | length' <<<"$rj18")" "[verify-nohash] one warning"
+assert_eq "no-verifiable-hashes" \
+  "$(jq -r '.extraction_report.warnings[0].type' <<<"$rj18")" "[verify-nohash] warning type"
+
+# --- 19. --verify-hashes mixed manifest (one hashed, one not). ---------------
+d19="$tmp/c19"
+build_lds_enabled_root "$d19"
+printf 'line 1\nline 2\nline 3\nline 4\nline 5\n' >"$d19/legacy/a.md"
+printf 'alpha\nbeta\ngamma\n' >"$d19/legacy/b.md"
+h19="$(range_sha256 "$d19/legacy/a.md" 2 4)"
+cat >"$d19/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: hashed
+    source:
+      file: legacy/a.md
+      start_line: 2
+      end_line: 4
+      hash: "$h19"
+    target: decisions/0001-a.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+  - id: nohash
+    source:
+      file: legacy/b.md
+    target: decisions/0002-b.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d19" bin/wip-plumbing extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-mixed] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-mixed] verified"
+assert_eq "2" "$(jq -r '.wrote | length' <<<"$out")" "[verify-mixed] wrote=2"
+assert_file "$d19/engineering/decisions/0001-a.md" "[verify-mixed] hashed target written"
+assert_file "$d19/engineering/decisions/0002-b.md" "[verify-mixed] no-hash target written"
+rj19="$(yq -o=json '.' "$d19/engineering/extraction-report.yaml")"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_checked' <<<"$rj19")" \
+  "[verify-mixed] entries_checked=1"
+assert_eq "1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.entries_no_hash' <<<"$rj19")" \
+  "[verify-mixed] entries_no_hash=1"
+
+# --- 20. Flag off regression — a present hash is ignored; skipped-v1. --------
+d20="$tmp/c20"
+build_lds_enabled_root "$d20"
+printf 'line 1\nline 2\nline 3\n' >"$d20/legacy/source.md"
+h20="$(range_sha256 "$d20/legacy/source.md" 1 2)"
+cat >"$d20/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 2
+      hash: "$h20"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d20" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-off] ok:true"
+assert_eq "skipped-v1" "$(jq -r '.hash_verification' <<<"$out")" "[verify-off] hash_verification skipped-v1"
+rj20="$(yq -o=json '.' "$d20/engineering/extraction-report.yaml")"
+assert_eq "skipped-v1" \
+  "$(jq -r '.extraction_report.verification_results.content_hash_check.status' <<<"$rj20")" \
+  "[verify-off] content_hash_check skipped-v1"
+assert_eq "0" "$(jq -r '.extraction_report.warnings | length' <<<"$rj20")" "[verify-off] no warnings"
+assert_grep 'Content hash check:   skipped-v1' "$d20/engineering/extraction-report.md" \
+  "[verify-off] md line skipped-v1"
+
+# --- 21. --dry-run + --verify-hashes: check runs, writes nothing. ------------
+d21="$tmp/c21"
+build_lds_enabled_root "$d21"
+printf 'line 1\nline 2\nline 3\nline 4\n' >"$d21/legacy/source.md"
+h21="$(range_sha256 "$d21/legacy/source.md" 1 3)"
+cat >"$d21/engineering/.lds-manifest.yaml" <<EOF
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 3
+      hash: "$h21"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+out="$(WIP_ROOT="$d21" bin/wip-plumbing --dry-run extract --verify-hashes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[verify-dry-match] ok:true"
+assert_eq "verified" "$(jq -r '.hash_verification' <<<"$out")" "[verify-dry-match] verified in stdout"
+assert_absent "$d21/engineering/decisions/0001-v.md" "[verify-dry-match] no target"
+assert_absent "$d21/engineering/extraction-report.yaml" "[verify-dry-match] no report"
+# Same fixture, now a wrong hash: dry-run still surfaces the mismatch as exit 4,
+# but writes neither target nor report.
+cat >"$d21/engineering/.lds-manifest.yaml" <<'EOF'
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: adr-v
+    source:
+      file: legacy/source.md
+      start_line: 1
+      end_line: 3
+      hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    target: decisions/0001-v.md
+    mode: verbatim
+    confidence: high
+    classification_reason: t
+EOF
+set +e
+out="$(WIP_ROOT="$d21" bin/wip-plumbing --dry-run extract --verify-hashes 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[verify-dry-mismatch] exit 4"
+assert_eq "hash-mismatch" "$(jq -r '.error.kind' <<<"$out")" "[verify-dry-mismatch] kind"
+assert_absent "$d21/engineering/decisions/0001-v.md" "[verify-dry-mismatch] no target"
+assert_absent "$d21/engineering/extraction-report.yaml" "[verify-dry-mismatch] no report"
+
+# --- 22. transform/heading_adjust e2e: +1 shift, skip_first, fence + indent
+#         untouched, verbatim-style attribution, §7 report reconciliation. ----
+d22="$tmp/c22"
+build_lds_enabled_root "$d22"
+cat >"$d22/legacy/doc.md" <<'EOF'
+# Title
+intro text
+## Section
+```
+# fenced not a heading
+```
+    # indented not a heading
+### Sub
+EOF
+write_manifest "$d22" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-shift
+    source: legacy/doc.md
+    target: specs/shifted.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+        skip_first: true
+'
+out="$(WIP_ROOT="$d22" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-shift] ok:true"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[tr-shift] wrote=1"
+assert_eq "0" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-shift] none unsupported"
+tgt22="$d22/engineering/specs/shifted.md"
+assert_file "$tgt22" "[tr-shift] target written"
+assert_grep '<!-- Migrated from legacy/doc.md -->' "$tgt22" "[tr-shift] verbatim-style attribution"
+assert_grep '<!-- Extraction ID: tr-shift -->' "$tgt22" "[tr-shift] extraction id"
+assert_grep '^# Title$' "$tgt22" "[tr-shift] skip_first leaves first heading"
+assert_grep '^### Section$' "$tgt22" "[tr-shift] ## -> ### (+1)"
+assert_grep '^#### Sub$' "$tgt22" "[tr-shift] ### -> #### (+1)"
+assert_grep '^# fenced not a heading$' "$tgt22" "[tr-shift] fenced # untouched"
+assert_grep '^    # indented not a heading$' "$tgt22" "[tr-shift] indented # untouched"
+# §7 report reconciliation: transform success counts in summary.successful +
+# files_created (not unsupported), and reconciles with the stdout ledger.
+rj22="$(yq -o=json '.' "$d22/engineering/extraction-report.yaml")"
+assert_eq "1" "$(jq -r '.extraction_report.summary.successful' <<<"$rj22")" "[tr-shift] report successful=1"
+assert_eq "0" "$(jq -r '.extraction_report.summary.unsupported' <<<"$rj22")" "[tr-shift] report unsupported=0"
+assert_eq "success" \
+  "$(jq -r '.extraction_report.files_created[] | select(.target=="engineering/specs/shifted.md") | .status' <<<"$rj22")" \
+  "[tr-shift] report success row"
+assert_eq "$(jq -r '.wrote | length' <<<"$out")" \
+  "$(jq -r '.extraction_report.summary.successful' <<<"$rj22")" "[tr-shift] wrote count reconciles"
+
+# --- 23. transform/heading_adjust -1 shift + clamp floor (# stays #). --------
+d23="$tmp/c23"
+build_lds_enabled_root "$d23"
+printf '# Stays at one\n## Down to one\n### Down to two\n' >"$d23/legacy/doc.md"
+write_manifest "$d23" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-down
+    source: legacy/doc.md
+    target: specs/down.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: -1
+'
+out="$(WIP_ROOT="$d23" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "1" "$(jq -r '.wrote | length' <<<"$out")" "[tr-down] wrote=1"
+tgt23="$d23/engineering/specs/down.md"
+assert_grep '^# Stays at one$' "$tgt23" "[tr-down] # -1 clamps to #"
+assert_grep '^# Down to one$' "$tgt23" "[tr-down] ## -> #"
+assert_grep '^## Down to two$' "$tgt23" "[tr-down] ### -> ##"
+
+# --- 24. transform/heading_adjust clamp ceiling (###### +1 stays ######). ----
+d24="$tmp/c24"
+build_lds_enabled_root "$d24"
+printf '##### Five\n###### Six\n' >"$d24/legacy/doc.md"
+write_manifest "$d24" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-up
+    source: legacy/doc.md
+    target: specs/up.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+out="$(WIP_ROOT="$d24" bin/wip-plumbing extract 2>/dev/null)"
+tgt24="$d24/engineering/specs/up.md"
+assert_grep '^###### Five$' "$tgt24" "[tr-up] ##### -> ######"
+assert_grep '^###### Six$' "$tgt24" "[tr-up] ###### +1 clamps to ######"
+assert_not_grep '#######' "$tgt24" "[tr-up] never emits 7 hashes"
+
+# --- 25. transform/heading_adjust idempotent re-run (three-way). -------------
+d25="$tmp/c25"
+build_lds_enabled_root "$d25"
+printf '# A\n## B\n' >"$d25/legacy/doc.md"
+write_manifest "$d25" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-idem
+    source: legacy/doc.md
+    target: specs/idem.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+WIP_ROOT="$d25" bin/wip-plumbing extract >/dev/null 2>&1
+out="$(WIP_ROOT="$d25" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-idem] ok"
+assert_eq "0" "$(jq -r '.wrote | length' <<<"$out")" "[tr-idem] wrote=0 on re-run"
+assert_eq "1" "$(jq -r '.skipped_idempotent | length' <<<"$out")" "[tr-idem] skipped_idempotent=1"
+
+# --- 26. transform link_rewrite / custom still unsupported (skip, not fail). -
+d26="$tmp/c26"
+build_lds_enabled_root "$d26"
+echo "x" >"$d26/legacy/x.md"
+write_manifest "$d26" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-link
+    source: legacy/x.md
+    target: specs/link.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: link_rewrite
+      options:
+        base_path: "../"
+  - id: tr-custom
+    source: legacy/x.md
+    target: specs/custom.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: custom
+'
+out="$(WIP_ROOT="$d26" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-unsup] ok:true (skip not fail)"
+assert_eq "2" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-unsup] count=2"
+assert_eq "link_rewrite transform not supported in v1" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-link") | .reason' <<<"$out")" "[tr-unsup] link_rewrite reason"
+assert_eq "custom transform not supported in v1" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-custom") | .reason' <<<"$out")" "[tr-unsup] custom reason"
+assert_absent "$d26/engineering/specs/link.md" "[tr-unsup] link_rewrite not written"
+assert_absent "$d26/engineering/specs/custom.md" "[tr-unsup] custom not written"
+
+# --- 27. transform on multi-file source → unsupported-source:multi-file. -----
+#     (multi-file takes precedence over the transform type, per D6.)
+d27="$tmp/c27"
+build_lds_enabled_root "$d27"
+echo "a" >"$d27/legacy/a.md"
+echo "b" >"$d27/legacy/b.md"
+write_manifest "$d27" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-multi
+    source:
+      files:
+        - file: legacy/a.md
+        - file: legacy/b.md
+    target: specs/multi.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+    transform_config:
+      type: heading_adjust
+      options:
+        level_offset: 1
+'
+out="$(WIP_ROOT="$d27" bin/wip-plumbing extract 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "[tr-multi] ok:true"
+assert_eq "1" "$(jq -r '.unsupported | length' <<<"$out")" "[tr-multi] unsupported=1"
+assert_eq "multi-file" \
+  "$(jq -r '.unsupported[] | select(.id=="tr-multi") | .source_kind' <<<"$out")" \
+  "[tr-multi] multi-file source_kind (not transform_type)"
+assert_absent "$d27/engineering/specs/multi.md" "[tr-multi] not written"
+
+# --- 28. transform with absent transform_config → bad-entry-shape. ----------
+d28="$tmp/c28"
+build_lds_enabled_root "$d28"
+echo "x" >"$d28/legacy/x.md"
+write_manifest "$d28" '
+metadata:
+  schema_version: "1.0.0"
+  status: approved
+entries:
+  - id: tr-noconfig
+    source: legacy/x.md
+    target: specs/noconfig.md
+    mode: transform
+    confidence: high
+    classification_reason: t
+'
+set +e
+out="$(WIP_ROOT="$d28" bin/wip-plumbing extract 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[tr-badshape] exit 4"
+assert_eq "bad-entry-shape" "$(jq -r '.error.kind' <<<"$out")" "[tr-badshape] kind"
+assert_absent "$d28/engineering/specs/noconfig.md" "[tr-badshape] not written"
 
 test_summary

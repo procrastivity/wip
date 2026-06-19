@@ -572,6 +572,12 @@ locks evolve per consumer (`nix flake update` rolls inputs forward), so
 byte-equal would refuse every consumer who's done one update. Under
 `--force` the lock is still overwritten.
 
+The `setup deps` devShell already lists **`coreutils`**, which provides
+**`sha256sum`** — so `extract --verify-hashes` works in the pure nix dev
+shell with **no new package**. (`shasum` is the perl tool, not a flake
+package; the hasher leads with `sha256sum` and falls back to
+`shasum -a 256` outside nix.)
+
 **Composition.** Verbs do not auto-chain. `setup direnv` requires
 `flake.nix` and exits 3 `missing-prereq` with `error.path: "flake.nix"`
 when absent (hint to run `setup deps` first). All verbs exit 3
@@ -793,7 +799,7 @@ sentinel); `<eng-docs>/decisions/` (for auto-NNNN scanning).
 }
 ```
 
-### `wip-plumbing extract [--manifest <path>] [--force]`
+### `wip-plumbing extract [--manifest <path>] [--force] [--verify-hashes]`
 
 Run the deterministic LDS Extract phase against an approved extraction
 manifest (step-15). The bulk-from-manifest LDS seam: reads a
@@ -813,19 +819,154 @@ deferral rationale):**
 |---|---|
 | `verbatim` mode | **supported** |
 | `content` mode | **supported** |
-| `transform` mode | **skipped** (`unsupported[]`) |
+| `transform` mode | **partial** — `heading_adjust` supported; `link_rewrite` / `markdown_format` / `custom` skipped (`unsupported[]`); see **Transform mode (v1)** below |
 | `summarize` mode | **skipped** (`unsupported[]`) |
 | Simple-path source (string) | **supported** |
 | Single-file with line range | **supported** |
 | Multi-file source (`source.files[]`) | **skipped** |
-| SHA-256 source hash verification | **skipped-v1** (ledger flag) |
+| SHA-256 source hash verification | **opt-in** via `--verify-hashes` (default skipped-v1; see below) |
 | Templates + `field_mappings` | **skipped** (`unsupported[]`) |
 | `--resume` mode | **not implemented** |
-| Extraction report file | **not written** (ledger is stdout-only) |
+| Extraction report file | **written** (`extraction-report.{yaml,md}`; see below) |
 
 Skipped (unsupported) entries do **not** fail the run; other entries
 in the same manifest still execute. The ledger names every skip so the
 consumer can see what didn't land.
+
+**Transform mode (v1).** `mode: transform` is supported for exactly one
+transform type — `transform_config.type: heading_adjust` — over a
+verbatim-able single-file / simple-path source. Such an entry classifies
+`ok-transform`: its body is the extracted source range with **ATX heading
+levels shifted**, and it carries the same attribution block as a verbatim
+entry (it has a real source). It flows through the same idempotency helper
+as every other target, so an unchanged re-run is reported under
+`skipped_idempotent`.
+
+`heading_adjust` honors two `transform_config.options`:
+
+- `level_offset` (integer, default `0`) — added to every ATX heading
+  level. `# H` with `level_offset: 1` becomes `## H`; `## H` with
+  `level_offset: -1` becomes `# H`. The new level is **clamped to `[1, 6]`**
+  — a shift never emits invalid `#######` (7) and never drops a heading
+  below `#` (1). A missing or `0` offset writes the body faithfully (a
+  no-op shift, not a failure).
+- `skip_first` (boolean, default `false`) — when `true`, the **first ATX
+  heading in the document** (the first one outside any fenced code block)
+  is left at its original level; the offset applies from the second
+  heading on. Useful for preserving a document title.
+
+The shifter is **fence-aware**: a `#` inside a fenced code block (a line
+whose first non-space run, with ≤3 leading spaces, is ≥3 backticks or ≥3
+tildes toggles fence state) or a 4-space-indented `#` is left untouched.
+**Setext headings** (a title underlined with `===` / `---`) are **not
+adjusted in v1** — applying a numeric offset to an underline form is
+ill-defined; this is a documented limitation.
+
+`transform` with `transform_config.type` ∈ {`link_rewrite`,
+`markdown_format`, `custom`}, or on a multi-file source, stays in
+`unsupported[]` (skip, don't fail). A still-unsupported transform type is
+named in the ledger with the reason string `unsupported-transform:<type>`
+(rendered as `"<type> transform not supported in v1"`); a transform on a
+multi-file source keeps reporting `unsupported-source:multi-file`. An entry
+whose `mode: transform` has an absent or non-map `transform_config` is a
+`bad-entry-shape` failure, not a skip.
+
+`--verify-hashes` (below) remains **`ok-verbatim`-only** in v1: transform
+entries are counted in `content_hash_check.entries_no_hash` and never
+failed by the gate. The source-byte recipe is identical, so extending the
+gate to transform entries later is a one-line change.
+
+**Extraction report (LDS §7).** Every run serializes the stdout ledger to
+two files at the eng-docs root:
+
+- `<eng-docs>/extraction-report.yaml` — the §7.2 machine-readable
+  structure (`extraction_report:` with `metadata` / `summary` /
+  `files_created[]` / `unsupported[]` / `verification_results` / `errors[]`
+  / `source_changes`).
+- `<eng-docs>/extraction-report.md` — the §7.4 human-readable summary
+  (FILES CREATED / LAYER SUMMARY / SUMMARY / VERIFICATION / `Status:` line,
+  where `Status:` is `COMPLETED` or `COMPLETED WITH ERRORS`).
+
+The report is **always written, including on partial failure** — on the
+`exit 4` drift / bad-shape paths it is written **before** the exit, so a
+failed run still leaves a report (§7.3). It honors `--dry-run`: under
+`--dry-run` (`WIP_DRY_RUN=1`) **nothing** is written (no report, no
+targets), consistent with the global flag's touch-nothing contract.
+
+The report write is a **plain overwrite — it is *not* three-way
+idempotent** and bypasses the idempotency helper that guards extracted
+targets. The report embeds a fresh `executed_at` timestamp, so it differs
+every run by construction; routing it through idempotency would make every
+second run report spurious `content-drift` on the report file itself.
+Re-running `extract` on an unchanged tree therefore regenerates the report
+while the extracted *targets* stay idempotent.
+
+**v1 field-availability caveats.** The report is a faithful subset of what
+v1 tracks — it never fabricates numbers. Genuinely-unavailable fields are
+self-documenting:
+
+- `line_statistics` fields and `layer_breakdown.<layer>.total_lines` are
+  `null` (v1 does not count source/output lines).
+- `verification_results.line_count_check.status` is `"skipped-v1"`.
+  `content_hash_check.status` is `"skipped-v1"` by default and becomes a
+  real `"pass"` / `"fail"` verdict under `--verify-hashes` (see
+  **Source-hash verification** below); `file_existence_check` is always
+  computed live.
+- `metadata.manifest_hash` is a SHA-256 of the manifest file (`shasum -a
+  256`), or `null` if `shasum` is unavailable.
+
+**Source-hash verification (`--verify-hashes`).** Off by default; when
+set, `extract` verifies declared source hashes as a **pre-write gate**
+before any target is written (LDS `source_hash_mismatch_handling`:
+verify at the start, *"never silently proceed when source has changed"*).
+
+- **What is verified.** Only `entries[].source.hash` on **single-file**
+  sources that classify `ok-verbatim`. Simple-path (string) sources,
+  single-file entries with no `hash`, `content`-mode entries, and anything
+  already routed to `unsupported[]` / `bad_entries[]` are **not verifiable**
+  and are counted in `content_hash_check.entries_no_hash` — never failed.
+  The top-level whole-file `sources.<path>.hash` registry and multi-file
+  `combined_hash` are **out of v1 scope** (multi-file never reaches the
+  write path).
+- **Hash recipe (locked).** The digest covers the **extracted source-range
+  body bytes exactly as written to the target, minus the attribution block**
+  — i.e. the `cat` / `awk` output for the entry's source range. For a line
+  range this includes the **trailing newline** the extractor emits (range
+  bytes are `awk 'NR>=start && NR<=end'`); for a whole-file source it is the
+  raw file bytes (`cat`). The reference computation is
+  `awk 'NR>=S && NR<=E' <src> | sha256sum` (range) or `sha256sum <src>`
+  (whole file). The hasher is `sha256sum` (from `coreutils`), falling back
+  to `shasum -a 256`. A manifest producer that wants its hashes to verify
+  must hash these same bytes.
+- **Pre-write gate.** If every declared hash matches, the write loop runs
+  unchanged and the run exits 0 with `hash_verification: "verified"`. If any
+  hash mismatches — or a hashed source file is **missing** — the run writes
+  **no target at all** (no partial extraction), sets
+  `error.kind: "hash-mismatch"`, and `exit 4`. The §7 report is still
+  written **first** (with `content_hash_check.status: "fail"`), before the
+  exit.
+- **No-op signal.** A `--verify-hashes` run where *no* entry carries a
+  verifiable hash exits 0 with `hash_verification: "no-hashes"` and a
+  report `warnings[]` entry (`type: "no-verifiable-hashes"`) so the consumer
+  knows the flag did nothing.
+- **`--dry-run` interaction.** Verification still runs (it is read-only) and
+  a mismatch still yields `exit 4 hash-mismatch` in the ledger — but, like
+  every dry-run path, **neither targets nor the report are written**.
+
+The populated `content_hash_check` object (in `verification_results`):
+
+```yaml
+content_hash_check:
+  status: skipped-v1 | pass | fail   # skipped-v1 when the flag is off
+  entries_checked: 2                 # entries with a verifiable hash
+  entries_matched: 2
+  entries_no_hash: 1                 # verifiable-shape entries lacking a hash + non-verifiable entries
+  mismatches:                        # [] unless status == fail
+    - { id, source, expected_hash, actual_hash, status }  # status: mismatch | missing
+```
+
+The `.md` report's `Content hash check:` line renders this dynamically:
+`skipped-v1`, `pass (2/2 entries matched)`, or `fail (1/2 matched, 1 mismatch)`.
 
 **Per-entry write contract: three-way idempotency** (same as
 `graduate` and `setup`). A bytes-equal target is silently skipped; a
@@ -860,8 +1001,10 @@ idempotency compares.
 **Reads:** `.wip.yaml`; the manifest at the default or `--manifest`
 path; every entry's source file (for `verbatim` mode).
 
-**Writes:** one target per supported entry (or just the ledger with
-`--dry-run`).
+**Writes:** one target per supported entry, plus the extraction report
+files `<eng-docs>/extraction-report.{yaml,md}` (always, including on
+partial failure); or, with `--dry-run`, just the ledger (no targets, no
+report).
 
 **Exit:**
 
@@ -872,7 +1015,8 @@ path; every entry's source file (for `verbatim` mode).
   `missing-manifest`.
 - **4** — `manifest-missing`, `manifest-unparseable`,
   `manifest-not-approved`, `incompatible-schema`, `manifest-empty`,
-  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`.
+  `duplicate-entry-id`, `bad-entry-shape`, `content-drift`,
+  `hash-mismatch` (only with `--verify-hashes`).
 
 **stdout (success):**
 
@@ -894,6 +1038,10 @@ path; every entry's source file (for `verbatim` mode).
 }
 ```
 
+`hash_verification` is `"skipped-v1"` by default, `"verified"` when
+`--verify-hashes` checked ≥1 hash and all matched, or `"no-hashes"` when
+`--verify-hashes` found zero verifiable hashes.
+
 **stdout (content drift):**
 
 ```json
@@ -909,6 +1057,29 @@ path; every entry's source file (for `verbatim` mode).
   }
 }
 ```
+
+**stdout (hash mismatch — only with `--verify-hashes`):**
+
+```json
+{
+  "ok": false,
+  "verb": "extract",
+  "manifest": "engineering/.lds-manifest.yaml",
+  "error": {
+    "code": 4,
+    "kind": "hash-mismatch",
+    "message": "source hash verification failed; no targets written (run with the correct source or regenerate the manifest hashes)",
+    "paths": ["legacy/foo.md"],
+    "mismatches": [
+      {"id": "vision-main", "source": "legacy/foo.md", "expected_hash": "abc…", "actual_hash": "def…", "status": "mismatch"}
+    ]
+  }
+}
+```
+
+A `status` of `"missing"` (with `actual_hash: null`) marks a hashed source
+file that does not exist. No target is written on this path; the §7 report
+is written first (with `content_hash_check.status: "fail"`).
 
 **Templates dir resolution:** not relevant — `extract` does not read
 the `wip` templates dir (the LDS templates referenced in

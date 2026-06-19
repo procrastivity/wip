@@ -59,6 +59,12 @@ YAML
   cp "$REPO_ROOT"/templates/glossary/core.md "$tmp/templates/glossary/"
   cp "$REPO_ROOT"/templates/glossary/orchestration.md "$tmp/templates/glossary/"
   cp "$REPO_ROOT"/templates/glossary/solo.md "$tmp/templates/glossary/"
+  # Ship lds.md into the tmp templates dir only when lds is enabled, so the
+  # positive-inclusion case (section 14) exercises it without disturbing the
+  # diataxis graceful-skip case (section 5), which keeps its partial unshipped.
+  if [[ "$lds_enabled" == "true" ]]; then
+    cp "$REPO_ROOT"/templates/glossary/lds.md "$tmp/templates/glossary/"
+  fi
   printf '%s' "$tmp"
 }
 
@@ -260,5 +266,42 @@ rc_repo=$?
 set -e
 assert_eq "0" "$rc_repo" "repo's committed glossary exits 0 against check"
 assert_eq "false" "$(jq -r '.drift' <<<"$out_repo")" "repo's committed glossary has no drift"
+
+# ---------------------------------------------------------------------------
+# 14. LDS partial — positive inclusion, ordering after solo, header strip.
+# ---------------------------------------------------------------------------
+tmp_lds="$(make_tmp_repo solo true false true)"
+out_lds="$SCRATCH/lds.md"
+WIP_ROOT="$tmp_lds" WIP_TEMPLATES_DIR="$tmp_lds/templates" bin/wip-plumbing glossary assemble >"$out_lds"
+
+# Body sentinels — both lds sections are present.
+assert_grep '^## Layered Documentation System' "$out_lds" "lds terms section present"
+assert_grep '^## Graduation (LDS mechanism)' "$out_lds" "lds graduation section present"
+# Divider emitted for the lds partial.
+assert_grep '^<!-- partial: lds\.md ' "$out_lds" "lds divider emitted"
+# Driven-by lists the lds predicate now that its body is on disk.
+assert_grep 'Driven by:.*features\.lds\.enabled' "$out_lds" "Driven-by lists lds predicate"
+
+# Ordering: lds divider must come after solo (declaration order core < orch < solo < lds).
+solo_div_l=$(grep -n '^<!-- partial: solo.md ' "$out_lds" | head -1 | cut -d: -f1)
+lds_div_l=$(grep -n '^<!-- partial: lds.md ' "$out_lds" | head -1 | cut -d: -f1)
+lds_ordered="no"
+if [[ -n "$solo_div_l" && -n "$lds_div_l" && "$solo_div_l" -lt "$lds_div_l" ]]; then
+  lds_ordered="yes"
+fi
+assert_eq "yes" "$lds_ordered" "lds divider emits after solo"
+
+# Strip rule: the lds partial-author comment header MUST NOT appear in output.
+assert_not_grep 'wip glossary partial: LDS' "$out_lds" "partial LDS header stripped"
+
+# check round-trips clean against the freshly-assembled lds glossary.
+cp "$out_lds" "$tmp_lds/.wip/GLOSSARY.md"
+set +e
+out_lds_chk="$(WIP_ROOT="$tmp_lds" WIP_TEMPLATES_DIR="$tmp_lds/templates" bin/wip-plumbing glossary check 2>/dev/null)"
+rc_lds_chk=$?
+set -e
+assert_eq "0" "$rc_lds_chk" "lds check exit 0"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_lds_chk")" "lds check ok:true"
+assert_eq "false" "$(jq -r '.drift' <<<"$out_lds_chk")" "lds check drift:false"
 
 test_summary
