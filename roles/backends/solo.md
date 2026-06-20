@@ -181,6 +181,15 @@ Failure message must include: requested tier, discovered tools,
 enabled tools after filtering, `exclude_ids` (if any), classification
 source used (`command`, `name`, or none), token policy checked.
 
+The hard-fail is now the **last rung of the fallback resolution ladder**
+below — reached only when classification is non-confident, every ladder
+rung above it came up empty, **and** the session is non-interactive (no
+human to ask). The message must therefore also enumerate the escape
+hatches the operator can use to resolve the run: a `--agent <name|id>`
+request override, a `wip/<slug>/agent-pin` session pin in the KV store,
+and a `features.solo.agent_tier_policy.fallback_tool` value in
+`.wip.yaml`.
+
 Do **not** silently fall back to an arbitrary enabled tool.
 
 ### Manifest override
@@ -190,6 +199,89 @@ Do **not** silently fall back to an arbitrary enabled tool.
 tier regardless of the Role's preference — the resolver still records
 the Role's preference under `selection_reason` for audit. On this
 repo: `force_tier: large` (Opus-only).
+
+### Fallback resolution ladder
+
+The command-first classifier above can come back **non-confident** —
+zero candidates, or multiple conflicting ones that cannot be resolved
+deterministically. On this repo that is the live defect: with
+`force_tier: large`, of the enabled tools only `gpt-5.5` (a codex
+runtime) carries a `large` model token, while the intended Claude/Opus
+runtime exposes `command: claude` and a bare `name: Claude` — **no
+model or tier token at all**. Classified alone, Solo would silently
+route every `large` spawn to codex. The ladder below replaces that
+silent mis-route (and a blind hard-fail) with an explicit precedence
+chain.
+
+**When the ladder applies.** It is consulted only when **both** hold:
+
+1. Tier classification is **non-confident** (zero candidates, or
+   ambiguous candidates that the deterministic strategy cannot break),
+   **and**
+2. **Duo is not in use** — the `solo` backend is the active
+   orchestration backend (`features.orchestration.backend: solo`, no
+   Duo backend bound). Tiers are Duo's native concept; when a Duo
+   backend exists it owns tier→runtime selection and this Solo-alone
+   bridge does not engage. The guard is exactly "active backend ==
+   `solo`".
+
+When classification **is** confident, the ladder is skipped entirely —
+nothing below overrides a clean tier match.
+
+The rungs, in **precedence order** (first match wins):
+
+1. **Request override — `--agent <name|id>`.** A per-invocation value
+   passed at orchestrate/start time. Resolution: an **all-digits**
+   value is treated as an `agent_tool_id`; otherwise it is a **name**,
+   matched against `mcp__solo__list_agent_tools()[].name` (and
+   `command` as a secondary signal). The resolved tool is used for this
+   spawn and is written to the session pin (rung 2) so it governs the
+   rest of the run. The flag is **parsed in the command bodies**
+   (`commands/orchestrate.md` / `commands/start.md`); those bodies name
+   no MCP tool — they hand the parsed value into the Role flow, and it
+   is **this** Role flow that performs the `mcp__solo__list_agent_tools`
+   match and the `mcp__solo__kv_set` pin. Highest precedence.
+
+2. **Session pin — KV `wip/<slug>/agent-pin`.** Read via
+   `mcp__solo__kv_get(key="wip/<slug>/agent-pin")` where `<slug>` is the
+   initiative slug. If set, its value (a tool name or id, already
+   resolved when written) is used **verbatim**. The pin is the durable
+   propagation channel: the Coordinator and **every** Builder spawn read
+   it *before* running tier classification, so one choice — made by a
+   `--agent` flag (rung 1) or by the ask (rung 4) — applies to all
+   downstream spawns without prompt-threading. No TTL; cleared or
+   overwritten at the operator's discretion via
+   `mcp__solo__kv_set` / `mcp__solo__kv_delete`.
+
+3. **Configured fallback — `.wip.yaml fallback_tool`.** Read
+   `features.solo.agent_tier_policy.fallback_tool` (see
+   [`tier-policy.md`](../tier-policy.md)). It holds a tool **name**
+   (never an id — ids are operational and change), matched against
+   `mcp__solo__list_agent_tools()[].name`/`command`. This is the
+   per-project permanent fix: set once, every non-confident resolution
+   honors it. On this repo it is `fallback_tool: Claude`, so `large`
+   resolves to the Claude runtime (id 3) with no manual pin.
+
+4. **Ask the human, then pin.** The interactive last resort, reached
+   only when rungs 1–3 are empty **and a human is present**. The live
+   human-facing agent (the **Orchestrator**) asks which tool to use —
+   the doc text does not prompt; the agent following this rule does.
+   On the answer it:
+   - writes `mcp__solo__kv_set(key="wip/<slug>/agent-pin", value=<the
+     chosen tool>)`, so the choice applies to **this spawn and all
+     future spawns this session** (it becomes the rung-2 pin); and
+   - **offers** to persist the choice permanently — if the human says
+     "always use this", the Orchestrator edits
+     `features.solo.agent_tier_policy.fallback_tool` in `.wip.yaml`
+     **inline** with the existing `yq` idiom. (The dedicated hardened
+     persist write-verb is **deferred**; inline edit only for now.)
+
+5. **Hard-fail (existing).** Reached only when classification is
+   non-confident, rungs 1–3 resolved nothing, **and** the session is
+   **non-interactive** (no human to ask at rung 4). Emits the §Failure
+   modes message — now enumerating the `--agent`, `agent-pin` KV, and
+   `fallback_tool` escape hatches. Never a silent fall-back to an
+   arbitrary enabled tool.
 
 ## Tag glossary
 
