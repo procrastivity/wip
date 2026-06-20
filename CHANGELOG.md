@@ -2,16 +2,38 @@
 
 All notable changes to this project are documented here.
 
-## [0.0.7] - 2026-06-19
+## [0.0.8] - 2026-06-20
 
-Round 4 — Extract polish & LDS completion. All four steps shipped.
+Round 5 — Orchestration ergonomics & scaffold fixes. Dogfood follow-ups from running the wip orchestration Roles.
 
 ### Added
 
-- `extract` now writes an on-disk extraction report `<eng-docs>/extraction-report.{yaml,md}` per LDS §7 (faithful-subset serialization of the run ledger; always written incl. on partial failure, skipped under `--dry-run`).
-- `extract --verify-hashes` — opt-in SHA-256 source-hash pre-write gate over single-file `source.hash`; a mismatch writes zero targets and exits 4 (`hash-mismatch`). Off by default and byte-identical to prior behavior.
-- `extract` `transform` mode (`heading_adjust`) — fence-aware ATX heading-level shifter (`level_offset` clamped 1–6, `skip_first`); `link_rewrite` / `markdown_format` remain unsupported (deferred to backlog).
-- `templates/glossary/lds.md` — the LDS glossary partial (LDS vocabulary + the Extract graduation mechanism).
+- Agent-tool resolution fallback: `wip` resolves a requested tier to a runtime via a fallback ladder — `--agent <name|id>` on `/wip:orchestrate` and `/wip:start` (a session-wide spawn pin) → a `.wip.yaml` `features.solo.agent_tier_policy.fallback_tool` default → ask-the-human-then-pin → hard-fail. Solo-alone stays usable without Duo; the manual `agent_tool_id` pin is no longer required (set `fallback_tool` once).
+- `wip-plumbing detect` now echoes the `agent_tier_policy` block (`force_tier` + `fallback_tool`) in the `solo` feature detail.
+
+### Changed
+
+- Roles docs: formalized the **liveness-and-report gate** (`roles/shared.md` + `coordinator.md` + `orchestrator.md`) — a watcher must re-check the backend liveness signal **and** require an explicit final-report signal before routing a watched agent/task complete; never on a bare idle edge.
+- `setup lds` scaffold: renamed the LDS layer-6 directory `features/` → canonical `behaviors/` (matches the glossary partial, ADR-0011, and the playbook); `WIP_GRADUATE_LAYERS` updated accordingly.
+
+### Documentation
+
+- Docs(roadmap): open Round 5 — orchestration ergonomics & scaffold fixes
+- Docs(roadmap): mark step-20 shipped (orchestration idle-routing guard)
+- Docs(roadmap): mark step-21 shipped (LDS scaffold layer-6 naming)
+- Docs(roadmap): mark step-22 shipped; close Round 5
+
+### Other
+
+- Step 20 · Task 1: bake the liveness-and-report gate into the Roles docs
+- Step 21 · Task 1: rename LDS layer-6 scaffold dir features/ → behaviors/
+- Step 22 · Task 1: add resolver fallback ladder to solo.md
+- Step 22 · Task 2: document fallback_tool + abstract ladder in tier-policy.md
+- Step 22 · Task 3: add features.solo.agent_tier_policy.fallback_tool (Claude) to .wip.yaml
+- Step 22 · Task 4: add --agent <name|id> session-pin override to orchestrate + start
+- Step 22 · Task 5: detect echoes agent_tier_policy (force_tier + fallback_tool)
+
+## [0.0.7] - 2026-06-19
 
 ### Documentation
 
