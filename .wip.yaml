@@ -56,7 +56,15 @@ features:
   solo: # Solo backend config (binding for orchestration.backend: solo)
     enabled: true # sentinel: Solo project registration
     agent_tier_policy: # Tier→agent_tool_id is backend-specific, so it lives here
-      force_tier: large # this project: Opus-only (agent_tool_id=3)
+      force_tier: large # this project: Opus-only (agent_tool_id=3); see fallback_tool below
+      # fallback_tool: per-project default tool consulted ONLY when tier
+      # classification is non-confident (the resolver finds zero candidates for
+      # the requested tier, or candidates it cannot disambiguate). Holds a tool
+      # NAME, never an id (ids are operational and shift as the tool inventory
+      # changes). The Solo-alone-without-Duo bridge: lets a Duo-less Solo run
+      # resolve a forced tier with no manual agent_tool_id pin. Ignored when
+      # resolution is confident. See force_tier above.
+      fallback_tool: Claude # resolves `large` → Claude (id 3) here (D6 dogfood)
 # --- initiative registry ----------------------------------------------------
 # One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
 # Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
