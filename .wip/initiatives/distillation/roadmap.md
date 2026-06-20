@@ -1,12 +1,13 @@
 # Roadmap — distillation
 
-**Status: shipped.** All four rounds shipped (Round 1 → 2026-06-12, Round 2 → 2026-06-13,
-Round 3 → 2026-06-14, Round 4 → 2026-06-18). Round 4 (reopened 2026-06-17) promoted the
-four P2 follow-ups out of §Backlog and closed them, shrinking `extract`'s `unsupported[]`
-to genuinely-speculative items. The roadmap is again complete; the remaining §Backlog is
-P3/nit + the deferred-transform items — opt-in, not sequential (prioritization in
-[`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)). Reopen with a new round to
-continue.
+**Status: shipped.** All five rounds shipped (Round 1 → 2026-06-12, Round 2 → 2026-06-13,
+Round 3 → 2026-06-14, Round 4 → 2026-06-18 / v0.0.7, Round 5 → 2026-06-19). Round 5
+(reopened 2026-06-19) landed the dogfood follow-ups from building Round 4 via the Roles —
+the idle-routing guard, the LDS scaffold layer-6 fix, and the agent-tool resolution fallback
+(which retired the manual id-3 spawn pin). The roadmap is again complete; reopen with a new
+round to continue. The remaining §Backlog is P3/nit + the
+deferred-transform items (prioritization in
+[`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)).
 
 The plan of record for building `wip` by distilling the collected workflows. Promoted
 from the remaining-items scratchpad (now this file is the source of truth; the scratchpad
@@ -71,6 +72,22 @@ Closing criterion met: `unsupported[]` now holds only `link_rewrite` / `markdown
 <!-- wip-amend: ea4e8cba28197833d43d6b9fca6de6263f8c7bfc9f38b75c47a182a890f74cc3 -->
 
 
+## Round 5 — Orchestration ergonomics & scaffold fixes  ✅ shipped 2026-06-19
+
+Dogfood follow-ups surfaced while building Round 4 via the orchestration Roles, plus the
+one LDS scaffold inconsistency the glossary work exposed. Two are orchestration-ergonomics
+fixes that make every future run smoother (both backend-agnostic where possible, with the
+Solo binding carrying the concrete tool names); one is a scaffold-correctness fix. Ordered
+quick-wins-first; the round closes when the orchestration flow no longer needs ad-hoc
+human workarounds for routing or tool selection.
+
+- **step-20 — orchestration idle-routing guard** (small) ✅ shipped 2026-06-19 — Formalized the **"liveness-and-report gate"** in the Roles docs: a bare idle edge is *not* completion. Defined once in `roles/shared.md` (§Pause and Resume) — before routing any watched agent/task complete, (1) re-check the liveness signal & re-arm if still active, and (2) require an explicit final-report comment / completed ledger entry; **both** must hold. `roles/coordinator.md` (§Wake-up Routing) applies it by name (no branch routes complete on a bare idle edge; quiet-but-no-comment → status-check, not "done"); `roles/orchestrator.md` (Polling Loop) cites it by name; `roles/backends/solo.md` binds the abstract liveness signal to `mcp__solo__get_process_status` (`agent_state.idle` / `idle_seconds` / `status`; explicit "no magic threshold") — the only file naming Solo tokens. Backend seam (ADR-0007) intact: behavior files name zero Solo tokens, `test/test-roles-backend-seam.sh` 60/60, `make check` green. Docs-only (4 files). Dogfood: this is the very guard the Orchestrator + Coordinators applied ad hoc throughout Round 4 — and applied again while building it. (was backlog `orchestration-idle-routing-false-positive`.)
+- **step-21 — LDS scaffold layer-6 naming** (small) ✅ shipped 2026-06-19 — Renamed the `setup lds` scaffold's layer-6 dir `features/` → canonical **`behaviors/`** (matching `templates/glossary/lds.md`, xcind ADR-0011, and the playbook). A tracked `git mv` across exactly 3 wip-owned sites (the spike found the load-bearing one was the graduate allowlist, not `setup.bash` as first briefed): the scaffold `.gitkeep`, `WIP_GRADUATE_LAYERS` in `lib/wip/wip-plumbing-graduate-lib.bash:18` (replace, not alias — `graduate --to behaviors/…` now resolves; `--to features/…` exits 4 unknown-layer), and the `test/test-setup.sh:226` layer-dir assertion. 1:1 rename: 13-file count + `doctor` drift-0 unchanged; `make check` green (test-setup 133/0). **Q1 residual (tracked):** the byte-pinned `maintenance/*.md` files still reference `features/` as *upstream cucumber feature-file paths* (not LDS layer dirs) — left untouched (editing breaks the `assert_cmp` guard); reconciling is a separate re-vendor effort. Built via orchestration (Coordinator→Researcher→Builder on Solo, id-3 pinned). (was backlog `lds-scaffold-layer-6-naming`.)
+- **step-22 — agent-tool resolution fallback** (large) ✅ shipped 2026-06-19 — Closed the tier→tool resolution gap that forced a manual `agent_tool_id=3` pin on every spawn through Rounds 4–5 (the registered `claude` tool carries no model token, so the command-first resolver classified only the `gpt-5.5` codex tool as `large`). Scoped via a Phase-1 spike to the **Solo-alone resolution ladder** (one coherent precedence behavior, not separable features): `--agent <name|id>` request override → KV session pin (`wip/<slug>/agent-pin`) → `.wip.yaml` `features.solo.agent_tier_policy.fallback_tool` (a tool **name**) → ask-the-human-then-pin → existing hard-fail; "Duo not in use" ≡ `backend == solo`. Concrete ladder in `roles/backends/solo.md`; backend-agnostic decision rule in `roles/tier-policy.md` (token-free — seam intact); `--agent` surface + session-pin propagation in `commands/{orchestrate,start}.md` (no MCP tokens); `wip-plumbing detect` now echoes the `agent_tier_policy` block (`force_tier` + `fallback_tool`) — the one automated seam (`test/test-detect.sh`). **Dogfood:** this repo's `.wip.yaml` sets `fallback_tool: Claude`, so a Solo-alone run resolves `large` → Claude (id 3) with no manual pin — the gap is closed. 5 isolated commits; all 34 suites green (seam 60/0, prep 27/0, plugin-manifest 52/0, detect 12/0). **Deferred:** the Duo agent-tier-selection track (→ [§Backlog](#backlog) `duo-agent-tier-selection`) and a hardened persist-to-`.wip.yaml` write-verb (only the inline-yq persist *offer* shipped). **Round 5 closes here.** Built via orchestration (serial 5-Builder loop on Solo, id-3 pinned). (surfaced building Round 4.)
+<!-- wip-amend: 73bbe33d753678b02051c5262d7997c40a93653f8d80c52035ba9c027a9ed50a -->
+
+
+
 ## Deferred (decided-not-now)
 
 - Plural LDS installs / monorepo support (v1 = scalar single root).
@@ -79,10 +96,22 @@ Closing criterion met: `unsupported[]` now holds only `link_rewrite` / `markdown
 
 ## Backlog
 
-_The four P2 follow-ups (`glossary-partial-lds`, `extract-extraction-report`,
-`extract-verify-hashes`, `extract-transform-mode`) were promoted to Round 4 (2026-06-17)
-and all shipped by 2026-06-18. What remains is P3/nit + the two deferred-transform items
-below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+_The four P2 follow-ups were promoted to Round 4 (2026-06-17) and all shipped by 2026-06-18.
+On 2026-06-19 `lds-scaffold-layer-6-naming` + `orchestration-idle-routing-false-positive`
+were promoted to Round 5 (with the Solo tier-resolver finding as step-22), all shipped
+2026-06-19. What remains is P3/nit + the two deferred-transform items + the two step-22
+deferrals below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+
+- **duo-agent-tier-selection** (deferred from step-22; the *correct long-term fix*): improve
+  **Duo**'s agent-tier selection so a requested Tier resolves to the right runtime without the
+  Solo-alone fallback ladder. Tiers are Duo's native concept (Solo has none — that's why Duo
+  exists), so this lives in the **Duo repo/track**, likely a separate initiative, not this one.
+  step-22's Solo-alone resolution ladder (`--agent` → session pin → `.wip.yaml fallback_tool` →
+  ask-then-pin → fail) is the bridge until this lands.
+- **extract-verify-hashes-and-fallback-persist-verb** (deferred from step-22): a hardened
+  `wip-plumbing` write-verb to persist a chosen agent tool to `.wip.yaml` (step-22 shipped only
+  the inline-yq persist *offer* from the live Orchestrator). Pull in if the inline edit proves
+  insufficient.
 
 - **extract-transform-link-rewrite** (deferred from step-19): LDS `transform` `link_rewrite`
   (`base_path`) — rewrite relative links. **Underspecified** (LDS gives no rewrite algorithm)
@@ -98,19 +127,6 @@ below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
   human call — these are reference copies and prtend is a useful counter-example.
-- **lds-scaffold-layer-6-naming** (surfaced by step-16 Q1): `templates/setup/lds/engineering/`
-  ships `features/` at LDS layer 6, but the canonical layer set (playbook `DOCUMENTATION-GUIDE.md`
-  + xcind ADR-0011, now also `templates/glossary/lds.md`) names layer 6 **`behaviors/`**. Align the
-  `setup lds` scaffold to `behaviors/` (or document the divergence intentionally). Scaffold/template
-  change + `test/test-setup.sh` update; deliberately out of scope for step-16.
-- **orchestration-idle-routing-false-positive** (surfaced building steps 16–17): idle-timer wakes
-  can fire on a *between-step* idle (an agent momentarily quiet between tool calls), so a watcher
-  treats "idle" as "done" prematurely. Both the Coordinator and Orchestrator hit this on step-17 and
-  guarded ad hoc. Bake the guard into the Roles docs: before routing a watched task/agent as
-  complete, re-check the backend liveness signal (`get_process_status` → `idle:false`/actively
-  producing) **and** require an explicit final-report comment/ledger signal — don't route on the bare
-  idle edge. Touches `roles/coordinator.md` (Wake-up Routing) + `roles/shared.md` (Pause and Resume),
-  backend-agnostic wording; the `roles/backends/solo.md` binding names the concrete status tool.
 - **extract-summarize-mode** — LDS `summarize` mode. Inherently LLM-driven (LDS itself says "NEVER automatic"); belongs in porcelain, not plumbing. v1 routes to `unsupported[]`.
 - **extract-multi-file-source** — Multi-file source specs (`source.files[]` with separator + `combined_hash`). v1 routes to `unsupported[]`. Add when a real manifest needs concatenation.
 - **extract-templates-field-mappings** — LDS template + `field_mappings` support per `extract.md` §4 (literal + `source:<path>:<lines>` references). v1 skips templated entries. Add when a consumer adopts MADR/PRD-Lite templates with field maps.

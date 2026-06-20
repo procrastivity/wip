@@ -159,14 +159,25 @@ _wip_feature_records() {
 }
 
 # wip_features_json <root> <manifest-json> — JSON array of resolved feature
-# objects: {name, enabled, active, sentinel, sentinel_exists?, drift?}.
+# objects: {name, enabled, active, sentinel, sentinel_exists?, drift?, detail?}.
+# detail is a pure config echo (no resolution): for `solo` it surfaces the
+# agent_tier_policy block (force_tier + fallback_tool) — the spec'd detail field
+# (engineering/specs/wip-plumbing-cli.md). Permissive: absent keys are omitted.
 wip_features_json() {
   local root="$1" mj="$2"
-  local arr="[]" name enabled sentinel exists active drift obj
+  local arr="[]" name enabled sentinel exists active drift detail obj
   while IFS=$'\037' read -r name enabled sentinel; do
     [[ -n "$name" ]] || continue
     exists="null"
     drift=""
+    detail="null"
+    if [[ "$name" == "solo" ]]; then
+      detail="$(printf '%s' "$mj" | jq -c '
+        (.features.solo.agent_tier_policy // {})
+        | { force_tier: .force_tier, fallback_tool: .fallback_tool }
+        | with_entries(select(.value != null))
+        | if length == 0 then null else . end')"
+    fi
     if [[ -n "$sentinel" ]]; then
       if [[ -e "$root/$sentinel" ]]; then exists="true"; else exists="false"; fi
     fi
@@ -185,11 +196,13 @@ wip_features_json() {
     fi
     obj="$(jq -nc \
       --arg name "$name" --argjson enabled "$enabled" --arg sentinel "$sentinel" \
-      --argjson exists "$exists" --argjson active "$active" --arg drift "$drift" '
+      --argjson exists "$exists" --argjson active "$active" --arg drift "$drift" \
+      --argjson detail "$detail" '
       {name:$name, enabled:$enabled, active:$active,
        sentinel:(if $sentinel == "" then null else $sentinel end)}
       + (if $exists == null then {} else {sentinel_exists:$exists} end)
-      + (if $drift == "" then {} else {drift:$drift} end)')"
+      + (if $drift == "" then {} else {drift:$drift} end)
+      + (if $detail == null then {} else {detail:$detail} end)')"
     arr="$(jq -nc --argjson a "$arr" --argjson o "$obj" '$a + [$o]')"
   done < <(printf '%s' "$mj" | _wip_feature_records)
   printf '%s' "$arr"

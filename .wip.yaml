@@ -56,7 +56,15 @@ features:
   solo: # Solo backend config (binding for orchestration.backend: solo)
     enabled: true # sentinel: Solo project registration
     agent_tier_policy: # Tier→agent_tool_id is backend-specific, so it lives here
-      force_tier: large # this project: Opus-only (agent_tool_id=3)
+      force_tier: large # this project: Opus-only (agent_tool_id=3); see fallback_tool below
+      # fallback_tool: per-project default tool consulted ONLY when tier
+      # classification is non-confident (the resolver finds zero candidates for
+      # the requested tier, or candidates it cannot disambiguate). Holds a tool
+      # NAME, never an id (ids are operational and shift as the tool inventory
+      # changes). The Solo-alone-without-Duo bridge: lets a Duo-less Solo run
+      # resolve a forced tier with no manual agent_tool_id pin. Ignored when
+      # resolution is confident. See force_tier above.
+      fallback_tool: Claude # resolves `large` → Claude (id 3) here (D6 dogfood)
 # --- initiative registry ----------------------------------------------------
 # One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
 # Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
@@ -65,11 +73,11 @@ current_initiative: distillation
 initiatives:
   - slug: distillation
     title: Workflow Distillation
-    status: shipped # proposed | in-flight | shipped | archived | paused (Round 4 closed 2026-06-18; all 4 rounds shipped)
+    status: shipped # proposed | in-flight | shipped | archived | paused (Round 5 closed 2026-06-19; all 5 rounds shipped)
     intake: ad-hoc # ad-hoc | spec-generator
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
-    active_step: step-19 # step-19 shipped 2026-06-18 (Round 4 complete, 4 of 4)
+    active_step: step-22 # step-22 shipped 2026-06-19 (Round 5 complete, 3 of 3)
 # --- integrations (optional) ------------------------------------------------
 # integrations:
 #   github:

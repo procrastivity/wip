@@ -35,5 +35,53 @@ assert_eq "true" "$(jq -r '.features[]|select(.name=="changelog").active' <<<"$o
 assert_eq "false" "$(jq -r '.features[]|select(.name=="lds").active' <<<"$out")" "lds inactive (sentinel missing)"
 assert_eq "declared-but-missing" "$(jq -r '.features[]|select(.name=="lds").drift' <<<"$out")" "lds drift"
 assert_eq "1" "$(jq -r '[.initiatives[]]|length' <<<"$out")" "one initiative"
+# Original fixture has no agent_tier_policy -> no detail key (backward-compatible).
+assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail // "null"' <<<"$out")" "solo detail absent when no policy"
+
+# --- detail echo: agent_tier_policy surfaced under the solo feature (pure config read) ---
+# Case A: both force_tier + fallback_tool present -> both echoed under solo detail.
+tmpA="$(mktemp -d)"
+cat >"$tmpA/.wip.yaml" <<'YAML'
+version: 1
+current_initiative: demo
+features:
+  solo:
+    enabled: true
+    agent_tier_policy:
+      force_tier: large
+      fallback_tool: Claude
+initiatives:
+  - slug: demo
+    status: in-flight
+    active_step: step-01
+    brief: .wip/initiatives/demo/brief.md
+YAML
+
+outA="$(WIP_ROOT="$tmpA" bin/wip-plumbing detect)"
+rm -rf "$tmpA"
+assert_eq "large" "$(jq -r '.features[]|select(.name=="solo").detail.force_tier' <<<"$outA")" "solo detail force_tier"
+assert_eq "Claude" "$(jq -r '.features[]|select(.name=="solo").detail.fallback_tool' <<<"$outA")" "solo detail fallback_tool"
+
+# Case B: fallback_tool absent -> force_tier echoed, fallback_tool gracefully omitted (no error).
+tmpB="$(mktemp -d)"
+cat >"$tmpB/.wip.yaml" <<'YAML'
+version: 1
+current_initiative: demo
+features:
+  solo:
+    enabled: true
+    agent_tier_policy:
+      force_tier: large
+initiatives:
+  - slug: demo
+    status: in-flight
+    active_step: step-01
+    brief: .wip/initiatives/demo/brief.md
+YAML
+
+outB="$(WIP_ROOT="$tmpB" bin/wip-plumbing detect)"
+rm -rf "$tmpB"
+assert_eq "large" "$(jq -r '.features[]|select(.name=="solo").detail.force_tier' <<<"$outB")" "solo detail force_tier (no fallback)"
+assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail.fallback_tool // "null"' <<<"$outB")" "solo detail fallback_tool omitted"
 
 test_summary
