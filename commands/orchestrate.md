@@ -1,6 +1,6 @@
 ---
 description: Boot orchestration for the active step — become the Orchestrator and spawn its Coordinator.
-argument-hint: "[--initiative <slug>]"
+argument-hint: "[--initiative <slug>] [--agent <name|id>]"
 allowed-tools: [Bash, Read, Task]
 ---
 
@@ -35,8 +35,21 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
    If the resolver printed the not-found message (`$WIP` unset), stop. Use
    `"$WIP"` in place of `wip-plumbing` for every command below.
 
-2. **Parse `$ARGUMENTS`.** The only accepted argument is optional
-   `--initiative <slug>`. Anything else: stop and show the usage line.
+2. **Parse `$ARGUMENTS`.** Accepted arguments are optional
+   `--initiative <slug>` and optional `--agent <name|id>`. Anything else:
+   stop and show the usage line.
+
+   - `--agent <name|id>` **pins which agent tool every spawn uses this
+     run.** The value is a tool **name** or a numeric tool **id**
+     (all-digits → id; otherwise a name). Hand the parsed value into the
+     Orchestrator flow as the **session spawn pin** — the request
+     override at the top of the resolver's fallback ladder. Once set, the
+     pin governs the Coordinator→Builder spawns for the rest of the run
+     and **bypasses the resolver's interactive fallback prompt**, so an
+     operator can pre-select the tool when tier classification would
+     otherwise be non-confident. The command body does **not** persist
+     the pin or name any backend tool — the live Role flow records it
+     (see `roles/backends/solo.md` and `roles/tier-policy.md`).
 
 3. **Prep (plumbing).** Run `"$WIP" orchestrate prep` (append
    `--initiative <slug>` when given). This is deterministic — it resolves the
@@ -76,7 +89,10 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
          (the Orchestrator never spawns silently on an ambiguous start).
        - On confirmation, spawn the Coordinator (which spawns its Researcher)
          for the active step via the backend, and run the Orchestrator's
-         polling loop.
+         polling loop. **If `--agent` was parsed**, hand its value to the
+         Orchestrator flow as the session spawn pin before spawning, so
+         every Coordinator→Builder spawn this run uses the pinned tool
+         without the interactive fallback prompt.
 
 ## Notes
 

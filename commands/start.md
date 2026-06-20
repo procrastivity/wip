@@ -1,6 +1,6 @@
 ---
 description: Activate a roadmap step and brief it, then offer to start the work.
-argument-hint: "<step-id> [--initiative <slug>]"
+argument-hint: "<step-id> [--initiative <slug>] [--agent <name|id>]"
 allowed-tools: [Bash, Read, Write, Edit]
 ---
 
@@ -36,8 +36,21 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
    resolver if a later step starts in a fresh shell.
 
 2. **Parse `$ARGUMENTS`.** Extract the positional `<step-id>` plus optional
-   `--initiative <slug>`. `<step-id>` is required; if missing, stop and ask the
-   user which step to start.
+   `--initiative <slug>` and optional `--agent <name|id>`. `<step-id>` is
+   required; if missing, stop and ask the user which step to start.
+
+   - `--agent <name|id>` **pins which agent tool every spawn uses this
+     run** — a tool **name** or a numeric tool **id** (all-digits → id;
+     otherwise a name). It only takes effect on the **Orchestrate**
+     hand-off (step 6); carry it through to that branch as the **session
+     spawn pin** — the request override at the top of the resolver's
+     fallback ladder — so it governs the Coordinator→Builder spawns for
+     the rest of the run and **bypasses the resolver's interactive
+     fallback prompt** (the operator pre-selects the tool instead of
+     being asked when tier classification is non-confident). The command
+     body does **not** persist the pin or name any backend tool — the
+     live Role flow records it (see `roles/backends/solo.md` and
+     `roles/tier-policy.md`).
 
 3. **Resolve the initiative.** If the user passed `--initiative <slug>`, use it.
    Otherwise resolve the current one the way `/wip:status` does — run
@@ -76,7 +89,9 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
          wrapper for this branch: it preps the active step and has you become
          the Orchestrator (`roles/orchestrator.md` + `roles/backends/solo.md`)
          to spawn a Coordinator for the active step via Solo. (Run it now, or
-         invoke `/wip:orchestrate` directly later.)
+         invoke `/wip:orchestrate` directly later.) If `--agent <name|id>`
+         was parsed, pass it through to `/wip:orchestrate` so the session
+         spawn pin is set for the run.
 
 ## Notes
 
