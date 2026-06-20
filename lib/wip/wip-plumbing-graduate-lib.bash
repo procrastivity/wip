@@ -15,7 +15,7 @@
 
 # Canonical LDS layer directories (the 7 layers + maintenance + appendices).
 # Anything outside this set exits 4 unknown-layer.
-WIP_GRADUATE_LAYERS="decisions product architecture specs reference features implementation maintenance appendices"
+WIP_GRADUATE_LAYERS="decisions product architecture specs reference behaviors implementation maintenance appendices"
 
 # wip_graduate_layer_known <layer-name> — return 0 if the given top-level
 # directory is a recognized LDS layer; non-zero otherwise.

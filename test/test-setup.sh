@@ -223,7 +223,7 @@ assert_eq "engineering/.lds-manifest.yaml" "$(jq -r '.sentinel' <<<"$out")" \
 assert_eq "true" "$(jq -r '.sentinel_present' <<<"$out")" "[lds] sentinel present"
 
 # Layer dirs all exist with .gitkeep
-for layer in decisions product architecture specs reference features implementation appendices; do
+for layer in decisions product architecture specs reference behaviors implementation appendices; do
   assert_file "$workdir/engineering/$layer/.gitkeep" "[lds] $layer/.gitkeep present"
 done
 assert_file "$workdir/engineering/maintenance/audit.md" "[lds] maintenance/audit.md present"
