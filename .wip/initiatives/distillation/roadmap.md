@@ -93,14 +93,16 @@ human workarounds for routing or tool selection.
 - Plural LDS installs / monorepo support (v1 = scalar single root).
 - python-uv flake impure-shellHook variant (default is `make install`).
 - Diátaxis sentinel: README-4-section heuristic for v1 vs `.diataxis-manifest.yaml` later.
+- LDS `transform` `markdown_format` mode — "normalize/clean markdown" has no canonical target and would need a new formatter dependency, conflicting with LDS's deterministic/mechanical principle. Belongs in porcelain (LLM/tool-driven) if anywhere; likely never in plumbing. (moved here from §Backlog 2026-06-20, deferred from step-19.)
 
 ## Backlog
 
 _The four P2 follow-ups were promoted to Round 4 (2026-06-17) and all shipped by 2026-06-18.
 On 2026-06-19 `lds-scaffold-layer-6-naming` + `orchestration-idle-routing-false-positive`
 were promoted to Round 5 (with the Solo tier-resolver finding as step-22), all shipped
-2026-06-19. What remains is P3/nit + the two deferred-transform items + the two step-22
-deferrals below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
+2026-06-19. What remains is demand-driven P3/nit — opt-in, pulled in individually when a real
+consumer/need appears (reviewed 2026-06-20: no Round 6; `markdown_format` moved to §Deferred).
+See [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.md)._
 
 - **duo-agent-tier-selection** (deferred from step-22; the *correct long-term fix*): improve
   **Duo**'s agent-tier selection so a requested Tier resolves to the right runtime without the
@@ -108,22 +110,15 @@ deferrals below — see [`BACKLOG-PRIORITIZATION.md`](./BACKLOG-PRIORITIZATION.m
   exists), so this lives in the **Duo repo/track**, likely a separate initiative, not this one.
   step-22's Solo-alone resolution ladder (`--agent` → session pin → `.wip.yaml fallback_tool` →
   ask-then-pin → fail) is the bridge until this lands.
-- **extract-verify-hashes-and-fallback-persist-verb** (deferred from step-22): a hardened
-  `wip-plumbing` write-verb to persist a chosen agent tool to `.wip.yaml` (step-22 shipped only
-  the inline-yq persist *offer* from the live Orchestrator). Pull in if the inline edit proves
-  insufficient.
+- **fallback-tool-persist-verb** (deferred from step-22): a hardened `wip-plumbing` write-verb
+  to persist a chosen agent tool to `.wip.yaml` (step-22 shipped only the inline-yq persist
+  *offer* from the live Orchestrator). Pull in if the inline edit proves insufficient.
 
 - **extract-transform-link-rewrite** (deferred from step-19): LDS `transform` `link_rewrite`
   (`base_path`) — rewrite relative links. **Underspecified** (LDS gives no rewrite algorithm)
   and high silent-failure risk (rich markdown link syntax: inline/ref/images/autolinks/code
   spans). Tighten the `base_path` semantics first, then implement a link-aware rewriter; until
   then it stays in `extract`'s `unsupported[]`.
-- **extract-transform-markdown-format** (deferred from step-19): LDS `transform` `markdown_format`
-  — normalize/clean markdown. **Undefined target** ("normalize" has no canonical meaning;
-  formatters disagree) and would need a **new flake formatter dep**, conflicting with LDS's
-  deterministic/mechanical principle. **May belong in porcelain, not plumbing** (LLM/tool-driven),
-  or never. Stays in `unsupported[]`.
-
 - **In-place study-slice fixes** (scratchpad item 3): fix `prtend/CLAUDE.md` (→ xcind
   pointer) and `workflow-portable-stub` broken paths *in the gitignored slices*. Needs a
   human call — these are reference copies and prtend is a useful counter-example.
