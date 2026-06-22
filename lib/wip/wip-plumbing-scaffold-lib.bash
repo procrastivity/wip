@@ -10,8 +10,12 @@ wip_scaffold_now() {
 
 # wip_scaffold_render <tmpl> <key=val>... — read <tmpl>, substitute {{key}}
 # placeholders with the matching value, echo the rendered content to stdout.
-# Values must not contain newlines or the sed delimiter (use ASCII unit
-# separator 0x1f as the delimiter so common characters survive).
+# Values are scalar template substitutions (titles, slugs, dates). The sed
+# replacement-special chars `&` (whole-match) and `\` (escape lead) are escaped
+# so values survive verbatim — a title like `A & B` lands as `A & B`, not the
+# matched `{{title}}`. The ASCII unit separator 0x1f is the `s` delimiter (so
+# `/` in values survives); a value containing a literal 0x1f or a newline is
+# rejected (return 1) rather than silently corrupting the substitution.
 wip_scaffold_render() {
   local tmpl="$1"
   shift
@@ -19,14 +23,22 @@ wip_scaffold_render() {
     printf 'wip-plumbing: scaffold template missing: %s\n' "$tmpl" >&2
     return 1
   }
-  local content key val
+  local content key val esc
   content="$(cat "$tmpl")"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       *=*)
         key="${1%%=*}"
         val="${1#*=}"
-        content="$(printf '%s' "$content" | sed $'s\037{{'"$key"$'}}\037'"$val"$'\037g')"
+        if [[ "$val" == *$'\037'* || "$val" == *$'\n'* ]]; then
+          printf 'wip-plumbing: scaffold render: value for %s contains an unsupported control character (newline or 0x1f)\n' "$key" >&2
+          return 1
+        fi
+        # Escape sed replacement-specials: `\` and `&` in one pass via the
+        # character class (so order is moot — same trick as
+        # wip-plumbing-amend-lib.bash's pattern escaper, replacement side here).
+        esc="$(printf '%s' "$val" | sed -e 's/[\\&]/\\&/g')"
+        content="$(printf '%s' "$content" | sed $'s\037{{'"$key"$'}}\037'"$esc"$'\037g')"
         ;;
       *)
         printf 'wip-plumbing: scaffold render: bad key=val: %s\n' "$1" >&2

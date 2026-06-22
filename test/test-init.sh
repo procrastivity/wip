@@ -73,4 +73,13 @@ WIP_ROOT="$tmp/e" bin/wip-plumbing init second-thing >/dev/null
 assert_eq "foo-bar-baz" "$(yq -r '.current_initiative' "$tmp/e/.wip.yaml")" "current_initiative preserved"
 assert_eq "2" "$(yq -r '.initiatives | length' "$tmp/e/.wip.yaml")" "two initiatives"
 
+# 9. a title containing & renders verbatim into BRIEF.md (regression for the
+#    wip_scaffold_render sed-replacement escaping bug).
+mkdir -p "$tmp/f"
+WIP_ROOT="$tmp/f" bin/wip-plumbing init xcind-tls --title "X & Y" >/dev/null
+brief="$tmp/f/.wip/initiatives/xcind-tls/BRIEF.md"
+assert_grep "X & Y" "$brief" "ampersand title verbatim in BRIEF.md"
+assert_not_grep "{{title}}" "$brief" "no placeholder leak in BRIEF.md"
+assert_eq "X & Y" "$(yq -r '.initiatives[] | select(.slug=="xcind-tls") | .title' "$tmp/f/.wip.yaml")" "manifest title verbatim"
+
 test_summary
