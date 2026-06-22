@@ -2,19 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.9] - 2026-06-22
+
+### Documentation
+
+- Docs(roadmap): backlog hygiene — no Round 6, demand-driven
+
 ## [0.0.8] - 2026-06-20
-
-Round 5 — Orchestration ergonomics & scaffold fixes. Dogfood follow-ups from running the wip orchestration Roles.
-
-### Added
-
-- Agent-tool resolution fallback: `wip` resolves a requested tier to a runtime via a fallback ladder — `--agent <name|id>` on `/wip:orchestrate` and `/wip:start` (a session-wide spawn pin) → a `.wip.yaml` `features.solo.agent_tier_policy.fallback_tool` default → ask-the-human-then-pin → hard-fail. Solo-alone stays usable without Duo; the manual `agent_tool_id` pin is no longer required (set `fallback_tool` once).
-- `wip-plumbing detect` now echoes the `agent_tier_policy` block (`force_tier` + `fallback_tool`) in the `solo` feature detail.
-
-### Changed
-
-- Roles docs: formalized the **liveness-and-report gate** (`roles/shared.md` + `coordinator.md` + `orchestrator.md`) — a watcher must re-check the backend liveness signal **and** require an explicit final-report signal before routing a watched agent/task complete; never on a bare idle edge.
-- `setup lds` scaffold: renamed the LDS layer-6 directory `features/` → canonical `behaviors/` (matches the glossary partial, ADR-0011, and the playbook); `WIP_GRADUATE_LAYERS` updated accordingly.
 
 ### Documentation
 
