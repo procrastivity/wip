@@ -82,4 +82,43 @@ assert_grep "X & Y" "$brief" "ampersand title verbatim in BRIEF.md"
 assert_not_grep "{{title}}" "$brief" "no placeholder leak in BRIEF.md"
 assert_eq "X & Y" "$(yq -r '.initiatives[] | select(.slug=="xcind-tls") | .title' "$tmp/f/.wip.yaml")" "manifest title verbatim"
 
+# 10. --brief-body splices a shaped body beneath the standard header.
+mkdir -p "$tmp/g"
+cat >"$tmp/g-body.md" <<'MD'
+---
+slug: ignored-here
+---
+# Shaped Title
+
+## Goal
+
+The shaped goal text.
+
+## Constraints
+
+- Ship by Friday.
+MD
+WIP_ROOT="$tmp/g" bin/wip-plumbing init shaped --title "Shaped Title" --brief-body "$tmp/g-body.md" >/dev/null
+gbrief="$tmp/g/.wip/initiatives/shaped/BRIEF.md"
+assert_grep "^# Shaped Title — BRIEF" "$gbrief" "brief-body keeps decorated header"
+assert_grep "Slug: \`shaped\`" "$gbrief" "brief-body keeps Slug line"
+assert_grep "The shaped goal text." "$gbrief" "brief-body persists shaped Goal"
+assert_grep "Ship by Friday." "$gbrief" "brief-body persists shaped Constraints"
+assert_not_grep "_decision 1_" "$gbrief" "brief-body drops template stub"
+assert_not_grep "^# Shaped Title$" "$gbrief" "brief-body drops shaped raw H1"
+
+# 11. --brief-body requires a slug (repo-level use is an error).
+set +e
+WIP_ROOT="$tmp/g" bin/wip-plumbing init --brief-body "$tmp/g-body.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "--brief-body without slug exit 2"
+
+# 12. --brief-body with an unreadable file exits 2.
+set +e
+WIP_ROOT="$tmp/g" bin/wip-plumbing init other --brief-body "$tmp/nope.md" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "--brief-body missing file exit 2"
+
 test_summary

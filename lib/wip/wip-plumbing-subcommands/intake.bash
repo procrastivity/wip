@@ -184,12 +184,15 @@ _wip_intake_apply_brief() {
   # shellcheck disable=SC1091
   source "$WIP_LIB/wip-plumbing-subcommands/init.bash"
 
+  # Persist the shaped artifact as the brief body (not just slug + title) — the
+  # shape phase already validated it; apply should capture the plan, not an
+  # empty skeleton.
   local ledger rc
   set +e
   if [[ -n "$h1" ]]; then
-    ledger="$(wip_plumbing_cmd_init "$slug" --title "$h1")"
+    ledger="$(wip_plumbing_cmd_init "$slug" --title "$h1" --brief-body "$file")"
   else
-    ledger="$(wip_plumbing_cmd_init "$slug")"
+    ledger="$(wip_plumbing_cmd_init "$slug" --brief-body "$file")"
   fi
   rc=$?
   set -e

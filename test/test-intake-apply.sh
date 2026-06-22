@@ -40,6 +40,14 @@ assert_eq "true" "$(jq -r '.ok' <<<"$out")" "brief slug ok"
 assert_eq "init" "$(jq -r '.dispatched' <<<"$out")" "brief dispatched init"
 assert_eq "payments" "$(jq -r '.target' <<<"$out")" "brief target slug"
 assert_file "$tmp/.wip/initiatives/payments/BRIEF.md" "payments BRIEF written"
+# The shaped body must be persisted — not the empty template skeleton.
+brief="$tmp/.wip/initiatives/payments/BRIEF.md"
+assert_grep "Stand up the payments service." "$brief" "brief body persisted (shaped Goal)"
+assert_grep "^# Payments — BRIEF" "$brief" "brief standard header (decorated H1)"
+assert_grep "Slug: \`payments\`" "$brief" "brief header carries Slug"
+assert_not_grep "_decision 1_" "$brief" "brief has no template placeholder stub"
+# Persisted brief round-trips back through the brief validator.
+assert_eq "true" "$(jq -r '.valid' <<<"$(WIP_ROOT="$tmp" bin/wip-plumbing intake validate "$brief" --kind brief)")" "persisted brief re-validates"
 
 # 2. apply --kind brief deriving slug from H1.
 cat >"$tmp/brief-h1.md" <<'MD'
@@ -52,6 +60,26 @@ MD
 out="$(run "$tmp/brief-h1.md" --kind brief)"
 # "Auth Rework" derives -> "auth-rework" but auth-rework doesn't exist yet.
 assert_eq "auth-rework" "$(jq -r '.target' <<<"$out")" "slug derived from H1"
+assert_grep "Refresh tokens." "$tmp/.wip/initiatives/auth-rework/BRIEF.md" "H1-derived brief body persisted"
+
+# 2b. a title containing & round-trips into the persisted BRIEF.md header
+#     (depends on the wip_scaffold_render escaping fix — no {{title}} leak).
+cat >"$tmp/brief-amp.md" <<'MD'
+---
+slug: tls-trust
+---
+# TLS proxy-domain wildcard & local trust
+
+## Goal
+
+Document the wildcard behavior & the local trust store.
+MD
+out="$(run "$tmp/brief-amp.md" --kind brief)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "ampersand brief ok"
+ampbrief="$tmp/.wip/initiatives/tls-trust/BRIEF.md"
+assert_grep "^# TLS proxy-domain wildcard & local trust — BRIEF" "$ampbrief" "ampersand title verbatim in header"
+assert_grep "the wildcard behavior & the local trust store." "$ampbrief" "ampersand body verbatim"
+assert_not_grep "{{title}}" "$ampbrief" "no placeholder leak with ampersand title"
 
 # 3. amendment -> dispatches through roadmap amend.
 mkdir -p "$tmp/.wip/initiatives/auth"
