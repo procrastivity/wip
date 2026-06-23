@@ -172,14 +172,15 @@ Manage the global registry at `$XDG_STATE_HOME/wip/projects.jsonl`
   `forget`, `{"ok":true,"forgot":"<id>"}`; for `list`, either a TSV-style
   table or raw JSONL with `--json`.
 
-### `wip-plumbing init [<slug>] [--title <t>] [--intake ad-hoc|structured]`
+### `wip-plumbing init [<slug>] [--title <t>] [--intake ad-hoc|structured] [--brief-body <file>]`
 Scaffold from `templates/`. Idempotent; protected-path model (never clobbers existing
 content without `--force`).
 
 - **No `<slug>`:** repo-level scaffold — write `.wip.yaml` (from `templates/wip.yaml.tmpl`) and the `.wip/` skeleton (`GLOSSARY.md` pointer, `backlog.md`) if absent.
 - **With `<slug>`:** initiative scaffold — create `.wip/initiatives/<slug>/{brief.md,roadmap.md}` from templates and append a registry entry to `.wip.yaml`. `--intake structured` marks the initiative for a spec-generator pass (porcelain); `ad-hoc` (default) drops a `brief.md` stub.
+- **`--brief-body <file>`:** persist a shaped brief instead of the empty template stub. `BRIEF.md` is the template's standard header (decorated H1 + durable-context blockquote + `Slug:`/`Started:`) spliced above the shaped file's sections (everything from its first `## ` heading to end; the shaped raw H1 + front-matter are dropped — the template owns the H1). The dispatch target for `intake apply --kind brief`. Requires `<slug>`; the file must be readable (else exit 2). The shaped body is spliced verbatim (no `{{key}}` substitution), so a title containing `&` round-trips correctly via the escaped `wip_scaffold_render`.
 - **Writes:** the files above (or, with `--dry-run`, just the ledger).
-- **Exit:** 0 on scaffold; **4** if `<slug>` already exists (no overwrite); 2 on bad slug (must match `^[a-z0-9][a-z0-9-]*$`).
+- **Exit:** 0 on scaffold; **4** if `<slug>` already exists (no overwrite); 2 on bad slug (must match `^[a-z0-9][a-z0-9-]*$`) or unreadable `--brief-body` file.
 - **stdout:** a write ledger:
 ```json
 { "ok": true, "slug": "auth-rework", "wrote": [".wip/initiatives/auth-rework/brief.md", ".wip/initiatives/auth-rework/roadmap.md"], "skipped_protected": [], "manifest_updated": ".wip.yaml" }
@@ -227,7 +228,8 @@ Per-kind shape check. With `--kind` omitted, uses `classify`'s best guess.
 Terminal write. Validates first; refuses on shape failure. Dispatches to the
 appropriate writer:
 
-- `--kind brief` → `init <derived-slug>`.
+- `--kind brief` → `init <derived-slug> --title <H1> --brief-body <file>` — the
+  shaped artifact becomes `BRIEF.md` (header-spliced), not an empty stub.
 - `--kind amendment` → `roadmap amend <target> <directive-from-artifact>`.
 - `--kind workplan-seed` → `workplan init <slug> <step-id> --from <file>`.
 - `--kind spec` → LDS seam (ADR-0006). The LDS verb surface ships in step-15

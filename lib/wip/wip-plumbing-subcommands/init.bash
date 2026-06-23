@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_init() {
-  local slug="" title="" intake="ad-hoc"
+  local slug="" title="" intake="ad-hoc" brief_body=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title)
@@ -22,6 +22,15 @@ wip_plumbing_cmd_init() {
         ;;
       --intake=*)
         intake="${1#--intake=}"
+        shift
+        ;;
+      --brief-body)
+        [[ $# -ge 2 ]] || wip_die 2 usage "init: --brief-body requires an argument"
+        brief_body="$2"
+        shift 2
+        ;;
+      --brief-body=*)
+        brief_body="${1#--brief-body=}"
         shift
         ;;
       -*) wip_die 2 usage "init: unknown flag: $1" ;;
@@ -46,10 +55,16 @@ wip_plumbing_cmd_init() {
     wip_die 1 internal "init: templates/ directory not found"
 
   if [[ -z "$slug" ]]; then
+    [[ -z "$brief_body" ]] ||
+      wip_die 2 usage "init: --brief-body requires a <slug> (initiative-level)"
     _wip_init_repo "$templates_dir"
   else
     _wip_init_validate_slug "$slug"
-    _wip_init_initiative "$templates_dir" "$slug" "$title" "$intake"
+    if [[ -n "$brief_body" ]]; then
+      [[ -f "$brief_body" && -r "$brief_body" ]] ||
+        wip_die 2 not-found "init: --brief-body file not readable: $brief_body"
+    fi
+    _wip_init_initiative "$templates_dir" "$slug" "$title" "$intake" "$brief_body"
   fi
 }
 
@@ -171,6 +186,27 @@ _wip_init_try_write() {
   esac
 }
 
+# Compose a BRIEF.md by splicing a shaped brief body beneath the template's
+# standard header. The header (decorated H1 + durable-context blockquote +
+# Slug/Started lines) is the rendered template up to — but not including — its
+# first `## ` section; the body is the shaped file from its first `## ` section
+# to end (dropping the shaped H1/front-matter, since the template owns the H1).
+# Echoes the composed content. Falls back to the rendered template if the shaped
+# file carries no `## ` section (shouldn't happen — apply validates first).
+_wip_init_compose_brief() {
+  local tmpl="$1" body_file="$2" slug="$3" title="$4" date="$5"
+  local rendered header body
+  rendered="$(wip_scaffold_render "$tmpl" "slug=$slug" "title=$title" "date=$date")" ||
+    return 1
+  body="$(sed -n '/^## /,$p' "$body_file")"
+  if [[ -z "$body" ]]; then
+    printf '%s' "$rendered"
+    return 0
+  fi
+  header="$(printf '%s\n' "$rendered" | sed '/^## /,$d')"
+  printf '%s\n\n%s' "$header" "$body"
+}
+
 # Write literal <content> -> <dest>, append outcome to the named arrays.
 _wip_init_try_write_content() {
   local dest="$1" content="$2" wrote_name="$3" skipped_name="$4"
@@ -205,7 +241,7 @@ _wip_init_relpaths() {
 # Initiative-level scaffold: ensure manifest, then scaffold the initiative
 # directory and append a registry entry.
 _wip_init_initiative() {
-  local templates_dir="$1" slug="$2" title="$3" intake="$4"
+  local templates_dir="$1" slug="$2" title="$3" intake="$4" brief_body="${5:-}"
   [[ -n "$title" ]] || title="$(_wip_init_humanize "$slug")"
 
   local target
@@ -227,8 +263,19 @@ _wip_init_initiative() {
   local date
   date="$(wip_scaffold_now)"
 
-  _wip_init_try_write "$templates_dir/brief.md.tmpl" "$init_dir/BRIEF.md" \
-    wrote skipped "slug=$slug" "title=$title" "date=$date"
+  if [[ -n "$brief_body" ]]; then
+    # Persist the shaped brief body: standard template header (decorated H1 +
+    # durable-context blockquote + Slug/Started) spliced above the shaped
+    # sections, so intake captures the plan instead of an empty skeleton.
+    local brief_content
+    brief_content="$(_wip_init_compose_brief \
+      "$templates_dir/brief.md.tmpl" "$brief_body" "$slug" "$title" "$date")" ||
+      wip_die 1 internal "init: failed to compose brief from $brief_body"
+    _wip_init_try_write_content "$init_dir/BRIEF.md" "$brief_content" wrote skipped
+  else
+    _wip_init_try_write "$templates_dir/brief.md.tmpl" "$init_dir/BRIEF.md" \
+      wrote skipped "slug=$slug" "title=$title" "date=$date"
+  fi
   _wip_init_try_write "$templates_dir/roadmap.md.tmpl" "$init_dir/roadmap.md" \
     wrote skipped "slug=$slug" "title=$title" "date=$date"
 
