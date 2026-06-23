@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.10] - 2026-06-23
+
+### Added
+
+- Feat(orchestration): register orchestration-backends initiative
+- Feat(orchestration): Task-tool backend + active-backend indirection seam
+- Feat(status): opt-in Solo liveness probe + Task-backend fallback offer
+
+### Documentation
+
+- Docs(decisions): ADR-0013/0014 + specs for Task backend & Solo liveness
+
+### Fixed
+
+- Fix(scaffold): escape sed replacement-specials in wip_scaffold_render
+- Fix(intake): persist the shaped body on intake apply --kind brief
+- Fix(orchestration): harden backend fallback paths
+
 ## [0.0.9] - 2026-06-22
 
 ### Documentation
