@@ -16,3 +16,6 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0009](./0009-intake-as-pipeline.md) | Intake is a pipeline, not a verb; closed kind vocabulary |
 | [0010](./0010-parallel-lanes-in-roadmaps.md) | Parallel lanes (`### Lane <name>`) as a structural roadmap primitive |
 | [0011](./0011-bundle-assembler-porcelain.md) | Bundle assembler is a porcelain verb (`wip bundle` / `/wip:bundle` multi-file front-end) |
+| [0012](./0012-orchestrate-entrypoint-is-a-plugin-command.md) | Orchestrate entrypoint is a plugin command (`/wip:orchestrate`), not a CLI verb |
+| [0013](./0013-task-tool-orchestration-backend.md) | Task-tool orchestration backend + generated `active.md` backend-indirection |
+| [0014](./0014-solo-liveness-bash-probe.md) | Solo liveness is a bash probe (`status --probe-solo`); unreachable → warn + offer Task fallback |

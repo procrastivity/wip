@@ -378,7 +378,7 @@ process names, `agent_tool_id` stay in the Roles + backend binding, ADR-0007).
 }
 ```
 
-### `wip-plumbing status [--initiative <slug>]`
+### `wip-plumbing status [--initiative <slug>] [--probe-solo]`
 "Where am I." Deterministic from manifest + the initiative's `roadmap.md` + git state of
 `.wip/`. Defaults to `current_initiative`; `--initiative` overrides.
 
@@ -389,6 +389,15 @@ process names, `agent_tool_id` stay in the Roles + backend binding, ADR-0007).
   `### Lane <name>` it lives under, or `null` for a main-lane step). When two or more
   lanes have unshipped steps in the active round, `lanes_in_flight` lists the next
   actionable step per in-flight lane; otherwise it is `[]`.
+- **Solo liveness (ADR-0014):** `solo_available` is a *config echo* (Solo declared in
+  `.wip.yaml`), not a probe. With `--probe-solo` (opt-in, because it shells out and is
+  non-deterministic), `status` runs `solo status --json` and reports `solo_reachable`:
+  `true` (answered ready) / `false` (probe ran, not ready) / `null` (not probed, or the
+  `solo` CLI is absent — *unknown*, never "down"). The probe command is overridable via
+  `WIP_SOLO_STATUS_CMD` (test seam). When `solo_reachable` is `false` **and** the active
+  orchestration backend is `solo`, `signals` gains `"solo-unreachable"` — the actionable
+  case `/wip:status` keys off to warn + offer the Task-backend fallback. Without the flag,
+  `solo_reachable` is `null` and the default output is unchanged.
 - **stdout:**
 ```json
 {
@@ -397,7 +406,8 @@ process names, `agent_tool_id` stay in the Roles + backend binding, ADR-0007).
   "active_step": { "id": "step-13", "title": "Track A part 1", "shipped": false, "lane": "A" },
   "lanes_in_flight": [ { "lane": "A", "step": "step-13" }, { "lane": "D", "step": "step-14" } ],
   "dirty_wip_files": [".wip/initiatives/distillation/roadmap.md"],
-  "solo_available": true
+  "solo_available": true, "solo_reachable": null,
+  "signals": []
 }
 ```
 
