@@ -146,4 +146,67 @@ outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing status)"
 assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$outL2")" "single in-flight lane -> empty"
 rm -rf "$tmpL"
 
+# --- Solo liveness probe (--probe-solo, ADR-0014) -----------------------
+# Isolated root: Solo declared + orchestration backend solo. The probe is fed
+# from a file via the WIP_SOLO_STATUS_CMD seam (no real `solo` CLI dependency).
+tmpP="$(mktemp -d)"
+mkdir -p "$tmpP/.wip/initiatives/demo"
+cat >"$tmpP/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  orchestration: { enabled: true, backend: solo }
+  solo: { enabled: true }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    title: Demo
+    status: in-flight
+    active_step: step-02
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$tmpP/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One
+
+- **step-02 — Second** — current.
+MD
+printf '%s\n' '{"ok":true,"data":{"ready":true}}' >"$tmpP/solo-ready.json"
+printf '%s\n' '{"ok":true,"data":{"ready":false}}' >"$tmpP/solo-down.json"
+
+runp() { WIP_ROOT="$tmpP" bin/wip-plumbing status "$@"; }
+
+# p1. No flag -> no probe; solo_reachable null, no solo-unreachable signal.
+p1="$(runp)"
+assert_eq "null" "$(jq -r '.solo_reachable' <<<"$p1")" "no flag -> solo_reachable null"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p1")" \
+  "no flag -> no solo-unreachable signal"
+
+# p2. --probe-solo, Solo READY -> reachable true, no signal.
+p2="$(WIP_SOLO_STATUS_CMD="cat $tmpP/solo-ready.json" runp --probe-solo)"
+assert_eq "true" "$(jq -r '.solo_reachable' <<<"$p2")" "probe ready -> solo_reachable true"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p2")" \
+  "probe ready -> no signal"
+
+# p3. --probe-solo, Solo DOWN (backend solo) -> reachable false + signal.
+p3="$(WIP_SOLO_STATUS_CMD="cat $tmpP/solo-down.json" runp --probe-solo)"
+assert_eq "false" "$(jq -r '.solo_reachable' <<<"$p3")" "probe down -> solo_reachable false"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p3")" \
+  "probe down + backend solo -> solo-unreachable signal"
+
+# p4. Backend is task -> Solo down is NOT actionable: reachable false, NO signal.
+WIP_ROOT="$tmpP" yq -i '.features.orchestration.backend = "task"' "$tmpP/.wip.yaml"
+p4="$(WIP_SOLO_STATUS_CMD="cat $tmpP/solo-down.json" runp --probe-solo)"
+assert_eq "false" "$(jq -r '.solo_reachable' <<<"$p4")" "probe down (backend task) -> reachable false"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p4")" \
+  "backend task -> no solo-unreachable signal (not actionable)"
+WIP_ROOT="$tmpP" yq -i '.features.orchestration.backend = "solo"' "$tmpP/.wip.yaml"
+
+# p5. --probe-solo but Solo not declared -> null (no probe), even with the seam.
+WIP_ROOT="$tmpP" yq -i '.features.solo.enabled = false' "$tmpP/.wip.yaml"
+p5="$(WIP_SOLO_STATUS_CMD="cat $tmpP/solo-down.json" runp --probe-solo)"
+assert_eq "null" "$(jq -r '.solo_reachable' <<<"$p5")" "solo not declared -> reachable null (no probe)"
+rm -rf "$tmpP"
+
 test_summary

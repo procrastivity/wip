@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_status() {
-  local slug=""
+  local slug="" probe_solo=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --initiative)
@@ -13,6 +13,10 @@ wip_plumbing_cmd_status() {
         ;;
       --initiative=*)
         slug="${1#--initiative=}"
+        shift
+        ;;
+      --probe-solo)
+        probe_solo=1
         shift
         ;;
       -*) wip_die 2 usage "status: unknown flag: $1" ;;
@@ -101,7 +105,8 @@ wip_plumbing_cmd_status() {
     fi
   fi
 
-  # solo_available derived from the same feature resolver detect uses.
+  # solo_available derived from the same feature resolver detect uses. This is
+  # a CONFIG echo — "Solo is declared", not "Solo answers".
   local features solo_available
   features="$(wip_features_json "$root" "$mj")"
   solo_available="$(jq -r '
@@ -109,11 +114,46 @@ wip_plumbing_cmd_status() {
   ' <<<"$features")"
   [[ -n "$solo_available" ]] || solo_available="false"
 
+  # solo_reachable: a LIVE probe of the Solo control plane (opt-in via
+  # --probe-solo, since it shells out and is non-deterministic). Distinct from
+  # solo_available: config says declared, this says actually answering.
+  #   null  = not probed (no flag) or no probe available (Solo declared but the
+  #           `solo` CLI isn't on PATH) — unknown, not a claim of down.
+  #   true  = `solo status --json` returned ok + data.ready.
+  #   false = the probe ran and Solo did not answer ready.
+  # WIP_SOLO_STATUS_CMD overrides the probe command (test seam).
+  local solo_reachable="null" orch_backend
+  orch_backend="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
+  if [[ "$probe_solo" == "1" && "$solo_available" == "true" ]]; then
+    local probe_cmd="${WIP_SOLO_STATUS_CMD:-}"
+    if [[ -z "$probe_cmd" ]] && command -v solo >/dev/null 2>&1; then
+      probe_cmd="solo status --json"
+    fi
+    if [[ -n "$probe_cmd" ]]; then
+      local probe ok ready
+      probe="$(bash -c "$probe_cmd" 2>/dev/null || true)"
+      ok="$(jq -r '.ok // false' <<<"$probe" 2>/dev/null || printf 'false')"
+      ready="$(jq -r '.data.ready // false' <<<"$probe" 2>/dev/null || printf 'false')"
+      if [[ "$ok" == "true" && "$ready" == "true" ]]; then
+        solo_reachable="true"
+      else
+        solo_reachable="false"
+      fi
+    fi
+  fi
+  # Actionable signal: the active orchestration backend is solo but Solo isn't
+  # answering — orchestration would stall at the first spawn. /wip:status keys
+  # off this to warn + offer the Task-backend fallback (ADR-0014).
+  if [[ "$solo_reachable" == "false" && "$orch_backend" == "solo" ]]; then
+    signals="$(jq -nc --argjson a "$signals" '$a + ["solo-unreachable"]')"
+  fi
+
   jq -nc \
     --arg slug "$slug" --arg status "$status_field" \
     --argjson round "$round" --argjson active_step "$active_step" \
     --argjson lanes_in_flight "$lanes_in_flight" \
     --argjson dirty "$dirty" --argjson solo "$solo_available" \
+    --argjson solo_reachable "$solo_reachable" \
     --argjson signals "$signals" '
     {
       ok: true,
@@ -124,6 +164,7 @@ wip_plumbing_cmd_status() {
       lanes_in_flight: $lanes_in_flight,
       dirty_wip_files: $dirty,
       solo_available: $solo,
+      solo_reachable: $solo_reachable,
       signals: $signals
     }'
 }
