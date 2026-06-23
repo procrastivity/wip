@@ -25,6 +25,12 @@ fetch shaper prompts from `templates/prompts/intake/` via
 `wip-plumbing template show`) one layer up.
 
 The active orchestration backend binding is referenced via
-`@../roles/backends/solo.md` (ADR-0007 makes `solo` the default and
-only backend today; a second backend would warrant per-backend agent
-variants or a backend-selector hop here).
+`@../roles/backends/active.md` — a **generated** pointer regenerated from
+`roles/backends/<backend>.md` by `wip-plumbing orchestrate backend <name>`
+(default `solo`; `task` is the second backend per ADR-0013). The
+indirection exists because Claude Code `@`-includes are static — the agent
+files cannot conditionally select a backend — so `active.md` is the single
+swappable seam (committed, regenerated on switch, like `.wip/GLOSSARY.md`).
+Per-project switching assumes a vendored install (`features.orchestration.source:
+vendored`); a shared `source: plugin` install switches the plugin's `active.md`
+globally.

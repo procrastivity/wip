@@ -49,7 +49,7 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
      operator can pre-select the tool when tier classification would
      otherwise be non-confident. The command body does **not** persist
      the pin or name any backend tool — the live Role flow records it
-     (see `roles/backends/solo.md` and `roles/tier-policy.md`).
+     (see `roles/backends/active.md` and `roles/tier-policy.md`).
 
 3. **Prep (plumbing).** Run `"$WIP" orchestrate prep` (append
    `--initiative <slug>` when given). This is deterministic — it resolves the
@@ -80,7 +80,7 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
    - **If you're a plain session**, become the **Orchestrator**: read and follow
      `roles/orchestrator.md` together with `roles/shared.md`,
      `roles/tier-policy.md`, and the active backend binding
-     `roles/backends/solo.md` (these are the canonical, single-source operating
+     `roles/backends/active.md` (these are the canonical, single-source operating
      instructions — do not paraphrase from memory). Then, per
      `roles/orchestrator.md`:
        - Confirm your identity via the backend.
@@ -98,7 +98,9 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
 
 - This command body is the contract; do not improvise off-script.
 - The command body names **no** backend MCP tools — the spawn mechanics live
-  only in `roles/backends/solo.md`, keeping the backend seam intact (ADR-0007).
+  only in the active backend binding `roles/backends/active.md` (regenerated
+  from `roles/backends/<backend>.md` by `wip-plumbing orchestrate backend`),
+  keeping the backend seam intact (ADR-0007).
 - Tier, process naming, and `agent_tool_id` resolution are **Role** decisions,
   not prep output: `orchestrate prep` emits the facts about the work, the Roles
   decide how to staff it.

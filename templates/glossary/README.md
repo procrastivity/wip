@@ -8,6 +8,7 @@ glossary by concatenating `core.md` with one partial per feature enabled in `.wi
 | `core.md` | always | layers, collections, lifecycle verbs + state machine, composability/detection |
 | `orchestration.md` | `features.orchestration.enabled` | Roles + abstract substrate (backend-agnostic) |
 | `solo.md` | `features.orchestration.backend: solo` | Solo backend binding for orchestration |
+| `task.md` | `features.orchestration.backend: task` | Task-tool / native-subagent backend binding for orchestration |
 | `lds.md` | `features.lds.enabled` | LDS terms + the LDS graduation mechanism *(future)* |
 | `diataxis.md` | `features.diataxis.enabled` | Diátaxis terms *(future)* |
 

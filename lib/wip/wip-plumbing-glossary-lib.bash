@@ -6,7 +6,8 @@
 # one-row addition here). Each row is `<partial>\t<predicate-name>\t<jq-expr>`,
 # in declaration order (which is also the emit order).
 #
-# `solo.md` is gated on `features.orchestration.backend == "solo"` per ADR-0007;
+# `solo.md` / `task.md` are gated on `features.orchestration.backend` per
+# ADR-0007 / ADR-0013 — exactly one fires for the active binding;
 # `features.solo.enabled` is the Solo backend's *availability* flag, distinct
 # from the *active binding* the partial follows.
 # shellcheck shell=bash
@@ -16,6 +17,7 @@ wip_glossary_rules() {
   printf 'core.md\talways\ttrue\n'
   printf 'orchestration.md\tfeatures.orchestration.enabled\t.features.orchestration.enabled == true\n'
   printf 'solo.md\tfeatures.orchestration.backend\t(.features.orchestration.enabled == true) and (.features.orchestration.backend == "solo")\n'
+  printf 'task.md\tfeatures.orchestration.backend\t(.features.orchestration.enabled == true) and (.features.orchestration.backend == "task")\n'
   printf 'lds.md\tfeatures.lds.enabled\t.features.lds.enabled == true\n'
   printf 'diataxis.md\tfeatures.diataxis.enabled\t.features.diataxis.enabled == true\n'
 }

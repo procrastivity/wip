@@ -47,6 +47,34 @@ orchestration readiness, and emits the "what to orchestrate" brief.
 
 See `wip-plumbing-cli.md` for the verb-table entry and the canonical stdout shape.
 
+## 1b. Plumbing — `orchestrate backend [<name>]` (ADR-0013)
+
+```
+wip-plumbing orchestrate backend            # show: current backend + sync state
+wip-plumbing orchestrate backend <name>     # switch to <name> (solo | task)
+```
+
+Shows or switches the active orchestration backend. It selects a backend **binding**, not
+a backend *tool* — it names no `mcp__solo__*` tool, so the ADR-0007 seam holds.
+
+- **Resolves `roles/`** from `$root/roles` (dev/vendored), else `$CLAUDE_PLUGIN_ROOT/roles`;
+  neither found → exit **4** `no-roles-dir` (a shared `source: plugin` install switches the
+  plugin's `active.md` globally, not a per-project copy).
+- **Available backends** = authored `roles/backends/*.md` minus the generated `active.md`.
+- **No `<name>`** → reports `{backend, available[], active_in_sync}` (`active_in_sync` =
+  `active.md` byte-equals the configured backend's binding). Mutates nothing.
+- **`<name>`** → regenerates `roles/backends/active.md` from `roles/backends/<name>.md`
+  (idempotent — skipped when already equal) and sets `features.orchestration.backend` with a
+  **surgical scalar** `yq -i` (preserves manifest block style + comments). Honors
+  `--dry-run` (reports the would-be regen, writes nothing).
+- **Exit:** 0; **4** `unknown-backend` (no such `roles/backends/<name>.md`) / `no-roles-dir`;
+  **2** usage (e.g. the reserved name `active`).
+- **stdout (switch):** `{ok, verb, backend, available[], active_regenerated, manifest_updated}`.
+
+This is the verb `/wip:status`'s Solo-unreachable fallback offer (ADR-0014) calls as
+`orchestrate backend task`. The four `agents/*.md` `@`-include the generated
+`roles/backends/active.md`, so a switch is picked up with no agent-file edits.
+
 ## 2. Plugin — `/wip:orchestrate [--initiative <slug>]`
 
 ```

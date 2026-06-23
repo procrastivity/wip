@@ -11,4 +11,4 @@ Act as the Researcher for this wip Step per the linked manuals — they are the 
 - @../roles/shared.md
 - @../roles/researcher.md
 - @../roles/tier-policy.md
-- @../roles/backends/solo.md
+- @../roles/backends/active.md

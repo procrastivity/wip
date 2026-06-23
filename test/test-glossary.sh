@@ -20,6 +20,7 @@ rules="$(WIP_LIB="$REPO_ROOT/lib/wip" bash -c '
 expected_rules="core.md	always	true
 orchestration.md	features.orchestration.enabled	.features.orchestration.enabled == true
 solo.md	features.orchestration.backend	(.features.orchestration.enabled == true) and (.features.orchestration.backend == \"solo\")
+task.md	features.orchestration.backend	(.features.orchestration.enabled == true) and (.features.orchestration.backend == \"task\")
 lds.md	features.lds.enabled	.features.lds.enabled == true
 diataxis.md	features.diataxis.enabled	.features.diataxis.enabled == true"
 assert_eq "$expected_rules" "$rules" "wip_glossary_rules emits documented table"
@@ -59,6 +60,7 @@ YAML
   cp "$REPO_ROOT"/templates/glossary/core.md "$tmp/templates/glossary/"
   cp "$REPO_ROOT"/templates/glossary/orchestration.md "$tmp/templates/glossary/"
   cp "$REPO_ROOT"/templates/glossary/solo.md "$tmp/templates/glossary/"
+  cp "$REPO_ROOT"/templates/glossary/task.md "$tmp/templates/glossary/"
   # Ship lds.md into the tmp templates dir only when lds is enabled, so the
   # positive-inclusion case (section 14) exercises it without disturbing the
   # diataxis graceful-skip case (section 5), which keeps its partial unshipped.
@@ -117,12 +119,21 @@ WIP_ROOT="$tmp_b" WIP_TEMPLATES_DIR="$tmp_b/templates" bin/wip-plumbing glossary
 assert_not_grep '^## Roles' "$out_b" "tmp_b excludes orchestration"
 assert_not_grep '^## Solo backend' "$out_b" "tmp_b excludes solo (orchestration off)"
 
-# (c) orchestration enabled but backend != solo → orchestration kept, solo dropped.
+# (c) orchestration enabled but backend != solo/task → orchestration kept, both dropped.
 tmp_c="$(make_tmp_repo native false false true)"
 out_c="$SCRATCH/c.md"
 WIP_ROOT="$tmp_c" WIP_TEMPLATES_DIR="$tmp_c/templates" bin/wip-plumbing glossary assemble >"$out_c"
 assert_grep '^## Roles' "$out_c" "tmp_c includes orchestration"
 assert_not_grep '^## Solo backend' "$out_c" "tmp_c excludes solo (backend != solo)"
+assert_not_grep '^## Task backend' "$out_c" "tmp_c excludes task (backend != task)"
+
+# (c2) backend: task → orchestration kept, task included, solo dropped (ADR-0013).
+tmp_c2="$(make_tmp_repo task false false true)"
+out_c2="$SCRATCH/c2.md"
+WIP_ROOT="$tmp_c2" WIP_TEMPLATES_DIR="$tmp_c2/templates" bin/wip-plumbing glossary assemble >"$out_c2"
+assert_grep '^## Roles' "$out_c2" "tmp_c2 includes orchestration"
+assert_grep '^## Task backend (orchestration binding)' "$out_c2" "tmp_c2 includes task backend"
+assert_not_grep '^## Solo backend' "$out_c2" "tmp_c2 excludes solo (backend == task)"
 
 # ---------------------------------------------------------------------------
 # 5. Future-row graceful skip — diataxis enabled but partial not shipped.
