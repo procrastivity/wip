@@ -11,4 +11,4 @@ Act as the Coordinator for this wip Step per the linked manuals — they are the
 - @../roles/shared.md
 - @../roles/coordinator.md
 - @../roles/tier-policy.md
-- @../roles/backends/solo.md
+- @../roles/backends/active.md

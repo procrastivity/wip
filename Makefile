@@ -9,7 +9,7 @@ SRC := bin/wip \
        $(wildcard lib/wip/wip-subcommands/*.bash)
 TESTS := $(wildcard test/test-*.sh)
 
-.PHONY: fmt lint test check deps-check hooks glossary install install-local uninstall uninstall-local
+.PHONY: fmt lint test check deps-check hooks glossary active install install-local uninstall uninstall-local
 
 fmt:
 	shfmt -w -i 2 -ci $(SRC) test/*.sh
@@ -46,3 +46,8 @@ uninstall-local:
 
 glossary:
 	bin/wip-plumbing glossary assemble > .wip/GLOSSARY.md
+
+# Regenerate roles/backends/active.md from the configured backend (the
+# indirection seam — ADR-0013). active.md is committed but generated.
+active:
+	bin/wip-plumbing orchestrate backend "$$(yq -r '.features.orchestration.backend // "solo"' .wip.yaml)"

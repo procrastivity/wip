@@ -1,14 +1,20 @@
-# orchestrate — deterministic prep for booting orchestration (ADR-0012).
+# orchestrate — deterministic prep + backend selection for orchestration.
 #
-# `orchestrate prep` resolves an initiative's active step, gates orchestration
-# readiness, and emits a "what to orchestrate" brief that /wip:orchestrate
-# consumes before it adopts the Orchestrator role and spawns a Coordinator.
+# `orchestrate prep` (ADR-0012) resolves an initiative's active step, gates
+# orchestration readiness, and emits a "what to orchestrate" brief that
+# /wip:orchestrate consumes before it adopts the Orchestrator role and spawns a
+# Coordinator.
 #
-# This verb NEVER spawns and NEVER names a backend tool (no mcp__solo__*,
-# no agent_tool_id) — spawning is a plugin/MCP concern. It emits the FACTS
-# about the work (initiative / step / workplan), not the STAFFING of it
-# (Tier, process names) which lives in the Roles + backend binding (ADR-0007).
-# Pure function of .wip.yaml + roadmap + disk.
+# `orchestrate backend [<name>]` (ADR-0013) shows or switches the active
+# orchestration backend by regenerating the generated pointer
+# roles/backends/active.md from roles/backends/<name>.md and flipping
+# features.orchestration.backend.
+#
+# Neither verb spawns or names a backend *tool* (no mcp__solo__*, no
+# agent_tool_id) — spawning is a plugin/MCP concern. prep emits the FACTS about
+# the work (initiative / step / workplan), not the STAFFING of it (Tier,
+# process names) which lives in the Roles + backend binding (ADR-0007); backend
+# selects the *binding*, not a tool. Pure function of .wip.yaml + roadmap + disk.
 # shellcheck shell=bash
 
 wip_plumbing_cmd_orchestrate() {
@@ -16,9 +22,112 @@ wip_plumbing_cmd_orchestrate() {
   shift || true
   case "$sub" in
     prep) _wip_orchestrate_cmd_prep "$@" ;;
-    "") wip_die 2 usage "orchestrate: missing subcommand (prep)" ;;
+    backend) _wip_orchestrate_cmd_backend "$@" ;;
+    "") wip_die 2 usage "orchestrate: missing subcommand (prep|backend)" ;;
     *) wip_die 2 usage "orchestrate: unknown subcommand: $sub" ;;
   esac
+}
+
+# orchestrate backend [<name>] — show or switch the active orchestration
+# backend. With no argument, reports the configured backend + whether the
+# generated pointer `roles/backends/active.md` is in sync with it. With a
+# <name>, sets features.orchestration.backend and regenerates active.md from
+# roles/backends/<name>.md (idempotent). This selects a backend *binding*; it
+# names no backend tool, so the ADR-0007 seam stays intact. It's the verb the
+# /wip:status fallback offer calls when Solo is unreachable (ADR-0014).
+_wip_orchestrate_cmd_backend() {
+  local name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) wip_die 2 usage "orchestrate backend: unknown flag: $1" ;;
+      *)
+        [[ -z "$name" ]] || wip_die 2 usage "orchestrate backend: unexpected arg: $1"
+        name="$1"
+        shift
+        ;;
+    esac
+  done
+
+  local root mj
+  root="$(wip_find_root)" || wip_die 4 no-manifest "no .wip.yaml found from $PWD upward"
+  mj="$(wip_manifest_json "$root")"
+  [[ -n "$mj" ]] || wip_die 4 bad-manifest "could not parse $root/.wip.yaml" ".wip.yaml"
+
+  # Resolve the roles/ dir. The generated active.md lives next to the authored
+  # backend bindings. In the dev/vendored layout roles/ sits at the repo root;
+  # for a shared plugin install it lives under CLAUDE_PLUGIN_ROOT.
+  local roles_dir=""
+  if [[ -d "$root/roles/backends" ]]; then
+    roles_dir="$root/roles"
+  elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -d "$CLAUDE_PLUGIN_ROOT/roles/backends" ]]; then
+    roles_dir="$CLAUDE_PLUGIN_ROOT/roles"
+  else
+    wip_die 4 no-roles-dir \
+      "orchestrate backend: roles/backends/ not found (looked in \$root and \$CLAUDE_PLUGIN_ROOT); a \`source: plugin\` install switches the plugin's active.md, not a per-project copy"
+  fi
+  local backends_dir="$roles_dir/backends"
+
+  # Available backends = authored *.md under backends/, excluding the
+  # generated active.md pointer.
+  local available
+  available="$(find "$backends_dir" -maxdepth 1 -type f -name '*.md' ! -name 'active.md' \
+    -exec basename {} .md \; 2>/dev/null | LC_ALL=C sort | jq -R . | jq -sc .)"
+  [[ -n "$available" ]] || available="[]"
+
+  local current
+  current="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
+
+  # No name → report current + sync state, do not mutate.
+  if [[ -z "$name" ]]; then
+    local in_sync="false" src="$backends_dir/$current.md" dst="$backends_dir/active.md"
+    if [[ -n "$current" && -f "$src" && -f "$dst" ]] && cmp -s "$src" "$dst"; then
+      in_sync="true"
+    fi
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg b "$current" --argjson avail "$available" --argjson sync "$in_sync" '
+        {ok:true, verb:"orchestrate backend", backend:$b, available:$avail, active_in_sync:$sync}'
+    fi
+    return 0
+  fi
+
+  # Switch. Validate the requested backend exists (active is reserved).
+  [[ "$name" != "active" ]] ||
+    wip_die 2 usage "orchestrate backend: 'active' is the generated pointer, not a backend name"
+  local src="$backends_dir/$name.md" dst="$backends_dir/active.md"
+  [[ -f "$src" ]] ||
+    wip_die 4 unknown-backend \
+      "orchestrate backend: no such backend '$name' (available: $(jq -r 'join(", ")' <<<"$available"))"
+
+  # Regenerate the pointer iff it differs (idempotent). Honor --dry-run env.
+  local active_regenerated=false
+  if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
+    if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+      cp "$src" "$dst" || wip_die 1 internal "orchestrate backend: failed to regenerate active.md"
+    fi
+    active_regenerated=true
+  fi
+
+  # Flip features.orchestration.backend (idempotent; honors WIP_DRY_RUN).
+  # Surgical scalar set — NOT a whole-node rewrite — so block style and the
+  # manifest's inline comments survive a switch (this verb runs repeatedly,
+  # incl. from the /wip:status fallback offer).
+  local manifest="$root/.wip.yaml" manifest_updated_json="null"
+  if [[ "$current" != "$name" ]]; then
+    if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+      NAME="$name" yq -i '.features.orchestration.backend = strenv(NAME)' "$manifest" ||
+        wip_die 1 internal "orchestrate backend: manifest update failed"
+    fi
+    manifest_updated_json='".wip.yaml"'
+  fi
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    jq -nc \
+      --arg b "$name" --argjson avail "$available" \
+      --argjson regen "$active_regenerated" \
+      --argjson manifest_updated "$manifest_updated_json" '
+      {ok:true, verb:"orchestrate backend", backend:$b, available:$avail,
+       active_regenerated:$regen, manifest_updated:$manifest_updated}'
+  fi
 }
 
 _wip_orchestrate_cmd_prep() {

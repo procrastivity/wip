@@ -17,9 +17,18 @@ for f in shared orchestrator coordinator researcher builder tier-policy; do
 done
 assert_file "roles/backends/solo.md" "roles/backends/solo.md present"
 
-# backends/ must contain only solo.md (no unauthored backend files).
-extra_backends="$(find roles/backends -mindepth 1 -not -name solo.md 2>/dev/null | wc -l | tr -d ' ')"
-assert_eq "0" "$extra_backends" "roles/backends/ only contains solo.md"
+# backends/ holds the authored bindings (solo.md, task.md) plus the generated
+# active.md pointer — no other (unauthored) backend files. ADR-0007 / ADR-0013.
+extra_backends="$(find roles/backends -mindepth 1 -type f \
+  ! -name solo.md ! -name task.md ! -name active.md 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "0" "$extra_backends" "roles/backends/ contains only solo.md, task.md, active.md"
+
+# active.md is GENERATED: byte-identical to the configured backend's binding
+# (the indirection seam — ADR-0013). Default backend is solo.
+seam_backend="$(yq -r '.features.orchestration.backend // "solo"' .wip.yaml 2>/dev/null || printf solo)"
+[[ -f "roles/backends/$seam_backend.md" ]] || seam_backend="solo"
+assert_cmp "roles/backends/active.md" "roles/backends/$seam_backend.md" \
+  "active.md == roles/backends/$seam_backend.md (generated pointer in sync)"
 
 # --- Forbidden tokens in behavior + tier-policy --------------------------
 # The acceptance shape from roles/README.md:29-30 — a hypothetical
@@ -53,6 +62,14 @@ for tok in 'mcp__solo__spawn_process' 'agent_tool_id' 'list_agent_tools' 'whoami
   assert_grep "$tok" "roles/backends/solo.md" "backends/solo.md names $tok"
 done
 
+# --- backends/task.md is a real second backend (ADR-0013) ---------------
+# The Task backend binds to the Task tool + on-disk files, naming NO Solo MCP
+# tool — the proof that the seam admits a genuinely different backend.
+assert_file "roles/backends/task.md" "roles/backends/task.md present"
+assert_not_grep 'mcp__solo__' "roles/backends/task.md" "backends/task.md names no Solo MCP tool"
+assert_grep 'subagent_type' "roles/backends/task.md" "backends/task.md names subagent_type"
+assert_grep 'Task tool' "roles/backends/task.md" "backends/task.md names the Task tool"
+
 # --- tier-policy.md sanity ----------------------------------------------
 # Each Role name appears in a Tier-defaults context.
 for role in Orchestrator Coordinator Researcher Builder; do
@@ -75,10 +92,10 @@ for a in "${PLUGIN_AGENTS[@]}"; do
   assert_grep '@../roles/shared.md' "$path" "$a references roles/shared.md"
   assert_grep "@../roles/$a.md" "$path" "$a references roles/$a.md"
   assert_grep '@../roles/tier-policy.md' "$path" "$a references roles/tier-policy.md"
-  assert_grep '@../roles/backends/solo.md' "$path" "$a references roles/backends/solo.md"
+  assert_grep '@../roles/backends/active.md' "$path" "$a references roles/backends/active.md"
   # Plugin agent body must NOT name Solo MCP tools — same forbidden set
   # as the behavior files (plugin agents are thin pointers).
-  bad="$(grep -En -- "$FORBIDDEN" "$path" 2>/dev/null | grep -v '^[0-9]*:.*roles/backends/solo.md' || true)"
+  bad="$(grep -En -- "$FORBIDDEN" "$path" 2>/dev/null | grep -v '^[0-9]*:.*roles/backends/active.md' || true)"
   if [[ -z "$bad" ]]; then
     _WIP_PASS=$((_WIP_PASS + 1))
     printf '  ok   %s contains no inline Solo-specific tokens\n' "$a"

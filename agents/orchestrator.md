@@ -11,4 +11,4 @@ Act as the Orchestrator for this wip initiative per the linked manuals — they 
 - @../roles/shared.md
 - @../roles/orchestrator.md
 - @../roles/tier-policy.md
-- @../roles/backends/solo.md
+- @../roles/backends/active.md

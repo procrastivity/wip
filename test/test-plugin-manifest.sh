@@ -128,8 +128,9 @@ assert_grep \
 
 # /wip:orchestrate must resolve the bundled wip-plumbing (CLAUDE_PLUGIN_ROOT idiom),
 # drive the deterministic prep (orchestrate prep), route the boot through the
-# Orchestrator role + Solo backend binding, and — per ADR-0007 — name NO backend
-# MCP tool in the command body (spawn mechanics live only in roles/backends/solo.md).
+# Orchestrator role + the active backend binding (the generated active.md pointer,
+# ADR-0013), and — per ADR-0007 — name NO backend MCP tool in the command body
+# (spawn mechanics live only in roles/backends/<backend>.md).
 assert_grep \
   'CLAUDE_PLUGIN_ROOT' \
   commands/orchestrate.md \
@@ -143,9 +144,9 @@ assert_grep \
   commands/orchestrate.md \
   "orchestrate.md routes the boot through the Orchestrator role"
 assert_grep \
-  'roles/backends/solo.md' \
+  'roles/backends/active.md' \
   commands/orchestrate.md \
-  "orchestrate.md points at the Solo backend binding"
+  "orchestrate.md points at the active backend binding (active.md)"
 assert_not_grep \
   'mcp__solo__' \
   commands/orchestrate.md \

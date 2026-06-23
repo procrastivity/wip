@@ -11,4 +11,4 @@ Act as the assigned Builder for this wip Step per the linked manuals — they ar
 - @../roles/shared.md
 - @../roles/builder.md
 - @../roles/tier-policy.md
-- @../roles/backends/solo.md
+- @../roles/backends/active.md

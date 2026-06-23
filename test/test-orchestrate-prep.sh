@@ -128,4 +128,87 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "unknown flag exit 2"
 
+# --- orchestrate backend (ADR-0013) -------------------------------------
+# Isolated root with a roles/backends/ tree; neutralize CLAUDE_PLUGIN_ROOT so
+# the real plugin dir is never picked up.
+tmp2="$(mktemp -d)"
+trap 'rm -rf "$tmp" "$tmp2"' EXIT
+mkdir -p "$tmp2/roles/backends"
+printf 'SOLO BINDING\n' >"$tmp2/roles/backends/solo.md"
+printf 'TASK BINDING\n' >"$tmp2/roles/backends/task.md"
+cp "$tmp2/roles/backends/solo.md" "$tmp2/roles/backends/active.md"
+cat >"$tmp2/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  orchestration: { enabled: true, backend: solo }
+current_initiative: demo
+initiatives: []
+YAML
+
+runb() { CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp2" bin/wip-plumbing orchestrate backend "$@"; }
+
+# b1. show (no arg): current backend + available list + in-sync pointer.
+b1="$(runb)"
+assert_eq "true" "$(jq -r '.ok' <<<"$b1")" "backend show ok"
+assert_eq "solo" "$(jq -r '.backend' <<<"$b1")" "backend show: current solo"
+assert_eq '["solo","task"]' "$(jq -c '.available' <<<"$b1")" "backend show: available list"
+assert_eq "true" "$(jq -r '.active_in_sync' <<<"$b1")" "backend show: active.md in sync"
+
+# b2. switch to task: regenerates pointer + flips manifest.
+b2="$(runb task)"
+assert_eq "task" "$(jq -r '.backend' <<<"$b2")" "switch: backend task"
+assert_eq "true" "$(jq -r '.active_regenerated' <<<"$b2")" "switch: active regenerated"
+assert_eq ".wip.yaml" "$(jq -r '.manifest_updated' <<<"$b2")" "switch: manifest updated"
+assert_cmp "$tmp2/roles/backends/task.md" "$tmp2/roles/backends/active.md" \
+  "switch: active.md == task.md on disk"
+assert_eq "task" "$(yq -r '.features.orchestration.backend' "$tmp2/.wip.yaml")" \
+  "switch: manifest backend == task"
+
+# b3. idempotent re-switch to task: no regen, no manifest write.
+b3="$(runb task)"
+assert_eq "false" "$(jq -r '.active_regenerated' <<<"$b3")" "re-switch: no regen"
+assert_eq "null" "$(jq -r '.manifest_updated' <<<"$b3")" "re-switch: manifest noop"
+
+# b4. switch back to solo: regen flips pointer again.
+b4="$(runb solo)"
+assert_eq "solo" "$(jq -r '.backend' <<<"$b4")" "switch back: backend solo"
+assert_eq "true" "$(jq -r '.active_regenerated' <<<"$b4")" "switch back: regen"
+assert_cmp "$tmp2/roles/backends/solo.md" "$tmp2/roles/backends/active.md" \
+  "switch back: active.md == solo.md"
+
+# b5. unknown backend -> exit 4.
+set +e
+b5="$(runb bogus 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "unknown backend exit 4"
+assert_eq "unknown-backend" "$(jq -r '.error.kind' <<<"$b5")" "unknown-backend kind"
+
+# b6. reserved 'active' name -> exit 2.
+set +e
+runb active >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "reserved 'active' exit 2"
+
+# b7. --dry-run: reports the would-be regen, mutates nothing on disk.
+b7="$(CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp2" bin/wip-plumbing --dry-run orchestrate backend task)"
+assert_eq "true" "$(jq -r '.active_regenerated' <<<"$b7")" "dry-run: reports regen"
+assert_cmp "$tmp2/roles/backends/solo.md" "$tmp2/roles/backends/active.md" \
+  "dry-run: active.md unchanged on disk (still solo)"
+assert_eq "solo" "$(yq -r '.features.orchestration.backend' "$tmp2/.wip.yaml")" \
+  "dry-run: manifest backend unchanged"
+
+# b8. no roles/backends/ reachable -> exit 4 no-roles-dir.
+tmp3="$(mktemp -d)"
+cp "$tmp2/.wip.yaml" "$tmp3/.wip.yaml"
+set +e
+b8="$(CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp3" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "no roles dir exit 4"
+assert_eq "no-roles-dir" "$(jq -r '.error.kind' <<<"$b8")" "no-roles-dir kind"
+rm -rf "$tmp3"
+
 test_summary
