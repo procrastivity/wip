@@ -91,6 +91,8 @@ _wip_orchestrate_cmd_backend() {
   fi
 
   # Switch. Validate the requested backend exists (active is reserved).
+  [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] ||
+    wip_die 2 usage "orchestrate backend: backend name must match ^[a-z][a-z0-9-]*$: $name"
   [[ "$name" != "active" ]] ||
     wip_die 2 usage "orchestrate backend: 'active' is the generated pointer, not a backend name"
   local src="$backends_dir/$name.md" dst="$backends_dir/active.md"

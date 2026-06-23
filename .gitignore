@@ -17,3 +17,7 @@ xcind/
 result
 result-*
 .DS_Store
+
+# Task-backend live orchestration state. Roadmaps/workplans remain the durable
+# tracked plan; these files are an ephemeral execution mirror.
+.wip/initiatives/*/orchestration/

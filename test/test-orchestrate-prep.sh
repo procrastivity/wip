@@ -192,6 +192,13 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "reserved 'active' exit 2"
 
+# b6b. backend names are identifiers, not paths.
+set +e
+runb ../README >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "path-like backend name exit 2"
+
 # b7. --dry-run: reports the would-be regen, mutates nothing on disk.
 b7="$(CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp2" bin/wip-plumbing --dry-run orchestrate backend task)"
 assert_eq "true" "$(jq -r '.active_regenerated' <<<"$b7")" "dry-run: reports regen"

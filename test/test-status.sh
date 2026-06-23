@@ -207,6 +207,19 @@ WIP_ROOT="$tmpP" yq -i '.features.orchestration.backend = "solo"' "$tmpP/.wip.ya
 WIP_ROOT="$tmpP" yq -i '.features.solo.enabled = false' "$tmpP/.wip.yaml"
 p5="$(WIP_SOLO_STATUS_CMD="cat $tmpP/solo-down.json" runp --probe-solo)"
 assert_eq "null" "$(jq -r '.solo_reachable' <<<"$p5")" "solo not declared -> reachable null (no probe)"
+WIP_ROOT="$tmpP" yq -i '.features.solo.enabled = true' "$tmpP/.wip.yaml"
+
+# p6. --probe-solo, Solo declared but CLI absent -> unreachable + signal.
+nosolo_bin="$tmpP/nosolo-bin"
+mkdir -p "$nosolo_bin"
+for exe in bash jq yq git awk dirname head; do
+  target="$(command -v "$exe")"
+  ln -s "$target" "$nosolo_bin/$exe"
+done
+p6="$(PATH="$nosolo_bin" runp --probe-solo)"
+assert_eq "false" "$(jq -r '.solo_reachable' <<<"$p6")" "probe with missing solo CLI -> solo_reachable false"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p6")" \
+  "missing solo CLI + backend solo -> solo-unreachable signal"
 rm -rf "$tmpP"
 
 test_summary

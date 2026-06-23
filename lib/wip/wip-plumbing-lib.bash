@@ -23,7 +23,7 @@ commands:
                    intake validate <file> [--kind brief|amendment|workplan-seed|spec|handoff]
                    intake apply <file> --kind <k> [--target <slug|slug/step>]
   status    where am I: initiative / round / active step / dirty .wip files
-            usage: status [--initiative <slug>]
+            usage: status [--initiative <slug>] [--probe-solo]
   next      ranked candidates for what to do next
             usage: next [--initiative <slug>]
   roadmap   deterministic edits to an initiative's roadmap.md
@@ -31,9 +31,9 @@ commands:
                    [--insert-after <step-id> | --replace <step-id> | --append-round <title>]
   workplan  scaffold a step workplan from templates/workplan.md.tmpl
             usage: workplan init <slug> <step-id> [--from <seed>] [--slug <s>] [--force]
-  orchestrate  deterministic prep for booting orchestration (ADR-0012; never
-            spawns — that is /wip:orchestrate's job)
+  orchestrate  deterministic prep + backend selection for orchestration
             usage: orchestrate prep [--initiative <slug>]
+                   orchestrate backend [<name>]
   template  show / list the canonical templates that ship with wip
             usage: template show <id>          (e.g. intake/preamble)
                    template list [--no-json]

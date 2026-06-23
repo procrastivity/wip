@@ -117,10 +117,10 @@ wip_plumbing_cmd_status() {
   # solo_reachable: a LIVE probe of the Solo control plane (opt-in via
   # --probe-solo, since it shells out and is non-deterministic). Distinct from
   # solo_available: config says declared, this says actually answering.
-  #   null  = not probed (no flag) or no probe available (Solo declared but the
-  #           `solo` CLI isn't on PATH) — unknown, not a claim of down.
+  #   null  = not probed (no flag).
   #   true  = `solo status --json` returned ok + data.ready.
-  #   false = the probe ran and Solo did not answer ready.
+  #   false = the probe ran and Solo did not answer ready, or Solo is declared
+  #           but the `solo` CLI is missing.
   # WIP_SOLO_STATUS_CMD overrides the probe command (test seam).
   local solo_reachable="null" orch_backend
   orch_backend="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
@@ -139,6 +139,8 @@ wip_plumbing_cmd_status() {
       else
         solo_reachable="false"
       fi
+    else
+      solo_reachable="false"
     fi
   fi
   # Actionable signal: the active orchestration backend is solo but Solo isn't

@@ -392,8 +392,8 @@ process names, `agent_tool_id` stay in the Roles + backend binding, ADR-0007).
 - **Solo liveness (ADR-0014):** `solo_available` is a *config echo* (Solo declared in
   `.wip.yaml`), not a probe. With `--probe-solo` (opt-in, because it shells out and is
   non-deterministic), `status` runs `solo status --json` and reports `solo_reachable`:
-  `true` (answered ready) / `false` (probe ran, not ready) / `null` (not probed, or the
-  `solo` CLI is absent — *unknown*, never "down"). The probe command is overridable via
+  `true` (answered ready) / `false` (probe ran but not ready, or the `solo` CLI is absent
+  while Solo is declared) / `null` (not probed). The probe command is overridable via
   `WIP_SOLO_STATUS_CMD` (test seam). When `solo_reachable` is `false` **and** the active
   orchestration backend is `solo`, `signals` gains `"solo-unreachable"` — the actionable
   case `/wip:status` keys off to warn + offer the Task-backend fallback. Without the flag,
