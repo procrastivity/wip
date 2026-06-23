@@ -69,7 +69,7 @@ features:
 # One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
 # Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
 # <slug>-step-NN-coordinator) so concurrent initiatives never collide.
-current_initiative: distillation
+current_initiative: orchestration-backends
 initiatives:
   - slug: distillation
     title: Workflow Distillation
@@ -78,6 +78,12 @@ initiatives:
     brief: .wip/initiatives/distillation/BRIEF.md
     roadmap: .wip/initiatives/distillation/roadmap.md
     active_step: step-22 # step-22 shipped 2026-06-19 (Round 5 complete, 3 of 3)
+  - slug: orchestration-backends
+    title: Orchestration Backends
+    status: in-flight
+    intake: ad-hoc
+    brief: .wip/initiatives/orchestration-backends/BRIEF.md
+    roadmap: .wip/initiatives/orchestration-backends/roadmap.md
 # --- integrations (optional) ------------------------------------------------
 # integrations:
 #   github:
