@@ -12,7 +12,15 @@ let Claude do the prose / shape / route work.
 |---------------|--------------|
 | `/wip:next` | Ranked candidates for what to do next, plus a recommendation. Backed by `wip-plumbing next`. |
 | `/wip:status` | "Where am I" — initiative / round / active step / dirty `.wip/` files. Backed by `wip-plumbing status`. |
-| `/wip:intake <file>` | Drives the full intake pipeline (classify → shape → validate → apply). Claude is the shaper; clarifications happen inline in chat. |
+| `/wip:intake <file>` | Drives the full intake pipeline (classify → shape → validate → apply, or explode for a bundle). Claude is the shaper; clarifications happen inline in chat. |
+| `/wip:start <step-id>` | Activate a roadmap step (`workplan init … --activate`) and brief it, then hand off solo or to orchestration. |
+| `/wip:orchestrate` | Hand the active step to the Roles backend — become the Orchestrator and spawn its Coordinator. |
+| `/wip:bundle <file>…` | Assemble N handoff files into one bundle lead manifest, then explode it through intake. |
+
+The command bodies in `commands/` are **generated** from the canonical plugin
+commands (`commands/*.md` in the wip repo) by `contrib/sync-agents-commands` —
+the only transform is the binary resolver (`$CLAUDE_PLUGIN_ROOT` → PATH) and
+`"$WIP"` → `wip-plumbing`. See [ADR-0015](../engineering/decisions/0015-setup-agents-commands-generated-from-plugin.md).
 
 ## Prerequisites
 

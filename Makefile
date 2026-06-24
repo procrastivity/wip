@@ -9,7 +9,7 @@ SRC := bin/wip \
        $(wildcard lib/wip/wip-subcommands/*.bash)
 TESTS := $(wildcard test/test-*.sh)
 
-.PHONY: fmt lint test check deps-check hooks glossary active install install-local uninstall uninstall-local
+.PHONY: fmt lint test check deps-check hooks glossary active agents-commands install install-local uninstall uninstall-local
 
 fmt:
 	shfmt -w -i 2 -ci $(SRC) test/*.sh
@@ -51,3 +51,8 @@ glossary:
 # indirection seam — ADR-0013). active.md is committed but generated.
 active:
 	bin/wip-plumbing orchestrate backend "$$(yq -r '.features.orchestration.backend // "solo"' .wip.yaml)"
+
+# Regenerate templates/setup/agents/commands/*.md from the canonical plugin
+# commands/*.md (ADR-0015). Committed but generated; `--check` gates drift.
+agents-commands:
+	contrib/sync-agents-commands

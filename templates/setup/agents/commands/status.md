@@ -15,10 +15,10 @@ backed entirely by deterministic plumbing.
    `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop:
    > `wip-plumbing` is not on PATH. Install wip first (see the project README) or set $WIP_PLUMBING_BIN.
 
-2. **Run `wip-plumbing status --probe-solo`.** Forward `--initiative <slug>`
-   from `$ARGUMENTS` if present. Capture the JSON envelope. `--probe-solo`
-   adds a live `solo_reachable` check (used in step 4); it shells out to the
-   `solo` CLI, so drop the flag only for the fast, probe-free read.
+2. **Run `wip-plumbing status --probe-solo`.** Forward `--initiative <slug>` from
+   `$ARGUMENTS` if present. Capture the JSON envelope. `--probe-solo` adds a
+   live `solo_reachable` check (used in step 4); it shells out to the `solo`
+   CLI, so drop the flag only if you explicitly want the fast, probe-free read.
 
 3. **Render to prose.** A short paragraph or bulleted summary, in this
    order:
@@ -27,24 +27,24 @@ backed entirely by deterministic plumbing.
    - Active step id + title, and whether it's shipped.
    - `dirty_wip_files` count; if non-zero, list each file on its own
      line under a "Pending edits in `.wip/`:" sub-bullet.
-   - Solo footer: `solo_available` (declared in config) and, when probed,
-     `solo_reachable` (`true` answering / `false` not answering / `null` not
-     probed).
+   - Solo footer: `solo_available` (Solo is *declared* in config) and, when
+     probed, `solo_reachable` (`true` = answering, `false` = not answering,
+     `null` = not probed).
    - If `ok: false`, surface `error.message` directly.
 
 4. **Solo unreachable → warn + offer the Task-backend fallback.** If
    `signals` contains `"solo-unreachable"` (Solo is the active orchestration
-   backend but the live probe did not answer), tell the user plainly that Solo
-   is enabled but not reachable, so orchestration would stall at the first
-   spawn. Then **offer** to fall back to the Task backend (native subagents,
+   backend but the live probe did not answer), tell the user plainly: *Solo
+   is enabled but not reachable — orchestration would stall at the first
+   spawn.* Then **offer** to fall back to the Task backend (native subagents,
    no Solo):
-   - On an explicit **yes**, run `wip-plumbing orchestrate backend task`
-     (regenerates `roles/backends/active.md` + flips
-     `features.orchestration.backend`). Echo the ledger; tell the user to
-     re-run their orchestration. Switch back later with
+   - On an explicit **yes**, run `wip-plumbing orchestrate backend task`. It
+     regenerates `roles/backends/active.md` and flips
+     `features.orchestration.backend` to `task`. Echo the resulting ledger and
+     tell the user to re-run their orchestration (e.g. `/wip:orchestrate`).
+   - **Never switch without confirmation** — this is the *only* write this
+     command can make, and only on a yes. Switching back later is
      `wip-plumbing orchestrate backend solo`.
-   - **Never switch without confirmation** — the only write this command can
-     make, and only on a yes.
 
 5. **No writes** other than the confirmed fallback switch in step 4.
 

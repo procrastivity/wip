@@ -38,3 +38,10 @@ repos:
         language: system
         pass_filenames: false
         files: '^(\.wip\.yaml|\.wip/GLOSSARY\.md|templates/glossary/.*\.md)$'
+
+      - id: wip-agents-commands
+        name: setup-agents commands in sync (ADR-0015)
+        entry: contrib/sync-agents-commands --check
+        language: system
+        pass_filenames: false
+        files: '^(commands/.*\.md|templates/setup/agents/commands/.*\.md|contrib/sync-agents-commands)$'
