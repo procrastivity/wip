@@ -25,7 +25,8 @@ authoritative until `apply` returns or the flow errors out.
 ## Procedure
 
 1. **Resolve plumbing.** Run `command -v wip-plumbing`. If absent and
-   `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop.
+   `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop:
+   > `wip-plumbing` is not on PATH. Install wip first (see the project README) or set $WIP_PLUMBING_BIN.
 
 2. **Parse `$ARGUMENTS`.** Extract the positional `<file>` plus optional
    `--kind <k>` and `--target <t>`. `<file>` is required; if missing,
@@ -120,11 +121,11 @@ authoritative until `apply` returns or the flow errors out.
 
 10. **Point at what's next (don't guess).** After a successful apply, ask
     the plumbing what comes next instead of improvising — run
-    `wip-plumbing next --initiative <slug>` (for a `brief`, `<slug>` is the
-    new initiative; for `amendment`/`workplan-seed`, the target slug) and
-    render its **top candidate verbatim**. Do NOT substitute your own
-    suggestion (in particular, do NOT tell the user to run `/wip:start`
-    unless the top candidate is a concrete `step-NN`). Two cases:
+    `wip-plumbing next --initiative <slug>` (for a `brief`, `<slug>` is the new
+    initiative; for `amendment`/`workplan-seed`, the target slug) and render
+    its **top candidate verbatim**. Do NOT substitute your own suggestion
+    (in particular, do NOT tell the user to run `/wip:start` unless the top
+    candidate is a concrete `step-NN`). Two cases to spell out:
     - **`source: "scaffold"`** (title `author the roadmap`) — the initiative
       exists but its roadmap is still the empty skeleton with no steps. Say
       so, name the file from the candidate's `path`, and end with exactly:

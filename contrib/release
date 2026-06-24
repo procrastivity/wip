@@ -76,8 +76,14 @@ TAG="v${NEW_VERSION}"
 echo "Releasing ${CURRENT_VERSION} -> ${NEW_VERSION} (tag ${TAG}) on branch ${BRANCH}"
 
 # Write the new version back (temp + mv so a jq error can't truncate the file).
-tmp=$(mktemp)
-jq --arg v "$NEW_VERSION" '.version = $v' "$MANIFEST" >"$tmp" && mv "$tmp" "$MANIFEST"
+# The setup-agents tree ships its own plugin manifest (`setup agents` installs a
+# plugin-shaped tree into a consumer repo) — bump it in lockstep so the consumer
+# copy never skews from the release that produced it.
+AGENTS_MANIFEST="templates/setup/agents/.claude-plugin/plugin.json"
+for m in "$MANIFEST" "$AGENTS_MANIFEST"; do
+  tmp=$(mktemp)
+  jq --arg v "$NEW_VERSION" '.version = $v' "$m" >"$tmp" && mv "$tmp" "$m"
+done
 
 # --- Regenerate changelog ---
 #

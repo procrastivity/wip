@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# sync-agents-commands — generate templates/setup/agents/commands/*.md from the
+# canonical plugin commands/*.md.
+#
+# The plugin commands (commands/*.md, the `/wip:*` surface) are the SINGLE
+# SOURCE OF TRUTH. The setup-agents copies — what `wip-plumbing setup agents`
+# installs into a plugin-less consumer repo — are a mechanical transform:
+#
+#   1. step 1 (the `$CLAUDE_PLUGIN_ROOT` bundled-binary resolver) is replaced by
+#      a `command -v wip-plumbing` PATH-resolver form (consumers have wip on
+#      PATH; `test/test-setup.sh` forbids `bin/wip-plumbing` refs in this tree).
+#   2. `"$WIP"` becomes `wip-plumbing` throughout the body.
+#
+# Generated-but-committed, mirroring roles/backends/active.md (ADR-0013). The
+# committed output is the artifact `setup agents` ships; this script keeps it
+# from drifting out of sync with the plugin source.
+#
+# Usage:
+#   contrib/sync-agents-commands            regenerate (write) the copies
+#   contrib/sync-agents-commands --check    exit 1 if any copy is out of sync
+set -euo pipefail
+
+# shellcheck disable=SC1007  # CDPATH= prefixes the cd (neutralize CDPATH), not an assignment.
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+src_dir="$repo_root/commands"
+dst_dir="$repo_root/templates/setup/agents/commands"
+
+check=0
+case "${1:-}" in
+  --check) check=1 ;;
+  "") ;;
+  *)
+    echo "usage: sync-agents-commands [--check]" >&2
+    exit 2
+    ;;
+esac
+
+# The canonical PATH-resolver step that replaces the plugin's bundled-binary
+# resolver (plugin step 1). Kept literal (quoted heredoc) so `$WIP_PLUMBING_BIN`
+# survives verbatim.
+read -r -d '' agents_resolver <<'EOF' || true
+1. **Resolve plumbing.** Run `command -v wip-plumbing`. If absent and
+   `$WIP_PLUMBING_BIN` is unset, print a one-line install hint and stop:
+   > `wip-plumbing` is not on PATH. Install wip first (see the project README) or set $WIP_PLUMBING_BIN.
+EOF
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+resolver_file="$tmp/resolver.md"
+# Trailing blank line so the resolver step is separated from step 2 (the plugin
+# source's blank line before step 2 is consumed with the rest of step 1).
+printf '%s\n\n' "$agents_resolver" >"$resolver_file"
+
+# transform <plugin-command-file> — emit the setup-agents form on stdout.
+# Replaces the whole of step 1 (from `1. **Resolve` up to the `2. **` that
+# follows) with the PATH resolver, then rewrites `"$WIP"` -> `wip-plumbing`.
+transform() {
+  local src="$1"
+  # shellcheck disable=SC2016  # the sed pattern matches the literal "$WIP"; no expansion wanted.
+  awk -v rf="$resolver_file" '
+    /^1\. \*\*Resolve/ && !done1 {
+      while ((getline line < rf) > 0) print line
+      close(rf)
+      done1 = 1
+      in_step1 = 1
+      next
+    }
+    in_step1 && /^2\. \*\*/ { in_step1 = 0 }
+    in_step1 { next }
+    { print }
+  ' "$src" | sed 's/"\$WIP"/wip-plumbing/g'
+}
+
+status=0
+shopt -s nullglob
+for src in "$src_dir"/*.md; do
+  name="$(basename "$src")"
+  dst="$dst_dir/$name"
+  out="$(transform "$src")"
+  if [[ "$check" == "1" ]]; then
+    if [[ ! -f "$dst" ]]; then
+      echo "drift: $dst missing (generated from commands/$name)" >&2
+      status=1
+    elif ! diff -q <(printf '%s\n' "$out") "$dst" >/dev/null; then
+      echo "drift: $dst out of sync with commands/$name — run \`make agents-commands\`" >&2
+      status=1
+    fi
+  else
+    printf '%s\n' "$out" >"$dst"
+    echo "wrote $dst"
+  fi
+done
+
+# Guard the invariant test/test-setup.sh enforces: the consumer tree must not
+# reference the bundled binary path.
+if grep -rq 'bin/wip-plumbing' "$dst_dir" 2>/dev/null; then
+  echo "error: generated copies reference bin/wip-plumbing (consumers use PATH)" >&2
+  status=1
+fi
+
+exit "$status"
