@@ -83,6 +83,46 @@ assert_eq "roadmap complete" "$(jq -r '.candidates[0].title' <<<"$out2")" "all s
 assert_eq "start next round / close initiative" "$(jq -r '.candidates[0].reason' <<<"$out2")" "all shipped: reason"
 rm -rf "$tmp2"
 
+# 3b. Unauthored roadmap (empty skeleton, zero steps) -> "author the roadmap"
+# candidate with the roadmap path — NOT "roadmap complete" (the Brief→Roadmap gap).
+tmpE="$(mktemp -d)"
+mkdir -p "$tmpE/.wip/initiatives/fresh"
+cat >"$tmpE/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+current_initiative: fresh
+initiatives:
+  - slug: fresh
+    status: in-flight
+    roadmap: .wip/initiatives/fresh/roadmap.md
+YAML
+cat >"$tmpE/.wip/initiatives/fresh/roadmap.md" <<'MD'
+# Roadmap — fresh
+
+The plan of record. Brief: [`BRIEF.md`](./BRIEF.md).
+
+<!--
+Author the roadmap here. Example (commented, so it parses to zero steps):
+
+## Round 1 — _title_
+
+- **step-01 — _title_** — _scope in a sentence._
+-->
+
+## Deferred (decided-not-now)
+
+## Backlog (cross-cutting; see also `.wip/backlog.md`)
+MD
+outE="$(WIP_ROOT="$tmpE" bin/wip-plumbing next)"
+assert_eq "1" "$(jq -r '.candidates | length' <<<"$outE")" "unauthored: single candidate"
+assert_eq "null" "$(jq -r '.candidates[0].id' <<<"$outE")" "unauthored: id null"
+assert_eq "scaffold" "$(jq -r '.candidates[0].source' <<<"$outE")" "unauthored: source scaffold"
+assert_eq "author the roadmap" "$(jq -r '.candidates[0].title' <<<"$outE")" "unauthored: title"
+assert_eq "brief exists; roadmap has no steps yet" "$(jq -r '.candidates[0].reason' <<<"$outE")" "unauthored: reason"
+assert_eq ".wip/initiatives/fresh/roadmap.md" "$(jq -r '.candidates[0].path' <<<"$outE")" "unauthored: roadmap path"
+rm -rf "$tmpE"
+
 # 4. Manifest active_step shipped (or empty) -> rank 1 = inferred first unshipped.
 tmp3="$(mktemp -d)"
 mkdir -p "$tmp3/.wip/initiatives/demo"

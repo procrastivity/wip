@@ -103,7 +103,29 @@ authoritative until `apply` returns or the flow errors out.
    insert-after step-06". On exit-4 from apply, report the envelope
    verbatim.
 
-10. **Cleanup.** Remove the tempfile (`rm -- <tempfile>`) on success.
+10. **Point at what's next (don't guess).** After a successful apply, ask
+    the plumbing what comes next instead of improvising — run
+    `"$WIP" next --initiative <slug>` (for a `brief`, `<slug>` is the new
+    initiative; for `amendment`/`workplan-seed`, the target slug) and render
+    its **top candidate verbatim**. Do NOT substitute your own suggestion
+    (in particular, do NOT tell the user to run `/wip:start` unless the top
+    candidate is a concrete `step-NN`). Two cases to spell out:
+    - **`source: "scaffold"`** (title `author the roadmap`) — the initiative
+      exists but its roadmap is still the empty skeleton with no steps. Say
+      so, name the file from the candidate's `path`, and end with exactly:
+
+      Next: author the roadmap at `<path>` against the new `BRIEF.md` — turn
+      it into Rounds and Steps. Do it by hand, or say `go` and I'll draft
+      Round 1 from the brief for you.
+
+      On `go`, read the `BRIEF.md`, propose Rounds/Steps for review, and once
+      approved write them in (hand-edit `roadmap.md`, or shape an `amendment`
+      with `append-round` and apply via `roadmap amend`). Then re-run
+      `"$WIP" next` so a real `step-NN` is the new top candidate.
+    - **concrete `step-NN`** — render it and note that `/wip:start <id>`
+      activates it.
+
+11. **Cleanup.** Remove the tempfile (`rm -- <tempfile>`) on success.
 
 ## Notes
 

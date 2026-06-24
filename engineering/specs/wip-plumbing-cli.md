@@ -417,7 +417,19 @@ justifies. Source order: active roadmap (first unshipped step) → backlog.
 
 - **Reads:** `<initiative>/roadmap.md`; `.wip/backlog.md`.
 - **Writes:** nothing.
-- **Exit:** 0 (including "all steps shipped" → candidate to start the next round / close the initiative).
+- **Exit:** 0. When no step is actionable and there is no manifest active step, a
+  single guidance candidate is emitted, distinguishing two states:
+  - **Unauthored roadmap** — zero steps anywhere (a fresh `init` / `intake
+    --kind brief` whose `roadmap.md` is still the empty skeleton). Emits
+    `{ "source": "scaffold", "id": null, "title": "author the roadmap",
+    "reason": "brief exists; roadmap has no steps yet", "path": "<roadmap.md>" }`.
+    This closes the Brief → Roadmap gap: the porcelain points the user at
+    authoring the roadmap (with the path), **not** at `/wip:start` (which has no
+    step to start). The scaffold template ships its example round/step inside an
+    HTML comment precisely so a fresh roadmap parses to zero steps and lands here.
+  - **Complete roadmap** — at least one step authored and every step shipped.
+    Emits `{ "source": "roadmap", "id": null, "title": "roadmap complete",
+    "reason": "start next round / close initiative" }`.
 - **Lane awareness (ADR-0010):** when the active step lives in a lane, the next unshipped
   step in that lane is the primary forward candidate (`reason: "next-in-lane"`), and
   unshipped steps in *sibling* lanes of the same round carry `concurrent: true`. Ranks

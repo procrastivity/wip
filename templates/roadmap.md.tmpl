@@ -9,13 +9,20 @@ Started: {{date}}.
 
 ---
 
+<!--
+Author the roadmap here: turn the BRIEF into Rounds and Steps. Until a real
+step exists below, `wip next` reports "author the roadmap" — it will NOT point
+you at `/wip:start`, because there is nothing to start yet. Uncomment and edit
+the example, or write your own. Each round is one `## Round <N> — <title>` with
+a one-sentence shipping criterion; each step is one
+`- **step-NN — <title>** — <scope>` bullet (ids stay globally sequential).
+
 ## Round 1 — _title_
 
 _One-sentence shipping criterion for the round._
 
 - **step-01 — _title_** — _scope in a sentence._
 
-<!--
 Parallel lanes (ADR-0010): a round may run tracks in parallel. Put the shared
 prereq in the main lane (a bare bullet), then one `### Lane <name>` subheading
 per track. Lanes run in parallel; steps within a lane stay sequential. Step ids

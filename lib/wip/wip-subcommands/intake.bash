@@ -366,13 +366,56 @@ _wip_intake_single_file() {
       "$(jq -nc --argjson r "$apply_json" '{apply:$r}')"
   fi
 
+  # After a brief apply the initiative exists but its roadmap is still the empty
+  # scaffold (zero steps). Surface the deterministic next action from
+  # `wip-plumbing next` — the single source of truth — instead of leaving the
+  # frontend to guess "/wip:start" (which has no step to start yet).
+  local next_json="null"
+  if [[ "$kind" == "brief" && "$is_child" == "0" ]]; then
+    next_json="$(_wip_intake_next_candidate "$plumbing" "$root" "$route_target")"
+  fi
+
   jq -nc \
     --arg kind "$kind" --arg target "$route_target" \
     --argjson asked "$asked_json" --argjson rounds "$rounds" \
-    --argjson result "$apply_json" '
+    --argjson result "$apply_json" --argjson next "$next_json" '
     { ok: true, kind: $kind, target: $target,
-      rounds: $rounds, asked: $asked, result: $result }'
+      rounds: $rounds, asked: $asked, result: $result }
+    + (if $next == null then {} else { next: $next } end)'
   wip_p_warn "intake: kind=$kind target=$route_target rounds=$rounds applied"
+  if [[ "$next_json" != "null" ]]; then
+    local nt nr np
+    nt="$(jq -r '.title // ""' <<<"$next_json")"
+    nr="$(jq -r '.reason // ""' <<<"$next_json")"
+    np="$(jq -r '.path // ""' <<<"$next_json")"
+    if [[ -n "$np" ]]; then
+      wip_p_warn "intake: next — $nt ($nr): $np"
+    else
+      wip_p_warn "intake: next — $nt ($nr)"
+    fi
+  fi
+}
+
+# _wip_intake_next_candidate <plumbing> <root> <slug> — echo the top `next`
+# candidate JSON for <slug> (or `null` if next errors or has none). Lets the
+# porcelain point at the deterministic next action after an apply without
+# re-deriving "what's next" itself.
+_wip_intake_next_candidate() {
+  local plumbing="$1" root="$2" slug="$3"
+  [[ -n "$slug" ]] || {
+    printf 'null'
+    return 0
+  }
+  local out rc
+  set +e
+  out="$(WIP_ROOT="$root" "$plumbing" next --initiative "$slug" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" != "0" || -z "$out" ]]; then
+    printf 'null'
+    return 0
+  fi
+  jq -c '.candidates[0] // null' <<<"$out" 2>/dev/null || printf 'null'
 }
 
 _wip_intake_mktemp() {

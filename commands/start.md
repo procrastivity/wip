@@ -37,7 +37,15 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
 
 2. **Parse `$ARGUMENTS`.** Extract the positional `<step-id>` plus optional
    `--initiative <slug>` and optional `--agent <name|id>`. `<step-id>` is
-   required; if missing, stop and ask the user which step to start.
+   required. If it is missing, do **not** just ask for one blindly — first run
+   `"$WIP" next` (forwarding `--initiative` if given) and look at the top
+   candidate:
+   - If it is **`source: "scaffold"`** (title `author the roadmap`), the
+     roadmap has no steps yet — there is nothing to start. Tell the user the
+     roadmap at the candidate's `path` is still the empty skeleton and point
+     them to author it first (hand-edit it, or `/wip:intake` an amendment that
+     appends a round). Then stop — do not ask for a step-id.
+   - Otherwise, list the candidate `step-NN`s and ask which one to start.
 
    - `--agent <name|id>` **pins which agent tool every spawn uses this
      run** — a tool **name** or a numeric tool **id** (all-digits → id;
