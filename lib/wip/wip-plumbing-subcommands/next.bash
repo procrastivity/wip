@@ -95,10 +95,22 @@ wip_plumbing_cmd_next() {
   local count
   count="$(jq -r 'length' <<<"$unshipped")"
   if [[ "$count" == "0" && "$rank" == "1" ]]; then
-    # Nothing on the roadmap is unshipped (and no manifest active step).
-    candidates="$(jq -c --argjson rank "$rank" '
-      . + [{rank:$rank, source:"roadmap", id:null, title:"roadmap complete",
-            reason:"start next round / close initiative"}]' <<<"$candidates")"
+    # No actionable step and no manifest active step. Distinguish an UNAUTHORED
+    # roadmap (a fresh brief whose roadmap is still the empty skeleton — zero
+    # steps anywhere) from a COMPLETE one (every authored step shipped). The
+    # former needs authoring, not a "start the next round / close" nudge — this
+    # is the Brief → Roadmap gap a fresh `init` / `intake --kind brief` lands in.
+    local total_steps
+    total_steps="$(jq -r '[.rounds[].steps[]] | length' <<<"$doc")"
+    if [[ "$total_steps" == "0" ]]; then
+      candidates="$(jq -c --argjson rank "$rank" --arg path "$roadmap_path" '
+        . + [{rank:$rank, source:"scaffold", id:null, title:"author the roadmap",
+              reason:"brief exists; roadmap has no steps yet", path:$path}]' <<<"$candidates")"
+    else
+      candidates="$(jq -c --argjson rank "$rank" '
+        . + [{rank:$rank, source:"roadmap", id:null, title:"roadmap complete",
+              reason:"start next round / close initiative"}]' <<<"$candidates")"
+    fi
     rank=$((rank + 1))
   else
     local i

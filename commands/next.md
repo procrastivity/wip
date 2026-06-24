@@ -38,6 +38,12 @@ judgment lives here that the CLI doesn't also have).
    - Emit the candidates as a short numbered list — one line each:
      `rank. **<id> — <title>**  _<source>: <reason>_`.
    - Recommend rank 1 in a one-line conclusion.
+   - **`source: "scaffold"`** (title `author the roadmap`, `id: null`): the
+     initiative has a brief but no roadmap steps yet. Don't render it as a
+     `step-NN` — render it as the action *author the roadmap at `<path>`*
+     (from the candidate's `path`), and recommend authoring the roadmap from
+     the `BRIEF.md` before anything else. `/wip:start` has nothing to start
+     until a real step exists.
    - If a backlog candidate is in the list, add a one-line caveat that
      backlog items need an explicit go-ahead (they're not the sequential
      next step).

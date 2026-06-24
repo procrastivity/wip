@@ -49,6 +49,11 @@ assert_eq "brief" "$(jq -r '.kind' <<<"$out")" "happy path kind"
 assert_eq "1" "$(jq -r '.rounds' <<<"$out")" "happy path rounds=1"
 assert_eq "init" "$(jq -r '.result.dispatched' <<<"$out")" "dispatched=init"
 assert_file "$tmp/.wip/initiatives/payments/BRIEF.md" "BRIEF written"
+# After a brief apply, the envelope carries the deterministic next action: the
+# fresh roadmap has no steps, so `next` says "author the roadmap" (not /wip:start).
+assert_eq "scaffold" "$(jq -r '.next.source' <<<"$out")" "brief apply: next.source scaffold"
+assert_eq "author the roadmap" "$(jq -r '.next.title' <<<"$out")" "brief apply: next.title"
+assert_eq ".wip/initiatives/payments/roadmap.md" "$(jq -r '.next.path' <<<"$out")" "brief apply: next.path"
 
 # --- shape-retry: first response missing Goal; second is good ---------------
 tmp2="$(mktemp -d)"
