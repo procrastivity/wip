@@ -60,7 +60,12 @@ and resume:
   context.
 - Timer bodies must be **self-contained**: include the agent's
   identity, any ids the next action needs, and the action itself. The
-  fresh turn has no implicit memory of what set the timer.
+  fresh turn has no implicit memory of what set the timer. If the body
+  may close or inject into a process (its own delivery target or any
+  watched process), it must also carry the operator-engagement guard
+  (below) inline — the hold-check plus the ids of every process whose
+  hold it must verify before acting — since a fired timer is the one
+  context where that check cannot be inherited from elsewhere.
 - Use the "fire when watched agents go idle" variant for **worker
   quiet periods** (waiting on a Builder, a Researcher, or a batch of
   Builders to finish their current task). Use a **fixed-duration**

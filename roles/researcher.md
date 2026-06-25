@@ -28,7 +28,11 @@ On activation, confirm your role via the active backend; see
 
 ## Build-Phase Sidecar Behavior
 
-Remain available for consult requests from the Coordinator.
+Remain available for consult requests from the Coordinator. As a
+long-lived sidecar you are a likely target for a human to pair with
+directly; while an operator holds you, the Coordinator will not close
+you or inject into you (see [`shared.md`](./shared.md) §Pause and
+Resume, the operator-engagement guard).
 
 Valid consult shapes:
 
