@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.11] - 2026-06-25
+
+### Added
+
+- Feat(next): surface "author the roadmap" for a fresh brief
+- Feat(orchestration): operator-engagement guard so a human-held agent is never dismissed
+
+### Changed
+
+- Refactor(setup): generate setup-agents commands from the plugin (ADR-0015)
+
+### Documentation
+
+- Docs(orchestration): make the timer-body hold-check authoring requirement explicit
+
+### Fixed
+
+- Fix(orchestration): make engagement guard implementable
+
 ## [0.0.10] - 2026-06-23
 
 ### Added
