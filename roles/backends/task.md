@@ -110,6 +110,16 @@ the Coordinator's Wake-up Routing **cannot occur** under this backend. The
 worker's returned result is the explicit terminal signal those branches
 exist to wait for; record it and route directly.
 
+## Operator-engagement guard (N/A) {#operator-engagement-guard-na}
+
+There is no hold to place and no engagement signal to read. A native Task
+subagent is a synchronous one-shot call with no long-lived process a human
+can interject into mid-stream — the parent's turn is blocked until the
+subagent returns — so the operator-engagement guard of
+[`shared.md`](../shared.md) §Pause and Resume (hold + passive re-check
+before close/inject) **cannot apply** under this backend. There is no
+between-call window in which a human takes over the worker.
+
 ## Tier resolver
 
 Tiers (`small` / `medium` / `large` — see [`tier-policy.md`](../tier-policy.md))

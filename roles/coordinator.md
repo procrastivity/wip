@@ -47,6 +47,11 @@ On `build/go/approved`:
    - arm an idle timer
    - on wake, route the outcome: advance / retry / escalate
 
+Any prompt sent into a Builder (bootstrap, status-check, retry) is an
+inject and is subject to the operator-engagement guard
+([`shared.md`](./shared.md) §Pause and Resume): never inject into a
+Builder a human is holding or actively using — re-arm and wait instead.
+
 ## Research Consult Routing
 
 If a Builder or the Coordinator is blocked on design / analysis /
@@ -66,21 +71,26 @@ the routing hub.
 ## Wake-up Routing (Builder idle)
 
 When a Builder's watch timer fires, **first apply the
-liveness-and-report gate** ([`shared.md`](./shared.md) §Pause and
-Resume): re-check the liveness signal, and require an explicit
-final-report comment — a bare idle edge routes nothing.
+liveness-and-report gate and the operator-engagement guard**
+([`shared.md`](./shared.md) §Pause and Resume): re-check the liveness
+signal, require an explicit final-report comment, and confirm the Builder
+is neither held nor operator-engaged — a bare idle edge routes nothing,
+and a Builder a human is using is never closed or injected into.
 
 1. Read the Builder's ledger entry + comments **and** re-check the
-   liveness signal.
-2. **Still active / only briefly quiet** → between-step lull; re-arm the
+   liveness + engagement signals.
+2. **Held / operator-engaged** → a human is using this Builder; re-arm
+   the watch timer and wait. Do not close it and do not inject into it.
+3. **Still active / only briefly quiet** → between-step lull; re-arm the
    watch timer and wait. Do not route.
-3. **Quiet + final-report results comment** → append the per-task
-   outcome to the shared note and close the Builder.
-4. **Quiet, no final-report comment** → send a status-check prompt and
-   re-arm a short timer (do **not** treat as done).
-5. **`needs-human` tag** → create a Coordinator escalation ledger entry
+4. **Quiet + final-report results comment, not held/engaged** → append
+   the per-task outcome to the shared note and close the Builder.
+5. **Quiet, no final-report comment, not held/engaged** → send a
+   status-check prompt and re-arm a short timer (do **not** treat as
+   done).
+6. **`needs-human` tag** → create a Coordinator escalation ledger entry
    and pause further spawning until the human resolves.
-6. **Dead process** (not running, no terminal signal) → respawn once,
+7. **Dead process** (not running, no terminal signal) → respawn once,
    then escalate.
 
 ## Retry / Escalation Policy

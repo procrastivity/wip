@@ -83,9 +83,36 @@ Before routing any watched agent or task as **complete**, apply the
 2. **Explicit terminal signal** — require an explicit **final-report
    comment or a completed ledger entry** authored by the watched agent.
 
-Route to "complete" / close a process only when **both** hold. Never
-route on the bare idle edge. See [`backends/`](./backends/) for the
-concrete liveness signal.
+Route to "complete" / close a process only when **both** hold, **and**
+the operator-engagement guard below clears. Never route on the bare idle
+edge. See [`backends/`](./backends/) for the concrete liveness signal.
+
+### The operator-engagement guard
+
+A human operator can take over **any** spawned agent directly — pairing
+with it, course-correcting, or asking a follow-up — not only through this
+Role. Two actions must never land on an agent a human is actively using:
+**closing it**, and **injecting into it** (a status-check prompt, a retry
+prompt, or a fresh timer turn). Before either action, against any watched
+agent, apply the guard:
+
+1. **Explicit hold.** An operator may place a *hold* on a spawned agent.
+   While a hold is present, take **no** routing action against it — do not
+   close it, do not inject into it; re-arm the wait. A held agent's own
+   scheduled timers are paused so they cannot fire a fresh turn into the
+   session the operator is driving. The hold is cleared only by the
+   operator.
+2. **Passive engagement re-check.** Immediately before closing or
+   injecting, re-read the engagement signal. If there is fresh activity
+   this Role did not cause — the agent active again, or an un-submitted
+   operator draft pending — treat it as operator-engaged: back off and
+   re-arm. Best-effort; the explicit hold is the guarantee.
+
+Fold this into completion routing: close a process only when it is quiet,
+carries the explicit terminal signal above, **and** is neither held nor
+operator-engaged. Where the backend has no long-lived process a human can
+interject into (a synchronous one-shot backend), this guard is N/A — see
+[`backends/`](./backends/) for the concrete engagement signal and hold.
 
 ## Shared-Note Template
 
