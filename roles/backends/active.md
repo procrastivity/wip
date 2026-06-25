@@ -46,7 +46,7 @@ vocabulary, this row-set is the behavior binding.)
 | **Idle timer** (pause/resume) | Timer | `mcp__solo__timer_set`; `mcp__solo__timer_fire_when_idle_any` / `mcp__solo__timer_fire_when_idle_all`; `mcp__solo__timer_cancel` / `mcp__solo__timer_list` |
 | **Service readiness** wait | Port-bound wait | `mcp__solo__wait_for_bound_port` |
 | **Shared state** | KV store | `mcp__solo__kv_set` / `mcp__solo__kv_get` / `mcp__solo__kv_list` / `mcp__solo__kv_delete` |
-| **Operator hold** (engagement guard) | KV flag + paused timers | `mcp__solo__kv_set` / `mcp__solo__kv_get` / `mcp__solo__kv_delete` (the hold flag, keyed by the held process); `mcp__solo__timer_pause` / `mcp__solo__timer_resume` (pause the held agent's own timers); `mcp__solo__lock_acquire` / `mcp__solo__lock_release` / `mcp__solo__lock_status` (alternative: atomic acquire/release hold) |
+| **Operator hold** (engagement guard) | KV flag + cooperative timer guard | `mcp__solo__kv_set` / `mcp__solo__kv_get` / `mcp__solo__kv_delete` (the canonical hold flag, keyed by the held process); timer bodies check the hold before acting; `mcp__solo__timer_pause` / `mcp__solo__timer_resume` only for timers owned by the current actor when a Role deliberately pauses its own pending timer |
 
 Use the task ledger (Todos) as the **primary durable coordination
 surface**. Use the shared note (Scratchpad) for rolling context, not
@@ -85,13 +85,19 @@ process needs more than the agent-centric liveness read.
   `mcp__solo__kv_set(key="wip/hold/<process_id>", value=<who+why>)`. Any
   Role reads it with `mcp__solo__kv_get` before closing or injecting, and
   the operator clears it with `mcp__solo__kv_delete`.
-- On placing a hold, pause the held agent's own scheduled timers with
-  `mcp__solo__timer_pause` (list them via `mcp__solo__timer_list`) so a
-  timer cannot fire a fresh user turn into the session the operator is
-  driving; `mcp__solo__timer_resume` them when the hold is cleared.
-- `mcp__solo__lock_acquire` / `mcp__solo__lock_release` /
-  `mcp__solo__lock_status` are an alternative when atomic acquire/release
-  semantics are wanted instead of a plain KV flag.
+- Solo timer pause/resume is owner-scoped: `mcp__solo__timer_list`,
+  `mcp__solo__timer_pause`, and `mcp__solo__timer_resume` operate on timers
+  owned by the current actor. Therefore a hold cannot rely on pausing
+  another agent's timers. Timer bodies must be written defensively: on wake,
+  re-read the hold for the delivery process and any watched process they
+  would act on; if held, take no action and re-arm.
+- A Role may pause/resume its own pending timers when it places or observes
+  a hold, but this is an optimization only. The required safety property is
+  the KV hold check immediately before close/inject, including timer-fired
+  actions.
+- Locks are not the v1 hold mechanism. They remain useful for short-lived
+  edit/ownership leases, but their owner-scoped release and TTL semantics
+  do not match an operator-cleared hold flag.
 
 **Passive engagement re-check (best-effort).** Immediately before closing
 or injecting into a watched process, read:
@@ -99,7 +105,7 @@ or injecting into a watched process, read:
 - `mcp__solo__get_process_status` → `agent_state.idle_seconds`: a small
   value the watcher did not cause means the agent went active again
   (recent human-driven turn) — back off and re-arm.
-- `mcp__solo__get_process_output` rendered tail: an un-submitted draft in
+- `mcp__solo__get_process_output` rendered tail (heuristic): an un-submitted draft in
   the input line means the operator is *composing* a prompt — a state
   `idle_seconds` alone misses (the agent is idle while the human types).
   Back off and re-arm.
@@ -111,7 +117,9 @@ or injecting into a watched process, read:
 
 **Inject guard.** Run the same hold + engagement check before any
 `mcp__solo__send_input` to a watched process (bootstrap, status-check, or
-retry prompt), not only before `mcp__solo__close_process`.
+retry prompt), not only before `mcp__solo__close_process`. Timer bodies are
+injected as fresh turns too; each timer body must begin by checking the hold
+for the delivery process and any watched process it is about to route.
 
 ## Tier resolver
 

@@ -98,10 +98,12 @@ agent, apply the guard:
 
 1. **Explicit hold.** An operator may place a *hold* on a spawned agent.
    While a hold is present, take **no** routing action against it — do not
-   close it, do not inject into it; re-arm the wait. A held agent's own
-   scheduled timers are paused so they cannot fire a fresh turn into the
-   session the operator is driving. The hold is cleared only by the
-   operator.
+   close it, do not inject into it; re-arm the wait. Timer-delivered turns
+   are also subject to this guard: a timer body that wakes while its
+   delivery target or watched target is held must no-op/re-arm instead of
+   continuing. A backend may additionally pause timers while a hold is
+   present, but the mandatory guarantee is the guard check at action time.
+   The hold is cleared only by the operator.
 2. **Passive engagement re-check.** Immediately before closing or
    injecting, re-read the engagement signal. If there is fresh activity
    this Role did not cause — the agent active again, or an un-submitted

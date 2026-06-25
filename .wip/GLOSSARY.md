@@ -127,7 +127,7 @@ concrete runtime (see the backend partial).
 | **Tier** | Capability level requested when spawning an agent (`small`/`medium`/`large`) — a *semantic* request, never a runtime tool id. The backend resolves a Tier to whatever runtime it offers. A `.wip.yaml` policy may force a Tier (e.g. Opus-only). |
 | **Task ledger** | The live execution surface (ownership, blockers, comments, locks, status), scoped `<slug>/step-NN`. A *mirror* of the Roadmap, not a replacement. The backend provides the concrete store. |
 | **Agent process** | A backend-managed runtime instance that plays a Role. |
-| **Operator hold** | A flag an operator places on a spawned agent to take it over directly. While held, no Role closes it or injects into it, and its own scheduled timers pause; cleared only by the operator. The backend provides the concrete hold + engagement signal. |
+| **Operator hold** | A flag an operator places on a spawned agent to take it over directly. While held, no Role closes it or injects into it; timer-delivered turns must check the hold and back off/re-arm before acting. Cleared only by the operator. The backend provides the concrete hold + engagement signal. |
 | **Operator-engagement guard** | The rule that gates *both* closing and injecting into any watched agent on the operator: an explicit hold (deterministic) plus a passive engagement re-check (best-effort) before either action. N/A for synchronous one-shot backends. |
 
 **Source of truth for "what's next" (split, deliberate):** the **Roadmap** is the

@@ -21,16 +21,21 @@ On activation, confirm your role via the active backend; see
 
 1. Spawn the Researcher as `<slug>-step-NN-researcher` at the Tier
    from [`tier-policy.md`](./tier-policy.md).
-2. Send the Researcher the workplan request.
-3. Wait for the Researcher to finish (idle-timer signal — do not
+2. Apply the operator-engagement guard to the Researcher.
+3. Send the Researcher the workplan request only if it is not held or
+   operator-engaged.
+4. Wait for the Researcher to finish (idle-timer signal — do not
    poll).
-4. Review the generated workplan for structure / completeness.
-5. Surface the workplan path + a short summary to the Orchestrator
+5. Review the generated workplan for structure / completeness.
+6. Surface the workplan path + a short summary to the Orchestrator
    for the human's review.
-6. Keep the Researcher process **alive** after approval — it's the
+7. Keep the Researcher process **alive** after approval — it's the
    Step's on-demand research sidecar.
 
 No non-Researcher fallback path is defined.
+
+The workplan request is an inject into the Researcher: never inject into a
+Researcher a human is holding or actively using — re-arm and wait instead.
 
 ## Phase 2: Build Orchestration
 
@@ -58,11 +63,13 @@ If a Builder or the Coordinator is blocked on design / analysis /
 spec interpretation:
 
 1. Pause task progression for the blocked task.
-2. Send a focused question to the Researcher.
-3. Wait for the Researcher's response.
-4. Record the result under **Decisions made during build** in the
+2. Before sending, apply the operator-engagement guard to the Researcher.
+3. Send a focused question to the Researcher only if it is not held or
+   operator-engaged.
+4. Wait for the Researcher's response.
+5. Record the result under **Decisions made during build** in the
    shared note.
-5. Forward the distilled guidance to the blocked Builder as a ledger
+6. Forward the distilled guidance to the blocked Builder as a ledger
    comment or in the retry prompt.
 
 Builders never contact the Researcher directly; the Coordinator is
@@ -111,4 +118,7 @@ and a Builder a human is using is never closed or injected into.
    that Round under `.wip/initiatives/<slug>/archive/`. Verify no
    orphaned references remain.
 5. Post a step-shipped comment on the Step's ledger entry.
-6. Close the Researcher and the Coordinator processes.
+6. Before closing the Researcher or Coordinator, apply the
+   operator-engagement guard to each process; if either is held or
+   operator-engaged, re-arm and wait instead of closing it.
+7. Close the Researcher and the Coordinator processes.

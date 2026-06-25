@@ -53,11 +53,12 @@ demands it.
 The human can take over **any** spawned agent (Coordinator, Researcher,
 or a Builder) and drive it directly. To pair with one without it being
 closed or interrupted underneath you, **place a hold on that agent**:
-while held, no Role will close it or inject into it, and its own
-scheduled timers pause so they cannot submit a fresh turn into the
-session you are driving. **Release the hold** when done so normal routing
-(and the agent's own timers) resume. See [`backends/`](./backends/) for
-how a hold is placed, read, and released on the active backend.
+while held, no Role will close it or inject into it; timer-delivered
+turns must check the hold and back off/re-arm before taking action.
+Backends may additionally pause timers they own, but the action-time guard
+is the guarantee. **Release the hold** when done so normal routing
+resumes. See [`backends/`](./backends/) for how a hold is placed, read,
+and released on the active backend.
 
 ## Escalation Surfacing
 
