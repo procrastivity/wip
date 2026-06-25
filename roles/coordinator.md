@@ -21,16 +21,21 @@ On activation, confirm your role via the active backend; see
 
 1. Spawn the Researcher as `<slug>-step-NN-researcher` at the Tier
    from [`tier-policy.md`](./tier-policy.md).
-2. Send the Researcher the workplan request.
-3. Wait for the Researcher to finish (idle-timer signal — do not
+2. Apply the operator-engagement guard to the Researcher.
+3. Send the Researcher the workplan request only if it is not held or
+   operator-engaged.
+4. Wait for the Researcher to finish (idle-timer signal — do not
    poll).
-4. Review the generated workplan for structure / completeness.
-5. Surface the workplan path + a short summary to the Orchestrator
+5. Review the generated workplan for structure / completeness.
+6. Surface the workplan path + a short summary to the Orchestrator
    for the human's review.
-6. Keep the Researcher process **alive** after approval — it's the
+7. Keep the Researcher process **alive** after approval — it's the
    Step's on-demand research sidecar.
 
 No non-Researcher fallback path is defined.
+
+The workplan request is an inject into the Researcher: never inject into a
+Researcher a human is holding or actively using — re-arm and wait instead.
 
 ## Phase 2: Build Orchestration
 
@@ -47,17 +52,24 @@ On `build/go/approved`:
    - arm an idle timer
    - on wake, route the outcome: advance / retry / escalate
 
+Any prompt sent into a Builder (bootstrap, status-check, retry) is an
+inject and is subject to the operator-engagement guard
+([`shared.md`](./shared.md) §Pause and Resume): never inject into a
+Builder a human is holding or actively using — re-arm and wait instead.
+
 ## Research Consult Routing
 
 If a Builder or the Coordinator is blocked on design / analysis /
 spec interpretation:
 
 1. Pause task progression for the blocked task.
-2. Send a focused question to the Researcher.
-3. Wait for the Researcher's response.
-4. Record the result under **Decisions made during build** in the
+2. Before sending, apply the operator-engagement guard to the Researcher.
+3. Send a focused question to the Researcher only if it is not held or
+   operator-engaged.
+4. Wait for the Researcher's response.
+5. Record the result under **Decisions made during build** in the
    shared note.
-5. Forward the distilled guidance to the blocked Builder as a ledger
+6. Forward the distilled guidance to the blocked Builder as a ledger
    comment or in the retry prompt.
 
 Builders never contact the Researcher directly; the Coordinator is
@@ -66,21 +78,26 @@ the routing hub.
 ## Wake-up Routing (Builder idle)
 
 When a Builder's watch timer fires, **first apply the
-liveness-and-report gate** ([`shared.md`](./shared.md) §Pause and
-Resume): re-check the liveness signal, and require an explicit
-final-report comment — a bare idle edge routes nothing.
+liveness-and-report gate and the operator-engagement guard**
+([`shared.md`](./shared.md) §Pause and Resume): re-check the liveness
+signal, require an explicit final-report comment, and confirm the Builder
+is neither held nor operator-engaged — a bare idle edge routes nothing,
+and a Builder a human is using is never closed or injected into.
 
 1. Read the Builder's ledger entry + comments **and** re-check the
-   liveness signal.
-2. **Still active / only briefly quiet** → between-step lull; re-arm the
+   liveness + engagement signals.
+2. **Held / operator-engaged** → a human is using this Builder; re-arm
+   the watch timer and wait. Do not close it and do not inject into it.
+3. **Still active / only briefly quiet** → between-step lull; re-arm the
    watch timer and wait. Do not route.
-3. **Quiet + final-report results comment** → append the per-task
-   outcome to the shared note and close the Builder.
-4. **Quiet, no final-report comment** → send a status-check prompt and
-   re-arm a short timer (do **not** treat as done).
-5. **`needs-human` tag** → create a Coordinator escalation ledger entry
+4. **Quiet + final-report results comment, not held/engaged** → append
+   the per-task outcome to the shared note and close the Builder.
+5. **Quiet, no final-report comment, not held/engaged** → send a
+   status-check prompt and re-arm a short timer (do **not** treat as
+   done).
+6. **`needs-human` tag** → create a Coordinator escalation ledger entry
    and pause further spawning until the human resolves.
-6. **Dead process** (not running, no terminal signal) → respawn once,
+7. **Dead process** (not running, no terminal signal) → respawn once,
    then escalate.
 
 ## Retry / Escalation Policy
@@ -101,4 +118,7 @@ final-report comment — a bare idle edge routes nothing.
    that Round under `.wip/initiatives/<slug>/archive/`. Verify no
    orphaned references remain.
 5. Post a step-shipped comment on the Step's ledger entry.
-6. Close the Researcher and the Coordinator processes.
+6. Before closing the Researcher or Coordinator, apply the
+   operator-engagement guard to each process; if either is held or
+   operator-engaged, re-arm and wait instead of closing it.
+7. Close the Researcher and the Coordinator processes.

@@ -39,12 +39,26 @@ Use bounded checks only:
 2. Check the Coordinator's process status.
 3. Re-arm the idle timer if no action is needed.
 
-On any idle-timer wake, apply the **liveness-and-report gate**
-([`shared.md`](./shared.md) §Pause and Resume) before routing the
-Coordinator as complete — a bare idle edge routes nothing.
+On any idle-timer wake, apply the **liveness-and-report gate** and the
+**operator-engagement guard** ([`shared.md`](./shared.md) §Pause and
+Resume) before routing the Coordinator as complete — a bare idle edge
+routes nothing, and a Coordinator a human is using is never closed or
+injected into (no status-check, no fresh timer turn).
 
 Do not inspect Coordinator internals unless an escalation or crash
 demands it.
+
+## Working directly with a spawned agent
+
+The human can take over **any** spawned agent (Coordinator, Researcher,
+or a Builder) and drive it directly. To pair with one without it being
+closed or interrupted underneath you, **place a hold on that agent**:
+while held, no Role will close it or inject into it; timer-delivered
+turns must check the hold and back off/re-arm before taking action.
+Backends may additionally pause timers they own, but the action-time guard
+is the guarantee. **Release the hold** when done so normal routing
+resumes. See [`backends/`](./backends/) for how a hold is placed, read,
+and released on the active backend.
 
 ## Escalation Surfacing
 

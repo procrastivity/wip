@@ -33,7 +33,10 @@ On success:
 3. Add a ledger results comment on the assigned entry with: files
    touched, tests run, commit sha, decisions made.
 4. Mark the ledger entry complete.
-5. Stop and wait for the Coordinator to close you.
+5. Stop and wait for the Coordinator to close you. (A human operator may
+   place a hold on you and keep working with you after this report; while
+   held you are not closed or injected into — see [`shared.md`](./shared.md)
+   §Pause and Resume, the operator-engagement guard.)
 
 ## Soft Flags (optional)
 

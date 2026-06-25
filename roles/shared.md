@@ -60,7 +60,12 @@ and resume:
   context.
 - Timer bodies must be **self-contained**: include the agent's
   identity, any ids the next action needs, and the action itself. The
-  fresh turn has no implicit memory of what set the timer.
+  fresh turn has no implicit memory of what set the timer. If the body
+  may close or inject into a process (its own delivery target or any
+  watched process), it must also carry the operator-engagement guard
+  (below) inline — the hold-check plus the ids of every process whose
+  hold it must verify before acting — since a fired timer is the one
+  context where that check cannot be inherited from elsewhere.
 - Use the "fire when watched agents go idle" variant for **worker
   quiet periods** (waiting on a Builder, a Researcher, or a batch of
   Builders to finish their current task). Use a **fixed-duration**
@@ -83,9 +88,38 @@ Before routing any watched agent or task as **complete**, apply the
 2. **Explicit terminal signal** — require an explicit **final-report
    comment or a completed ledger entry** authored by the watched agent.
 
-Route to "complete" / close a process only when **both** hold. Never
-route on the bare idle edge. See [`backends/`](./backends/) for the
-concrete liveness signal.
+Route to "complete" / close a process only when **both** hold, **and**
+the operator-engagement guard below clears. Never route on the bare idle
+edge. See [`backends/`](./backends/) for the concrete liveness signal.
+
+### The operator-engagement guard
+
+A human operator can take over **any** spawned agent directly — pairing
+with it, course-correcting, or asking a follow-up — not only through this
+Role. Two actions must never land on an agent a human is actively using:
+**closing it**, and **injecting into it** (a status-check prompt, a retry
+prompt, or a fresh timer turn). Before either action, against any watched
+agent, apply the guard:
+
+1. **Explicit hold.** An operator may place a *hold* on a spawned agent.
+   While a hold is present, take **no** routing action against it — do not
+   close it, do not inject into it; re-arm the wait. Timer-delivered turns
+   are also subject to this guard: a timer body that wakes while its
+   delivery target or watched target is held must no-op/re-arm instead of
+   continuing. A backend may additionally pause timers while a hold is
+   present, but the mandatory guarantee is the guard check at action time.
+   The hold is cleared only by the operator.
+2. **Passive engagement re-check.** Immediately before closing or
+   injecting, re-read the engagement signal. If there is fresh activity
+   this Role did not cause — the agent active again, or an un-submitted
+   operator draft pending — treat it as operator-engaged: back off and
+   re-arm. Best-effort; the explicit hold is the guarantee.
+
+Fold this into completion routing: close a process only when it is quiet,
+carries the explicit terminal signal above, **and** is neither held nor
+operator-engaged. Where the backend has no long-lived process a human can
+interject into (a synchronous one-shot backend), this guard is N/A — see
+[`backends/`](./backends/) for the concrete engagement signal and hold.
 
 ## Shared-Note Template
 
