@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.13] - 2026-06-26
+
+### Fixed
+
+- Fix(release): stage the setup-agents manifest in the release commit
+
+### Internal
+
+- Chore: Remove .wip itself from the repo.
+
 ## [0.0.11] - 2026-06-25
 
 ### Added
