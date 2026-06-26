@@ -12,6 +12,9 @@ prtend/
 workflow-portable-stub/
 xcind/
 
+.wip.yaml
+.wip/
+
 # Environment / tooling noise
 .direnv/
 result
