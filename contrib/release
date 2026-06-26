@@ -108,7 +108,7 @@ make check
 #
 # 'release: vX.Y.Z' matches the cliff skip rule so the release commit itself
 # stays out of the changelog.
-git add "$MANIFEST" CHANGELOG.md
+git add "$MANIFEST" "$AGENTS_MANIFEST" CHANGELOG.md
 git commit -m "release: v${NEW_VERSION}"
 
 # --- Push branch, then create and push the annotated tag ---
