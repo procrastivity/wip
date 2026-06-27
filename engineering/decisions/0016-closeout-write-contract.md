@@ -120,3 +120,27 @@ wip-plumbing ship <slug> <step-id> [--dry-run]
   `lib/wip/wip-plumbing-ship-roadmap-lib.bash`,
   `lib/wip/wip-plumbing-ship-manifest-lib.bash`, plus dispatch + source wiring in
   `bin/wip-plumbing` and `test/test-ship-skeleton.sh`.
+
+## Implementation refinements
+
+_Post-acceptance notes from the lanes that landed against this contract._
+
+- **Stub A marker insertion (step-02, commit `b78ce12`) splices directly rather than via
+  `wip_amend_apply_replace`.** The Decision above names `wip_amend_apply_replace` as the
+  reuse helper, but in practice that helper structurally writes `<bullet>\n<marker>\n`: with
+  an empty marker it injects a stray blank line, and with a real marker a
+  `<!-- wip-amend: SHA -->` comment that is alien to `ship` and inconsistent with step-01's
+  clean manual marking. step-02 instead splices the bullet's first line **in place** via the
+  same lib family's block-boundary helpers (`_wip_amend_find_step_block_start` /
+  `_wip_amend_find_step_block_end`), preserving continuation lines verbatim and injecting no
+  marker line — same reuse spirit, clean output. The locked signature and printed-status
+  contract (`updated`/`noop`) are unchanged; the reasoning is captured in a code comment in
+  `lib/wip/wip-plumbing-ship-roadmap-lib.bash`.
+- **The step-01 skeleton harness (`test/test-ship-skeleton.sh`) was retired to a
+  writer-agnostic plumbing test (commit `87241d8`).** Its `WIP_SHIP_FAKE_{ROADMAP,MANIFEST}_STATUS`
+  shim and inert-stub value assertions only held while both stubs were inert; the moment a
+  real writer landed they broke. A shared pre-step (owned by neither lane) stripped the
+  writer-coupled assertions, leaving dispatch / argparse / error-code / ledger-shape /
+  dry-run coverage. Real writer behaviour, status aggregation, and idempotency now live in
+  the per-lane tests (`test-ship-roadmap-writer.sh`, `test-ship-manifest-writer.sh`) and,
+  for the composed end-to-end path, step-04.
