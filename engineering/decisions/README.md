@@ -20,3 +20,4 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0013](./0013-task-tool-orchestration-backend.md) | Task-tool orchestration backend + generated `active.md` backend-indirection |
 | [0014](./0014-solo-liveness-bash-probe.md) | Solo liveness is a bash probe (`status --probe-solo`); unreachable → warn + offer Task fallback |
 | [0015](./0015-setup-agents-commands-generated-from-plugin.md) | setup-agents command copies are generated-but-committed from the canonical plugin `commands/` |
+| [0016](./0016-closeout-write-contract.md) | closeout-write contract: top-level `wip-plumbing ship <slug> <step-id>` marks the step shipped + clears `active_step`, idempotent, two-stub/two-file seam |
