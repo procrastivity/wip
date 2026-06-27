@@ -78,6 +78,16 @@ wip_plumbing_cmd_status() {
     round="null"
   fi
 
+  # Closeout hint: active_step names a not-yet-shipped step whose workplan is
+  # already archived — the same "half-done-closeout" drift doctor flags, surfaced
+  # here so status/next don't silently nominate an already-closed-out step.
+  # Reuses the shared archive probe (single-sources "archived" with doctor).
+  if [[ -n "$active_step_id" ]] &&
+    [[ "$(jq -r '.shipped // false' <<<"$active_step")" == "false" ]] &&
+    _wip_archived_workplan_exists "$root/.wip/initiatives/$slug/archive" "$active_step_id"; then
+    signals="$(jq -nc --argjson a "$signals" '$a + ["half-done-closeout"]')"
+  fi
+
   # lanes_in_flight: the next actionable (first unshipped) step per lane that has
   # unshipped work in the active round — only when two+ lanes are in flight at
   # once (ADR-0010 §7). Preserves declared lane order; [] otherwise.

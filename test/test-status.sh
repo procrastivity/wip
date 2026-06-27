@@ -222,4 +222,47 @@ assert_eq "1" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length
   "missing solo CLI + backend solo -> solo-unreachable signal"
 rm -rf "$tmpP"
 
+# ---- Closeout hint (half-done-closeout, step-06) ------------------------
+# active_step names a not-yet-shipped step whose workplan is already archived ->
+# signals carries "half-done-closeout" (single-sourced with doctor's check). The
+# rolling-context sidecar alone must NOT trigger it. (The no-archive baseline is
+# already covered by the "no signals" assertion on the main fixture above.)
+tmpH="$(mktemp -d)"
+mkdir -p "$tmpH/.wip/initiatives/demo/archive"
+cat >"$tmpH/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    title: Demo
+    status: in-flight
+    active_step: step-02
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$tmpH/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One
+
+- **step-01 — First** ✅ shipped 2026-05-01 — done.
+- **step-02 — Second** — current.
+- **step-03 — Third** — later.
+MD
+
+# Negative: only the rolling-context sidecar is archived -> no signal.
+: >"$tmpH/.wip/initiatives/demo/archive/step-02-rolling-context.md"
+outHneg="$(WIP_ROOT="$tmpH" bin/wip-plumbing status)"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "half-done-closeout")) | length' <<<"$outHneg")" \
+  "closeout hint: sidecar-only archive -> no half-done-closeout signal"
+
+# Positive: the workplan itself is archived for the unshipped active step.
+: >"$tmpH/.wip/initiatives/demo/archive/step-02-second-workplan.md"
+outHpos="$(WIP_ROOT="$tmpH" bin/wip-plumbing status)"
+assert_eq "false" "$(jq -r '.active_step.shipped' <<<"$outHpos")" "closeout hint: active step still unshipped"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "half-done-closeout")) | length' <<<"$outHpos")" \
+  "closeout hint: archived workplan for unshipped active step -> half-done-closeout signal"
+rm -rf "$tmpH"
+
 test_summary
