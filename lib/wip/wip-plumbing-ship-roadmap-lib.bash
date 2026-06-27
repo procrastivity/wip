@@ -1,28 +1,100 @@
 # wip-plumbing-ship-roadmap-lib.bash — the `ship` verb's roadmap marker writer.
-# Sourced by bin/wip-plumbing. STEP-01 SEAM: this is an inert stub; the
-# step-02 (roadmap-writer) lane fills the body. Pairs with the manifest seam in
+# Sourced by bin/wip-plumbing. Pairs with the manifest pointer writer in
 # wip-plumbing-ship-manifest-lib.bash. Contract: ADR-0016.
 # shellcheck shell=bash
 
 # _wip_ship_mark_roadmap_shipped <roadmap-path> <step-id> <date>
 #
 # Insert/normalize <step-id>'s `✅ shipped <date>` bullet marker in the roadmap.
-# Per the seam contract it PRINTS a status word to stdout and returns 0, or
-# returns 1 on internal error:
-#   updated — the marker was written (or corrected to <date>).
-#   noop    — the bullet already carries the correct `✅ shipped <date>`.
+# Prints a status word to stdout and returns 0, or returns 1 on internal error:
+#   updated — the marker was inserted, or a present-but-wrong/missing date was
+#             corrected to <date>.
+#   noop    — the bullet already carries the exact `✅ shipped <date>`; no write
+#             is performed, so the file stays byte-identical.
 #
-# STEP-01 STUB: inert seam. Performs NO read and NO write; returns `noop` by
-# default and honors $WIP_SHIP_FAKE_ROADMAP_STATUS so the harness can exercise
-# every status branch (updated/noop) before the real writer lands.
+# Reads the bullet's current shipped-state with `_wip_roadmap_extract_shipped`
+# against the post-`**` remainder (`srest`) ONLY — never the whole line — so a
+# `✅ shipped` that lives inside the bold title (e.g. step-02's own title) is not
+# misread as a marker. Honors $WIP_DRY_RUN: the status is still computed and
+# printed, but no file write happens when $WIP_DRY_RUN == 1.
 #
-# STEP-02 CONTRACT: replace this body WITHOUT changing the signature or the
-# printed-status contract — reuse `_wip_roadmap_extract_shipped` (grammar) to
-# read the bullet's current shipped state and `wip_amend_apply_replace` (in-place
-# block rewrite) to insert/normalize the marker. Honor $WIP_DRY_RUN (no write).
+# Rewrite mechanism: locate the bullet's block via the amend lib's
+# `_wip_amend_find_step_block_start`/`_wip_amend_find_step_block_end` helpers,
+# replace ONLY the bullet's first line in place, and keep its wrapped
+# continuation lines verbatim. We splice that first line directly rather than
+# calling `wip_amend_apply_replace` because that helper structurally appends an
+# extra `<bullet>\n<marker>\n` line — a stray blank, or a `<!-- wip-amend: … -->`
+# comment — which is alien to `ship`'s clean, marker-free bullet form (cf.
+# step-01's manual marking).
 _wip_ship_mark_roadmap_shipped() {
   local roadmap="$1" step_id="$2" date="$3"
-  : "$roadmap" "$step_id" "$date" # step-01 seam: inert; step-02 consumes these.
-  printf '%s' "${WIP_SHIP_FAKE_ROADMAP_STATUS:-noop}"
+
+  [[ -f "$roadmap" ]] || return 1
+
+  local lines=()
+  mapfile -t lines <"$roadmap"
+
+  # Locate the bullet block [start, end): start is the bullet's first line,
+  # [start+1, end) are its wrapped continuation lines (preserved verbatim).
+  local start end
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  end="$(_wip_amend_find_step_block_end "$start" lines)"
+
+  # Split the first line on the parser's own bullet grammar so the bold title
+  # (everything up to the closing `**`) is isolated from `srest` (the post-`**`
+  # remainder). Reading shipped-state against `srest` ONLY is load-bearing.
+  local first="${lines[start]}"
+  if [[ ! "$first" =~ ^(-\ \*\*step-[0-9]+(\.[0-9]+)?\ —\ [^*]+\*\*)(.*)$ ]]; then
+    return 1
+  fi
+  local prefix="${BASH_REMATCH[1]}" # - **step-NN — Title**
+  local srest="${BASH_REMATCH[3]}"  # post-`**` remainder
+
+  # Read the bullet's current shipped-state from `srest` only.
+  local shipped="false" cur_date="" _dummy=""
+  _wip_roadmap_extract_shipped "$srest" shipped cur_date _dummy
+
+  # noop iff already shipped with the exact target date; every other case
+  # (absent marker, or present-but-wrong/missing date) is an update.
+  local status="updated"
+  if [[ "$shipped" == "true" && "$cur_date" == "$date" ]]; then
+    status="noop"
+  fi
+
+  if [[ "$status" == "updated" && "${WIP_DRY_RUN:-0}" != "1" ]]; then
+    # Strip any existing `✅ …` marker run from `srest`, leaving the clean
+    # descriptive tail. Glob on the literal ✅ (mirroring extract_shipped's
+    # `*"✅"*` style) rather than regex-matching the multibyte char, to stay
+    # locale-robust; the ASCII `shipped <date>` run is then peeled off in turn.
+    local tail="$srest"
+    if [[ "$tail" == *"✅"* ]]; then
+      tail="${tail#*✅}"                       # drop up to and including the ✅
+      tail="${tail#"${tail%%[![:space:]]*}"}" # ltrim
+      if [[ "$tail" == shipped* ]]; then
+        tail="${tail#shipped}"
+        tail="${tail#"${tail%%[![:space:]]*}"}" # ltrim
+      fi
+      [[ "$tail" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(.*)$ ]] && tail="${BASH_REMATCH[1]}"
+    fi
+    # ltrim the clean tail; it is re-attached below with one leading space.
+    tail="${tail#"${tail%%[![:space:]]*}"}"
+
+    # Reconstruct the first line: prefix, then the marker immediately after the
+    # closing `**`, then the clean tail (when any).
+    local rebuilt="${prefix} ✅ shipped ${date}"
+    [[ -n "$tail" ]] && rebuilt="${rebuilt} ${tail}"
+
+    # Splice: keep [0, start) verbatim, swap the bullet's first line, keep its
+    # continuation lines [start+1, end) and the rest of the file [end, n)
+    # verbatim. No marker/comment line is injected.
+    local out=() i n=${#lines[@]}
+    for ((i = 0; i < start; i++)); do out+=("${lines[i]}"); done
+    out+=("$rebuilt")
+    for ((i = start + 1; i < end; i++)); do out+=("${lines[i]}"); done
+    for ((i = end; i < n; i++)); do out+=("${lines[i]}"); done
+    printf '%s\n' "${out[@]}" >"$roadmap"
+  fi
+
+  printf '%s' "$status"
   return 0
 }
