@@ -5,43 +5,11 @@ _WIP_TEST_NAME="next"
 # shellcheck source=test/helpers.sh
 source test/helpers.sh
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(wip_mktemp)"
 export WIP_NO_REGISTRY=1
 
-mkdir -p "$tmp/.wip/initiatives/demo"
-cat >"$tmp/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    status: in-flight
-    active_step: step-02
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
-cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
-# Roadmap — demo
-
-## Round 1 — One
-
-- **step-01 — First** ✅ shipped 2026-05-01 — done.
-- **step-02 — Second** — current.
-- **step-03 — Third** — later.
-
-## Round 2 — Two
-
-- **step-04 — Fourth** — round 2.
-
-## Deferred (decided-not-now)
-
-- **Round-level closeout writes** — postponed; revisit after v1.
-
-## Backlog
-
-- **Cleanup chore** — sweep stragglers.
-MD
+wip_fixture_init "$tmp"
+wip_fixture_roadmap "$tmp" --round2 --deferred --backlog
 
 # 1. Happy path: manifest active step is rank 1.
 out="$(WIP_ROOT="$tmp" bin/wip-plumbing next)"
@@ -70,7 +38,7 @@ assert_eq "0" "$(jq '[.candidates[] | select(.id == "round-level-closeout-writes
 # 2b. Half-done closeout: manifest active_step is unshipped in the roadmap but
 # its workplan is already archived. `status` flags this drift; `next` should not
 # nominate the archived step again.
-tmpH="$(mktemp -d)"
+tmpH="$(wip_mktemp)"
 mkdir -p "$tmpH/.wip/initiatives/demo/archive"
 cp "$tmp/.wip.yaml" "$tmpH/.wip.yaml"
 cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmpH/.wip/initiatives/demo/roadmap.md"
@@ -81,21 +49,10 @@ assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason
   "half-done closeout: next unarchived step is inferred"
 assert_eq "0" "$(jq '[.candidates[] | select(.id == "step-02")] | length' <<<"$outH")" \
   "half-done closeout: archived active step absent"
-rm -rf "$tmpH"
 
 # 3. All shipped -> "roadmap complete" candidate.
-tmp2="$(mktemp -d)"
-mkdir -p "$tmp2/.wip/initiatives/demo"
-cat >"$tmp2/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    status: in-flight
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
+tmp2="$(wip_mktemp)"
+wip_fixture_init "$tmp2" --no-active-step
 cat >"$tmp2/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap
 
@@ -108,22 +65,11 @@ out2="$(WIP_ROOT="$tmp2" bin/wip-plumbing next)"
 assert_eq "null" "$(jq -r '.candidates[0].id' <<<"$out2")" "all shipped: id null"
 assert_eq "roadmap complete" "$(jq -r '.candidates[0].title' <<<"$out2")" "all shipped: title"
 assert_eq "start next round / close initiative" "$(jq -r '.candidates[0].reason' <<<"$out2")" "all shipped: reason"
-rm -rf "$tmp2"
 
 # 3b. Unauthored roadmap (empty skeleton, zero steps) -> "author the roadmap"
 # candidate with the roadmap path — NOT "roadmap complete" (the Brief→Roadmap gap).
-tmpE="$(mktemp -d)"
-mkdir -p "$tmpE/.wip/initiatives/fresh"
-cat >"$tmpE/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-current_initiative: fresh
-initiatives:
-  - slug: fresh
-    status: in-flight
-    roadmap: .wip/initiatives/fresh/roadmap.md
-YAML
+tmpE="$(wip_mktemp)"
+wip_fixture_init "$tmpE" --slug fresh --no-active-step
 cat >"$tmpE/.wip/initiatives/fresh/roadmap.md" <<'MD'
 # Roadmap — fresh
 
@@ -149,17 +95,15 @@ assert_eq "author the roadmap" "$(jq -r '.candidates[0].title' <<<"$outE")" "una
 assert_eq "brief exists; roadmap has no steps yet" "$(jq -r '.candidates[0].reason' <<<"$outE")" "unauthored: reason"
 assert_eq ".wip/initiatives/fresh/roadmap.md" "$(jq -r '.candidates[0].path' <<<"$outE")" "unauthored: roadmap path"
 assert_eq "0" "$(jq -r '.deferred | length' <<<"$outE")" "unauthored: empty deferred -> []"
-rm -rf "$tmpE"
 
 # 4. Manifest active_step shipped (or empty) -> rank 1 = inferred first unshipped.
-tmp3="$(mktemp -d)"
+tmp3="$(wip_mktemp)"
 mkdir -p "$tmp3/.wip/initiatives/demo"
 sed 's/active_step: step-02//' "$tmp/.wip.yaml" >"$tmp3/.wip.yaml"
 cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmp3/.wip/initiatives/demo/roadmap.md"
 out3="$(WIP_ROOT="$tmp3" bin/wip-plumbing next)"
 assert_eq "step-02" "$(jq -r '.candidates[0].id' <<<"$out3")" "no active_step: rank 1 = inferred"
 assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason' <<<"$out3")" "inferred reason"
-rm -rf "$tmp3"
 
 # 5. Repo backlog appears after roadmap backlog.
 cat >"$tmp/.wip/backlog.md" <<'MD'
@@ -181,7 +125,7 @@ set -e
 assert_eq "3" "$rc" "unknown initiative exit 3"
 
 # ---- Lane-aware ranking (ADR-0010) ----
-tmpL="$(mktemp -d)"
+tmpL="$(wip_mktemp)"
 mkdir -p "$tmpL/.wip/initiatives/demo"
 cat >"$tmpL/.wip.yaml" <<'YAML'
 version: 1
@@ -255,6 +199,5 @@ MD
 outL3="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
 assert_eq "step-12" "$(jq -r '.candidates[0].id' <<<"$outL3")" "single-lane: prereq ranks first"
 assert_eq "0" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL3")" "single-lane: no foreshadow"
-rm -rf "$tmpL"
 
 test_summary
