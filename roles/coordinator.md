@@ -113,12 +113,19 @@ and a Builder a human is using is never closed or injected into.
 2. Run the post-build evaluation and append a retro entry.
 3. Archive the workplan and the shared note under
    `.wip/initiatives/<slug>/archive/`.
-4. **If this Step closes a Round** (last Step in its Round on the
+4. Write the step-shipped state with `wip-plumbing ship <slug>
+   <step-id>` — this marks the step's `✅ shipped <date>` roadmap
+   bullet **and** clears the manifest's `active_step` when it points at
+   this step, in one idempotent call (ADR-0016). Re-running is a no-op;
+   `--dry-run` previews without writing. This is what keeps
+   `status`/`next` from nominating an already-shipped step, while the
+   prior archive step keeps `doctor` clean once the boundary completes.
+5. **If this Step closes a Round** (last Step in its Round on the
    Roadmap): also archive the Round's intake artifacts referenced by
    that Round under `.wip/initiatives/<slug>/archive/`. Verify no
    orphaned references remain.
-5. Post a step-shipped comment on the Step's ledger entry.
-6. Before closing the Researcher or Coordinator, apply the
+6. Post a step-shipped comment on the Step's ledger entry.
+7. Before closing the Researcher or Coordinator, apply the
    operator-engagement guard to each process; if either is held or
    operator-engaged, re-arm and wait instead of closing it.
-7. Close the Researcher and the Coordinator processes.
+8. Close the Researcher and the Coordinator processes.

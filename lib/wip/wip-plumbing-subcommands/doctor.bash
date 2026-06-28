@@ -55,6 +55,46 @@ wip_plumbing_cmd_doctor() {
     done
   fi
 
+  # 2b. Closeout drift — per roadmap step, the `✅ shipped` marker must agree
+  #     with whether its workplan is archived (pure-disk, no git; pairs with the
+  #     `ship` writer). marked != archived is drift in one of two directions:
+  #       archived ∧ ¬marked → "half-done-closeout"  (the bug ship/next would miss)
+  #       marked ∧ ¬archived → "shipped-not-archived" (Step Boundary archive skipped)
+  #     Healthy steps (marked == archived) add no entry — keep checks[] quiet.
+  #     Scope: in-flight/proposed initiatives only. A `status: shipped`/`archived`
+  #     initiative is already closed out at the initiative level; auditing its
+  #     historical per-step archive hygiene would be noise (legacy initiatives
+  #     predate the ship→archive discipline). Skip them.
+  local irec istatus rpath adir cdoc steps step_json sid marked archived
+  while IFS= read -r irec; do
+    [[ -n "$irec" ]] || continue
+    slug="$(jq -r '.slug // ""' <<<"$irec")"
+    [[ -n "$slug" ]] || continue
+    istatus="$(jq -r '.status // ""' <<<"$irec")"
+    [[ "$istatus" == "shipped" || "$istatus" == "archived" ]] && continue
+    rpath="$(jq -r '.roadmap // empty' <<<"$irec")"
+    [[ -n "$rpath" ]] || rpath=".wip/initiatives/$slug/roadmap.md"
+    adir="$root/.wip/initiatives/$slug/archive"
+    cdoc="$(wip_roadmap_parse "$root/$rpath")"
+    steps="$(jq -c '[.rounds[].steps[] | {id, shipped}]' <<<"$cdoc")"
+    while IFS= read -r step_json; do
+      [[ -n "$step_json" ]] || continue
+      sid="$(jq -r '.id' <<<"$step_json")"
+      marked="$(jq -r '.shipped' <<<"$step_json")"
+      archived=false
+      _wip_archived_workplan_exists "$adir" "$sid" && archived=true
+      [[ "$marked" == "$archived" ]] && continue
+      if [[ "$archived" == "true" ]]; then
+        obj="$(jq -nc --arg slug "$slug" --arg step "$sid" --arg fix "run wip ship $slug $sid" \
+          '{kind:"closeout", slug:$slug, step:$step, status:"half-done-closeout", fix:$fix}')"
+      else
+        obj="$(jq -nc --arg slug "$slug" --arg step "$sid" \
+          '{kind:"closeout", slug:$slug, step:$step, status:"shipped-not-archived"}')"
+      fi
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(jq -c '.[]' <<<"$steps")
+  done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
   # 3. Root collision: lds and diataxis must not share a root.
   local collide
   collide="$(printf '%s' "$mj" | jq -r '

@@ -269,3 +269,26 @@ wip_roadmap_lanes_in_round() {
     [ .rounds[] | select(.n == $n) | .lanes[] ]
   ' <<<"$doc"
 }
+
+# _wip_archived_workplan_exists <archive_dir> <step_id> — return 0 if an
+# archived workplan for <step_id> lives in <archive_dir>, else 1. "Archived"
+# means a non-sidecar file `step-<token>-*.md` exists, where token = <step_id>
+# minus the leading `step-`. The trailing `-` in the glob guards `step-1` from
+# matching `step-12`. Basenames ending `-rolling-context.md` are excluded — the
+# rolling-context sidecar is not the workplan. Runs in a subshell with
+# `nullglob` so a missing dir or no match is a clean negative. Pure bash, no jq.
+# Single-sources "archived" for both `doctor` and `status`.
+_wip_archived_workplan_exists() {
+  local archive_dir="$1" step_id="$2"
+  local token="${step_id#step-}"
+  (
+    shopt -s nullglob
+    local f base
+    for f in "$archive_dir"/step-"$token"-*.md; do
+      base="${f##*/}"
+      [[ "$base" == *-rolling-context.md ]] && continue
+      exit 0
+    done
+    exit 1
+  )
+}
