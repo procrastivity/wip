@@ -47,6 +47,10 @@ judgment lives here that the CLI doesn't also have).
    - If a backlog candidate is in the list, add a one-line caveat that
      backlog items need an explicit go-ahead (they're not the sequential
      next step).
+   - If `deferred` is non-empty, list its `title`s under a separate
+     **Deferred (not actionable)** sub-heading, clearly apart from the
+     candidates. These are consciously postponed items — never recommend one
+     as the next step; they are context only.
    - If the envelope is `ok: false`, surface `error.message` directly.
 
 4. **No writes.** This command is read-only; it must not mutate any file
@@ -59,5 +63,6 @@ judgment lives here that the CLI doesn't also have).
   "candidates": [
     { "rank": 1, "source": "roadmap", "id": "step-12",
       "title": "Roles set", "reason": "first unshipped step in active round" }
-  ] }
+  ],
+  "deferred": [ { "id": "duo-backend", "title": "Duo backend" } ] }
 ```

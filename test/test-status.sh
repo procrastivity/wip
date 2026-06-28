@@ -32,6 +32,10 @@ cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 - **step-01 — First** ✅ shipped 2026-05-01 — done.
 - **step-02 — Second** — current.
 - **step-03 — Third** — later.
+
+## Deferred (decided-not-now)
+
+- **Round-level closeout writes** — postponed; revisit after v1.
 MD
 
 out="$(WIP_ROOT="$tmp" bin/wip-plumbing status)"
@@ -45,6 +49,14 @@ assert_eq "Second" "$(jq -r '.active_step.title' <<<"$out")" "active step title"
 assert_eq "false" "$(jq -r '.active_step.shipped' <<<"$out")" "active step not shipped"
 assert_eq "true" "$(jq -r '.solo_available' <<<"$out")" "solo available"
 assert_eq "0" "$(jq -r '.signals | length' <<<"$out")" "no signals"
+
+# Deferred items surface as informational, NOT-actionable context (BDS-17):
+# present under .deferred, never leaking into active_step / lanes_in_flight.
+assert_eq "1" "$(jq -r '.deferred | length' <<<"$out")" "1 deferred entry"
+assert_eq "round-level-closeout-writes" "$(jq -r '.deferred[0].id' <<<"$out")" "deferred id"
+assert_eq "Round-level closeout writes" "$(jq -r '.deferred[0].title' <<<"$out")" "deferred title"
+assert_eq "step-02" "$(jq -r '.active_step.id' <<<"$out")" "deferred does not displace active_step"
+assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$out")" "deferred does not leak into lanes_in_flight"
 
 # --initiative <unknown> -> exit 3.
 set +e

@@ -34,6 +34,10 @@ cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 
 - **step-04 — Fourth** — round 2.
 
+## Deferred (decided-not-now)
+
+- **Round-level closeout writes** — postponed; revisit after v1.
+
 ## Backlog
 
 - **Cleanup chore** — sweep stragglers.
@@ -55,6 +59,13 @@ assert_eq "4" "$(jq -r '.candidates | length' <<<"$out")" "4 candidates"
 
 # 2. No duplicates: step-02 is rank 1 only, not also rank 2.
 assert_eq "1" "$(jq '[.candidates[] | select(.id == "step-02")] | length' <<<"$out")" "step-02 not duplicated"
+
+# 2b. Deferred items surface as a separate, NOT-actionable bucket (BDS-17):
+#     under .deferred, never among .candidates.
+assert_eq "1" "$(jq -r '.deferred | length' <<<"$out")" "1 deferred entry"
+assert_eq "round-level-closeout-writes" "$(jq -r '.deferred[0].id' <<<"$out")" "deferred id"
+assert_eq "Round-level closeout writes" "$(jq -r '.deferred[0].title' <<<"$out")" "deferred title"
+assert_eq "0" "$(jq '[.candidates[] | select(.id == "round-level-closeout-writes")] | length' <<<"$out")" "deferred never a candidate"
 
 # 2b. Half-done closeout: manifest active_step is unshipped in the roadmap but
 # its workplan is already archived. `status` flags this drift; `next` should not
@@ -137,6 +148,7 @@ assert_eq "scaffold" "$(jq -r '.candidates[0].source' <<<"$outE")" "unauthored: 
 assert_eq "author the roadmap" "$(jq -r '.candidates[0].title' <<<"$outE")" "unauthored: title"
 assert_eq "brief exists; roadmap has no steps yet" "$(jq -r '.candidates[0].reason' <<<"$outE")" "unauthored: reason"
 assert_eq ".wip/initiatives/fresh/roadmap.md" "$(jq -r '.candidates[0].path' <<<"$outE")" "unauthored: roadmap path"
+assert_eq "0" "$(jq -r '.deferred | length' <<<"$outE")" "unauthored: empty deferred -> []"
 rm -rf "$tmpE"
 
 # 4. Manifest active_step shipped (or empty) -> rank 1 = inferred first unshipped.

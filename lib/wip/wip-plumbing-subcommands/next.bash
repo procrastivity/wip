@@ -205,6 +205,13 @@ wip_plumbing_cmd_next() {
     fi
   fi
 
-  jq -nc --arg slug "$slug" --argjson candidates "$candidates" '
-    { ok: true, initiative: $slug, candidates: $candidates }'
+  # Deferred items (## Deferred in the roadmap) — a clearly NOT-actionable
+  # bucket, emitted separately from candidates so they are never ranked or
+  # nominated as the next step (BDS-17). Pass through {id,title} verbatim.
+  local deferred
+  deferred="$(jq -c '.deferred' <<<"$doc")"
+
+  jq -nc --arg slug "$slug" --argjson candidates "$candidates" \
+    --argjson deferred "$deferred" '
+    { ok: true, initiative: $slug, candidates: $candidates, deferred: $deferred }'
 }
