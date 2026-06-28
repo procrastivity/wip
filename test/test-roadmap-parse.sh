@@ -27,6 +27,7 @@ cat >"$tmp/roadmap.md" <<'MD'
 ## Deferred (decided-not-now)
 
 - Things we are not doing.
+- **Round-level closeout writes** — keep separate for v1.
 
 ## Backlog
 
@@ -67,6 +68,14 @@ assert_eq "In-place fixes" "$(jq -r '.backlog[0].title' <<<"$doc")" "backlog tit
 assert_eq "0" "$(jq '.backlog | map(select(.title | contains("not doing"))) | length' <<<"$doc")" "deferred excluded"
 assert_eq "Random idea" "$(jq -r '.backlog[1].title' <<<"$doc")" "second backlog title"
 
+# Deferred entries surface as {id,title}, mirroring backlog. Only the **bold**
+# bullet is collected; the plain `- Things we are not doing.` bullet is not.
+assert_eq "1" "$(jq -r '.deferred | length' <<<"$doc")" "1 deferred entry (bold only)"
+assert_eq "round-level-closeout-writes" "$(jq -r '.deferred[0].id' <<<"$doc")" "deferred id slugified"
+assert_eq "Round-level closeout writes" "$(jq -r '.deferred[0].title' <<<"$doc")" "deferred title"
+# Isolation both ways: backlog titles don't bleed into deferred.
+assert_eq "0" "$(jq '.deferred | map(select(.title | contains("In-place"))) | length' <<<"$doc")" "backlog excluded from deferred"
+
 # Helper checks.
 round="$(wip_roadmap_active_round "$doc" "step-03.5")"
 assert_eq "2" "$(jq -r '.n' <<<"$round")" "active_round for step-03.5"
@@ -91,6 +100,8 @@ assert_eq "Skeleton" "$(jq -r '.title' <<<"$s")" "step lookup title"
 empty="$(wip_roadmap_parse "$tmp/missing.md")"
 assert_eq "0" "$(jq -r '.rounds | length' <<<"$empty")" "missing file rounds=0"
 assert_eq "0" "$(jq -r '.backlog | length' <<<"$empty")" "missing file backlog=0"
+assert_eq "array" "$(jq -r '.deferred | type' <<<"$empty")" "missing file deferred is array"
+assert_eq "0" "$(jq -r '.deferred | length' <<<"$empty")" "missing file deferred=[]"
 assert_eq "array" "$(jq -r '.lane_errors | type' <<<"$empty")" "missing file lane_errors is array"
 assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$empty")" "missing file lane_errors=[]"
 
