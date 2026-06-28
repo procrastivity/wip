@@ -19,17 +19,8 @@ source test/helpers.sh
 # `wip` feature is enabled, so the fixture has no non-closeout drift of its own.
 mkfix() {
   local tmp="$1"
+  wip_fixture_init "$tmp" --no-active-step
   mkdir -p "$tmp/.wip/initiatives/demo/archive"
-  cat >"$tmp/.wip.yaml" <<'YAML'
-version: 1
-current_initiative: demo
-features:
-  wip: { enabled: true, root: .wip }
-initiatives:
-  - slug: demo
-    status: in-flight
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
 }
 
 # run_doctor <tmp> — run doctor under WIP_ROOT; set globals OUT (json) and RC.
@@ -47,8 +38,7 @@ n_closeout() {
 }
 
 # ── Case A: healthy — shipped+archived AND unshipped+unarchived → clean ──────
-tmpA="$(mktemp -d)"
-trap 'rm -rf "$tmpA"' EXIT
+tmpA="$(wip_mktemp)"
 mkfix "$tmpA"
 cat >"$tmpA/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
@@ -66,7 +56,7 @@ assert_eq "0" "$(jq -r '.drift_count' <<<"$OUT")" "healthy: zero drift"
 assert_eq "0" "$(n_closeout)" "healthy: no closeout entries"
 
 # ── Case B: half-done-closeout — archived ∧ ¬marked → entry + exit 4 ─────────
-tmpB="$(mktemp -d)"
+tmpB="$(wip_mktemp)"
 mkfix "$tmpB"
 cat >"$tmpB/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
@@ -91,10 +81,9 @@ assert_eq "demo" \
 assert_eq "run wip ship demo step-01" \
   "$(jq -r '.checks[]|select(.kind=="closeout").fix' <<<"$OUT")" \
   "half-done-closeout: fix hint"
-rm -rf "$tmpB"
 
 # ── Case C: shipped-not-archived — marked ∧ ¬archived → entry + exit 4 ───────
-tmpC="$(mktemp -d)"
+tmpC="$(wip_mktemp)"
 mkfix "$tmpC"
 cat >"$tmpC/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
@@ -113,10 +102,9 @@ assert_eq "shipped-not-archived" \
 assert_eq "step-01" \
   "$(jq -r '.checks[]|select(.kind=="closeout").step' <<<"$OUT")" \
   "shipped-not-archived: offending step"
-rm -rf "$tmpC"
 
 # ── Case D: rolling-context sidecar is NOT a workplan → no entry ─────────────
-tmpD="$(mktemp -d)"
+tmpD="$(wip_mktemp)"
 mkfix "$tmpD"
 cat >"$tmpD/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
@@ -130,10 +118,9 @@ MD
 run_doctor "$tmpD"
 assert_eq "0" "$RC" "rolling-context-only: exit 0 (sidecar excluded)"
 assert_eq "0" "$(n_closeout)" "rolling-context-only: no closeout entry"
-rm -rf "$tmpD"
 
 # ── Case E: prefix-collision guard — step-01 archived must not satisfy step-12 ─
-tmpE="$(mktemp -d)"
+tmpE="$(wip_mktemp)"
 mkfix "$tmpE"
 cat >"$tmpE/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
@@ -150,12 +137,11 @@ assert_eq "0" "$RC" "prefix-collision: exit 0 (step-01 archive does not satisfy 
 assert_eq "0" "$(n_closeout '.step=="step-12"')" \
   "prefix-collision: step-12 gets no closeout entry"
 assert_eq "0" "$(n_closeout)" "prefix-collision: no closeout entries at all"
-rm -rf "$tmpE"
 
 # ── Case F: Option-C scope — status:shipped initiatives are skipped ──────────
 # A legacy shipped initiative with a shipped-but-unarchived step must NOT trip
 # closeout drift; an in-flight initiative in the same manifest still does.
-tmpF="$(mktemp -d)"
+tmpF="$(wip_mktemp)"
 mkdir -p "$tmpF/.wip/initiatives/demo/archive" "$tmpF/.wip/initiatives/legacy/archive"
 cat >"$tmpF/.wip.yaml" <<'YAML'
 version: 1
@@ -189,6 +175,5 @@ assert_eq "4" "$RC" "scope: in-flight initiative still trips drift"
 assert_eq "1" "$(n_closeout)" "scope: exactly one closeout entry (demo only)"
 assert_eq "1" "$(n_closeout '.slug=="demo"')" "scope: demo (in-flight) is checked"
 assert_eq "0" "$(n_closeout '.slug=="legacy"')" "scope: legacy (shipped) is skipped"
-rm -rf "$tmpF"
 
 test_summary
