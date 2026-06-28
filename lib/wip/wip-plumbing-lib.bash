@@ -14,7 +14,7 @@ usage: wip-plumbing [global flags] <command> [args]
 
 commands:
   detect    report features + initiatives from .wip.yaml (mandatory first call)
-  doctor    verify the manifest against disk; report drift  [--fix advisory in v1]
+  doctor    verify the manifest against disk; report drift  [--fix] [--probe-solo]
   project   list / register / resolve / forget entries in the global registry
   init      scaffold manifest and/or initiative from templates/
             usage: init [<slug>] [--title <t>] [--intake ad-hoc|structured]

@@ -98,17 +98,16 @@ wip_plumbing_cmd_next() {
   # upcoming lane steps are parallelizable. We surface that one step early — from
   # the prereq itself — by marking those lane-step candidates concurrent, rather
   # than waiting until active_step is already inside a lane (ADR-0010 §7).
-  local inflight_lanes=0
+  local foreshadow_steps="[]"
   if [[ -n "$active_round" ]]; then
-    inflight_lanes="$(jq -r --argjson n "$active_round" '
+    foreshadow_steps="$(jq -c --argjson n "$active_round" '
       (.rounds[] | select(.n == $n)) as $r
       | [ $r.lanes[] as $ln
-          | ($r.steps | map(select(.shipped == false and .lane == $ln)) | length)
-          | select(. > 0) ] | length
+          | ($r.steps | map(select(.shipped == false and .lane == $ln)) | (.[0].id // empty)) ]
     ' <<<"$doc")"
   fi
   local foreshadow=0
-  [[ -z "$active_lane" && "${inflight_lanes:-0}" -ge 2 ]] && foreshadow=1
+  [[ -z "$active_lane" && "$(jq -r 'length' <<<"$foreshadow_steps")" -ge 2 ]] && foreshadow=1
 
   # 2/3/4. Rank remaining unshipped roadmap steps.
   local first_seen=0
@@ -136,13 +135,16 @@ wip_plumbing_cmd_next() {
   else
     local i
     for ((i = 0; i < count; i++)); do
-      local entry reason rn lane concurrent=0
+      local entry reason rn lane eid concurrent=0
       entry="$(jq -c --argjson i "$i" '.[$i]' <<<"$unshipped")"
       rn="$(jq -r '.round_n' <<<"$entry")"
       lane="$(jq -r '.lane // ""' <<<"$entry")"
-      if [[ "$rn" == "$active_round" && "$foreshadow" == "1" && -n "$lane" ]]; then
+      eid="$(jq -r '.id' <<<"$entry")"
+      if [[ "$rn" == "$active_round" && "$foreshadow" == "1" && -n "$lane" ]] &&
+        [[ "$(jq -r --arg id "$eid" 'index($id) != null' <<<"$foreshadow_steps")" == "true" ]]; then
         # Pre-lane vantage with 2+ in-flight lanes: foreshadow that the upcoming
-        # lane steps run concurrently, from the main-lane prereq itself (BDS-16).
+        # first step in each lane runs concurrently, from the main-lane prereq
+        # itself (BDS-16). Later same-lane steps remain sequential.
         reason="concurrent lane $lane"
         concurrent=1
       elif [[ "$first_seen" == "0" && -z "$active_lane" ]]; then

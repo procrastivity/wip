@@ -111,5 +111,17 @@ mkfix "$tmpF"
 run_doctor "$tmpF" "" --probe-solo
 assert_eq "0" "$RC" "unresolvable probe: exit 0 (never fails doctor)"
 assert_eq "0" "$(n_ledger '.status!="ok"')" "unresolvable probe: no drift"
+rm -rf "$tmpF"
+
+# ── Case G: probe command fails → informational status:ok note, never an empty
+#    successful probe ───────────────────────────────────────────────────────
+tmpG="$(mktemp -d)"
+mkfix "$tmpG"
+run_doctor "$tmpG" "false" --probe-solo
+assert_eq "0" "$RC" "failed probe command: exit 0 (never fails doctor)"
+assert_eq "1" "$(n_ledger)" "failed probe command: one ledger note"
+assert_eq "ok" "$(jq -r '.checks[]|select(.kind=="ledger").status' <<<"$OUT")" "failed probe command: ok note"
+assert_eq "unavailable" "$(jq -r '.checks[]|select(.kind=="ledger").probe' <<<"$OUT")" "failed probe command: unavailable"
+rm -rf "$tmpG"
 
 test_summary

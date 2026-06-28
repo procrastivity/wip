@@ -231,11 +231,13 @@ outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
 assert_eq "step-12" "$(jq -r '.candidates[0].id' <<<"$outL2")" "lane: main prereq ranks first"
 assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason' <<<"$outL2")" "lane: prereq reason"
 assert_eq "null" "$(jq -r '.candidates[0].concurrent // null' <<<"$outL2")" "lane: prereq itself not concurrent"
-# The two lanes (A: step-13/step-15, D: step-14) are foreshadowed as concurrent.
+# The first unshipped step in each lane (A: step-13, D: step-14) is
+# foreshadowed as concurrent; later same-lane work stays sequential.
 assert_eq "concurrent lane A" "$(jq -r '[.candidates[] | select(.id == "step-13")][0].reason' <<<"$outL2")" "lane: step-13 foreshadowed concurrent A"
 assert_eq "true" "$(jq -r '[.candidates[] | select(.id == "step-13")][0].concurrent' <<<"$outL2")" "lane: step-13 concurrent flag"
 assert_eq "concurrent lane D" "$(jq -r '[.candidates[] | select(.id == "step-14")][0].reason' <<<"$outL2")" "lane: step-14 foreshadowed concurrent D"
-assert_eq "3" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL2")" "lane: all 3 lane steps foreshadowed"
+assert_eq "null" "$(jq -r '[.candidates[] | select(.id == "step-15")][0].concurrent // null' <<<"$outL2")" "lane: later same-lane step not concurrent"
+assert_eq "2" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL2")" "lane: first step per lane foreshadowed"
 
 # Single in-flight lane from the prereq vantage -> NO foreshadow (nothing to
 # parallelize). Drop Lane D so only Lane A remains.

@@ -118,31 +118,37 @@ wip_plumbing_cmd_doctor() {
       [[ -n "$proj_id" ]] && todos_cmd="solo todos list --project-id $proj_id --completed false --json"
     fi
     if [[ -n "$todos_cmd" ]]; then
-      local todos_json open_tags lrec lslug lstatus lrpath ldoc lsid ltag lcount
-      todos_json="$(bash -c "$todos_cmd" 2>/dev/null || true)"
-      open_tags="$(jq -c '[.data.todos[]? | (.tags // [])]' <<<"$todos_json" 2>/dev/null || printf '[]')"
-      [[ -n "$open_tags" ]] || open_tags='[]'
-      while IFS= read -r lrec; do
-        [[ -n "$lrec" ]] || continue
-        lslug="$(jq -r '.slug // ""' <<<"$lrec")"
-        [[ -n "$lslug" ]] || continue
-        lstatus="$(jq -r '.status // ""' <<<"$lrec")"
-        [[ "$lstatus" == "shipped" || "$lstatus" == "archived" ]] && continue
-        lrpath="$(jq -r '.roadmap // empty' <<<"$lrec")"
-        [[ -n "$lrpath" ]] || lrpath=".wip/initiatives/$lslug/roadmap.md"
-        ldoc="$(wip_roadmap_parse "$root/$lrpath")"
-        while IFS= read -r lsid; do
-          [[ -n "$lsid" && "$lsid" != "null" ]] || continue
-          ltag="$lslug/$lsid"
-          lcount="$(jq --arg t "$ltag" '[.[] | select(index($t))] | length' <<<"$open_tags")"
-          if [[ "${lcount:-0}" -gt 0 ]]; then
-            obj="$(jq -nc --arg slug "$lslug" --arg step "$lsid" --argjson count "$lcount" \
-              --arg fix "complete the open $ltag ledger entries (roles/shared.md §Ledger Ownership & Completion)" \
-              '{kind:"ledger", slug:$slug, step:$step, status:"shipped-step-open-ledger", count:$count, fix:$fix}')"
-            checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
-          fi
-        done < <(jq -r '[.rounds[].steps[] | select(.shipped == true) | .id] | .[]' <<<"$ldoc")
-      done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+      local todos_json open_tags lrec lslug lstatus lrpath ldoc lsid ltag lcount todos_rc=0
+      todos_json="$(bash -c "$todos_cmd" 2>/dev/null)" || todos_rc=$?
+      if [[ "$todos_rc" == "0" ]] &&
+        open_tags="$(jq -ec '[.data.todos[]? | (.tags // [])]' <<<"$todos_json" 2>/dev/null)"; then
+        [[ -n "$open_tags" ]] || open_tags='[]'
+        while IFS= read -r lrec; do
+          [[ -n "$lrec" ]] || continue
+          lslug="$(jq -r '.slug // ""' <<<"$lrec")"
+          [[ -n "$lslug" ]] || continue
+          lstatus="$(jq -r '.status // ""' <<<"$lrec")"
+          [[ "$lstatus" == "shipped" || "$lstatus" == "archived" ]] && continue
+          lrpath="$(jq -r '.roadmap // empty' <<<"$lrec")"
+          [[ -n "$lrpath" ]] || lrpath=".wip/initiatives/$lslug/roadmap.md"
+          ldoc="$(wip_roadmap_parse "$root/$lrpath")"
+          while IFS= read -r lsid; do
+            [[ -n "$lsid" && "$lsid" != "null" ]] || continue
+            ltag="$lslug/$lsid"
+            lcount="$(jq --arg t "$ltag" '[.[] | select(index($t))] | length' <<<"$open_tags")"
+            if [[ "${lcount:-0}" -gt 0 ]]; then
+              obj="$(jq -nc --arg slug "$lslug" --arg step "$lsid" --argjson count "$lcount" \
+                --arg fix "complete the open $ltag ledger entries (roles/shared.md §Ledger Ownership & Completion)" \
+                '{kind:"ledger", slug:$slug, step:$step, status:"shipped-step-open-ledger", count:$count, fix:$fix}')"
+              checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+            fi
+          done < <(jq -r '[.rounds[].steps[] | select(.shipped == true) | .id] | .[]' <<<"$ldoc")
+        done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+      else
+        obj="$(jq -nc '{kind:"ledger", status:"ok", probe:"unavailable",
+          message:"solo ledger probe requested but todos could not be fetched or parsed"}')"
+        checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+      fi
     else
       obj="$(jq -nc '{kind:"ledger", status:"ok", probe:"unavailable",
         message:"solo ledger probe requested but the Solo project could not be resolved"}')"
