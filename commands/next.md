@@ -43,7 +43,10 @@ judgment lives here that the CLI doesn't also have).
      `step-NN` — render it as the action *author the roadmap at `<path>`*
      (from the candidate's `path`), and recommend authoring the roadmap from
      the `BRIEF.md` before anything else. `/wip:start` has nothing to start
-     until a real step exists.
+     until a real step exists. When recommending authoring, note that the
+     author should **assess parallelism**: independent steps (disjoint files, no
+     ordering) can run as ADR-0010 parallel lanes rather than a forced sequence
+     — don't linearize by default.
    - If a backlog candidate is in the list, add a one-line caveat that
      backlog items need an explicit go-ahead (they're not the sequential
      next step).

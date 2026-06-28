@@ -44,7 +44,9 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
      roadmap has no steps yet — there is nothing to start. Tell the user the
      roadmap at the candidate's `path` is still the empty skeleton and point
      them to author it first (hand-edit it, or `/wip:intake` an amendment that
-     appends a round). Then stop — do not ask for a step-id.
+     appends a round), noting that independent steps (disjoint files, no
+     ordering) can run as ADR-0010 parallel lanes rather than a forced sequence.
+     Then stop — do not ask for a step-id.
    - Otherwise, list the candidate `step-NN`s and ask which one to start.
 
    - `--agent <name|id>` **pins which agent tool every spawn uses this
