@@ -12,14 +12,14 @@ TESTS := $(wildcard test/test-*.sh)
 .PHONY: fmt lint test check deps-check hooks glossary active agents-commands install install-local uninstall uninstall-local
 
 fmt:
-	shfmt -w -i 2 -ci $(SRC) test/*.sh
+	shfmt -w -i 2 -ci $(SRC) test/*.sh test/run
 
 lint:
-	shfmt -d -i 2 -ci $(SRC) test/*.sh
-	shellcheck -x $(SRC) test/*.sh
+	shfmt -d -i 2 -ci $(SRC) test/*.sh test/run
+	shellcheck -x $(SRC) test/*.sh test/run
 
 test:
-	@for t in $(TESTS); do echo "== $$t =="; bash "$$t" || exit 1; done
+	@bash test/run
 
 check: lint test
 
