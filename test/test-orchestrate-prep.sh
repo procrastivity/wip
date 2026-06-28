@@ -7,23 +7,11 @@ _WIP_TEST_NAME="orchestrate-prep"
 # shellcheck source=test/helpers.sh
 source test/helpers.sh
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(wip_mktemp)"
 export WIP_NO_REGISTRY=1
 
+wip_fixture_init "$tmp" --orchestration
 mkdir -p "$tmp/.wip/initiatives/demo/workplans"
-cat >"$tmp/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-  orchestration: { enabled: true, backend: solo }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    status: in-flight
-    roadmap: .wip/initiatives/demo/roadmap.md
-    active_step: step-02
-YAML
 cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap
 
@@ -131,8 +119,7 @@ assert_eq "2" "$rc" "unknown flag exit 2"
 # --- orchestrate backend (ADR-0013) -------------------------------------
 # Isolated root with a roles/backends/ tree; neutralize CLAUDE_PLUGIN_ROOT so
 # the real plugin dir is never picked up.
-tmp2="$(mktemp -d)"
-trap 'rm -rf "$tmp" "$tmp2"' EXIT
+tmp2="$(wip_mktemp)"
 mkdir -p "$tmp2/roles/backends"
 printf 'SOLO BINDING\n' >"$tmp2/roles/backends/solo.md"
 printf 'TASK BINDING\n' >"$tmp2/roles/backends/task.md"
@@ -208,7 +195,7 @@ assert_eq "solo" "$(yq -r '.features.orchestration.backend' "$tmp2/.wip.yaml")" 
   "dry-run: manifest backend unchanged"
 
 # b8. no roles/backends/ reachable -> exit 4 no-roles-dir.
-tmp3="$(mktemp -d)"
+tmp3="$(wip_mktemp)"
 cp "$tmp2/.wip.yaml" "$tmp3/.wip.yaml"
 set +e
 b8="$(CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp3" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
@@ -216,6 +203,5 @@ rc=$?
 set -e
 assert_eq "4" "$rc" "no roles dir exit 4"
 assert_eq "no-roles-dir" "$(jq -r '.error.kind' <<<"$b8")" "no-roles-dir kind"
-rm -rf "$tmp3"
 
 test_summary
