@@ -7,8 +7,9 @@
 #   Step bullet   : - **step-<NN[.5]> — <title>** [✅] [shipped <YYYY-MM-DD>] — <body>
 #   Step heading  : ### step-<NN[.5]> — <title>           (amendment form)
 #   Lane heading  : ### Lane <name>                       (parallel lane in a round)
-#   Sections      : ## Deferred / ## Backlog              (Backlog parsed as entries)
+#   Sections      : ## Deferred / ## Backlog              (both parsed as entries)
 #   Backlog entry : - **<title>** [— <body>] | (<body>)   (id = slugify(title))
+#   Deferred entry: - **<title>** [— <body>]              (id = slugify(title))
 #
 # Lanes parallelize across; steps within a lane stay sequential. Every step parses
 # with a `lane` field (the `### Lane <name>` it lives under, or null for main lane);
@@ -22,6 +23,7 @@
 #   {rounds:[{n, title, shipped, shipped_date, lanes:[<name>],
 #             steps:[{id, title, shipped, shipped_date, lane}]}],
 #    backlog:[{id, title}],
+#    deferred:[{id, title}],
 #    lane_errors:[{kind, round?, lane?, step?}]}
 # `lane` is null for a main-lane step; `lanes` lists a round's declared lanes in
 # order (incl. empty lanes); `lane_errors` is empty when the lane structure is
@@ -29,12 +31,12 @@
 wip_roadmap_parse() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
-    jq -nc '{rounds:[], backlog:[], lane_errors:[]}'
+    jq -nc '{rounds:[], backlog:[], deferred:[], lane_errors:[]}'
     return 0
   fi
 
   local mode="outside" line current_lane="" lane_saw_step=0 in_comment=0
-  local doc='{"rounds":[],"backlog":[],"lane_errors":[]}'
+  local doc='{"rounds":[],"backlog":[],"deferred":[],"lane_errors":[]}'
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Skip HTML comment blocks (`<!-- … -->`) so commented examples (e.g. the
@@ -156,6 +158,18 @@ wip_roadmap_parse() {
           bid="$(_wip_roadmap_slugify "$btitle")"
           doc="$(jq -c --arg id "$bid" --arg title "$btitle" '
             .backlog += [{id:$id, title:$title}]' <<<"$doc")"
+        fi
+        ;;
+      deferred)
+        # Mirror the backlog arm: a `- **<title>**` bullet becomes a
+        # {id, title} deferred entry (id = slugify(title)). Plain (non-bold)
+        # bullets under `## Deferred` are not collected, same as backlog.
+        if [[ "$line" =~ ^-\ \*\*([^*]+)\*\*(.*)$ ]]; then
+          local dtitle="${BASH_REMATCH[1]}"
+          local did
+          did="$(_wip_roadmap_slugify "$dtitle")"
+          doc="$(jq -c --arg id "$did" --arg title "$dtitle" '
+            .deferred += [{id:$id, title:$title}]' <<<"$doc")"
         fi
         ;;
     esac

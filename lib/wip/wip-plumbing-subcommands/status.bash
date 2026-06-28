@@ -160,12 +160,19 @@ wip_plumbing_cmd_status() {
     signals="$(jq -nc --argjson a "$signals" '$a + ["solo-unreachable"]')"
   fi
 
+  # Deferred items (## Deferred in the roadmap) — informational, clearly
+  # NOT-actionable context, surfaced so "where am I" can see consciously
+  # postponed work without it ever being nominated as a next step (BDS-17).
+  local deferred
+  deferred="$(jq -c '.deferred' <<<"$doc")"
+
   jq -nc \
     --arg slug "$slug" --arg status "$status_field" \
     --argjson round "$round" --argjson active_step "$active_step" \
     --argjson lanes_in_flight "$lanes_in_flight" \
     --argjson dirty "$dirty" --argjson solo "$solo_available" \
     --argjson solo_reachable "$solo_reachable" \
+    --argjson deferred "$deferred" \
     --argjson signals "$signals" '
     {
       ok: true,
@@ -177,6 +184,7 @@ wip_plumbing_cmd_status() {
       dirty_wip_files: $dirty,
       solo_available: $solo,
       solo_reachable: $solo_reachable,
+      deferred: $deferred,
       signals: $signals
     }'
 }

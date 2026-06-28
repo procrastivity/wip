@@ -93,6 +93,22 @@ wip_plumbing_cmd_next() {
     fi
   fi
 
+  # Pre-lane foreshadow (BDS-16): when the active step is main-lane (no
+  # active_lane) and the active round has 2+ lanes with unshipped work, the
+  # upcoming lane steps are parallelizable. We surface that one step early — from
+  # the prereq itself — by marking those lane-step candidates concurrent, rather
+  # than waiting until active_step is already inside a lane (ADR-0010 §7).
+  local foreshadow_steps="[]"
+  if [[ -n "$active_round" ]]; then
+    foreshadow_steps="$(jq -c --argjson n "$active_round" '
+      (.rounds[] | select(.n == $n)) as $r
+      | [ $r.lanes[] as $ln
+          | ($r.steps | map(select(.shipped == false and .lane == $ln)) | (.[0].id // empty)) ]
+    ' <<<"$doc")"
+  fi
+  local foreshadow=0
+  [[ -z "$active_lane" && "$(jq -r 'length' <<<"$foreshadow_steps")" -ge 2 ]] && foreshadow=1
+
   # 2/3/4. Rank remaining unshipped roadmap steps.
   local first_seen=0
 
@@ -119,11 +135,19 @@ wip_plumbing_cmd_next() {
   else
     local i
     for ((i = 0; i < count; i++)); do
-      local entry reason rn lane concurrent=0
+      local entry reason rn lane eid concurrent=0
       entry="$(jq -c --argjson i "$i" '.[$i]' <<<"$unshipped")"
       rn="$(jq -r '.round_n' <<<"$entry")"
       lane="$(jq -r '.lane // ""' <<<"$entry")"
-      if [[ "$first_seen" == "0" && -z "$active_lane" ]]; then
+      eid="$(jq -r '.id' <<<"$entry")"
+      if [[ "$rn" == "$active_round" && "$foreshadow" == "1" && -n "$lane" ]] &&
+        [[ "$(jq -r --arg id "$eid" 'index($id) != null' <<<"$foreshadow_steps")" == "true" ]]; then
+        # Pre-lane vantage with 2+ in-flight lanes: foreshadow that the upcoming
+        # first step in each lane runs concurrently, from the main-lane prereq
+        # itself (BDS-16). Later same-lane steps remain sequential.
+        reason="concurrent lane $lane"
+        concurrent=1
+      elif [[ "$first_seen" == "0" && -z "$active_lane" ]]; then
         # Linear roadmap (active step is main-lane): the first forward candidate
         # is the headline next step. Preserves the pre-lane contract.
         reason="first unshipped step in active round"
@@ -205,6 +229,13 @@ wip_plumbing_cmd_next() {
     fi
   fi
 
-  jq -nc --arg slug "$slug" --argjson candidates "$candidates" '
-    { ok: true, initiative: $slug, candidates: $candidates }'
+  # Deferred items (## Deferred in the roadmap) — a clearly NOT-actionable
+  # bucket, emitted separately from candidates so they are never ranked or
+  # nominated as the next step (BDS-17). Pass through {id,title} verbatim.
+  local deferred
+  deferred="$(jq -c '.deferred' <<<"$doc")"
+
+  jq -nc --arg slug "$slug" --argjson candidates "$candidates" \
+    --argjson deferred "$deferred" '
+    { ok: true, initiative: $slug, candidates: $candidates, deferred: $deferred }'
 }

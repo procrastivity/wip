@@ -30,6 +30,9 @@ backed entirely by deterministic plumbing.
    - Solo footer: `solo_available` (Solo is *declared* in config) and, when
      probed, `solo_reachable` (`true` = answering, `false` = not answering,
      `null` = not probed).
+   - If `deferred` is non-empty, add a one-line **Deferred (not actionable):**
+     note listing the `title`s — consciously postponed items, shown as context
+     only; never a next step.
    - If `ok: false`, surface `error.message` directly.
 
 4. **Solo unreachable → warn + offer the Task-backend fallback.** If
@@ -56,5 +59,6 @@ backed entirely by deterministic plumbing.
   "active_step": { "id": "step-12", "title": "Roles set", "shipped": false },
   "dirty_wip_files": [],
   "solo_available": true, "solo_reachable": false,
+  "deferred": [ { "id": "duo-backend", "title": "Duo backend" } ],
   "signals": ["solo-unreachable"] }
 ```

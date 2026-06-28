@@ -138,6 +138,18 @@ authoritative until `apply` returns or the flow errors out.
       approved write them in (hand-edit `roadmap.md`, or shape an `amendment`
       with `append-round` and apply via `roadmap amend`). Then re-run
       `wip-plumbing next` so a real `step-NN` is the new top candidate.
+
+      When proposing steps, **assess parallelism before settling the order**:
+      identify which proposed steps are mutually independent — they touch
+      disjoint files/surfaces and have no ordering between them — and where two
+      or more are, propose an ADR-0010 lane shape rather than a forced sequence.
+      A laned round is `main* (lane+) main*`: an optional shared prereq in the
+      main lane, then one `### Lane <name>` per independent track (steps within a
+      lane sequential, lanes parallel across), then optional post-lane main-lane
+      sync steps. Only lane work that is genuinely non-conflicting — no two lanes
+      editing the same file; when in doubt, keep it sequential and say why.
+      Surface the lane proposal in the same review so the human can confirm or
+      flatten it — don't silently linearize independent tracks.
     - **concrete `step-NN`** — render it and note that `/wip:start <id>`
       activates it.
 

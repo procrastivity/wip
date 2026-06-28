@@ -125,7 +125,16 @@ and a Builder a human is using is never closed or injected into.
    that Round under `.wip/initiatives/<slug>/archive/`. Verify no
    orphaned references remain.
 6. Post a step-shipped comment on the Step's ledger entry.
-7. Before closing the Researcher or Coordinator, apply the
+7. **Complete the Step's ledger entries** before closing any process:
+   mark complete every still-open entry in this Step's `<slug>/step-NN`
+   scope that this boundary owns — the Coordinator's own
+   `coordinator-context` entry, plus any `task` entries left open by
+   one-off/pre-step work or a Builder that reported success without
+   self-completing. Leave `escalation`/`needs-human` entries open (they
+   gate on the human). After this, the ledger's open-entries view for the
+   scope should be empty. (See [`shared.md`](./shared.md) §Ledger
+   Ownership & Completion.)
+8. Before closing the Researcher or Coordinator, apply the
    operator-engagement guard to each process; if either is held or
    operator-engaged, re-arm and wait instead of closing it.
-8. Close the Researcher and the Coordinator processes.
+9. Close the Researcher and the Coordinator processes.

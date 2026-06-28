@@ -3,10 +3,11 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_doctor() {
-  local fix=0
+  local fix=0 probe_solo=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --fix) fix=1 ;;
+      --probe-solo) probe_solo=1 ;;
       *) wip_die 2 usage "doctor: unknown arg: $1" ;;
     esac
     shift
@@ -94,6 +95,66 @@ wip_plumbing_cmd_doctor() {
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
     done < <(jq -c '.[]' <<<"$steps")
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
+  # 2c. Ledger drift (opt-in `--probe-solo`). A shipped step must leave no open
+  #     `<slug>/step-NN` ledger entry — the invariant documented in
+  #     roles/shared.md §Ledger Ownership & Completion and completed at the
+  #     coordinator Step Boundary (BDS-14). The ledger lives in the Solo control
+  #     plane, not on disk, so unlike 2b this is an opt-in LIVE probe mirroring
+  #     `status --probe-solo`; without the flag doctor stays a pure-disk read.
+  #     One shell-out per project (open todos, each with a `.tags` array); the
+  #     `<slug>/step-NN` tag is matched per shipped step. A probe that can't run
+  #     (Solo absent / project unresolved) records an informational
+  #     status:"ok" note — never drift, so a down Solo never fails doctor.
+  #     WIP_SOLO_TODOS_CMD overrides the list command (test seam).
+  if [[ "$probe_solo" == "1" ]] &&
+    [[ "$(jq -r '.features.orchestration.backend // ""' <<<"$mj")" == "solo" ]]; then
+    local todos_cmd="${WIP_SOLO_TODOS_CMD:-}" proj_id="${SOLO_PROJECT_ID:-}"
+    if [[ -z "$todos_cmd" ]] && command -v solo >/dev/null 2>&1; then
+      if [[ -z "$proj_id" ]]; then
+        proj_id="$(solo projects list --json 2>/dev/null |
+          jq -r --arg p "$root" '.data.projects[]? | select(.path == $p) | .id' | head -1)"
+      fi
+      [[ -n "$proj_id" ]] && todos_cmd="solo todos list --project-id $proj_id --completed false --json"
+    fi
+    if [[ -n "$todos_cmd" ]]; then
+      local todos_json open_tags lrec lslug lstatus lrpath ldoc lsid ltag lcount todos_rc=0
+      todos_json="$(bash -c "$todos_cmd" 2>/dev/null)" || todos_rc=$?
+      if [[ "$todos_rc" == "0" ]] &&
+        open_tags="$(jq -ec '[.data.todos[]? | (.tags // [])]' <<<"$todos_json" 2>/dev/null)"; then
+        [[ -n "$open_tags" ]] || open_tags='[]'
+        while IFS= read -r lrec; do
+          [[ -n "$lrec" ]] || continue
+          lslug="$(jq -r '.slug // ""' <<<"$lrec")"
+          [[ -n "$lslug" ]] || continue
+          lstatus="$(jq -r '.status // ""' <<<"$lrec")"
+          [[ "$lstatus" == "shipped" || "$lstatus" == "archived" ]] && continue
+          lrpath="$(jq -r '.roadmap // empty' <<<"$lrec")"
+          [[ -n "$lrpath" ]] || lrpath=".wip/initiatives/$lslug/roadmap.md"
+          ldoc="$(wip_roadmap_parse "$root/$lrpath")"
+          while IFS= read -r lsid; do
+            [[ -n "$lsid" && "$lsid" != "null" ]] || continue
+            ltag="$lslug/$lsid"
+            lcount="$(jq --arg t "$ltag" '[.[] | select(index($t))] | length' <<<"$open_tags")"
+            if [[ "${lcount:-0}" -gt 0 ]]; then
+              obj="$(jq -nc --arg slug "$lslug" --arg step "$lsid" --argjson count "$lcount" \
+                --arg fix "complete the open $ltag ledger entries (roles/shared.md §Ledger Ownership & Completion)" \
+                '{kind:"ledger", slug:$slug, step:$step, status:"shipped-step-open-ledger", count:$count, fix:$fix}')"
+              checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+            fi
+          done < <(jq -r '[.rounds[].steps[] | select(.shipped == true) | .id] | .[]' <<<"$ldoc")
+        done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+      else
+        obj="$(jq -nc '{kind:"ledger", status:"ok", probe:"unavailable",
+          message:"solo ledger probe requested but todos could not be fetched or parsed"}')"
+        checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+      fi
+    else
+      obj="$(jq -nc '{kind:"ledger", status:"ok", probe:"unavailable",
+        message:"solo ledger probe requested but the Solo project could not be resolved"}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    fi
+  fi
 
   # 3. Root collision: lds and diataxis must not share a root.
   local collide

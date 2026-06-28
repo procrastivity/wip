@@ -50,6 +50,24 @@ Used to slice the task ledger by scope:
   Orchestrator.
 - `coordinator-context` — entries the Coordinator owns.
 
+## Ledger Ownership & Completion
+
+Every ledger entry has an owner responsible for completing it, so the ledger's
+open-entries view keeps reflecting reality:
+
+- **`task` entries** — owned by the Builder executing them. The Builder marks
+  its entry complete on success and leaves it open (tagged `needs-human`) on
+  escalation (see [`builder.md`](./builder.md) §Reporting Contract). Task work
+  done **outside** a Builder — a one-off or pre-step run — is owned by whoever
+  created the entry: complete it when the work lands.
+- **`coordinator-context` entries** — owned by the Coordinator. It has no other
+  closer, so the Coordinator completes its own at the Step Boundary.
+- **`escalation` / `needs-human` entries** — stay open until the human resolves
+  them; never auto-completed.
+
+Invariant: a shipped Step leaves **no open `task` or `coordinator-context`
+entry** in its `<slug>/step-NN` scope. The Step Boundary sweeps any stragglers.
+
 ## Pause and Resume
 
 Roles do not poll. Use the backend's **idle-timer** signal to pause
