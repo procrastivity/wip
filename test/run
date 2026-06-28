@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# test/run — parallel, fail-aggregating runner for the wip test suite.
+#
+# Discovers test/test-*.sh (sorted) by default, or runs the explicit file/path
+# args given. Fans the files out across N workers (one file each), captures each
+# file's combined output to a per-file results dir, then replays that output in
+# discovery order and tallies the per-file exit statuses itself. The run exits
+# non-zero iff ANY file failed — the aggregation is explicit and never inherited
+# from xargs' exit code.
+#
+# Usage:
+#   bash test/run                 # full suite, parallel
+#   bash test/run --serial        # full suite, one job
+#   bash test/run test/test-x.sh  # ad-hoc single/explicit files
+#
+# Job count resolves in this order:
+#   WIP_TEST_JOBS (env override) -> --serial (=1) -> getconf _NPROCESSORS_ONLN
+#
+# (Per-file timing via WIP_TEST_TIMING is a later task; the worker + results-dir
+# layout below are shaped so it can stamp per-file wall time without a rewrite.)
+
+set -euo pipefail
+
+# Absolute paths so the worker re-invocation below resolves regardless of cwd.
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+self="$self_dir/$(basename "${BASH_SOURCE[0]}")"
+root="$(cd "$self_dir/.." && pwd)"
+
+# --- Worker mode -----------------------------------------------------------
+# Invoked once per file by the parallel sweep below (via xargs). Runs exactly
+# one test file, capturing its COMBINED output (2>&1) and exit status into the
+# results dir keyed by index. Kept in this same file so a later commit can stamp
+# per-file wall time here (EPOCHREALTIME) without restructuring the fan-out.
+if [[ "${1:-}" == "--worker" ]]; then
+  w_results="$2"
+  w_index="$3"
+  w_file="$(cat "$w_results/$w_index.path")"
+  set +e
+  bash "$w_file" >"$w_results/$w_index.out" 2>&1
+  w_rc=$?
+  set -e
+  printf '%s\n' "$w_rc" >"$w_results/$w_index.status"
+  exit 0
+fi
+
+# --- Arg parsing -----------------------------------------------------------
+serial=0
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --serial)
+      serial=1
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        args+=("$1")
+        shift
+      done
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# --- Job count -------------------------------------------------------------
+if [[ -n "${WIP_TEST_JOBS:-}" ]]; then
+  jobs="$WIP_TEST_JOBS"
+elif [[ "$serial" -eq 1 ]]; then
+  jobs=1
+else
+  jobs="$(getconf _NPROCESSORS_ONLN)"
+fi
+
+# --- Discovery -------------------------------------------------------------
+# Explicit args win; otherwise the sorted test/test-*.sh glob (bash globs sort
+# lexically, which is our stable discovery order).
+files=()
+if [[ ${#args[@]} -gt 0 ]]; then
+  files=("${args[@]}")
+else
+  for f in "$root"/test/test-*.sh; do
+    [[ -e "$f" ]] && files+=("$f")
+  done
+fi
+
+# --- Results dir -----------------------------------------------------------
+results_dir="$(mktemp -d "${TMPDIR:-/tmp}/wip-test-run.XXXXXX")"
+trap 'rm -rf "$results_dir"' EXIT
+
+# --- Parallel sweep --------------------------------------------------------
+# Feed indices (not paths) to xargs so each worker maps cleanly back to its
+# results files and discovery order is preserved on replay. Guard the xargs call
+# (|| true) so its 123-on-failure exit can't abort the runner before the tally
+# below — the explicit tally is the real guardrail.
+if [[ ${#files[@]} -gt 0 ]]; then
+  for i in "${!files[@]}"; do
+    printf '%s\n' "${files[$i]}" >"$results_dir/$i.path"
+  done
+  printf '%s\n' "${!files[@]}" |
+    xargs -P"$jobs" -n1 bash "$self" --worker "$results_dir" || true
+fi
+
+# --- Replay + tally --------------------------------------------------------
+# Replay each file's captured output in discovery order (never streamed live, so
+# parallel output can't interleave), reproducing its test_summary line verbatim.
+# Tally per-file exit statuses ourselves; a missing status file counts as failed.
+passed=0
+failed=0
+total=${#files[@]}
+for i in "${!files[@]}"; do
+  file="${files[$i]}"
+  printf '== %s ==\n' "$file"
+  if [[ -f "$results_dir/$i.out" ]]; then
+    cat "$results_dir/$i.out"
+  fi
+  rc=1
+  if [[ -f "$results_dir/$i.status" ]]; then
+    rc="$(cat "$results_dir/$i.status")"
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1))
+    printf '   !! FAILED (exit %s): %s\n' "$rc" "$file" >&2
+  fi
+done
+
+printf '\n%d passed, %d failed, %d total\n' "$passed" "$failed" "$total"
+
+# Exit non-zero iff ANY file failed.
+[[ "$failed" -eq 0 ]]
