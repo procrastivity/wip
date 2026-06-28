@@ -56,6 +56,22 @@ assert_eq "4" "$(jq -r '.candidates | length' <<<"$out")" "4 candidates"
 # 2. No duplicates: step-02 is rank 1 only, not also rank 2.
 assert_eq "1" "$(jq '[.candidates[] | select(.id == "step-02")] | length' <<<"$out")" "step-02 not duplicated"
 
+# 2b. Half-done closeout: manifest active_step is unshipped in the roadmap but
+# its workplan is already archived. `status` flags this drift; `next` should not
+# nominate the archived step again.
+tmpH="$(mktemp -d)"
+mkdir -p "$tmpH/.wip/initiatives/demo/archive"
+cp "$tmp/.wip.yaml" "$tmpH/.wip.yaml"
+cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmpH/.wip/initiatives/demo/roadmap.md"
+: >"$tmpH/.wip/initiatives/demo/archive/step-02-second-workplan.md"
+outH="$(WIP_ROOT="$tmpH" bin/wip-plumbing next)"
+assert_eq "step-03" "$(jq -r '.candidates[0].id' <<<"$outH")" "half-done closeout: archived active step skipped"
+assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason' <<<"$outH")" \
+  "half-done closeout: next unarchived step is inferred"
+assert_eq "0" "$(jq '[.candidates[] | select(.id == "step-02")] | length' <<<"$outH")" \
+  "half-done closeout: archived active step absent"
+rm -rf "$tmpH"
+
 # 3. All shipped -> "roadmap complete" candidate.
 tmp2="$(mktemp -d)"
 mkdir -p "$tmp2/.wip/initiatives/demo"

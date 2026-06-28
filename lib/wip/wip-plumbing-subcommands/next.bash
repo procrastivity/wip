@@ -52,12 +52,15 @@ wip_plumbing_cmd_next() {
   # derive the active round and active lane (ADR-0010).
   local active_is_manifest=0 active_round="" active_lane=""
 
-  # 1. Manifest active_step if unshipped.
+  # 1. Manifest active_step if unshipped and not already archived. An archived
+  #    but unmarked active step is a half-done closeout; status/doctor surface
+  #    that drift, while next should continue to the next actionable step.
   if [[ -n "$active_step_id" ]]; then
     local step
     step="$(wip_roadmap_step "$doc" "$active_step_id")"
     if [[ -n "$step" && "$step" != "null" ]] &&
-      [[ "$(jq -r '.shipped' <<<"$step")" == "false" ]]; then
+      [[ "$(jq -r '.shipped' <<<"$step")" == "false" ]] &&
+      ! _wip_archived_workplan_exists "$root/.wip/initiatives/$slug/archive" "$active_step_id"; then
       candidates="$(jq -c \
         --argjson rank "$rank" --argjson step "$step" '
         . + [{rank:$rank, source:"roadmap", id:$step.id, title:$step.title,
@@ -71,26 +74,27 @@ wip_plumbing_cmd_next() {
     fi
   fi
 
+  # Walk every unshipped step in declared order; skip the manifest active step
+  # when it was already surfaced above, or when it is a half-done closeout.
+  local unshipped
+  unshipped="$(wip_roadmap_unshipped_after "$doc" "")"
+  unshipped="$(jq -c --arg active "$active_step_id" '
+    map(select(.id != $active))
+  ' <<<"$unshipped")"
+
   # When there is no manifest active step, the first unshipped step is the
   # actionable one; its round + lane anchor the lane-aware ranking below.
   if [[ "$active_is_manifest" == "0" ]]; then
     local first
-    first="$(wip_roadmap_first_unshipped "$doc")"
+    first="$(jq -c '.[0] // null' <<<"$unshipped")"
     if [[ "$first" != "null" ]]; then
       active_lane="$(jq -r '.lane // ""' <<<"$first")"
       active_round="$(jq -r '.round_n // ""' <<<"$first")"
     fi
   fi
 
-  # 2/3/4. Walk every unshipped step in declared order; skip the one already
-  # surfaced as the manifest active step (if any).
+  # 2/3/4. Rank remaining unshipped roadmap steps.
   local first_seen=0
-  local unshipped
-  unshipped="$(wip_roadmap_unshipped_after "$doc" "")"
-  # Filter out the manifest active step (which we already emitted).
-  unshipped="$(jq -c --arg active "$active_step_id" '
-    map(select(.id != $active))
-  ' <<<"$unshipped")"
 
   local count
   count="$(jq -r 'length' <<<"$unshipped")"
