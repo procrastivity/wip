@@ -84,20 +84,31 @@ test_summary() {
 # opt tables and the generic-vs-keep-inline rule.
 
 # wip_mktemp — `mktemp -d` with automatic cleanup. Every call registers its
-# dir; a single EXIT trap removes them all, so a test file can call it many
-# times without clobbering an earlier trap. Echoes the new dir.
-_WIP_TMPDIRS=()
+# dir in a shared tracking file; a single EXIT trap (installed here at
+# source time, in the test's main shell) removes them all, so a test file
+# can call it many times without one trap clobbering another. Echoes the
+# new dir.
+#
+# NB: callers invoke this via command substitution (`tmp="$(wip_mktemp)"`),
+# which runs the function in a subshell. A per-call `trap`/in-memory array
+# set there cannot reach the parent shell — the subshell's own EXIT trap
+# would fire immediately and delete the dir before the caller can use it.
+# Registering through a tracking file (shared via the filesystem) with the
+# trap owned by the sourcing shell is what makes cleanup actually work.
+_WIP_TMPDIRS_FILE="$(mktemp)"
 _wip_cleanup_tmpdirs() {
   local d
-  for d in "${_WIP_TMPDIRS[@]:-}"; do
+  [[ -f "$_WIP_TMPDIRS_FILE" ]] || return 0
+  while IFS= read -r d; do
     [[ -n "$d" ]] && rm -rf "$d"
-  done
+  done <"$_WIP_TMPDIRS_FILE"
+  rm -f "$_WIP_TMPDIRS_FILE"
 }
+trap _wip_cleanup_tmpdirs EXIT
 wip_mktemp() {
   local d
   d="$(mktemp -d)"
-  _WIP_TMPDIRS+=("$d")
-  trap _wip_cleanup_tmpdirs EXIT
+  printf '%s\n' "$d" >>"$_WIP_TMPDIRS_FILE"
   printf '%s\n' "$d"
 }
 
