@@ -25,6 +25,11 @@ judgment lives here that the CLI doesn't also have).
    - Emit the candidates as a short numbered list — one line each:
      `rank. **<id> — <title>**  _<source>: <reason>_`.
    - Recommend rank 1 in a one-line conclusion.
+   - Candidates carrying `concurrent: true` are parallelizable lanes
+     (ADR-0010). When the top candidate is a main-lane step and one or more
+     later candidates are `concurrent`, add a one-line **foreshadow**: *after
+     `<top-id>`, lanes `<X>` and `<Y>` run concurrently* — so the operator sees
+     the parallelism from the prereq, before entering a lane.
    - **`source: "scaffold"`** (title `author the roadmap`, `id: null`): the
      initiative has a brief but no roadmap steps yet. Don't render it as a
      `step-NN` — render it as the action *author the roadmap at `<path>`*

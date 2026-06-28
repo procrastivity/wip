@@ -221,7 +221,8 @@ assert_eq "step-14" "$(jq -r '.candidates[2].id' <<<"$outL")" "lane: rank 3 = st
 assert_eq "concurrent lane D" "$(jq -r '.candidates[2].reason' <<<"$outL")" "lane: rank 3 reason concurrent"
 assert_eq "true" "$(jq -r '.candidates[2].concurrent' <<<"$outL")" "lane: sibling lane flagged concurrent"
 
-# No active_step + main-lane prereq unshipped: the prereq ranks first (no concurrency).
+# No active_step + main-lane prereq unshipped: the prereq ranks first, and the
+# upcoming lanes are FORESHADOWED as concurrent from the prereq itself (BDS-16).
 sed 's/active_step: step-13//' "$tmpL/.wip.yaml" >"$tmpL/.wip.yaml.noactive"
 mv "$tmpL/.wip.yaml.noactive" "$tmpL/.wip.yaml"
 sed 's/✅ shipped 2026-06-01 //' "$tmpL/.wip/initiatives/demo/roadmap.md" >"$tmpL/rm.tmp"
@@ -229,7 +230,29 @@ mv "$tmpL/rm.tmp" "$tmpL/.wip/initiatives/demo/roadmap.md"
 outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
 assert_eq "step-12" "$(jq -r '.candidates[0].id' <<<"$outL2")" "lane: main prereq ranks first"
 assert_eq "first unshipped step in active round" "$(jq -r '.candidates[0].reason' <<<"$outL2")" "lane: prereq reason"
-assert_eq "0" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL2")" "lane: no concurrency while in main lane"
+assert_eq "null" "$(jq -r '.candidates[0].concurrent // null' <<<"$outL2")" "lane: prereq itself not concurrent"
+# The two lanes (A: step-13/step-15, D: step-14) are foreshadowed as concurrent.
+assert_eq "concurrent lane A" "$(jq -r '[.candidates[] | select(.id == "step-13")][0].reason' <<<"$outL2")" "lane: step-13 foreshadowed concurrent A"
+assert_eq "true" "$(jq -r '[.candidates[] | select(.id == "step-13")][0].concurrent' <<<"$outL2")" "lane: step-13 concurrent flag"
+assert_eq "concurrent lane D" "$(jq -r '[.candidates[] | select(.id == "step-14")][0].reason' <<<"$outL2")" "lane: step-14 foreshadowed concurrent D"
+assert_eq "3" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL2")" "lane: all 3 lane steps foreshadowed"
+
+# Single in-flight lane from the prereq vantage -> NO foreshadow (nothing to
+# parallelize). Drop Lane D so only Lane A remains.
+cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 4 — Track expansion
+
+- **step-12 — F1 prereq** — prereq.
+
+### Lane A
+- **step-13 — Track A part 1** — spine.
+- **step-15 — Track A part 2** — provider.
+MD
+outL3="$(WIP_ROOT="$tmpL" bin/wip-plumbing next)"
+assert_eq "step-12" "$(jq -r '.candidates[0].id' <<<"$outL3")" "single-lane: prereq ranks first"
+assert_eq "0" "$(jq '[.candidates[] | select(.concurrent == true)] | length' <<<"$outL3")" "single-lane: no foreshadow"
 rm -rf "$tmpL"
 
 test_summary
