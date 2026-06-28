@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.14] - 2026-06-28
+
+### Documentation
+
+- Docs(adr-0016): note step-02 direct-splice refinement + skeleton-test retirement
+
+### Internal
+
+- Chore: add AGENTS.md + CLAUDE.md agent onboarding stubs
+
+### Other
+
+- Step 1 · Task 1: author ADR-0016 closeout-write contract
+- Step 1 · Task 2: scaffold ship verb skeleton + stubs + harness + tests
+- Closeout-write-completion: neutralize writer-coupled skeleton-test cases (shared pre-step for step-02/03 lanes)
+- Step 2: implement roadmap shipped-marker writer + lane test
+- Step 3: implement active_step clearer + lane test
+- Step 4: end-to-end ship composition test
+- Step 5: wire ship into the coordinator Step Boundary
+- Step 6: shared archived-workplan probe helper
+- Step 6: doctor closeout drift check + test
+- Step 6: status half-done-closeout hint + test
+- Fix closeout next ranking
+- Step 1: roadmap parser emits .deferred[] + test
+- Step 2: surface deferred as a not-actionable bucket in next/status
+- Step 3: prompt lane-opportunity assessment in roadmap authoring
+- Step 4: next foreshadows imminent lane parallelism from the prereq
+- Step 5: document ledger completion contract + fold it into Step Boundary
+- Step 6: doctor --probe-solo flags stale ledger entries for shipped steps
+- Fix PR review issues for latent state surfacing
+
 ## [0.0.13] - 2026-06-26
 
 ### Fixed
