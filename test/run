@@ -17,8 +17,10 @@
 # Job count resolves in this order:
 #   WIP_TEST_JOBS (env override) -> --serial (=1) -> getconf _NPROCESSORS_ONLN
 #
-# (Per-file timing via WIP_TEST_TIMING is a later task; the worker + results-dir
-# layout below are shaped so it can stamp per-file wall time without a rewrite.)
+# Per-file wall time is always stamped (via bash's EPOCHREALTIME, microsecond
+# resolution, no subprocess) into the results dir. With WIP_TEST_TIMING=1 the
+# runner prints a slowest-10 table plus the full-suite wall time after the
+# aggregate summary; unset, output is unchanged.
 
 set -euo pipefail
 
@@ -36,11 +38,17 @@ if [[ "${1:-}" == "--worker" ]]; then
   w_results="$2"
   w_index="$3"
   w_file="$(cat "$w_results/$w_index.path")"
+  # EPOCHREALTIME is "seconds.microseconds"; stripping every non-digit yields an
+  # integer microsecond count (locale-proof: handles either '.' or ',' radix),
+  # so elapsed time is plain integer arithmetic with no float/`date` involved.
+  w_start="${EPOCHREALTIME//[!0-9]/}"
   set +e
   bash "$w_file" >"$w_results/$w_index.out" 2>&1
   w_rc=$?
   set -e
+  w_end="${EPOCHREALTIME//[!0-9]/}"
   printf '%s\n' "$w_rc" >"$w_results/$w_index.status"
+  printf '%s\n' "$((w_end - w_start))" >"$w_results/$w_index.time"
   exit 0
 fi
 
@@ -97,6 +105,7 @@ trap 'rm -rf "$results_dir"' EXIT
 # results files and discovery order is preserved on replay. Guard the xargs call
 # (|| true) so its 123-on-failure exit can't abort the runner before the tally
 # below — the explicit tally is the real guardrail.
+suite_start="${EPOCHREALTIME//[!0-9]/}"
 if [[ ${#files[@]} -gt 0 ]]; then
   for i in "${!files[@]}"; do
     printf '%s\n' "${files[$i]}" >"$results_dir/$i.path"
@@ -131,6 +140,34 @@ for i in "${!files[@]}"; do
 done
 
 printf '\n%d passed, %d failed, %d total\n' "$passed" "$failed" "$total"
+
+# --- Timing report (opt-in) ------------------------------------------------
+# WIP_TEST_TIMING=1 is the on-switch only (no numeric form yet). N is fixed at
+# 10 per the workplan lean. Render integer microseconds as S.mmm seconds.
+if [[ "${WIP_TEST_TIMING:-}" == "1" ]]; then
+  suite_end="${EPOCHREALTIME//[!0-9]/}"
+
+  fmt_us() { printf '%d.%03d' "$(($1 / 1000000))" "$((($1 / 1000) % 1000))"; }
+
+  # One "microseconds<TAB>file" row per file, sorted slowest-first.
+  rows=()
+  for i in "${!files[@]}"; do
+    t=0
+    [[ -f "$results_dir/$i.time" ]] && t="$(cat "$results_dir/$i.time")"
+    rows+=("$(printf '%s\t%s' "$t" "${files[$i]}")")
+  done
+
+  shown=10
+  [[ "$total" -lt "$shown" ]] && shown="$total"
+  printf '\nSlowest %d of %d (wall seconds):\n' "$shown" "$total"
+  if [[ ${#rows[@]} -gt 0 ]]; then
+    printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1 -rn | head -n 10 |
+      while IFS=$'\t' read -r us file; do
+        printf '  %9ss  %s\n' "$(fmt_us "$us")" "$file"
+      done
+  fi
+  printf '\nFull-suite wall time: %ss\n' "$(fmt_us "$((suite_end - suite_start))")"
+fi
 
 # Exit non-zero iff ANY file failed.
 [[ "$failed" -eq 0 ]]
