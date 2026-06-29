@@ -142,9 +142,10 @@ tmp_d="$(make_tmp_repo solo false true true)"
 rm -f "$tmp_d/templates/glossary/diataxis.md"
 ledger_d="$(WIP_ROOT="$tmp_d" WIP_TEMPLATES_DIR="$tmp_d/templates" \
   bin/wip-plumbing glossary assemble --output .wip/GLOSSARY.md 2>/dev/null)"
-assert_eq "true" "$(jq -r '.ok' <<<"$ledger_d")" "future-row assemble ok"
-assert_eq "diataxis.md" "$(jq -r '.partials_skipped[0].name' <<<"$ledger_d")" "future-row skipped name"
-assert_eq "predicate-true; partial-not-shipped" "$(jq -r '.partials_skipped[0].reason' <<<"$ledger_d")" "future-row skip reason"
+mapfile -t F < <(jq -r '.ok, .partials_skipped[0].name, .partials_skipped[0].reason' <<<"$ledger_d")
+assert_eq "true" "${F[0]}" "future-row assemble ok"
+assert_eq "diataxis.md" "${F[1]}" "future-row skipped name"
+assert_eq "predicate-true; partial-not-shipped" "${F[2]}" "future-row skip reason"
 assert_not_grep '^<!-- partial: diataxis\.md ' "$tmp_d/.wip/GLOSSARY.md" "future-row skip omits divider"
 
 # ---------------------------------------------------------------------------
@@ -158,9 +159,10 @@ out_chk="$(WIP_ROOT="$tmp_chk" WIP_TEMPLATES_DIR="$tmp_chk/templates" bin/wip-pl
 rc_chk=$?
 set -e
 assert_eq "0" "$rc_chk" "check happy path exit 0"
-assert_eq "true" "$(jq -r '.ok' <<<"$out_chk")" "check happy path ok:true"
-assert_eq "false" "$(jq -r '.drift' <<<"$out_chk")" "check happy path drift:false"
-assert_eq ".wip/GLOSSARY.md" "$(jq -r '.expected_path' <<<"$out_chk")" "check expected_path"
+mapfile -t F < <(jq -r '.ok, .drift, .expected_path' <<<"$out_chk")
+assert_eq "true" "${F[0]}" "check happy path ok:true"
+assert_eq "false" "${F[1]}" "check happy path drift:false"
+assert_eq ".wip/GLOSSARY.md" "${F[2]}" "check expected_path"
 
 # ---------------------------------------------------------------------------
 # 7. check — content drift.
@@ -171,10 +173,10 @@ out_drift="$(WIP_ROOT="$tmp_chk" WIP_TEMPLATES_DIR="$tmp_chk/templates" bin/wip-
 rc_drift=$?
 set -e
 assert_eq "4" "$rc_drift" "check content-drift exit 4"
-assert_eq "true" "$(jq -r '.drift' <<<"$out_drift")" "check drift:true"
-assert_eq "glossary-drift" "$(jq -r '.error.kind' <<<"$out_drift")" "check error.kind"
-bd="$(jq -r '.byte_diff_count' <<<"$out_drift")"
-[[ "$bd" -gt 0 ]] && bd_positive="yes" || bd_positive="no"
+mapfile -t F < <(jq -r '.drift, .error.kind, .byte_diff_count' <<<"$out_drift")
+assert_eq "true" "${F[0]}" "check drift:true"
+assert_eq "glossary-drift" "${F[1]}" "check error.kind"
+[[ "${F[2]}" -gt 0 ]] && bd_positive="yes" || bd_positive="no"
 assert_eq "yes" "$bd_positive" "byte_diff_count > 0"
 
 # ---------------------------------------------------------------------------
@@ -197,8 +199,9 @@ assert_eq "true" "$(jq -r '.drift' <<<"$out_mdr")" "check manifest-drift drift:t
 tmp_out="$(make_tmp_repo solo false false true)"
 ledger="$(WIP_ROOT="$tmp_out" WIP_TEMPLATES_DIR="$tmp_out/templates" \
   bin/wip-plumbing glossary assemble --output .wip/GLOSSARY.md)"
-assert_eq "true" "$(jq -r '.ok' <<<"$ledger")" "--output ledger ok"
-assert_eq ".wip/GLOSSARY.md" "$(jq -r '.wrote[0]' <<<"$ledger")" "--output ledger wrote"
+mapfile -t F < <(jq -r '.ok, .wrote[0]' <<<"$ledger")
+assert_eq "true" "${F[0]}" "--output ledger ok"
+assert_eq ".wip/GLOSSARY.md" "${F[1]}" "--output ledger wrote"
 assert_file "$tmp_out/.wip/GLOSSARY.md" "--output file written"
 # Source-inspection: assert the subcommand uses atomic mv (not cat >).
 # shellcheck disable=SC2016
@@ -312,7 +315,8 @@ out_lds_chk="$(WIP_ROOT="$tmp_lds" WIP_TEMPLATES_DIR="$tmp_lds/templates" bin/wi
 rc_lds_chk=$?
 set -e
 assert_eq "0" "$rc_lds_chk" "lds check exit 0"
-assert_eq "true" "$(jq -r '.ok' <<<"$out_lds_chk")" "lds check ok:true"
-assert_eq "false" "$(jq -r '.drift' <<<"$out_lds_chk")" "lds check drift:false"
+mapfile -t F < <(jq -r '.ok, .drift' <<<"$out_lds_chk")
+assert_eq "true" "${F[0]}" "lds check ok:true"
+assert_eq "false" "${F[1]}" "lds check drift:false"
 
 test_summary
