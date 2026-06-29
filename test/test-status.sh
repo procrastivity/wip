@@ -176,6 +176,60 @@ assert_eq "false" "$(jq -r '.solo_reachable' <<<"$p6")" "probe with missing solo
 assert_eq "1" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p6")" \
   "missing solo CLI + backend solo -> solo-unreachable signal"
 
+# --- Forge liveness probe (--probe-forge, ADR-0018) ---------------------
+# Mirrors the solo probe: opt-in --probe-forge sets a tri-state forge_reachable
+# and emits forge-unreachable only when a forge is the declared transition owner
+# (features.forge.enabled) and the probe says it's down. The transport seam's
+# WIP_FORGE_STATUS_CMD feeds the probe (no real gh/glab); `true`/`false` stand in
+# for an authed / unreachable forge by exit status.
+tmpF="$(wip_mktemp)"
+wip_fixture_init "$tmpF" --title Demo
+cat >"$tmpF/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One
+
+- **step-02 — Second** — current.
+MD
+WIP_ROOT="$tmpF" yq -i '.features.forge.enabled = true' "$tmpF/.wip.yaml"
+
+runf() { WIP_ROOT="$tmpF" bin/wip-plumbing status "$@"; }
+
+# f0. forge_available echoes the declared key regardless of probing.
+assert_eq "true" "$(jq -r '.forge_available' <<<"$(runf)")" "forge declared -> forge_available true"
+
+# f1. No flag -> no probe; forge_reachable null, no forge-unreachable signal.
+f1="$(runf)"
+assert_eq "null" "$(jq -r '.forge_reachable' <<<"$f1")" "no flag -> forge_reachable null"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f1")" \
+  "no flag -> no forge-unreachable signal"
+
+# f2. --probe-forge, forge UP (status cmd exits 0) -> reachable true, no signal.
+f2="$(WIP_FORGE_STATUS_CMD="true" runf --probe-forge)"
+assert_eq "true" "$(jq -r '.forge_reachable' <<<"$f2")" "probe up -> forge_reachable true"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f2")" \
+  "probe up -> no signal"
+
+# f3. --probe-forge, forge DOWN (status cmd exits nonzero) -> reachable false + signal.
+f3="$(WIP_FORGE_STATUS_CMD="false" runf --probe-forge)"
+assert_eq "false" "$(jq -r '.forge_reachable' <<<"$f3")" "probe down -> forge_reachable false"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f3")" \
+  "probe down + forge declared -> forge-unreachable signal"
+
+# f4. Forge not declared -> probe is NOT actionable: reachable null, no signal.
+WIP_ROOT="$tmpF" yq -i '.features.forge.enabled = false' "$tmpF/.wip.yaml"
+f4="$(WIP_FORGE_STATUS_CMD="false" runf --probe-forge)"
+assert_eq "null" "$(jq -r '.forge_reachable' <<<"$f4")" "forge not declared -> reachable null (no probe)"
+assert_eq "0" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f4")" \
+  "forge not declared -> no forge-unreachable signal (not actionable)"
+WIP_ROOT="$tmpF" yq -i '.features.forge.enabled = true' "$tmpF/.wip.yaml"
+
+# f5. --probe-forge, forge declared but no gh/glab CLI -> unreachable + signal.
+f5="$(WIP_FORGE_CLI='' runf --probe-forge)"
+assert_eq "false" "$(jq -r '.forge_reachable' <<<"$f5")" "declared but no forge CLI -> forge_reachable false"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f5")" \
+  "missing forge CLI + forge declared -> forge-unreachable signal"
+
 # ---- Closeout hint (half-done-closeout, step-06) ------------------------
 # active_step names a not-yet-shipped step whose workplan is already archived ->
 # signals carries "half-done-closeout" (single-sourced with doctor's check). The

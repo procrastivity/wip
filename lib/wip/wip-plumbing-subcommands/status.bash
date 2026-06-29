@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_status() {
-  local slug="" probe_solo=0
+  local slug="" probe_solo=0 probe_forge=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --initiative)
@@ -17,6 +17,10 @@ wip_plumbing_cmd_status() {
         ;;
       --probe-solo)
         probe_solo=1
+        shift
+        ;;
+      --probe-forge)
+        probe_forge=1
         shift
         ;;
       -*) wip_die 2 usage "status: unknown flag: $1" ;;
@@ -160,6 +164,39 @@ wip_plumbing_cmd_status() {
     signals="$(jq -nc --argjson a "$signals" '$a + ["solo-unreachable"]')"
   fi
 
+  # forge_available: CONFIG echo — "a forge is declared the active transition
+  # owner" (features.forge.enabled), the Tier-1 owner from ADR-0018. Read raw
+  # from the manifest so Lane A does not depend on Lane B's features.forge
+  # detector; both lanes key off the same manifest key.
+  local forge_available
+  forge_available="$(jq -r '.features.forge.enabled // false' <<<"$mj")"
+  [[ -n "$forge_available" ]] || forge_available="false"
+
+  # forge_reachable: a LIVE probe of the forge CLI (opt-in via --probe-forge,
+  # since it shells out). Mirrors solo_reachable (ADR-0014):
+  #   null  = not probed (no flag, or no forge declared).
+  #   true  = the resolved liveness command (e.g. `gh auth status`) exited 0.
+  #   false = the probe ran and the forge did not answer, or a forge is declared
+  #           but no gh/glab CLI is present. The transport seam (ADR-0018,
+  #           step-02) resolves the command; WIP_FORGE_STATUS_CMD overrides it.
+  local forge_reachable="null"
+  if [[ "$probe_forge" == "1" && "$forge_available" == "true" ]]; then
+    local fcli fcmd
+    fcli="$(_wip_forge_detect)"
+    fcmd="$(_wip_forge_status_cmd "$fcli")"
+    if [[ -n "$fcmd" ]] && _wip_forge_run "$fcmd" >/dev/null 2>&1; then
+      forge_reachable="true"
+    else
+      forge_reachable="false"
+    fi
+  fi
+  # Actionable signal: a forge owns the Tier-1 transition but isn't answering, so
+  # the push/merge observation would stall. Mirrors solo-unreachable's
+  # "non-actionable → no signal" discipline — silent unless a forge is declared.
+  if [[ "$forge_reachable" == "false" && "$forge_available" == "true" ]]; then
+    signals="$(jq -nc --argjson a "$signals" '$a + ["forge-unreachable"]')"
+  fi
+
   # Deferred items (## Deferred in the roadmap) — informational, clearly
   # NOT-actionable context, surfaced so "where am I" can see consciously
   # postponed work without it ever being nominated as a next step (BDS-17).
@@ -172,6 +209,8 @@ wip_plumbing_cmd_status() {
     --argjson lanes_in_flight "$lanes_in_flight" \
     --argjson dirty "$dirty" --argjson solo "$solo_available" \
     --argjson solo_reachable "$solo_reachable" \
+    --argjson forge_available "$forge_available" \
+    --argjson forge_reachable "$forge_reachable" \
     --argjson deferred "$deferred" \
     --argjson signals "$signals" '
     {
@@ -184,6 +223,8 @@ wip_plumbing_cmd_status() {
       dirty_wip_files: $dirty,
       solo_available: $solo,
       solo_reachable: $solo_reachable,
+      forge_available: $forge_available,
+      forge_reachable: $forge_reachable,
       deferred: $deferred,
       signals: $signals
     }'
