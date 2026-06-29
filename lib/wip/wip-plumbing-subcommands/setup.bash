@@ -101,6 +101,29 @@ wip_plumbing_cmd_setup() {
       ;;
   esac
 
+  # Conservative-write guard (ADR-0020 / D-03.4): the vendored `setup agents`
+  # path must never clobber or be installed alongside a foreign host plugin's
+  # root `.claude-plugin/plugin.json` (one wip does not own). On a foreign hit,
+  # refuse with a drift-style exit (rc=4, write NOTHING) and steer the operator
+  # to `--source plugin` — the path for repos that are themselves plugins, which
+  # writes no root manifest and relies on the globally-enabled wip plugin. This
+  # is VENDORED-PATH-ONLY: `--source plugin` legitimately owns a foreign root
+  # manifest and must never be refused here. Wired at the seam where Chunk 3's
+  # vendored render+write loop lands, so the guard fires before any write.
+  if [[ "$sub" == "agents" && "$source_mode" == "vendored" ]] &&
+    _wip_setup_agents_foreign_plugin "$root"; then
+    local guard_path=".claude-plugin/plugin.json"
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "setup $sub" --arg path "$guard_path" '
+        {ok:false, verb:$verb,
+         error:{code:4, kind:"foreign-plugin-manifest",
+                message:"refusing to vendor agents over a foreign root .claude-plugin/plugin.json (wip does not own it); re-run with `--source plugin` to rely on the globally-enabled wip plugin instead",
+                paths:[$path]}}'
+    fi
+    printf 'wip-plumbing: setup %s: foreign root .claude-plugin/plugin.json present; re-run with --source plugin\n' "$sub" >&2
+    exit 4
+  fi
+
   local raw rc
   set +e
   if [[ "$sub" == "lds" && "$sentinel_only" == "1" ]]; then
@@ -222,6 +245,24 @@ wip_setup_sentinel_for_verb() {
     lds) printf 'engineering/.lds-manifest.yaml' ;;
     *) printf '' ;;
   esac
+}
+
+# _wip_setup_agents_foreign_plugin <root> — true (rc 0) iff a root
+# `.claude-plugin/plugin.json` exists whose `.name` is NOT `wip` (a host plugin
+# wip does not own); false (rc 1) when the manifest is absent or its `.name` is
+# `wip`. Drives the vendored `setup agents` conservative-write guard (ADR-0020
+# / D-03.4): a foreign root manifest signals the repo is itself a plugin, so the
+# vendored path must refuse and steer to `--source plugin` rather than clobber
+# the host manifest. Reads JSON via `jq` (the repo idiom — cf. doctor/setup);
+# an unparseable or nameless manifest reads as a non-`wip` name and is therefore
+# treated as foreign (conservative: refuse rather than risk a clobber).
+_wip_setup_agents_foreign_plugin() {
+  local root="$1"
+  local manifest="$root/.claude-plugin/plugin.json"
+  [[ -f "$manifest" ]] || return 1
+  local name
+  name="$(jq -r '.name // ""' "$manifest" 2>/dev/null || printf '')"
+  [[ "$name" != "wip" ]]
 }
 
 # _wip_setup_lds_sentinel_only <tmpl-root> <dest-root> — write ONLY the LDS
