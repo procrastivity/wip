@@ -28,7 +28,16 @@ initiatives:
     tracker_map: { step-01: BDS-90, step-02: BDS-91, step-03: BDS-92, step-04: BDS-93 }
     roadmap: .wip/initiatives/demo/roadmap.md
 YAML
-printf '# Roadmap — demo\n\n## Round 1 — One\n\n- **s** — x.\n' >"$tmp/.wip/initiatives/demo/roadmap.md"
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One
+
+- **step-01 — First** — x. [tracker: BDS-90]
+- **step-02 — Second** — x. [tracker: BDS-91]
+- **step-03 — Third** — x. [tracker: BDS-92]
+- **step-04 — Fourth** — x. [tracker: BDS-93]
+MD
 # wip cache: step-01 in-review (ahead), step-02 in-progress (==), step-03 todo
 # (tracker ahead), step-04 mapped but NO cache entry.
 _wip_tracker_cache_set "$tmp" "demo/step-01" "in-review" "ship" "2026-06-28" >/dev/null
@@ -88,6 +97,31 @@ assert_eq "none" "$(jq -r '.transport' <<<"$(WIP_ROOT="$tmp" $WIP sync solo)")" 
   "sync solo (no tracker match) -> transport none"
 assert_eq "mcp" "$(jq -r '.transport' <<<"$(WIP_ROOT="$tmp" $WIP sync linear)")" \
   "sync linear -> reconciles the tracker"
+
+tmpG="$(wip_mktemp)"
+mkdir -p "$tmpG/.wip/initiatives/demo"
+cat >"$tmpG/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip }, issue-tracker: { enabled: true, backend: github } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+printf '# Roadmap — demo\n\n## Round 1 — One\n\n- **step-01 — First** — x.\n' \
+  >"$tmpG/.wip/initiatives/demo/roadmap.md"
+assert_eq "none" "$(jq -r '.transport' <<<"$(WIP_ROOT="$tmpG" $WIP sync linear)")" \
+  "sync linear does not match a non-linear backend"
+
+# --- stale mirror guard ------------------------------------------------------
+WIP_ROOT="$tmp" yq -i '.initiatives[0].tracker_map["step-01"] = "BDS-999"' "$tmp/.wip.yaml"
+set +e
+drift="$(WIP_ROOT="$tmp" WIP_LINEAR_READ_CMD="$tmp/read.sh" WIP_LINEAR_WRITE_CMD="$tmp/write.sh" $WIP sync 2>/dev/null)"
+drc=$?
+set -e
+assert_eq "4" "$drc" "sync refuses stale tracker mirror"
+assert_eq "tracker-mirror-drift" "$(jq -r '.error.kind' <<<"$drift")" "sync drift error kind"
 
 # --- error envelopes --------------------------------------------------------
 set +e

@@ -207,7 +207,7 @@ wip_plumbing_cmd_doctor() {
           lissue="$(jq -r '.issue' <<<"$b")"
           lexpected="$(jq -r '.target_state // ""' <<<"$b")"
           [[ -n "$lexpected" ]] || continue # no cached state to compare
-          lactual="$(bash -c "$lread_cmd $lissue" 2>/dev/null || true)"
+          lactual="$(bash -c "$lread_cmd \"\$1\"" _ "$lissue" 2>/dev/null || true)"
           [[ -n "$lactual" ]] || continue # tracker didn't answer -> non-actionable
           [[ "$lactual" == "$lexpected" ]] && continue
           obj="$(jq -nc --arg slug "$lslug" --arg node "$lnode" --arg issue "$lissue" \

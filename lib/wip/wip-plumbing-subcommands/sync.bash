@@ -51,7 +51,11 @@ wip_plumbing_cmd_sync() {
   # `sync solo linear` lists both, only the tracker is reconciled in this verb).
   if [[ ${#services[@]} -gt 0 ]]; then
     local want=0 s
-    for s in "${services[@]}"; do [[ "$s" == "$backend" || "$s" == "linear" ]] && want=1; done
+    for s in "${services[@]}"; do
+      if [[ "$s" == "$backend" ]] || [[ "$s" == "linear" && "$backend" == "linear" ]]; then
+        want=1
+      fi
+    done
     [[ "$want" == "1" ]] || {
       jq -nc --arg slug "$slug" --arg backend "$backend" \
         '{ok:true, initiative:$slug, backend:(if $backend=="" then null else $backend end),
@@ -59,6 +63,16 @@ wip_plumbing_cmd_sync() {
           note:"no requested service matched the issue-tracker backend"}'
       return 0
     }
+  fi
+
+  local roadmap_path doc rmap mmap
+  roadmap_path="$(jq -r '.roadmap // empty' <<<"$init_record")"
+  [[ -n "$roadmap_path" ]] || roadmap_path=".wip/initiatives/$slug/roadmap.md"
+  doc="$(wip_roadmap_parse "$root/$roadmap_path")"
+  rmap="$(_wip_tracker_map_from_roadmap "$doc")"
+  mmap="$(_wip_tracker_map_from_manifest "$mj" "$slug")"
+  if ! jq -ne --argjson a "$rmap" --argjson b "$mmap" '$a == $b' >/dev/null; then
+    wip_die 4 tracker-mirror-drift "sync: tracker mirror drift; run wip tracker map $slug --write" "$roadmap_path"
   fi
 
   local write_cmd read_cmd bind transport="mcp"
@@ -87,7 +101,7 @@ wip_plumbing_cmd_sync() {
     tracker_sem=""
     tracker_rank=-1
     if [[ -n "$read_cmd" ]]; then
-      actual="$(bash -c "$read_cmd $issue" 2>/dev/null || true)"
+      actual="$(bash -c "$read_cmd \"\$1\"" _ "$issue" 2>/dev/null || true)"
       if [[ -n "$actual" ]]; then
         tracker_sem="$(_wip_tracker_provider_to_semantic "$backend" "$actual")"
         tracker_rank="$(_wip_tracker_semantic_rank "$tracker_sem")"
@@ -114,7 +128,7 @@ wip_plumbing_cmd_sync() {
     local row
     row="$(jq -nc --arg n "$node" --arg i "$issue" --arg to "$target" '{node:$n, issue:$i, to:$to}')"
     if [[ -n "$write_cmd" && "$dry_run" != "1" ]]; then
-      if bash -c "$write_cmd $issue \"$target\"" >/dev/null 2>&1; then
+      if bash -c "$write_cmd \"\$1\" \"\$2\"" _ "$issue" "$target" >/dev/null 2>&1; then
         applied="$(jq -nc --argjson a "$applied" --argjson r "$row" '$a + [$r]')"
       else
         skipped="$(jq -nc --argjson a "$skipped" --arg n "$node" --arg i "$issue" \

@@ -58,7 +58,7 @@ assert_eq "in-review" "$(cache_state "$tmp")" "ship advances cache floor to in-r
 # --- forge stand-down suppresses the ship intent (one writer) ---------------
 tmpF="$(wip_mktemp)"
 mkfx "$tmpF" --forge
-shF="$(WIP_ROOT="$tmpF" $WIP ship demo step-01)"
+shF="$(WIP_ROOT="$tmpF" WIP_FORGE_STATUS_CMD=true $WIP ship demo step-01)"
 assert_eq "stood-down" "$(jq -r '.transition' <<<"$shF")" "forge -> transition stood-down"
 assert_eq "null" "$(jq -r '.intent // null' <<<"$shF")" "forge stand-down -> no ship intent emitted"
 assert_eq "NOFILE" "$(cache_state "$tmpF")" "forge stand-down -> ship writes no cache"
