@@ -206,12 +206,19 @@ assert_eq "2" "$rc" "missing subcommand exit 2"
 
 # --- 15. setup lds — template fidelity (maintenance/*.md) -------------------
 # Maintenance .md files ship verbatim from the LDS distribution; any drift here
-# means the templates/setup/lds/ tree needs a refresh.
-for m in audit refine sync update; do
-  assert_cmp "templates/setup/lds/engineering/maintenance/$m.md" \
-    "layered-documentation-system/maintenance/$m.md" \
-    "lds maintenance/$m.md byte-equal to LDS distribution"
-done
+# means the templates/setup/lds/ tree needs a refresh. The upstream
+# distribution (layered-documentation-system/) is gitignored — absent on a
+# fresh CI checkout, and there is no tracked second copy to diff against — so
+# guard-skip when it is absent.
+if [[ -d layered-documentation-system/maintenance ]]; then
+  for m in audit refine sync update; do
+    assert_cmp "templates/setup/lds/engineering/maintenance/$m.md" \
+      "layered-documentation-system/maintenance/$m.md" \
+      "lds maintenance/$m.md byte-equal to LDS distribution"
+  done
+else
+  printf '  skip (CI: gitignored layered-documentation-system/ absent) — LDS-distribution fidelity (4 asserts)\n'
+fi
 
 # Seed manifest is yq-parseable + has the validator-required shape
 mapfile -t M < <(yq -o=json '.' templates/setup/lds/engineering/.lds-manifest.yaml |
