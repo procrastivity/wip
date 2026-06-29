@@ -22,3 +22,4 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0015](./0015-setup-agents-commands-generated-from-plugin.md) | setup-agents command copies are generated-but-committed from the canonical plugin `commands/` |
 | [0016](./0016-closeout-write-contract.md) | closeout-write contract: top-level `wip-plumbing ship <slug> <step-id>` marks the step shipped + clears `active_step`, idempotent, two-stub/two-file seam |
 | [0017](./0017-test-harness-stay-homegrown-no-bats.md) | Test harness stays on the homegrown bash assert library; do not adopt Bats (parallelism already won, bottleneck is CLI-invocation count not the harness) |
+| [0018](./0018-forge-observation-surface.md) | Forge observation surface: wip *observes* `gh`/`glab` state (no `wip push`); a `forge` verb + `status --probe-forge`; observed state → transition intent (merged → Done); Tier-0 `ship` stands down when a forge owns the transition |
