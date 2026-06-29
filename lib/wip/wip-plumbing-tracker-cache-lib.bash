@@ -45,3 +45,24 @@ _wip_tracker_cache_set() {
   printf '%s\n' "$next" >"$tmp" && mv -f "$tmp" "$f"
   jq -c --arg k "$key" '.[$k]' <<<"$next"
 }
+
+# _wip_tracker_emit_intent <root> <slug> <node-id> <to> <reason> <date> — record
+# a lifecycle intent in the cache floor and echo it as {node, to, reason}. This
+# is the provider-agnostic intent (ADR-0019 §A) a boundary command emits; the
+# Round 4 transport binds it to a provider call. Writing the cache IS the
+# emission for the headless Tier-0 path.
+_wip_tracker_emit_intent() {
+  local root="$1" slug="$2" node="$3" to="$4" reason="$5" date="$6"
+  _wip_tracker_cache_set "$root" "$slug/$node" "$to" "$reason" "$date" >/dev/null
+  jq -nc --arg node "$slug/$node" --arg to "$to" --arg reason "$reason" \
+    '{ node: $node, to: $to, reason: $reason }'
+}
+
+# _wip_tracker_enabled <manifest-json> — echo "true" iff issue-tracker is the
+# declared, enabled feature; "false" otherwise. The gate boundary commands check
+# before emitting a lifecycle intent.
+_wip_tracker_enabled() {
+  local v
+  v="$(jq -r '.features["issue-tracker"].enabled // false' <<<"$1")"
+  [[ "$v" == "true" ]] && printf 'true' || printf 'false'
+}

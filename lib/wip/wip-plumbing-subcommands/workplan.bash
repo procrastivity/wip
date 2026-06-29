@@ -156,6 +156,19 @@ _wip_workplan_cmd_init() {
     [[ "$astatus" == "updated" ]] && manifest_updated=".wip.yaml"
   fi
 
+  # Tier-0 lifecycle: starting a step is the In-Progress boundary (ADR-0019 §A).
+  # When issue-tracker is enabled, --activate emits an {to:in-progress,
+  # reason:start} intent into the cache floor. Headless — no transport, no forge.
+  # Skipped under --dry-run (writes nothing).
+  local intent="null"
+  if [[ "$activate" == "1" && "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+      intent="$(_wip_tracker_emit_intent "$root" "$slug" "$step_id" "in-progress" "start" "$(wip_scaffold_now)")"
+    else
+      intent="$(jq -nc --arg n "$slug/$step_id" '{node:$n, to:"in-progress", reason:"start"}')"
+    fi
+  fi
+
   # Write (overwrite when --force, else write_or_skip would refuse — but we
   # already gated that above). Skipped under --dry-run.
   if [[ "$will_write" == "1" && "${WIP_DRY_RUN:-0}" != "1" ]]; then
@@ -180,11 +193,13 @@ _wip_workplan_cmd_init() {
     --arg slug "$slug" --arg step "$step_id" \
     --argjson wrote "$wrote" --argjson skipped "$skipped" \
     --arg activate "$activate" --arg mu "$manifest_updated" \
+    --argjson intent "$intent" \
     --arg dry "${WIP_DRY_RUN:-0}" '
     { ok: true, slug: $slug, step: $step, wrote: $wrote }
     + (if ($skipped | length) > 0 then { skipped: $skipped } else {} end)
     + (if $activate == "1" then { active_step: $step } else {} end)
     + (if $mu != "" then { manifest_updated: $mu } else {} end)
+    + (if $intent != null then { intent: $intent } else {} end)
     + (if $dry == "1" then { dry_run: true } else {} end)
   '
 }
