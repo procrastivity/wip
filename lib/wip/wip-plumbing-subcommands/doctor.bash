@@ -219,6 +219,34 @@ wip_plumbing_cmd_doctor() {
     fi
   fi
 
+  # 2f. Unfiled tracker items (BRIEF §7) — deferred / backlog entries with no
+  #     `[tracker: ID]` mapping, surfaced as an INFORMATIONAL suggestion to file
+  #     them (never auto-filed, never drift: status stays "ok" so doctor does not
+  #     fail). Only when issue-tracker is enabled and an in-flight initiative has
+  #     unfiled items.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local urec uslug ustatus urpath udoc uitems ucount
+    while IFS= read -r urec; do
+      [[ -n "$urec" ]] || continue
+      uslug="$(jq -r '.slug // ""' <<<"$urec")"
+      [[ -n "$uslug" ]] || continue
+      ustatus="$(jq -r '.status // ""' <<<"$urec")"
+      [[ "$ustatus" == "shipped" || "$ustatus" == "archived" ]] && continue
+      urpath="$(jq -r '.roadmap // empty' <<<"$urec")"
+      [[ -n "$urpath" ]] || urpath=".wip/initiatives/$uslug/roadmap.md"
+      udoc="$(wip_roadmap_parse "$root/$urpath")"
+      uitems="$(jq -c '
+        [ (.deferred[]? | . + {source:"deferred"}), (.backlog[]? | . + {source:"backlog"}) ]
+        | map(select(.tracker == null) | {id, title, source})' <<<"$udoc")"
+      ucount="$(jq 'length' <<<"$uitems")"
+      [[ "$ucount" -gt 0 ]] || continue
+      obj="$(jq -nc --arg slug "$uslug" --argjson items "$uitems" --argjson count "$ucount" \
+        '{kind:"tracker-unfiled", slug:$slug, status:"ok", count:$count, items:$items,
+          message:"deferred/backlog items not filed as tracker issues (suggestion; never auto-filed)"}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+  fi
+
   # 3. Root collision: lds and diataxis must not share a root.
   local collide
   collide="$(printf '%s' "$mj" | jq -r '

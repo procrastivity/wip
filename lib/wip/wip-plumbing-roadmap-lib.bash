@@ -160,10 +160,12 @@ wip_roadmap_parse() {
       backlog)
         if [[ "$line" =~ ^-\ \*\*([^*]+)\*\*(.*)$ ]]; then
           local btitle="${BASH_REMATCH[1]}"
-          local bid
+          local brest="${BASH_REMATCH[2]}"
+          local bid btrk
           bid="$(_wip_roadmap_slugify "$btitle")"
-          doc="$(jq -c --arg id "$bid" --arg title "$btitle" '
-            .backlog += [{id:$id, title:$title}]' <<<"$doc")"
+          btrk="$(_wip_roadmap_extract_tracker "$brest")"
+          doc="$(jq -c --arg id "$bid" --arg title "$btitle" --arg trk "$btrk" '
+            .backlog += [{id:$id, title:$title, tracker:(if $trk == "" then null else $trk end)}]' <<<"$doc")"
         fi
         ;;
       deferred)
@@ -172,10 +174,12 @@ wip_roadmap_parse() {
         # bullets under `## Deferred` are not collected, same as backlog.
         if [[ "$line" =~ ^-\ \*\*([^*]+)\*\*(.*)$ ]]; then
           local dtitle="${BASH_REMATCH[1]}"
-          local did
+          local drest="${BASH_REMATCH[2]}"
+          local did dtrk
           did="$(_wip_roadmap_slugify "$dtitle")"
-          doc="$(jq -c --arg id "$did" --arg title "$dtitle" '
-            .deferred += [{id:$id, title:$title}]' <<<"$doc")"
+          dtrk="$(_wip_roadmap_extract_tracker "$drest")"
+          doc="$(jq -c --arg id "$did" --arg title "$dtitle" --arg trk "$dtrk" '
+            .deferred += [{id:$id, title:$title, tracker:(if $trk == "" then null else $trk end)}]' <<<"$doc")"
         fi
         ;;
     esac

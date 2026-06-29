@@ -216,6 +216,19 @@ wip_plumbing_cmd_status() {
   local deferred
   deferred="$(jq -c '.deferred' <<<"$doc")"
 
+  # unfiled_tracker_items: deferred + backlog entries with no `[tracker: ID]`
+  # mapping — candidate work not yet filed as a tracker issue (BRIEF §7). A
+  # SUGGESTION only (never auto-filed); surfaced solely when issue-tracker is
+  # enabled. Each carries its source so the user knows where it lives.
+  local unfiled="[]"
+  if [[ "$tracker_available" == "true" ]]; then
+    unfiled="$(jq -c '
+      [ (.deferred[]? | . + {source:"deferred"}),
+        (.backlog[]?  | . + {source:"backlog"}) ]
+      | map(select(.tracker == null) | {id, title, source})
+    ' <<<"$doc")"
+  fi
+
   jq -nc \
     --arg slug "$slug" --arg status "$status_field" \
     --argjson round "$round" --argjson active_step "$active_step" \
@@ -226,6 +239,7 @@ wip_plumbing_cmd_status() {
     --argjson forge_reachable "$forge_reachable" \
     --argjson tracker_available "$tracker_available" \
     --argjson tracker_state "$tracker_state" \
+    --argjson unfiled "$unfiled" \
     --argjson deferred "$deferred" \
     --argjson signals "$signals" '
     {
@@ -242,6 +256,7 @@ wip_plumbing_cmd_status() {
       forge_reachable: $forge_reachable,
       tracker_available: $tracker_available,
       tracker_state: $tracker_state,
+      unfiled_tracker_items: $unfiled,
       deferred: $deferred,
       signals: $signals
     }'
