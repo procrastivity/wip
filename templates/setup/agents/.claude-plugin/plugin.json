@@ -1,7 +1,7 @@
 {
   "name": "wip",
   "description": "wip — distill workflows; ranked next actions, status, and intake shaping from inside Claude Code.",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "author": {
     "name": "Beau Simensen",
     "email": "beau@beausimensen.com"

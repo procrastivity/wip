@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.15] - 2026-06-29
+
+### Added
+
+- Step-lifecycle step-01: ADR-0019 — the wip ⇄ tracker lifecycle contract
+- Step-lifecycle step-02: issue-tracker feature + tracker: node mapping
+- Step-lifecycle step-03: cache-as-floor lifecycle-state lib
+- Step-lifecycle step-04: Tier-0 lifecycle intent emission at boundaries
+- Step-lifecycle step-05: review command surface (list + complete + slashes)
+- Step-lifecycle step-06: tracker transport adapter (bind plan + state map)
+- Step-lifecycle step-07: doctor --probe-linear (Lane A, read-only drift)
+- Step-lifecycle step-08: wip sync push-forward reconciler (Lane B)
+- Step-lifecycle step-09: surface unfiled deferred/backlog items
+
+### Other
+
+- Step 1: add test/run parallel runner with fail-aggregation + --serial
+- Step 1: WIP_TEST_TIMING slowest-N timing report
+- Step 1: repoint make test at parallel runner + lint test/run
+- Step 1: add test/run regression + baseline/guardrail proof
+- Step 2: add CI workflow (Nix + make check) on push/PR
+- Step 3: add fixture builders to test/helpers.sh
+- Step 3: migrate test-next.sh to fixture builders (count 52 unchanged)
+- Step 3: make wip_mktemp subshell-safe (tracking file + source-time trap)
+- Step 3: migrate test-status.sh to fixture builders (count 43 unchanged)
+- Step 3: migrate test-doctor-closeout.sh to fixture builders (count 22 unchanged)
+- Step 3: migrate test-orchestrate-prep.sh to fixture builders (count 50 unchanged)
+- Step 3: migrate test-graduate.sh to wip_mktemp (count 37 unchanged)
+- Step 4 (R1): port folded-into-lead case into test-wip-intake-bundle (count 43->52)
+- Step 4 (R1): remove test-wip-intake-bundle-roundtrip; coverage merged into test-wip-intake-bundle (suite 43->42 files, intentional)
+- Step 5 · Task 1: test-extract jq-collapse (C1) — count 175 unchanged
+- Step 5 · Task 2: test-wip-intake-bundle jq-collapse (C3) — count 52 unchanged
+- Step 5 · Task 3: test-setup jq/yq-collapse (C4) — count 133 unchanged
+- Step 5 · Task 4: test-roadmap-amend jq-collapse (C5) — count 57 unchanged
+- Step 5 · Task 5: test-wip-bundle jq-collapse (C6) — count 42 unchanged
+- Step 5 · Task 6: test-glossary jq-collapse (C7) — count 58 unchanged
+- Step 6 · Task 1: author ADR-0017 — stay on homegrown harness, no Bats
+- Step 7 · Task 1: test-glossary.sh hermetic — §3 fixture + §13 CI guard
+- Step 7 · Task 2: test-setup.sh §15 guard-skip LDS fidelity in CI
+- Forge-surface step-01: ADR-0018 — the forge observation surface
+- Forge-surface step-02: forge transport seam (gh/glab wrapper)
+- Forge-surface step-03: status --probe-forge + forge-unreachable (Lane A)
+- Forge-surface step-04: forge observe verb + ship stand-down (Lane B)
+- Refine forge transition ownership
+- Harden tracker sync transport
+
 ## [0.0.14] - 2026-06-28
 
 ### Documentation
