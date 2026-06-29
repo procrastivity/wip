@@ -89,6 +89,21 @@ wip_flatten_parse_template() {
   return 0
 }
 
+# --- Chunk 3: O3 dangling-cross-link seam -----------------------------------
+
+# wip_flatten_neutralize_links — the O3 seam. O3 (dangling cross-links left in
+# inlined role bodies) is RATIFIED as LEAVE-INERT for v1, so this is the
+# IDENTITY transform: it reads stdin and writes it to stdout byte-for-byte,
+# unchanged. Leaving links inert maximizes the round-trip determinism step-05's
+# drift gate depends on (D6/D7): the rendered file is an LLM prompt, not a
+# served page, so relative links are read as text, and population-(1) targets
+# are inlined elsewhere in the same document anyway.
+#
+# This is the single, localized seam (D7): if Lane A's ADR later switches O3 to
+# strip or anchor-rewrite, it is an additive change confined to THIS function —
+# never a renderer rewrite. Do not strip or anchor-rewrite here in v1.
+wip_flatten_neutralize_links() { cat; }
+
 # --- Chunk 2: roles/backend resolution + the inliner ------------------------
 
 # _wip_flatten_roles_dir — echo the roles/ directory, resolved exactly like
@@ -208,13 +223,16 @@ wip_flatten_render() {
   # Fixed emit order (D5): framing + shared.md + <role>.md + tier-policy.md +
   # backends/<backend>.md, with the verbatim frontmatter ahead of the framing.
   # The active.md seam collapses by reading backends/<backend>.md directly.
+  # Each inlined body passes through the O3 neutralize-links seam (identity in
+  # v1, D7) before normalization. The frontmatter + framing come from the
+  # template verbatim and are NOT passed through the seam (D4).
   local -a sections=()
   sections+=("$(_wip_flatten_frontmatter "$template" | _wip_flatten_trim)")
   sections+=("$(_wip_flatten_framing "$template" | _wip_flatten_trim)")
-  sections+=("$(_wip_flatten_trim <"$shared")")
-  sections+=("$(_wip_flatten_trim <"$rolebody")")
-  sections+=("$(_wip_flatten_trim <"$tier")")
-  sections+=("$(_wip_flatten_trim <"$backendfile")")
+  sections+=("$(wip_flatten_neutralize_links <"$shared" | _wip_flatten_trim)")
+  sections+=("$(wip_flatten_neutralize_links <"$rolebody" | _wip_flatten_trim)")
+  sections+=("$(wip_flatten_neutralize_links <"$tier" | _wip_flatten_trim)")
+  sections+=("$(wip_flatten_neutralize_links <"$backendfile" | _wip_flatten_trim)")
 
   _wip_flatten_join "${sections[@]}"
 }
