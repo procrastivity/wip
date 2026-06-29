@@ -91,14 +91,15 @@ roadmap="$tmp/.wip/initiatives/tc/roadmap.md"
 mk_repo
 rm -f "$tmp/bundle.md"
 out="$(RUN "$tmp/spine.md" "$tmp/spa.md" --yes)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out")" "assemble ok"
-assert_eq "bundle" "$(jq -r '.verb' <<<"$out")" "verb bundle"
-assert_eq "$tmp/bundle.md" "$(jq -r '.manifest' <<<"$out")" "manifest in common parent"
-assert_eq "amendment" "$(jq -r '.lead_as' <<<"$out")" "lead_as amendment"
-assert_eq "tc" "$(jq -r '.target' <<<"$out")" "target tc"
-assert_eq "spine.md,spa.md" "$(jq -r '[.children[].path] | join(",")' <<<"$out")" "children basenames"
-assert_eq "A" "$(jq -r '.children[0].lane' <<<"$out")" "child lane A surfaced"
-assert_eq "$tmp/bundle.md" "$(jq -r '.wrote[0]' <<<"$out")" "wrote the manifest"
+mapfile -t F < <(jq -r '.ok, .verb, .manifest, .lead_as, .target, ([.children[].path]|join(",")), .children[0].lane, .wrote[0]' <<<"$out")
+assert_eq "true" "${F[0]}" "assemble ok"
+assert_eq "bundle" "${F[1]}" "verb bundle"
+assert_eq "$tmp/bundle.md" "${F[2]}" "manifest in common parent"
+assert_eq "amendment" "${F[3]}" "lead_as amendment"
+assert_eq "tc" "${F[4]}" "target tc"
+assert_eq "spine.md,spa.md" "${F[5]}" "children basenames"
+assert_eq "A" "${F[6]}" "child lane A surfaced"
+assert_eq "$tmp/bundle.md" "${F[7]}" "wrote the manifest"
 assert_file "$tmp/bundle.md" "bundle.md exists on disk"
 assert_grep "wip-kind: bundle" "$tmp/bundle.md" "manifest carries wip-kind: bundle"
 # Assemble alone does NOT touch the roadmap (no --intake).
@@ -125,19 +126,21 @@ EOF
 out2="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   WIP_PROVIDER_CMD="bash $tmp/dispatch-sub.sh" \
   bin/wip bundle "$tmp/a/x.md" "$tmp/b/y.md" --yes 2>/dev/null)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out2")" "subdir assemble ok"
-assert_eq "$tmp/bundle.md" "$(jq -r '.manifest' <<<"$out2")" "subdir manifest at common parent"
-assert_eq "a/x.md,b/y.md" "$(jq -r '[.children[].path] | join(",")' <<<"$out2")" "child paths keep subdir prefix"
+mapfile -t F2 < <(jq -r '.ok, .manifest, ([.children[].path]|join(","))' <<<"$out2")
+assert_eq "true" "${F2[0]}" "subdir assemble ok"
+assert_eq "$tmp/bundle.md" "${F2[1]}" "subdir manifest at common parent"
+assert_eq "a/x.md,b/y.md" "${F2[2]}" "child paths keep subdir prefix"
 
 # 3. --intake chains into the explode and fans out lead + 2 lane children.
 mk_repo
 rm -f "$tmp/bundle.md"
 out3="$(RUN "$tmp/spine.md" "$tmp/spa.md" --yes --intake)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out3")" "intake-chain ok"
-assert_eq "true" "$(jq -r '.intake.ok' <<<"$out3")" "intake envelope ok"
-assert_eq "bundle" "$(jq -r '.intake.kind' <<<"$out3")" "intake kind bundle"
-assert_eq "true" "$(jq -r '.intake.lead.ok' <<<"$out3")" "intake lead applied"
-assert_eq "2" "$(jq -r '.intake.summary.applied' <<<"$out3")" "intake fanned out 2 children"
+mapfile -t F3 < <(jq -r '.ok, .intake.ok, .intake.kind, .intake.lead.ok, .intake.summary.applied' <<<"$out3")
+assert_eq "true" "${F3[0]}" "intake-chain ok"
+assert_eq "true" "${F3[1]}" "intake envelope ok"
+assert_eq "bundle" "${F3[2]}" "intake kind bundle"
+assert_eq "true" "${F3[3]}" "intake lead applied"
+assert_eq "2" "${F3[4]}" "intake fanned out 2 children"
 assert_grep "## Round 2 — Track expansion" "$roadmap" "round 2 added by explode"
 assert_grep "### Lane A" "$roadmap" "Lane A heading"
 assert_grep "### Lane D" "$roadmap" "Lane D heading"
@@ -165,9 +168,10 @@ assert_eq "bundle-input-unreadable" "$(jq -r '.error.kind' <<<"$out5")" "unreada
 mk_repo
 rm -f "$tmp/bundle.md"
 out6="$(RUN "$tmp/spine.md" "$tmp/spa.md" --yes --dry-run)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out6")" "dry-run ok"
-assert_eq "true" "$(jq -r '.dry_run' <<<"$out6")" "dry-run flag"
-assert_eq "0" "$(jq -r '.wrote | length' <<<"$out6")" "dry-run wrote nothing in envelope"
+mapfile -t F6 < <(jq -r '.ok, .dry_run, (.wrote|length)' <<<"$out6")
+assert_eq "true" "${F6[0]}" "dry-run ok"
+assert_eq "true" "${F6[1]}" "dry-run flag"
+assert_eq "0" "${F6[2]}" "dry-run wrote nothing in envelope"
 assert_absent "$tmp/bundle.md" "dry-run left no manifest on disk"
 
 # 7. Nested-bundle child refused: a child declaring kind: bundle fails that
@@ -187,8 +191,9 @@ out7="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   bin/wip bundle "$tmp/spine.md" "$tmp/spa.md" --yes --intake 2>/dev/null)"
 rc=$?
 set -e
-assert_eq "false" "$(jq -r '.ok' <<<"$out7")" "nested-bundle -> aggregate not ok"
-assert_eq "nested-bundle" "$(jq -r '[.intake.children[] | select(.ok==false) | .result.error.kind][0]' <<<"$out7")" "nested-bundle child error kind"
+mapfile -t F7 < <(jq -r '.ok, ([.intake.children[]|select(.ok==false)|.result.error.kind][0])' <<<"$out7")
+assert_eq "false" "${F7[0]}" "nested-bundle -> aggregate not ok"
+assert_eq "nested-bundle" "${F7[1]}" "nested-bundle child error kind"
 
 # 8. Bad --lead-as → exit 2 usage.
 set +e
