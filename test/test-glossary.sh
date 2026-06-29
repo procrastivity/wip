@@ -71,10 +71,15 @@ YAML
 }
 
 # ---------------------------------------------------------------------------
-# 3. Assemble (this repo's actual manifest) — header + dividers + bodies.
+# 3. Assemble (representative manifest fixture) — header + dividers + bodies.
+#    Was the real repo manifest; that walks up for the gitignored .wip.yaml
+#    (absent in CI → exit 4). A solo/orch fixture yields byte-identical output
+#    for every assertion below, so all of §3 still runs in CI.
 # ---------------------------------------------------------------------------
+tmp_repo="$(make_tmp_repo solo false false true)"
 out_file="$SCRATCH/repo-assemble.md"
-bin/wip-plumbing glossary assemble >"$out_file"
+WIP_ROOT="$tmp_repo" WIP_TEMPLATES_DIR="$tmp_repo/templates" \
+  bin/wip-plumbing glossary assemble >"$out_file"
 
 assert_eq "# wip — Effective Glossary (this project)" "$(head -1 "$out_file")" "H1 line"
 # shellcheck disable=SC2016
@@ -273,13 +278,20 @@ assert_eq "2" "$rc_ns" "no subcommand exit 2"
 
 # ---------------------------------------------------------------------------
 # 13. Pre-commit hook regression guard — committed tree's glossary is fresh.
+#     Reads the real (gitignored) .wip.yaml + .wip/GLOSSARY.md; both are absent
+#     on a fresh CI checkout. This block's purpose IS validating the real
+#     committed artifact, so it cannot be made hermetic — guard-skip in CI.
 # ---------------------------------------------------------------------------
-set +e
-out_repo="$(bin/wip-plumbing glossary check 2>/dev/null)"
-rc_repo=$?
-set -e
-assert_eq "0" "$rc_repo" "repo's committed glossary exits 0 against check"
-assert_eq "false" "$(jq -r '.drift' <<<"$out_repo")" "repo's committed glossary has no drift"
+if [[ -f .wip.yaml && -f .wip/GLOSSARY.md ]]; then
+  set +e
+  out_repo="$(bin/wip-plumbing glossary check 2>/dev/null)"
+  rc_repo=$?
+  set -e
+  assert_eq "0" "$rc_repo" "repo's committed glossary exits 0 against check"
+  assert_eq "false" "$(jq -r '.drift' <<<"$out_repo")" "repo's committed glossary has no drift"
+else
+  printf '  skip (CI: gitignored .wip.yaml/.wip/GLOSSARY.md absent) — committed-glossary freshness guard\n'
+fi
 
 # ---------------------------------------------------------------------------
 # 14. LDS partial — positive inclusion, ordering after solo, header strip.
