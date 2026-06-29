@@ -27,6 +27,39 @@ _wip_tracker_provider_state() {
   esac
 }
 
+# _wip_tracker_semantic_rank <semantic> — the lifecycle order used to keep `sync`
+# push-forward-only: todo(0) < in-progress(1) < in-review(2) < done(3). Unknown
+# or canceled → -1 (never an automatic forward target).
+_wip_tracker_semantic_rank() {
+  case "$1" in
+    todo) printf '0' ;;
+    in-progress) printf '1' ;;
+    in-review) printf '2' ;;
+    'done') printf '3' ;;
+    *) printf -- '-1' ;;
+  esac
+}
+
+# _wip_tracker_provider_to_semantic <backend> <provider-state> — the reverse of
+# _wip_tracker_provider_state: a provider's concrete state name → wip's semantic
+# vocabulary, so `sync` can rank the tracker's current state. Unknown → empty.
+_wip_tracker_provider_to_semantic() {
+  local backend="$1" ps="$2"
+  case "$backend" in
+    linear)
+      case "$ps" in
+        Todo) printf 'todo' ;;
+        "In Progress") printf 'in-progress' ;;
+        "In Review") printf 'in-review' ;;
+        Done) printf 'done' ;;
+        Canceled) printf 'canceled' ;;
+        *) ;;
+      esac
+      ;;
+    *) printf '%s' "$ps" ;;
+  esac
+}
+
 # _wip_tracker_bind_plan <root> <mj> <slug> [<node>] — echo a JSON array of bind
 # plans, one per mapped node (or just <node> when given). Each:
 #   {node, issue, semantic_state, target_state}

@@ -70,7 +70,7 @@ for verb in deps direnv hygiene release agents; do
     direnv) expected=1 ;;  # .envrc
     hygiene) expected=1 ;; # .pre-commit-config.yaml
     release) expected=2 ;; # cliff.toml + CHANGELOG.md
-    agents) expected=15 ;; # 4 agents + 8 commands + agents/README + plugin/README + plugin.json
+    agents) expected=16 ;; # 4 agents + 9 commands + agents/README + plugin/README + plugin.json
   esac
   assert_eq "$expected" "$wrote_n" "[$verb] wrote $expected files"
   assert_eq "0" "${F[2]}" "[$verb] no refusals"

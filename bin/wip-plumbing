@@ -119,7 +119,7 @@ fi
 set -- "${_wip_filtered_args[@]+"${_wip_filtered_args[@]}"}"
 
 case "$cmd" in
-  detect | doctor | project | init | intake | status | next | roadmap | workplan | orchestrate | template | glossary | setup | graduate | extract | ship | forge | tracker | review)
+  detect | doctor | project | init | intake | status | next | roadmap | workplan | orchestrate | template | glossary | setup | graduate | extract | ship | forge | tracker | review | sync)
     # shellcheck disable=SC1090
     source "$WIP_LIB/wip-plumbing-subcommands/$cmd.bash"
     "wip_plumbing_cmd_$cmd" "$@"

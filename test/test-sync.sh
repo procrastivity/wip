@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+_WIP_TEST_NAME="sync"
+# shellcheck source=test/helpers.sh
+source test/helpers.sh
+
+# step-08 (Lane B, ADR-0019 §6): wip sync — a PUSH-FORWARD-ONLY reconciler.
+# Forwards wip→tracker transitions that advance the lifecycle; never backward;
+# a tracker ahead is observed (visibility), never mutated; no write transport ⇒
+# the forward plan is emitted as `pending` for the agent/MCP path. WIP_LINEAR_
+# {READ,WRITE}_CMD are the seams.
+
+export WIP_NO_REGISTRY=1
+# shellcheck source=lib/wip/wip-plumbing-tracker-cache-lib.bash
+source lib/wip/wip-plumbing-tracker-cache-lib.bash
+WIP=bin/wip-plumbing
+
+tmp="$(wip_mktemp)"
+mkdir -p "$tmp/.wip/initiatives/demo"
+cat >"$tmp/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip }, issue-tracker: { enabled: true, backend: linear } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    tracker_map: { step-01: BDS-90, step-02: BDS-91, step-03: BDS-92, step-04: BDS-93 }
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+printf '# Roadmap — demo\n\n## Round 1 — One\n\n- **s** — x.\n' >"$tmp/.wip/initiatives/demo/roadmap.md"
+# wip cache: step-01 in-review (ahead), step-02 in-progress (==), step-03 todo
+# (tracker ahead), step-04 mapped but NO cache entry.
+_wip_tracker_cache_set "$tmp" "demo/step-01" "in-review" "ship" "2026-06-28" >/dev/null
+_wip_tracker_cache_set "$tmp" "demo/step-02" "in-progress" "start" "2026-06-28" >/dev/null
+_wip_tracker_cache_set "$tmp" "demo/step-03" "todo" "x" "2026-06-28" >/dev/null
+# tracker side: BDS-90 Todo (behind), BDS-91 In Progress (==), BDS-92 In Review (ahead).
+cat >"$tmp/tracker.json" <<'J'
+{"BDS-90":"Todo","BDS-91":"In Progress","BDS-92":"In Review"}
+J
+cat >"$tmp/read.sh" <<SH
+#!/bin/sh
+jq -r --arg i "\$1" '.[\$i] // ""' "$tmp/tracker.json"
+SH
+chmod +x "$tmp/read.sh"
+cat >"$tmp/write.sh" <<SH
+#!/bin/sh
+echo "\$1=\$2" >> "$tmp/writes.log"
+SH
+chmod +x "$tmp/write.sh"
+
+# --- no write transport -> everything forward is pending (agent/MCP path) ----
+p="$(WIP_ROOT="$tmp" $WIP sync)"
+assert_eq "mcp" "$(jq -r '.transport' <<<"$p")" "no write transport -> transport mcp"
+assert_eq "0" "$(jq -r '.applied | length' <<<"$p")" "mcp path applies nothing"
+# step-01/02/03 are forward-or-unknown (no read either) -> pending; step-04 no state.
+assert_eq "3" "$(jq -r '.pending | length' <<<"$p")" "mcp path: 3 forward transitions pending"
+assert_eq "no wip state" "$(jq -r '.skipped[] | select(.node=="demo/step-04") | .reason' <<<"$p")" \
+  "unmapped-in-cache node -> skipped no wip state"
+
+# --- read+write transport: apply / skip / observe ---------------------------
+rm -f "$tmp/writes.log"
+s="$(WIP_ROOT="$tmp" WIP_LINEAR_READ_CMD="$tmp/read.sh" WIP_LINEAR_WRITE_CMD="$tmp/write.sh" $WIP sync)"
+assert_eq "cli" "$(jq -r '.transport' <<<"$s")" "wired write -> transport cli"
+# step-01: wip in-review, tracker Todo -> forward applied.
+assert_eq "demo/step-01" "$(jq -r '.applied[0].node' <<<"$s")" "step-01 applied (forward)"
+assert_eq "In Review" "$(jq -r '.applied[0].to' <<<"$s")" "step-01 applied to In Review"
+assert_eq "BDS-90=In Review" "$(cat "$tmp/writes.log")" "the transition was actually written"
+# step-02: wip == tracker -> skipped in sync.
+assert_eq "in sync" "$(jq -r '.skipped[] | select(.node=="demo/step-02") | .reason' <<<"$s")" \
+  "step-02 in sync -> skipped"
+# step-03: tracker In Review ahead of wip todo -> observed, NOT moved backward.
+assert_eq "demo/step-03" "$(jq -r '.observed[0].node' <<<"$s")" "step-03 tracker-ahead -> observed"
+assert_eq "in-review" "$(jq -r '.observed[0].tracker_state' <<<"$s")" "observed records the tracker state"
+assert_eq "0" "$(jq -r '[.applied[] | select(.node=="demo/step-03")] | length' <<<"$s")" \
+  "tracker-ahead node is never written (push-forward only)"
+
+# --- dry-run: forward plan is pending, nothing written ----------------------
+rm -f "$tmp/writes.log"
+d="$(WIP_ROOT="$tmp" WIP_LINEAR_READ_CMD="$tmp/read.sh" WIP_LINEAR_WRITE_CMD="$tmp/write.sh" $WIP sync --dry-run)"
+assert_eq "true" "$(jq -r '.dry_run' <<<"$d")" "dry-run flagged"
+assert_eq "0" "$(jq -r '.applied | length' <<<"$d")" "dry-run applies nothing"
+assert_eq "demo/step-01" "$(jq -r '.pending[0].node' <<<"$d")" "dry-run: forward move is pending"
+assert_eq "false" "$([[ -f "$tmp/writes.log" ]] && echo true || echo false)" "dry-run wrote nothing"
+
+# --- service selection ------------------------------------------------------
+assert_eq "none" "$(jq -r '.transport' <<<"$(WIP_ROOT="$tmp" $WIP sync solo)")" \
+  "sync solo (no tracker match) -> transport none"
+assert_eq "mcp" "$(jq -r '.transport' <<<"$(WIP_ROOT="$tmp" $WIP sync linear)")" \
+  "sync linear -> reconciles the tracker"
+
+# --- error envelopes --------------------------------------------------------
+set +e
+WIP_ROOT="$tmp" $WIP sync --initiative nope >/dev/null 2>&1
+assert_eq "3" "$?" "unknown initiative -> exit 3"
+WIP_ROOT="$tmp" $WIP sync --initiative >/dev/null 2>&1
+assert_eq "2" "$?" "--initiative without arg -> exit 2"
+set -e
+
+test_summary
