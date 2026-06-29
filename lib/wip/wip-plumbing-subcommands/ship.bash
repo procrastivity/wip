@@ -83,14 +83,19 @@ wip_plumbing_cmd_ship() {
 
   # Tier-0/Tier-1 stand-down (ADR-0018). ship's DISK writes above are unchanged
   # and un-gated (ADR-0016). What stands down is only the *transition intent*:
-  # when a forge owns the transition (features.forge.enabled), the forge
-  # observation is the single transition writer, so ship reports
-  # `transition: stood-down` instead of its Tier-0 In-Review drive — no
-  # double-fire. With no forge, ship carries the Tier-0 `in-review` intent (the
-  # Linear write that consumes it is BDS-20's).
+  # when a reachable forge owns the transition (features.forge.enabled + a
+  # successful liveness probe), forge observation is the single transition writer,
+  # so ship reports `transition: stood-down` instead of its Tier-0 In-Review drive
+  # — no double-fire. With no forge, ship carries the Tier-0 `in-review` intent
+  # (the Linear write that consumes it is BDS-20's).
   local transition="in-review"
   if [[ "$(jq -r '.features.forge.enabled // false' <<<"$mj")" == "true" ]]; then
-    transition="stood-down"
+    local fcli fcmd
+    fcli="$(_wip_forge_detect)"
+    fcmd="$(_wip_forge_status_cmd "$fcli")"
+    if [[ -n "$fcmd" ]] && _wip_forge_run "$fcmd" >/dev/null 2>&1; then
+      transition="stood-down"
+    fi
   fi
 
   # Locked flat JSON ledger (mirrors `workplan init`'s emit style), extended with

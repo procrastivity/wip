@@ -139,7 +139,8 @@ _Post-acceptance notes from the lanes that landed against this contract._
 - **ADR-0018 extended the ledger with a `transition` field.** The forge-surface
   initiative (step-04) added one key to ship's flat ledger: `transition`, which
   is `stood-down` when a forge owns the lifecycle transition
-  (`features.forge.enabled`) and `in-review` otherwise. This does **not** change
+  (`features.forge.enabled` plus a successful liveness probe) and `in-review`
+  otherwise. This does **not** change
   ship's un-gated disk-write behavior — the marker + `active_step` writes are
   unchanged; only the (forward-looking, BDS-20-consumed) transition *intent*
   stands down, so the forge observation stays the single transition writer (no

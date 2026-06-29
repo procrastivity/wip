@@ -66,7 +66,7 @@ assert_eq "http://gl/1" "$(jq -r '.observed.url' <<<"$o4")" "glab web_url normal
 # --- no PR / forge didn't answer (cmd exits nonzero) ------------------------
 o5="$(WIP_ROOT="$tmp" WIP_FORGE_OBSERVE_CMD="false" bin/wip-plumbing forge observe --branch feat)"
 assert_eq "none" "$(jq -r '.intent' <<<"$o5")" "no PR -> intent none"
-assert_eq "false" "$(jq -r '.forge.reachable' <<<"$o5")" "no PR -> reachable false"
+assert_eq "null" "$(jq -r '.forge.reachable' <<<"$o5")" "no PR -> reachability unknown"
 assert_eq "null" "$(jq -r '.observed' <<<"$o5")" "no PR -> observed null"
 
 # --- forge_available echo: declared vs not ----------------------------------

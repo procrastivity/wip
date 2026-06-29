@@ -77,7 +77,8 @@ _wip_forge_cmd_observe() {
   fi
 
   # Transport: detect CLI, resolve the observe command, run it. A non-zero exit
-  # or empty output = "the forge didn't answer / no PR" (reachable false).
+  # or empty output means "no PR / no answer" for observation purposes; liveness
+  # belongs to `status --probe-forge`, so do not collapse that into unreachable.
   local cli observe_cmd raw="" reachable="null"
   cli="$(_wip_forge_detect)"
   observe_cmd="$(_wip_forge_observe_cmd "$cli" "$branch")"
@@ -85,7 +86,6 @@ _wip_forge_cmd_observe() {
     if raw="$(_wip_forge_run "$observe_cmd")" && [[ -n "$raw" ]]; then
       reachable="true"
     else
-      reachable="false"
       raw=""
     fi
   fi

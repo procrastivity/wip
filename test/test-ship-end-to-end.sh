@@ -195,12 +195,17 @@ assert_eq "step-01" "$(active_step_of demo)" "D noop+skipped: non-matching point
 # ---------------------------------------------------------------------------
 setup_e2e
 WIP_ROOT="$tmp" yq -i '.features.forge.enabled = true' "$manifest"
-out="$(run demo step-02)"
+out="$(WIP_FORGE_STATUS_CMD=true run demo step-02)"
 assert_eq "stood-down" "$(jq -r '.transition' <<<"$out")" "E: transition stood-down (forge owns it)"
 assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "E: disk write unchanged — marked_shipped updated"
 assert_eq "updated" "$(jq -r '.active_step_cleared' <<<"$out")" "E: disk write unchanged — active_step cleared"
 assert_eq '- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.' \
   "$(step02_line)" "E: roadmap bullet still marked despite stand-down"
 assert_eq "" "$(active_step_of demo)" "E: active_step still cleared despite stand-down"
+
+setup_e2e
+WIP_ROOT="$tmp" yq -i '.features.forge.enabled = true' "$manifest"
+out="$(WIP_FORGE_STATUS_CMD=false run demo step-02)"
+assert_eq "in-review" "$(jq -r '.transition' <<<"$out")" "F: unreachable forge leaves Tier-0 transition active"
 
 test_summary
