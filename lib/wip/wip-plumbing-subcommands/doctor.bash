@@ -3,11 +3,12 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_doctor() {
-  local fix=0 probe_solo=0
+  local fix=0 probe_solo=0 probe_linear=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --fix) fix=1 ;;
       --probe-solo) probe_solo=1 ;;
+      --probe-linear) probe_linear=1 ;;
       *) wip_die 2 usage "doctor: unknown arg: $1" ;;
     esac
     shift
@@ -96,6 +97,30 @@ wip_plumbing_cmd_doctor() {
     done < <(jq -c '.[]' <<<"$steps")
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
 
+  # 2d. Tracker mapping mirror drift (ADR-0019 §C). The roadmap's `[tracker: ID]`
+  #     keys are the source of truth; `.wip.yaml`'s initiative `tracker_map` is a
+  #     writer-generated mirror. Disagreement is drift, fixable with
+  #     `wip tracker map <slug> --write`. Pure-disk (roadmap + manifest); scoped
+  #     to in-flight/proposed initiatives like 2b. Quiet when both are empty.
+  local trec tslug tstatus trpath tdoc rmap mmap
+  while IFS= read -r trec; do
+    [[ -n "$trec" ]] || continue
+    tslug="$(jq -r '.slug // ""' <<<"$trec")"
+    [[ -n "$tslug" ]] || continue
+    tstatus="$(jq -r '.status // ""' <<<"$trec")"
+    [[ "$tstatus" == "shipped" || "$tstatus" == "archived" ]] && continue
+    trpath="$(jq -r '.roadmap // empty' <<<"$trec")"
+    [[ -n "$trpath" ]] || trpath=".wip/initiatives/$tslug/roadmap.md"
+    tdoc="$(wip_roadmap_parse "$root/$trpath")"
+    rmap="$(_wip_tracker_map_from_roadmap "$tdoc")"
+    mmap="$(_wip_tracker_map_from_manifest "$mj" "$tslug")"
+    [[ "$rmap" == "{}" && "$mmap" == "{}" ]] && continue
+    jq -ne --argjson a "$rmap" --argjson b "$mmap" '$a == $b' >/dev/null && continue
+    obj="$(jq -nc --arg slug "$tslug" --arg fix "run wip tracker map $tslug --write" \
+      '{kind:"tracker", slug:$slug, status:"tracker-mirror-drift", fix:$fix}')"
+    checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+  done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
   # 2c. Ledger drift (opt-in `--probe-solo`). A shipped step must leave no open
   #     `<slug>/step-NN` ledger entry — the invariant documented in
   #     roles/shared.md §Ledger Ownership & Completion and completed at the
@@ -154,6 +179,72 @@ wip_plumbing_cmd_doctor() {
         message:"solo ledger probe requested but the Solo project could not be resolved"}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
     fi
+  fi
+
+  # 2e. Tracker live drift (opt-in `--probe-linear`). A READ-ONLY live probe of
+  #     the issue tracker, mirroring `--probe-solo`/`--probe-forge`: for each
+  #     mapped node, compare the tracker's reported state to wip's expected
+  #     (cached → provider) state. A concrete mismatch is drift; the tracker not
+  #     answering (empty read / no transport wired) is non-actionable — a down
+  #     tracker never fails doctor. WIP_LINEAR_READ_CMD is the transport seam
+  #     (test/CLI), invoked as `<cmd> <issue>`; without it the MCP path is
+  #     agent-side, so plumbing records an informational unavailable note.
+  if [[ "$probe_linear" == "1" ]] && [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local lbackend lread_cmd lslug lbind b lnode lissue lexpected lactual
+    lbackend="$(jq -r '.features["issue-tracker"].backend // ""' <<<"$mj")"
+    lread_cmd="$(_wip_tracker_transport_read_cmd "$lbackend")"
+    if [[ -z "$lread_cmd" ]]; then
+      obj="$(jq -nc '{kind:"tracker-probe", status:"ok", probe:"unavailable",
+        message:"linear probe requested but no read transport is wired (MCP path is agent-side, not a plumbing shell-out; CLI transport is BDS-23)"}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    else
+      while IFS= read -r lslug; do
+        [[ -n "$lslug" ]] || continue
+        lbind="$(_wip_tracker_bind_plan "$root" "$mj" "$lslug")"
+        while IFS= read -r b; do
+          [[ -n "$b" ]] || continue
+          lnode="$(jq -r '.node' <<<"$b")"
+          lissue="$(jq -r '.issue' <<<"$b")"
+          lexpected="$(jq -r '.target_state // ""' <<<"$b")"
+          [[ -n "$lexpected" ]] || continue # no cached state to compare
+          lactual="$(bash -c "$lread_cmd \"\$1\"" _ "$lissue" 2>/dev/null || true)"
+          [[ -n "$lactual" ]] || continue # tracker didn't answer -> non-actionable
+          [[ "$lactual" == "$lexpected" ]] && continue
+          obj="$(jq -nc --arg slug "$lslug" --arg node "$lnode" --arg issue "$lissue" \
+            --arg expected "$lexpected" --arg actual "$lactual" \
+            '{kind:"tracker-probe", slug:$slug, node:$node, issue:$issue, status:"tracker-state-drift", expected:$expected, actual:$actual}')"
+          checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+        done < <(jq -c '.[]' <<<"$lbind")
+      done < <(printf '%s' "$mj" | jq -r '.initiatives[]?.slug')
+    fi
+  fi
+
+  # 2f. Unfiled tracker items (BRIEF §7) — deferred / backlog entries with no
+  #     `[tracker: ID]` mapping, surfaced as an INFORMATIONAL suggestion to file
+  #     them (never auto-filed, never drift: status stays "ok" so doctor does not
+  #     fail). Only when issue-tracker is enabled and an in-flight initiative has
+  #     unfiled items.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local urec uslug ustatus urpath udoc uitems ucount
+    while IFS= read -r urec; do
+      [[ -n "$urec" ]] || continue
+      uslug="$(jq -r '.slug // ""' <<<"$urec")"
+      [[ -n "$uslug" ]] || continue
+      ustatus="$(jq -r '.status // ""' <<<"$urec")"
+      [[ "$ustatus" == "shipped" || "$ustatus" == "archived" ]] && continue
+      urpath="$(jq -r '.roadmap // empty' <<<"$urec")"
+      [[ -n "$urpath" ]] || urpath=".wip/initiatives/$uslug/roadmap.md"
+      udoc="$(wip_roadmap_parse "$root/$urpath")"
+      uitems="$(jq -c '
+        [ (.deferred[]? | . + {source:"deferred"}), (.backlog[]? | . + {source:"backlog"}) ]
+        | map(select(.tracker == null) | {id, title, source})' <<<"$udoc")"
+      ucount="$(jq 'length' <<<"$uitems")"
+      [[ "$ucount" -gt 0 ]] || continue
+      obj="$(jq -nc --arg slug "$uslug" --argjson items "$uitems" --argjson count "$ucount" \
+        '{kind:"tracker-unfiled", slug:$slug, status:"ok", count:$count, items:$items,
+          message:"deferred/backlog items not filed as tracker issues (suggestion; never auto-filed)"}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
   # 3. Root collision: lds and diataxis must not share a root.

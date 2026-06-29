@@ -98,16 +98,33 @@ wip_plumbing_cmd_ship() {
     fi
   fi
 
+  # Tier-0 lifecycle (ADR-0019 §A): ship is the In-Review boundary. When
+  # issue-tracker is enabled AND ship still owns the transition (Tier-0, i.e. not
+  # stood down for a forge), emit an {to:in-review, reason:ship} intent into the
+  # cache floor — generalizing the `transition` field this verb already carried.
+  # Exactly one writer: under stand-down ship emits nothing (the forge owns it).
+  # Skipped under --dry-run.
+  local intent="null"
+  if [[ "$transition" == "in-review" && "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    if [[ "$dry_run" != "1" ]]; then
+      intent="$(_wip_tracker_emit_intent "$root" "$slug" "$step_id" "in-review" "ship" "$shipped_date")"
+    else
+      intent="$(jq -nc --arg n "$slug/$step_id" '{node:$n, to:"in-review", reason:"ship"}')"
+    fi
+  fi
+
   # Locked flat JSON ledger (mirrors `workplan init`'s emit style), extended with
-  # `transition` per ADR-0018. `dry_run` key present only under --dry-run.
+  # `transition` (ADR-0018) and the lifecycle `intent` (ADR-0019). `dry_run` key
+  # present only under --dry-run; `intent` only when emitted.
   jq -nc \
     --arg slug "$slug" --arg step "$step_id" --arg date "$shipped_date" \
     --arg ms "$marked_shipped" --arg asc "$active_step_cleared" \
-    --arg transition "$transition" \
+    --arg transition "$transition" --argjson intent "$intent" \
     --argjson changed "$changed" --arg dry "$dry_run" '
     { ok: true, slug: $slug, step: $step, shipped_date: $date,
       marked_shipped: $ms, active_step_cleared: $asc, changed: $changed,
       transition: $transition }
+    + (if $intent != null then { intent: $intent } else {} end)
     + (if $dry == "1" then { dry_run: true } else {} end)
   '
 }

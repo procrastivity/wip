@@ -177,6 +177,14 @@ wip_features_json() {
         | { force_tier: .force_tier, fallback_tool: .fallback_tool }
         | with_entries(select(.value != null))
         | if length == 0 then null else . end')"
+    elif [[ "$name" == "issue-tracker" ]]; then
+      # Config echo of the named provider backend (ADR-0019 §B), parallel to
+      # orchestration's backend. No resolution — "declared", not "answering".
+      detail="$(printf '%s' "$mj" | jq -c '
+        (.features["issue-tracker"] // {})
+        | { backend: .backend }
+        | with_entries(select(.value != null))
+        | if length == 0 then null else . end')"
     fi
     if [[ -n "$sentinel" ]]; then
       if [[ -e "$root/$sentinel" ]]; then exists="true"; else exists="false"; fi
