@@ -97,13 +97,14 @@ roadmap="$tmp/.wip/initiatives/tc/roadmap.md"
 # 1. Full explode: lead + 2 lane children, aggregate ok.
 mk_repo
 out="$(RUN)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out")" "explode ok"
-assert_eq "bundle" "$(jq -r '.kind' <<<"$out")" "kind bundle"
-assert_eq "tc" "$(jq -r '.target' <<<"$out")" "target tc"
-assert_eq "true" "$(jq -r '.lead.ok' <<<"$out")" "lead applied"
-assert_eq "2" "$(jq -r '.summary.children' <<<"$out")" "2 children"
-assert_eq "2" "$(jq -r '.summary.applied' <<<"$out")" "2 applied"
-assert_eq "true" "$(jq -r '[.children[].ok] | all' <<<"$out")" "all children ok"
+mapfile -t F < <(jq -r '.ok, .kind, .target, .lead.ok, .summary.children, .summary.applied, ([.children[].ok]|all)' <<<"$out")
+assert_eq "true" "${F[0]}" "explode ok"
+assert_eq "bundle" "${F[1]}" "kind bundle"
+assert_eq "tc" "${F[2]}" "target tc"
+assert_eq "true" "${F[3]}" "lead applied"
+assert_eq "2" "${F[4]}" "2 children"
+assert_eq "2" "${F[5]}" "2 applied"
+assert_eq "true" "${F[6]}" "all children ok"
 
 # On disk: lane-shaped round 2.
 assert_grep "## Round 2 — Track expansion" "$roadmap" "round 2 added"
@@ -115,11 +116,12 @@ assert_grep "step-04 — Track A: core.document spine" "$roadmap" "step-04 in ro
 assert_grep "step-05 — Track D: SPA usability v1" "$roadmap" "step-05 in roadmap"
 
 P="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$roadmap")"
-assert_eq '["A","D"]' "$(jq -c '[.rounds[]|select(.n==2)|.lanes[]]' <<<"$P")" "round 2 lanes [A,D]"
-assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-04")][0].lane' <<<"$P")" "step-04 lane A"
-assert_eq "D" "$(jq -r '[.rounds[].steps[]|select(.id=="step-05")][0].lane' <<<"$P")" "step-05 lane D"
-assert_eq "null" "$(jq -r '[.rounds[].steps[]|select(.id=="step-03")][0].lane' <<<"$P")" "step-03 (F1) main lane"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$P")" "no lane errors"
+mapfile -t F < <(jq -rc '[.rounds[]|select(.n==2)|.lanes[]], ([.rounds[].steps[]|select(.id=="step-04")][0].lane), ([.rounds[].steps[]|select(.id=="step-05")][0].lane), ([.rounds[].steps[]|select(.id=="step-03")][0].lane), (.lane_errors|length)' <<<"$P")
+assert_eq '["A","D"]' "${F[0]}" "round 2 lanes [A,D]"
+assert_eq "A" "${F[1]}" "step-04 lane A"
+assert_eq "D" "${F[2]}" "step-05 lane D"
+assert_eq "null" "${F[3]}" "step-03 (F1) main lane"
+assert_eq "0" "${F[4]}" "no lane errors"
 
 # Source child docs are untouched.
 assert_grep "SPINEDOC" "$tmp/spine.md" "spine.md untouched"
@@ -138,10 +140,11 @@ assert_eq "$before" "$after" "re-apply idempotent (roadmap unchanged)"
 # 3. --dry-run fans out without writing.
 mk_repo
 out3="$(RUN --dry-run)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out3")" "dry-run ok"
-assert_eq "true" "$(jq -r '.dry_run' <<<"$out3")" "dry-run flag"
-assert_eq "true" "$(jq -r '.lead.ok' <<<"$out3")" "dry-run lead valid"
-assert_eq "2" "$(jq -r '.summary.applied' <<<"$out3")" "dry-run fanned out 2 children"
+mapfile -t F < <(jq -r '.ok, .dry_run, .lead.ok, .summary.applied' <<<"$out3")
+assert_eq "true" "${F[0]}" "dry-run ok"
+assert_eq "true" "${F[1]}" "dry-run flag"
+assert_eq "true" "${F[2]}" "dry-run lead valid"
+assert_eq "2" "${F[3]}" "dry-run fanned out 2 children"
 assert_not_grep "## Round 2 — Track expansion" "$roadmap" "dry-run wrote nothing"
 
 # 4. Topo order honors depends-on: spine.md depends-on spa.md, so spa (D)
@@ -172,9 +175,10 @@ out5="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   WIP_PROVIDER_CMD="bash $tmp/dispatch-nested.sh" \
   bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
 set -e
-assert_eq "false" "$(jq -r '.ok' <<<"$out5")" "nested bundle -> aggregate not ok"
-assert_eq "false" "$(jq -r '[.children[].ok] | all' <<<"$out5")" "nested-bundle child failed"
-assert_eq "nested-bundle" "$(jq -r '[.children[] | select(.ok==false) | .result.error.kind][0]' <<<"$out5")" "nested-bundle error kind"
+mapfile -t F < <(jq -r '.ok, ([.children[].ok]|all), ([.children[]|select(.ok==false)|.result.error.kind][0])' <<<"$out5")
+assert_eq "false" "${F[0]}" "nested bundle -> aggregate not ok"
+assert_eq "false" "${F[1]}" "nested-bundle child failed"
+assert_eq "nested-bundle" "${F[2]}" "nested-bundle error kind"
 
 # 6. --kind bundle is accepted by the porcelain flag validator.
 set +e
@@ -199,12 +203,14 @@ EOF
 out7="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   WIP_PROVIDER_CMD="bash $tmp/dispatch-isil.sh" \
   bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out7")" "isil-hint child: explode ok"
-assert_eq "null" "$(jq -r '.children[0].skipped' <<<"$out7")" "isil-hint child not folded"
-assert_eq "true" "$(jq -r '.children[0].ok' <<<"$out7")" "isil-hint child applied"
+mapfile -t F < <(jq -r '.ok, .children[0].skipped, .children[0].ok' <<<"$out7")
+assert_eq "true" "${F[0]}" "isil-hint child: explode ok"
+assert_eq "null" "${F[1]}" "isil-hint child not folded"
+assert_eq "true" "${F[2]}" "isil-hint child applied"
 P7="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$roadmap")"
-assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-04")][0].lane' <<<"$P7")" "isil-hint step-04 in lane A"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$P7")" "isil-hint: no lane errors"
+mapfile -t F < <(jq -r '([.rounds[].steps[]|select(.id=="step-04")][0].lane), (.lane_errors|length)' <<<"$P7")
+assert_eq "A" "${F[0]}" "isil-hint step-04 in lane A"
+assert_eq "0" "${F[1]}" "isil-hint: no lane errors"
 
 # 8. A brief lead carries no target:; children still get the slug the lead
 #    creates (derived from the lead artifact). (regression: PR review P1)
@@ -232,9 +238,10 @@ EOF
 out8="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   WIP_PROVIDER_CMD="bash $tmp/dispatch-brief.sh" \
   bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out8")" "brief-lead bundle ok"
-assert_eq "newproj" "$(jq -r '.target' <<<"$out8")" "brief-lead derives slug newproj"
-assert_eq "newproj" "$(jq -r '.children[0].result.target' <<<"$out8")" "child targets the derived slug (not empty)"
+mapfile -t F < <(jq -r '.ok, .target, .children[0].result.target' <<<"$out8")
+assert_eq "true" "${F[0]}" "brief-lead bundle ok"
+assert_eq "newproj" "${F[1]}" "brief-lead derives slug newproj"
+assert_eq "newproj" "${F[2]}" "child targets the derived slug (not empty)"
 assert_grep "step-01 — Track A spine" "$tmp/.wip/initiatives/newproj/roadmap.md" "child applied to the new initiative"
 
 # 9. Folded-into-lead (F1): a 3-child bundle where the FIRST child carries no
@@ -261,18 +268,18 @@ EOF
 out9="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
   WIP_PROVIDER_CMD="bash $tmp/dispatch-fold.sh" \
   bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
-assert_eq "true" "$(jq -r '.ok' <<<"$out9")" "fold: explode ok"
-assert_eq "3" "$(jq -r '.summary.children' <<<"$out9")" "fold: 3 children in manifest"
-assert_eq "2" "$(jq -r '.summary.applied' <<<"$out9")" "fold: 2 applied (F1 folded)"
-assert_eq "folded-into-lead" \
-  "$(jq -r '[.children[] | select(.path=="tax.md") | .skipped][0]' <<<"$out9")" \
-  "fold: F1 child skipped folded-into-lead"
+mapfile -t F < <(jq -r '.ok, .summary.children, .summary.applied, ([.children[]|select(.path=="tax.md")|.skipped][0])' <<<"$out9")
+assert_eq "true" "${F[0]}" "fold: explode ok"
+assert_eq "3" "${F[1]}" "fold: 3 children in manifest"
+assert_eq "2" "${F[2]}" "fold: 2 applied (F1 folded)"
+assert_eq "folded-into-lead" "${F[3]}" "fold: F1 child skipped folded-into-lead"
 # On disk: F1 in the main lane, A/D children in their lanes, no lane errors.
 PF="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$roadmap")"
-assert_eq "null" "$(jq -r '[.rounds[].steps[]|select(.id=="step-03")][0].lane' <<<"$PF")" "fold: F1 step-03 main lane"
-assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-04")][0].lane' <<<"$PF")" "fold: step-04 lane A"
-assert_eq "D" "$(jq -r '[.rounds[].steps[]|select(.id=="step-05")][0].lane' <<<"$PF")" "fold: step-05 lane D"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$PF")" "fold: no lane errors"
+mapfile -t F < <(jq -r '([.rounds[].steps[]|select(.id=="step-03")][0].lane), ([.rounds[].steps[]|select(.id=="step-04")][0].lane), ([.rounds[].steps[]|select(.id=="step-05")][0].lane), (.lane_errors|length)' <<<"$PF")
+assert_eq "null" "${F[0]}" "fold: F1 step-03 main lane"
+assert_eq "A" "${F[1]}" "fold: step-04 lane A"
+assert_eq "D" "${F[2]}" "fold: step-05 lane D"
+assert_eq "0" "${F[3]}" "fold: no lane errors"
 assert_grep "MPTAXONOMY" "$tmp/tax.md" "fold: tax.md untouched"
 
 test_summary
