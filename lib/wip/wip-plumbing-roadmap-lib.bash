@@ -126,13 +126,16 @@ wip_roadmap_parse() {
           local srest="${BASH_REMATCH[4]}"
           local sshipped="false" sdate="" sdummy="$srest"
           _wip_roadmap_extract_shipped "$srest" sshipped sdate sdummy
+          local strk
+          strk="$(_wip_roadmap_extract_tracker "$srest")"
           doc="$(jq -c \
             --arg id "$sid" --arg title "$stitle" --arg lane "$current_lane" \
-            --argjson shipped "$sshipped" --arg sdate "$sdate" '
+            --argjson shipped "$sshipped" --arg sdate "$sdate" --arg trk "$strk" '
             .rounds[-1].steps += [{
               id: $id, title: $title, shipped: $shipped,
               shipped_date: (if $sdate == "" then null else $sdate end),
-              lane: (if $lane == "" then null else $lane end)
+              lane: (if $lane == "" then null else $lane end),
+              tracker: (if $trk == "" then null else $trk end)
             }]' <<<"$doc")"
           [[ -n "$current_lane" ]] && lane_saw_step=1
         elif [[ "$line" =~ ^\#\#\#\ step-([0-9]+(\.[0-9]+)?)\ —\ (.+)$ ]]; then
@@ -140,13 +143,16 @@ wip_roadmap_parse() {
           local stitle="${BASH_REMATCH[3]}"
           local sshipped="false" sdate="" sdummy="$stitle"
           _wip_roadmap_extract_shipped "$stitle" sshipped sdate sdummy
+          local strk
+          strk="$(_wip_roadmap_extract_tracker "$stitle")"
           doc="$(jq -c \
             --arg id "$sid" --arg title "$sdummy" --arg lane "$current_lane" \
-            --argjson shipped "$sshipped" --arg sdate "$sdate" '
+            --argjson shipped "$sshipped" --arg sdate "$sdate" --arg trk "$strk" '
             .rounds[-1].steps += [{
               id: $id, title: $title, shipped: $shipped,
               shipped_date: (if $sdate == "" then null else $sdate end),
-              lane: (if $lane == "" then null else $lane end)
+              lane: (if $lane == "" then null else $lane end),
+              tracker: (if $trk == "" then null else $trk end)
             }]' <<<"$doc")"
           [[ -n "$current_lane" ]] && lane_saw_step=1
         fi
@@ -219,6 +225,18 @@ _wip_roadmap_extract_shipped() {
     _date=""
     _title="$rest"
     _title="${_title%"${_title##*[![:space:]]}"}"
+  fi
+}
+
+# _wip_roadmap_extract_tracker <text> — echo the issue id from a
+# `[tracker: <ID>]` marker in <text>, or empty. <ID> is an uppercase tracker key
+# (letters, then `-`, then digits — e.g. BDS-22). First match wins. The bracketed
+# form keeps it unambiguous against prose and survives the shipped-marker strip
+# (ADR-0019 §C: the roadmap node body authors the key).
+_wip_roadmap_extract_tracker() {
+  local text="$1"
+  if [[ "$text" =~ \[tracker:\ *([A-Z][A-Z0-9]*-[0-9]+)\ *\] ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
   fi
 }
 

@@ -96,6 +96,30 @@ wip_plumbing_cmd_doctor() {
     done < <(jq -c '.[]' <<<"$steps")
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
 
+  # 2d. Tracker mapping mirror drift (ADR-0019 §C). The roadmap's `[tracker: ID]`
+  #     keys are the source of truth; `.wip.yaml`'s initiative `tracker_map` is a
+  #     writer-generated mirror. Disagreement is drift, fixable with
+  #     `wip tracker map <slug> --write`. Pure-disk (roadmap + manifest); scoped
+  #     to in-flight/proposed initiatives like 2b. Quiet when both are empty.
+  local trec tslug tstatus trpath tdoc rmap mmap
+  while IFS= read -r trec; do
+    [[ -n "$trec" ]] || continue
+    tslug="$(jq -r '.slug // ""' <<<"$trec")"
+    [[ -n "$tslug" ]] || continue
+    tstatus="$(jq -r '.status // ""' <<<"$trec")"
+    [[ "$tstatus" == "shipped" || "$tstatus" == "archived" ]] && continue
+    trpath="$(jq -r '.roadmap // empty' <<<"$trec")"
+    [[ -n "$trpath" ]] || trpath=".wip/initiatives/$tslug/roadmap.md"
+    tdoc="$(wip_roadmap_parse "$root/$trpath")"
+    rmap="$(_wip_tracker_map_from_roadmap "$tdoc")"
+    mmap="$(_wip_tracker_map_from_manifest "$mj" "$tslug")"
+    [[ "$rmap" == "{}" && "$mmap" == "{}" ]] && continue
+    jq -ne --argjson a "$rmap" --argjson b "$mmap" '$a == $b' >/dev/null && continue
+    obj="$(jq -nc --arg slug "$tslug" --arg fix "run wip tracker map $tslug --write" \
+      '{kind:"tracker", slug:$slug, status:"tracker-mirror-drift", fix:$fix}')"
+    checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+  done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
   # 2c. Ledger drift (opt-in `--probe-solo`). A shipped step must leave no open
   #     `<slug>/step-NN` ledger entry — the invariant documented in
   #     roles/shared.md §Ledger Ownership & Completion and completed at the

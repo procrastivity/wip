@@ -29,6 +29,8 @@ source "$WIP_LIB/wip-plumbing-ship-roadmap-lib.bash"
 source "$WIP_LIB/wip-plumbing-ship-manifest-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-forge-lib.bash
 source "$WIP_LIB/wip-plumbing-forge-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-tracker-lib.bash
+source "$WIP_LIB/wip-plumbing-tracker-lib.bash"
 
 WIP_JSON=1
 WIP_VERBOSE=0
@@ -113,7 +115,7 @@ fi
 set -- "${_wip_filtered_args[@]+"${_wip_filtered_args[@]}"}"
 
 case "$cmd" in
-  detect | doctor | project | init | intake | status | next | roadmap | workplan | orchestrate | template | glossary | setup | graduate | extract | ship | forge)
+  detect | doctor | project | init | intake | status | next | roadmap | workplan | orchestrate | template | glossary | setup | graduate | extract | ship | forge | tracker)
     # shellcheck disable=SC1090
     source "$WIP_LIB/wip-plumbing-subcommands/$cmd.bash"
     "wip_plumbing_cmd_$cmd" "$@"
