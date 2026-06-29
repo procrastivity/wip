@@ -197,6 +197,19 @@ wip_plumbing_cmd_status() {
     signals="$(jq -nc --argjson a "$signals" '$a + ["forge-unreachable"]')"
   fi
 
+  # tracker_available + tracker_state: the issue-tracker config echo (parallel to
+  # solo_available) and the active node's cached lifecycle state — the durable
+  # "cache-as-floor" read (BRIEF §3 / ADR-0019 §A). Live reachability
+  # (tracker_reachable) arrives with the Round 4 transport/probe; for now the
+  # cache is the floor. tracker_state is null when the active node is unmapped or
+  # the cache has no entry yet.
+  local tracker_available tracker_state="null"
+  tracker_available="$(jq -r '.features["issue-tracker"].enabled // false' <<<"$mj")"
+  [[ -n "$tracker_available" ]] || tracker_available="false"
+  if [[ -n "$active_step_id" ]]; then
+    tracker_state="$(_wip_tracker_cache_get "$root" "$slug/$active_step_id")"
+  fi
+
   # Deferred items (## Deferred in the roadmap) — informational, clearly
   # NOT-actionable context, surfaced so "where am I" can see consciously
   # postponed work without it ever being nominated as a next step (BDS-17).
@@ -211,6 +224,8 @@ wip_plumbing_cmd_status() {
     --argjson solo_reachable "$solo_reachable" \
     --argjson forge_available "$forge_available" \
     --argjson forge_reachable "$forge_reachable" \
+    --argjson tracker_available "$tracker_available" \
+    --argjson tracker_state "$tracker_state" \
     --argjson deferred "$deferred" \
     --argjson signals "$signals" '
     {
@@ -225,6 +240,8 @@ wip_plumbing_cmd_status() {
       solo_reachable: $solo_reachable,
       forge_available: $forge_available,
       forge_reachable: $forge_reachable,
+      tracker_available: $tracker_available,
+      tracker_state: $tracker_state,
       deferred: $deferred,
       signals: $signals
     }'

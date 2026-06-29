@@ -31,6 +31,8 @@ source "$WIP_LIB/wip-plumbing-ship-manifest-lib.bash"
 source "$WIP_LIB/wip-plumbing-forge-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-tracker-lib.bash
 source "$WIP_LIB/wip-plumbing-tracker-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-tracker-cache-lib.bash
+source "$WIP_LIB/wip-plumbing-tracker-cache-lib.bash"
 
 WIP_JSON=1
 WIP_VERBOSE=0
