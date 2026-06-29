@@ -1,0 +1,77 @@
+# wip-plumbing-tracker-transport-lib.bash — the issue-tracker transport adapter
+# (ADR-0019 §4, BRIEF §4). Plumbing stays pure: it resolves a provider-agnostic
+# lifecycle intent into a concrete **bind plan** (which issue, which provider
+# state) and resolves the read/write shell-out seams — but it never makes the
+# call. The agent/MCP path (default) executes the plan via the Linear MCP
+# connector; a wrap-the-CLI path is deferred to BDS-23. Tests inject the
+# WIP_LINEAR_{READ,WRITE}_CMD seams so the read/write paths never touch a network.
+# shellcheck shell=bash
+
+# _wip_tracker_provider_state <backend> <semantic> — map a semantic state
+# (todo|in-progress|in-review|done|canceled, ADR-0019 §B) to the provider's
+# concrete state name. Unknown backend → passthrough; unknown state → empty.
+_wip_tracker_provider_state() {
+  local backend="$1" sem="$2"
+  case "$backend" in
+    linear)
+      case "$sem" in
+        todo) printf 'Todo' ;;
+        in-progress) printf 'In Progress' ;;
+        in-review) printf 'In Review' ;;
+        'done') printf 'Done' ;;
+        canceled) printf 'Canceled' ;;
+        *) ;;
+      esac
+      ;;
+    *) printf '%s' "$sem" ;;
+  esac
+}
+
+# _wip_tracker_bind_plan <root> <mj> <slug> [<node>] — echo a JSON array of bind
+# plans, one per mapped node (or just <node> when given). Each:
+#   {node, issue, semantic_state, target_state}
+# issue comes from the `.wip.yaml` tracker_map mirror; semantic_state from the
+# cache floor (null when no cache entry); target_state from the provider mapping.
+# Nodes without a tracker mapping are skipped.
+_wip_tracker_bind_plan() {
+  local root="$1" mj="$2" slug="$3" only="${4:-}"
+  local backend mirror cache
+  backend="$(jq -r '.features["issue-tracker"].backend // ""' <<<"$mj")"
+  mirror="$(_wip_tracker_map_from_manifest "$mj" "$slug")"
+  cache="$(_wip_tracker_cache_read "$root")"
+
+  local out="[]" node issue sem target entry
+  while IFS=$'\t' read -r node issue; do
+    [[ -n "$node" ]] || continue
+    [[ -n "$only" && "$node" != "$only" ]] && continue
+    sem="$(jq -r --arg k "$slug/$node" '.[$k].state // ""' <<<"$cache")"
+    target="$(_wip_tracker_provider_state "$backend" "$sem")"
+    entry="$(jq -nc \
+      --arg node "$slug/$node" --arg issue "$issue" \
+      --arg sem "$sem" --arg target "$target" '
+      { node: $node, issue: $issue,
+        semantic_state: (if $sem == "" then null else $sem end),
+        target_state: (if $target == "" then null else $target end) }')"
+    out="$(jq -nc --argjson a "$out" --argjson e "$entry" '$a + [$e]')"
+  done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"$mirror")
+  printf '%s' "$out"
+}
+
+# _wip_tracker_transport_read_cmd <backend> — the live read shell-out for a
+# backend, or "" when none (the agent/MCP path). WIP_LINEAR_READ_CMD overrides
+# (test seam). No default CLI: the bare-CLI adapter is deferred to BDS-23.
+_wip_tracker_transport_read_cmd() {
+  case "$1" in
+    linear) printf '%s' "${WIP_LINEAR_READ_CMD:-}" ;;
+    *) ;;
+  esac
+}
+
+# _wip_tracker_transport_write_cmd <backend> — the live write shell-out for a
+# backend, or "" when none. WIP_LINEAR_WRITE_CMD overrides (test seam).
+_wip_tracker_transport_write_cmd() {
+  case "$1" in
+    linear) printf '%s' "${WIP_LINEAR_WRITE_CMD:-}" ;;
+    *) ;;
+  esac
+}
