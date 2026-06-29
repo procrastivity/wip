@@ -21,3 +21,4 @@ Locked, durable decisions behind `wip`, in MADR-minimal form. Graduated from the
 | [0014](./0014-solo-liveness-bash-probe.md) | Solo liveness is a bash probe (`status --probe-solo`); unreachable → warn + offer Task fallback |
 | [0015](./0015-setup-agents-commands-generated-from-plugin.md) | setup-agents command copies are generated-but-committed from the canonical plugin `commands/` |
 | [0016](./0016-closeout-write-contract.md) | closeout-write contract: top-level `wip-plumbing ship <slug> <step-id>` marks the step shipped + clears `active_step`, idempotent, two-stub/two-file seam |
+| [0017](./0017-test-harness-stay-homegrown-no-bats.md) | Test harness stays on the homegrown bash assert library; do not adopt Bats (parallelism already won, bottleneck is CLI-invocation count not the harness) |
