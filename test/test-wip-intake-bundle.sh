@@ -237,4 +237,42 @@ assert_eq "newproj" "$(jq -r '.target' <<<"$out8")" "brief-lead derives slug new
 assert_eq "newproj" "$(jq -r '.children[0].result.target' <<<"$out8")" "child targets the derived slug (not empty)"
 assert_grep "step-01 — Track A spine" "$tmp/.wip/initiatives/newproj/roadmap.md" "child applied to the new initiative"
 
+# 9. Folded-into-lead (F1): a 3-child bundle where the FIRST child carries no
+#    lane and no insert-step-in-lane hint, so the bundle shaper folds it into
+#    the lead's main-lane step instead of applying it as its own step. The other
+#    two children still apply to lanes A and D, so summary.applied == 2 while
+#    summary.children == 3. (ported from the bundle-roundtrip kickoff gate)
+mk_repo
+cat >"$tmp/tax.md" <<'MD'
+# Model-profile taxonomy MPTAXONOMY
+
+The shared prereq feeding every track.
+MD
+fold_bundle=$'---\nwip-kind: bundle\nlead-as: amendment\ntarget: tc\nappend-round: Track expansion\nchildren:\n  - path: tax.md\n    kind: amendment\n  - path: spine.md\n    kind: amendment\n    lane: A\n    depends-on: tax.md\n  - path: spa.md\n    kind: amendment\n    lane: D\n    depends-on: tax.md\ncross-cuts:\n  shared-seams:\n    - ChatRespondLoop prompt-assembly (touches Track A and Track D)\n  parallel-groups:\n    - [A, D]\n---\n# Track expansion\n\n## Round 2 — Track expansion\n\n- **step-03 — F1: model-profile taxonomy** — the shared prereq for both lanes.\n'
+mk "$fold_bundle" >"$tmp/respFold.json"
+# F1 (tax.md) is folded by the shaper, so it makes no shape call; only the two
+# applied children (SPINEDOC -> A, SPADOC -> D) route, else -> fold bundle.
+cat >"$tmp/dispatch-fold.sh" <<EOF
+req="\$(cat)"
+if printf '%s' "\$req" | grep -q SPINEDOC; then cat "$tmp/respA.json"
+elif printf '%s' "\$req" | grep -q SPADOC; then cat "$tmp/respD.json"
+else cat "$tmp/respFold.json"; fi
+EOF
+out9="$(WIP_ROOT="$tmp" TEST_BASE_URL=x TEST_API_KEY=y TEST_MODEL=m \
+  WIP_PROVIDER_CMD="bash $tmp/dispatch-fold.sh" \
+  bin/wip intake "$tmp/lead.md" --kind bundle --yes 2>/dev/null)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out9")" "fold: explode ok"
+assert_eq "3" "$(jq -r '.summary.children' <<<"$out9")" "fold: 3 children in manifest"
+assert_eq "2" "$(jq -r '.summary.applied' <<<"$out9")" "fold: 2 applied (F1 folded)"
+assert_eq "folded-into-lead" \
+  "$(jq -r '[.children[] | select(.path=="tax.md") | .skipped][0]' <<<"$out9")" \
+  "fold: F1 child skipped folded-into-lead"
+# On disk: F1 in the main lane, A/D children in their lanes, no lane errors.
+PF="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$roadmap")"
+assert_eq "null" "$(jq -r '[.rounds[].steps[]|select(.id=="step-03")][0].lane' <<<"$PF")" "fold: F1 step-03 main lane"
+assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-04")][0].lane' <<<"$PF")" "fold: step-04 lane A"
+assert_eq "D" "$(jq -r '[.rounds[].steps[]|select(.id=="step-05")][0].lane' <<<"$PF")" "fold: step-05 lane D"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$PF")" "fold: no lane errors"
+assert_grep "MPTAXONOMY" "$tmp/tax.md" "fold: tax.md untouched"
+
 test_summary
