@@ -11,6 +11,8 @@
 
 # shellcheck source=lib/wip/wip-plumbing-setup-lib.bash
 source "$WIP_LIB/wip-plumbing-setup-lib.bash"
+# shellcheck source=lib/wip/wip-plumbing-flatten-lib.bash
+source "$WIP_LIB/wip-plumbing-flatten-lib.bash"
 
 wip_plumbing_cmd_setup() {
   local sub=""
@@ -24,7 +26,7 @@ wip_plumbing_cmd_setup() {
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0 sentinel_only=0
+  local force=0 sentinel_only=0 source_mode="vendored"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
@@ -37,10 +39,27 @@ wip_plumbing_cmd_setup() {
         sentinel_only=1
         shift
         ;;
+      --source)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --source is only valid for \`setup agents\`"
+        [[ $# -ge 2 ]] || wip_die 2 usage "setup $sub: --source requires an argument"
+        source_mode="$2"
+        shift 2
+        ;;
+      --source=*)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --source is only valid for \`setup agents\`"
+        source_mode="${1#--source=}"
+        shift
+        ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
       *) wip_die 2 usage "setup $sub: unexpected arg: $1" ;;
     esac
   done
+  case "$source_mode" in
+    plugin | vendored) ;;
+    *) wip_die 2 usage "setup $sub: --source must be \`plugin\` or \`vendored\` (got: $source_mode)" ;;
+  esac
   if [[ "$force" == "1" ]]; then
     WIP_SETUP_FORCE=1
     export WIP_SETUP_FORCE
