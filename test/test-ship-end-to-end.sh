@@ -97,6 +97,8 @@ assert_eq "2026-06-27" "$(jq -r '.shipped_date' <<<"$out")" "A: shipped_date fro
 assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "A: marked_shipped updated"
 assert_eq "updated" "$(jq -r '.active_step_cleared' <<<"$out")" "A: active_step_cleared updated"
 assert_eq "true" "$(jq -r '.changed' <<<"$out")" "A: changed true"
+# No forge declared -> ship carries the Tier-0 in-review transition intent (ADR-0018).
+assert_eq "in-review" "$(jq -r '.transition' <<<"$out")" "A: transition in-review (no forge)"
 assert_eq "null" "$(jq -r '.dry_run' <<<"$out")" "A: dry_run absent without flag"
 # Observable composition proof: BOTH artifacts changed from the one call.
 assert_eq '- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.' \
@@ -184,5 +186,21 @@ assert_eq "noop" "$(jq -r '.marked_shipped' <<<"$out")" "D noop+skipped: marked_
 assert_eq "skipped" "$(jq -r '.active_step_cleared' <<<"$out")" "D noop+skipped: active_step_cleared skipped"
 assert_eq "false" "$(jq -r '.changed' <<<"$out")" "D noop+skipped: changed false"
 assert_eq "step-01" "$(active_step_of demo)" "D noop+skipped: non-matching pointer left in place"
+
+# ---------------------------------------------------------------------------
+# Case E — forge stand-down (ADR-0018). When a forge owns the transition
+#   (features.forge.enabled), ship reports `transition: stood-down` — BUT its
+#   disk writes are UNCHANGED (the bullet is still marked, active_step still
+#   cleared). The stand-down is intent-only, never a gate.
+# ---------------------------------------------------------------------------
+setup_e2e
+WIP_ROOT="$tmp" yq -i '.features.forge.enabled = true' "$manifest"
+out="$(run demo step-02)"
+assert_eq "stood-down" "$(jq -r '.transition' <<<"$out")" "E: transition stood-down (forge owns it)"
+assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "E: disk write unchanged — marked_shipped updated"
+assert_eq "updated" "$(jq -r '.active_step_cleared' <<<"$out")" "E: disk write unchanged — active_step cleared"
+assert_eq '- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.' \
+  "$(step02_line)" "E: roadmap bullet still marked despite stand-down"
+assert_eq "" "$(active_step_of demo)" "E: active_step still cleared despite stand-down"
 
 test_summary

@@ -81,14 +81,28 @@ wip_plumbing_cmd_ship() {
     changed=true
   fi
 
-  # Locked flat JSON ledger (mirrors `workplan init`'s emit style). `dry_run`
-  # key present only under --dry-run.
+  # Tier-0/Tier-1 stand-down (ADR-0018). ship's DISK writes above are unchanged
+  # and un-gated (ADR-0016). What stands down is only the *transition intent*:
+  # when a forge owns the transition (features.forge.enabled), the forge
+  # observation is the single transition writer, so ship reports
+  # `transition: stood-down` instead of its Tier-0 In-Review drive — no
+  # double-fire. With no forge, ship carries the Tier-0 `in-review` intent (the
+  # Linear write that consumes it is BDS-20's).
+  local transition="in-review"
+  if [[ "$(jq -r '.features.forge.enabled // false' <<<"$mj")" == "true" ]]; then
+    transition="stood-down"
+  fi
+
+  # Locked flat JSON ledger (mirrors `workplan init`'s emit style), extended with
+  # `transition` per ADR-0018. `dry_run` key present only under --dry-run.
   jq -nc \
     --arg slug "$slug" --arg step "$step_id" --arg date "$shipped_date" \
     --arg ms "$marked_shipped" --arg asc "$active_step_cleared" \
+    --arg transition "$transition" \
     --argjson changed "$changed" --arg dry "$dry_run" '
     { ok: true, slug: $slug, step: $step, shipped_date: $date,
-      marked_shipped: $ms, active_step_cleared: $asc, changed: $changed }
+      marked_shipped: $ms, active_step_cleared: $asc, changed: $changed,
+      transition: $transition }
     + (if $dry == "1" then { dry_run: true } else {} end)
   '
 }

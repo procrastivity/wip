@@ -136,6 +136,14 @@ _Post-acceptance notes from the lanes that landed against this contract._
   marker line — same reuse spirit, clean output. The locked signature and printed-status
   contract (`updated`/`noop`) are unchanged; the reasoning is captured in a code comment in
   `lib/wip/wip-plumbing-ship-roadmap-lib.bash`.
+- **ADR-0018 extended the ledger with a `transition` field.** The forge-surface
+  initiative (step-04) added one key to ship's flat ledger: `transition`, which
+  is `stood-down` when a forge owns the lifecycle transition
+  (`features.forge.enabled`) and `in-review` otherwise. This does **not** change
+  ship's un-gated disk-write behavior — the marker + `active_step` writes are
+  unchanged; only the (forward-looking, BDS-20-consumed) transition *intent*
+  stands down, so the forge observation stays the single transition writer (no
+  double-fire). See ADR-0018 §5.
 - **The step-01 skeleton harness (`test/test-ship-skeleton.sh`) was retired to a
   writer-agnostic plumbing test (commit `87241d8`).** Its `WIP_SHIP_FAKE_{ROADMAP,MANIFEST}_STATUS`
   shim and inert-stub value assertions only held while both stubs were inert; the moment a
