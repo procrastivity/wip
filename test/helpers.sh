@@ -77,3 +77,163 @@ test_summary() {
   printf '%s: %d passed, %d failed\n' "$_WIP_TEST_NAME" "$_WIP_PASS" "$_WIP_FAIL"
   [[ "$_WIP_FAIL" -eq 0 ]]
 }
+
+# --- fixture builders -------------------------------------------------------
+# DRY helpers for constructing the canonical wip fixtures that test-*.sh files
+# inline today. See workplans/step-03-dry-fixture-builders.md (D2–D4) for the
+# opt tables and the generic-vs-keep-inline rule.
+
+# wip_mktemp — `mktemp -d` with automatic cleanup. Every call registers its
+# dir in a shared tracking file; a single EXIT trap (installed here at
+# source time, in the test's main shell) removes them all, so a test file
+# can call it many times without one trap clobbering another. Echoes the
+# new dir.
+#
+# NB: callers invoke this via command substitution (`tmp="$(wip_mktemp)"`),
+# which runs the function in a subshell. A per-call `trap`/in-memory array
+# set there cannot reach the parent shell — the subshell's own EXIT trap
+# would fire immediately and delete the dir before the caller can use it.
+# Registering through a tracking file (shared via the filesystem) with the
+# trap owned by the sourcing shell is what makes cleanup actually work.
+_WIP_TMPDIRS_FILE="$(mktemp)"
+_wip_cleanup_tmpdirs() {
+  local d
+  [[ -f "$_WIP_TMPDIRS_FILE" ]] || return 0
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && rm -rf "$d"
+  done <"$_WIP_TMPDIRS_FILE"
+  rm -f "$_WIP_TMPDIRS_FILE"
+}
+trap _wip_cleanup_tmpdirs EXIT
+wip_mktemp() {
+  local d
+  d="$(mktemp -d)"
+  printf '%s\n' "$d" >>"$_WIP_TMPDIRS_FILE"
+  printf '%s\n' "$d"
+}
+
+# wip_fixture_init <dir> [opts] — write a canonical <dir>/.wip.yaml for an
+# in-flight initiative; also create <dir>/.wip/initiatives/<slug>/. See the
+# opts table in workplans/step-03-dry-fixture-builders.md.
+wip_fixture_init() {
+  local dir="$1"
+  shift
+  # NB: name the status local `istatus`, not `status` — `status` is a
+  # read-only special parameter in zsh and a portability footgun.
+  local slug="demo" title="" istatus="in-flight" active_step="step-02"
+  local want_brief=0 want_solo=0 want_orch=0
+  while (($#)); do
+    case "$1" in
+      --slug)
+        slug="$2"
+        shift 2
+        ;;
+      --title)
+        title="$2"
+        shift 2
+        ;;
+      --status)
+        istatus="$2"
+        shift 2
+        ;;
+      --active-step)
+        active_step="$2"
+        shift 2
+        ;;
+      --no-active-step)
+        active_step=""
+        shift
+        ;;
+      --brief)
+        want_brief=1
+        shift
+        ;;
+      --solo)
+        want_solo=1
+        shift
+        ;;
+      --orchestration)
+        want_orch=1
+        shift
+        ;;
+      *)
+        printf 'wip_fixture_init: unknown opt %q\n' "$1" >&2
+        return 2
+        ;;
+    esac
+  done
+  mkdir -p "$dir/.wip/initiatives/$slug"
+  {
+    printf 'version: 1\n'
+    printf 'features:\n'
+    printf '  wip: { enabled: true, root: .wip }\n'
+    if ((want_solo)); then printf '  solo: { enabled: true }\n'; fi
+    if ((want_orch)); then
+      printf '  orchestration: { enabled: true, backend: solo }\n'
+    fi
+    printf 'current_initiative: %s\n' "$slug"
+    printf 'initiatives:\n'
+    printf '  - slug: %s\n' "$slug"
+    if [[ -n "$title" ]]; then printf '    title: %s\n' "$title"; fi
+    printf '    status: %s\n' "$istatus"
+    if [[ -n "$active_step" ]]; then
+      printf '    active_step: %s\n' "$active_step"
+    fi
+    if ((want_brief)); then
+      printf '    brief: .wip/initiatives/%s/BRIEF.md\n' "$slug"
+    fi
+    printf '    roadmap: .wip/initiatives/%s/roadmap.md\n' "$slug"
+  } >"$dir/.wip.yaml"
+}
+
+# wip_fixture_roadmap <dir> [opts] — write a canonical roadmap.md. See the
+# opts table in workplans/step-03-dry-fixture-builders.md.
+wip_fixture_roadmap() {
+  local dir="$1"
+  shift
+  local slug="demo" round2=0 deferred=0 backlog=0
+  while (($#)); do
+    case "$1" in
+      --slug)
+        slug="$2"
+        shift 2
+        ;;
+      --round2)
+        round2=1
+        shift
+        ;;
+      --deferred)
+        deferred=1
+        shift
+        ;;
+      --backlog)
+        backlog=1
+        shift
+        ;;
+      *)
+        printf 'wip_fixture_roadmap: unknown opt %q\n' "$1" >&2
+        return 2
+        ;;
+    esac
+  done
+  mkdir -p "$dir/.wip/initiatives/$slug"
+  {
+    printf '# Roadmap — %s\n\n' "$slug"
+    printf '## Round 1 — One\n\n'
+    printf -- '- **step-01 — First** ✅ shipped 2026-05-01 — done.\n'
+    printf -- '- **step-02 — Second** — current.\n'
+    printf -- '- **step-03 — Third** — later.\n'
+    if ((round2)); then
+      printf '\n## Round 2 — Two\n\n'
+      printf -- '- **step-04 — Fourth** — round 2.\n'
+    fi
+    if ((deferred)); then
+      printf '\n## Deferred (decided-not-now)\n\n'
+      printf -- '- **Round-level closeout writes** — postponed; revisit after v1.\n'
+    fi
+    if ((backlog)); then
+      printf '\n## Backlog\n\n'
+      printf -- '- **Cleanup chore** — sweep stragglers.\n'
+    fi
+  } >"$dir/.wip/initiatives/$slug/roadmap.md"
+}

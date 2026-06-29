@@ -54,14 +54,16 @@ insert-after: step-02
 A new step.
 MD
 out="$(run demo --from "$tmp/insert.md")"
-assert_eq "true" "$(jq -r '.ok' <<<"$out")" "insert-after ok"
-assert_eq "false" "$(jq -r '.idempotent_noop' <<<"$out")" "first apply not idempotent"
+mapfile -t F < <(jq -r '.ok, .idempotent_noop' <<<"$out")
+assert_eq "true" "${F[0]}" "insert-after ok"
+assert_eq "false" "${F[1]}" "first apply not idempotent"
 assert_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "step-03 in roadmap"
 assert_grep "<!-- wip-amend:" "$tmp/.wip/initiatives/demo/roadmap.md" "marker present"
 
 out2="$(run demo --from "$tmp/insert.md")"
-assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out2")" "second apply idempotent"
-assert_eq "0" "$(jq -r '.wrote | length' <<<"$out2")" "second apply wrote 0"
+mapfile -t F < <(jq -r '.idempotent_noop, (.wrote | length)' <<<"$out2")
+assert_eq "true" "${F[0]}" "second apply idempotent"
+assert_eq "0" "${F[1]}" "second apply wrote 0"
 
 # 2. CLI flag matching artifact -> ok.
 make_roadmap
@@ -156,8 +158,9 @@ fi
 # 8. dry-run with insert: no writes.
 make_roadmap
 out9="$(WIP_ROOT="$tmp" bin/wip-plumbing --dry-run roadmap amend demo --from "$tmp/insert.md")"
-assert_eq "true" "$(jq -r '.ok' <<<"$out9")" "dry-run ok"
-assert_eq "true" "$(jq -r '.dry_run' <<<"$out9")" "dry-run flag"
+mapfile -t F < <(jq -r '.ok, .dry_run' <<<"$out9")
+assert_eq "true" "${F[0]}" "dry-run ok"
+assert_eq "true" "${F[1]}" "dry-run flag"
 assert_not_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "dry-run did not write"
 
 # 9. Unknown initiative -> exit 3.
@@ -190,8 +193,9 @@ target-round: 1
 Parallel track A.
 MD
 out_l="$(run demo --from "$tmp/lane.md")"
-assert_eq "true" "$(jq -r '.ok' <<<"$out_l")" "append-lane ok"
-assert_eq "append-lane A (round 1)" "$(jq -r '.directive' <<<"$out_l")" "append-lane directive label"
+mapfile -t F < <(jq -r '.ok, .directive' <<<"$out_l")
+assert_eq "true" "${F[0]}" "append-lane ok"
+assert_eq "append-lane A (round 1)" "${F[1]}" "append-lane directive label"
 assert_grep "### Lane A" "$tmp/.wip/initiatives/demo/roadmap.md" "lane heading written"
 assert_grep "step-03 — Track A work" "$tmp/.wip/initiatives/demo/roadmap.md" "lane step written as bullet"
 # The new step parses with lane A.
@@ -265,10 +269,15 @@ MD
 out_rl="$(run demo --from "$tmp/round-lanes.md")"
 assert_eq "true" "$(jq -r '.ok' <<<"$out_rl")" "append-round-with-lanes ok"
 rl_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
-assert_eq '["A","D"]' "$(jq -c '[.rounds[] | select(.n==2) | .lanes[]]' <<<"$rl_parse")" "round 2 lanes [A,D]"
-assert_eq "A" "$(jq -r '[.rounds[].steps[] | select(.id=="step-13")][0].lane' <<<"$rl_parse")" "step-13 lane A via append-round"
-assert_eq "D" "$(jq -r '[.rounds[].steps[] | select(.id=="step-14")][0].lane' <<<"$rl_parse")" "step-14 lane D via append-round"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$rl_parse")" "append-round lanes: no lane errors"
+mapfile -t F < <(jq -r '
+  ([.rounds[] | select(.n==2) | .lanes[]] | @json),
+  ([.rounds[].steps[] | select(.id=="step-13")][0].lane),
+  ([.rounds[].steps[] | select(.id=="step-14")][0].lane),
+  (.lane_errors | length)' <<<"$rl_parse")
+assert_eq '["A","D"]' "${F[0]}" "round 2 lanes [A,D]"
+assert_eq "A" "${F[1]}" "step-13 lane A via append-round"
+assert_eq "D" "${F[2]}" "step-14 lane D via append-round"
+assert_eq "0" "${F[3]}" "append-round lanes: no lane errors"
 
 # 14c. append-lane into a round that already has lanes + a post-lane main sync
 # step must insert BEFORE the sync step, preserving `main* (lane+)? main*`.
@@ -300,9 +309,13 @@ MD
 out_lb="$(run demo --from "$tmp/lane-b.md")"
 assert_eq "true" "$(jq -r '.ok' <<<"$out_lb")" "append-lane before sync ok"
 lb_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$lb_parse")" "append-lane before sync: no lane errors"
-assert_eq "B" "$(jq -r '[.rounds[].steps[] | select(.id=="step-04")][0].lane' <<<"$lb_parse")" "step-04 lane B"
-assert_eq "null" "$(jq -r '[.rounds[].steps[] | select(.id=="step-03")][0].lane' <<<"$lb_parse")" "sync step-03 stays main-lane"
+mapfile -t F < <(jq -r '
+  (.lane_errors | length),
+  ([.rounds[].steps[] | select(.id=="step-04")][0].lane),
+  ([.rounds[].steps[] | select(.id=="step-03")][0].lane)' <<<"$lb_parse")
+assert_eq "0" "${F[0]}" "append-lane before sync: no lane errors"
+assert_eq "B" "${F[1]}" "step-04 lane B"
+assert_eq "null" "${F[2]}" "sync step-03 stays main-lane"
 # step-04 (Lane B) precedes the sync step-03 in declared order.
 order="$(jq -r '[.rounds[].steps[].id] | (index("step-04")) < (index("step-03"))' <<<"$lb_parse")"
 assert_eq "true" "$order" "new lane inserted before the sync step"
@@ -363,11 +376,15 @@ target-round: 2
 Spine work.
 MD
 out_i="$(run demo --from "$tmp/isil-a.md")"
-assert_eq "true" "$(jq -r '.ok' <<<"$out_i")" "insert-step-in-lane ok"
-assert_eq "insert-step-in-lane A (round 2)" "$(jq -r '.directive' <<<"$out_i")" "isil directive label"
+mapfile -t F < <(jq -r '.ok, .directive' <<<"$out_i")
+assert_eq "true" "${F[0]}" "insert-step-in-lane ok"
+assert_eq "insert-step-in-lane A (round 2)" "${F[1]}" "isil directive label"
 isil_parse="$(WIP_ROOT="$tmp" bin/wip-plumbing roadmap parse "$tmp/.wip/initiatives/demo/roadmap.md")"
-assert_eq "A" "$(jq -r '[.rounds[].steps[]|select(.id=="step-13")][0].lane' <<<"$isil_parse")" "step-13 parses into empty lane A"
-assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$isil_parse")" "isil: no lane errors"
+mapfile -t F < <(jq -r '
+  ([.rounds[].steps[] | select(.id=="step-13")][0].lane),
+  (.lane_errors | length)' <<<"$isil_parse")
+assert_eq "A" "${F[0]}" "step-13 parses into empty lane A"
+assert_eq "0" "${F[1]}" "isil: no lane errors"
 out_i2="$(run demo --from "$tmp/isil-a.md")"
 assert_eq "true" "$(jq -r '.idempotent_noop' <<<"$out_i2")" "insert-step-in-lane idempotent re-apply"
 

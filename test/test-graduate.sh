@@ -5,8 +5,7 @@ _WIP_TEST_NAME="graduate"
 # shellcheck source=test/helpers.sh
 source test/helpers.sh
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(wip_mktemp)"
 export WIP_NO_REGISTRY=1
 
 # build_lds_enabled_root <dir> [extra-yaml]

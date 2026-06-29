@@ -5,38 +5,11 @@ _WIP_TEST_NAME="status"
 # shellcheck source=test/helpers.sh
 source test/helpers.sh
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(wip_mktemp)"
 export WIP_NO_REGISTRY=1
 
-mkdir -p "$tmp/.wip/initiatives/demo"
-cat >"$tmp/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-  solo: { enabled: true }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    title: Demo
-    status: in-flight
-    active_step: step-02
-    brief: .wip/initiatives/demo/BRIEF.md
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
-cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
-# Roadmap — demo
-
-## Round 1 — One
-
-- **step-01 — First** ✅ shipped 2026-05-01 — done.
-- **step-02 — Second** — current.
-- **step-03 — Third** — later.
-
-## Deferred (decided-not-now)
-
-- **Round-level closeout writes** — postponed; revisit after v1.
-MD
+wip_fixture_init "$tmp" --solo --title Demo --brief
+wip_fixture_roadmap "$tmp" --deferred
 
 out="$(WIP_ROOT="$tmp" bin/wip-plumbing status)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out")" "ok"
@@ -66,16 +39,15 @@ set -e
 assert_eq "3" "$rc" "unknown initiative exit 3"
 
 # Manifest active_step names a shipped step -> signal manifest-step-ahead.
-tmp2="$(mktemp -d)"
+tmp2="$(wip_mktemp)"
 mkdir -p "$tmp2/.wip/initiatives/demo"
 sed 's/active_step: step-02/active_step: step-01/' "$tmp/.wip.yaml" >"$tmp2/.wip.yaml"
 cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmp2/.wip/initiatives/demo/roadmap.md"
 out2="$(WIP_ROOT="$tmp2" bin/wip-plumbing status)"
 assert_eq "1" "$(jq -r '.signals | map(select(. == "manifest-step-ahead")) | length' <<<"$out2")" "manifest-step-ahead signal"
-rm -rf "$tmp2"
 
 # No current_initiative + no --initiative -> exit 3.
-tmp3="$(mktemp -d)"
+tmp3="$(wip_mktemp)"
 cat >"$tmp3/.wip.yaml" <<'YAML'
 version: 1
 features:
@@ -87,16 +59,14 @@ WIP_ROOT="$tmp3" bin/wip-plumbing status >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "3" "$rc" "no initiative -> exit 3"
-rm -rf "$tmp3"
 
 # solo disabled -> solo_available false.
-tmp4="$(mktemp -d)"
+tmp4="$(wip_mktemp)"
 mkdir -p "$tmp4/.wip/initiatives/demo"
 sed 's/solo: { enabled: true }/solo: { enabled: false }/' "$tmp/.wip.yaml" >"$tmp4/.wip.yaml"
 cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmp4/.wip/initiatives/demo/roadmap.md"
 out4="$(WIP_ROOT="$tmp4" bin/wip-plumbing status)"
 assert_eq "false" "$(jq -r '.solo_available' <<<"$out4")" "solo disabled -> false"
-rm -rf "$tmp4"
 
 # dirty_wip_files is an array (empty on a non-git tree).
 assert_eq "array" "$(jq -r '.dirty_wip_files | type' <<<"$out")" "dirty_wip_files array"
@@ -106,20 +76,8 @@ assert_eq "null" "$(jq -r '.active_step.lane' <<<"$out")" "linear: active step l
 assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$out")" "linear: no lanes in flight"
 
 # ---- Lane disclosure (ADR-0010) ----
-tmpL="$(mktemp -d)"
-mkdir -p "$tmpL/.wip/initiatives/demo"
-cat >"$tmpL/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    title: Demo
-    status: in-flight
-    active_step: step-13
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
+tmpL="$(wip_mktemp)"
+wip_fixture_init "$tmpL" --title Demo --active-step step-13
 cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
 
@@ -156,27 +114,12 @@ cat >"$tmpL/.wip/initiatives/demo/roadmap.md" <<'MD'
 MD
 outL2="$(WIP_ROOT="$tmpL" bin/wip-plumbing status)"
 assert_eq "0" "$(jq -r '.lanes_in_flight | length' <<<"$outL2")" "single in-flight lane -> empty"
-rm -rf "$tmpL"
 
 # --- Solo liveness probe (--probe-solo, ADR-0014) -----------------------
 # Isolated root: Solo declared + orchestration backend solo. The probe is fed
 # from a file via the WIP_SOLO_STATUS_CMD seam (no real `solo` CLI dependency).
-tmpP="$(mktemp -d)"
-mkdir -p "$tmpP/.wip/initiatives/demo"
-cat >"$tmpP/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-  orchestration: { enabled: true, backend: solo }
-  solo: { enabled: true }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    title: Demo
-    status: in-flight
-    active_step: step-02
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
+tmpP="$(wip_mktemp)"
+wip_fixture_init "$tmpP" --solo --orchestration --title Demo
 cat >"$tmpP/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
 
@@ -232,27 +175,15 @@ p6="$(PATH="$nosolo_bin" runp --probe-solo)"
 assert_eq "false" "$(jq -r '.solo_reachable' <<<"$p6")" "probe with missing solo CLI -> solo_reachable false"
 assert_eq "1" "$(jq -r '.signals | map(select(. == "solo-unreachable")) | length' <<<"$p6")" \
   "missing solo CLI + backend solo -> solo-unreachable signal"
-rm -rf "$tmpP"
 
 # ---- Closeout hint (half-done-closeout, step-06) ------------------------
 # active_step names a not-yet-shipped step whose workplan is already archived ->
 # signals carries "half-done-closeout" (single-sourced with doctor's check). The
 # rolling-context sidecar alone must NOT trigger it. (The no-archive baseline is
 # already covered by the "no signals" assertion on the main fixture above.)
-tmpH="$(mktemp -d)"
+tmpH="$(wip_mktemp)"
+wip_fixture_init "$tmpH" --title Demo
 mkdir -p "$tmpH/.wip/initiatives/demo/archive"
-cat >"$tmpH/.wip.yaml" <<'YAML'
-version: 1
-features:
-  wip: { enabled: true, root: .wip }
-current_initiative: demo
-initiatives:
-  - slug: demo
-    title: Demo
-    status: in-flight
-    active_step: step-02
-    roadmap: .wip/initiatives/demo/roadmap.md
-YAML
 cat >"$tmpH/.wip/initiatives/demo/roadmap.md" <<'MD'
 # Roadmap — demo
 
@@ -275,6 +206,5 @@ outHpos="$(WIP_ROOT="$tmpH" bin/wip-plumbing status)"
 assert_eq "false" "$(jq -r '.active_step.shipped' <<<"$outHpos")" "closeout hint: active step still unshipped"
 assert_eq "1" "$(jq -r '.signals | map(select(. == "half-done-closeout")) | length' <<<"$outHpos")" \
   "closeout hint: archived workplan for unshipped active step -> half-done-closeout signal"
-rm -rf "$tmpH"
 
 test_summary
