@@ -3,11 +3,12 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_doctor() {
-  local fix=0 probe_solo=0
+  local fix=0 probe_solo=0 probe_linear=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --fix) fix=1 ;;
       --probe-solo) probe_solo=1 ;;
+      --probe-linear) probe_linear=1 ;;
       *) wip_die 2 usage "doctor: unknown arg: $1" ;;
     esac
     shift
@@ -177,6 +178,44 @@ wip_plumbing_cmd_doctor() {
       obj="$(jq -nc '{kind:"ledger", status:"ok", probe:"unavailable",
         message:"solo ledger probe requested but the Solo project could not be resolved"}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    fi
+  fi
+
+  # 2e. Tracker live drift (opt-in `--probe-linear`). A READ-ONLY live probe of
+  #     the issue tracker, mirroring `--probe-solo`/`--probe-forge`: for each
+  #     mapped node, compare the tracker's reported state to wip's expected
+  #     (cached → provider) state. A concrete mismatch is drift; the tracker not
+  #     answering (empty read / no transport wired) is non-actionable — a down
+  #     tracker never fails doctor. WIP_LINEAR_READ_CMD is the transport seam
+  #     (test/CLI), invoked as `<cmd> <issue>`; without it the MCP path is
+  #     agent-side, so plumbing records an informational unavailable note.
+  if [[ "$probe_linear" == "1" ]] && [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local lbackend lread_cmd lslug lbind b lnode lissue lexpected lactual
+    lbackend="$(jq -r '.features["issue-tracker"].backend // ""' <<<"$mj")"
+    lread_cmd="$(_wip_tracker_transport_read_cmd "$lbackend")"
+    if [[ -z "$lread_cmd" ]]; then
+      obj="$(jq -nc '{kind:"tracker-probe", status:"ok", probe:"unavailable",
+        message:"linear probe requested but no read transport is wired (MCP path is agent-side, not a plumbing shell-out; CLI transport is BDS-23)"}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    else
+      while IFS= read -r lslug; do
+        [[ -n "$lslug" ]] || continue
+        lbind="$(_wip_tracker_bind_plan "$root" "$mj" "$lslug")"
+        while IFS= read -r b; do
+          [[ -n "$b" ]] || continue
+          lnode="$(jq -r '.node' <<<"$b")"
+          lissue="$(jq -r '.issue' <<<"$b")"
+          lexpected="$(jq -r '.target_state // ""' <<<"$b")"
+          [[ -n "$lexpected" ]] || continue # no cached state to compare
+          lactual="$(bash -c "$lread_cmd $lissue" 2>/dev/null || true)"
+          [[ -n "$lactual" ]] || continue # tracker didn't answer -> non-actionable
+          [[ "$lactual" == "$lexpected" ]] && continue
+          obj="$(jq -nc --arg slug "$lslug" --arg node "$lnode" --arg issue "$lissue" \
+            --arg expected "$lexpected" --arg actual "$lactual" \
+            '{kind:"tracker-probe", slug:$slug, node:$node, issue:$issue, status:"tracker-state-drift", expected:$expected, actual:$actual}')"
+          checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+        done < <(jq -c '.[]' <<<"$lbind")
+      done < <(printf '%s' "$mj" | jq -r '.initiatives[]?.slug')
     fi
   fi
 
