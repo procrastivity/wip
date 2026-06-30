@@ -26,11 +26,17 @@ wip_plumbing_cmd_setup() {
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0 sentinel_only=0 source_mode="vendored"
+  local force=0 sentinel_only=0 source_mode="vendored" check=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
         force=1
+        shift
+        ;;
+      --check)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --check is only valid for \`setup agents\`"
+        check=1
         shift
         ;;
       --sentinel-only)
@@ -100,6 +106,28 @@ wip_plumbing_cmd_setup() {
       fi
       ;;
   esac
+
+  # Read-only drift gate (D-05.1/2/3): `setup agents --check` re-renders the
+  # vendored agents and diffs them against the installed files, writing NOTHING
+  # and never flipping the manifest. Dispatched BEFORE the write path AND before
+  # the foreign-plugin guard below — a `--check` writes nothing, so the guard
+  # (which refuses a vendored WRITE over a foreign root manifest) must not fire.
+  # It branches on the manifest's recorded `.features.orchestration.source`, not
+  # the `--source` flag (D-05.2); `--source`/`--force`/`--dry-run` are inert here
+  # (Q-05.1 lean: write-flags are no-ops under the read-only check). A render
+  # failure surfaces as rc 5 → `wip_die 1 internal`, kept DISTINCT from a drift
+  # exit (rc 4, kind `agents-drift`).
+  if [[ "$sub" == "agents" && "$check" == "1" ]]; then
+    local check_rc
+    set +e
+    _wip_setup_agents_check "$root"
+    check_rc=$?
+    set -e
+    if [[ "$check_rc" == "5" ]]; then
+      wip_die 1 internal "setup agents: --check render failed (see stderr for the offending role)"
+    fi
+    exit "$check_rc"
+  fi
 
   # Conservative-write guard (ADR-0020 / D-03.4): the vendored `setup agents`
   # path must never clobber or be installed alongside a foreign host plugin's
@@ -346,6 +374,96 @@ _wip_setup_agents_vendored() {
     printf '%s\t%s\n' "$status" "$rel"
   done
   [[ "$saw_refused" -eq 0 ]] || return 4
+  return 0
+}
+
+# _wip_setup_agents_check <root> — the read-only `setup agents --check` drift
+# gate (D-05.1/2/3), the agent-side analog of ADR-0015's
+# `sync-agents-commands --check`. Branches on the manifest's recorded
+# `.features.orchestration.source`: only `vendored` has installed agent files to
+# verify; anything else (`plugin`, absent) vendored nothing, so `--check` is a
+# clean no-op. For each role in `orchestrator coordinator researcher builder`
+# (the vendored write path's fixed order) it re-renders the flattened agent via
+# `wip_flatten_render <role> <backend>` — backend read as
+# `.features.orchestration.backend // "solo"`, the SAME read as
+# `_wip_setup_agents_vendored` — to a tmpfile and `cmp -s` it against the
+# installed `$root/.claude/agents/wip/<role>.md`, classifying in-sync / drifted /
+# missing. The clean re-render === installed comparison IS the ADR-0020
+# round-trip proof (D6): step-08's D5 disclaimer is present on BOTH sides because
+# both go through the same renderer — it is NEVER special-cased. This path NEVER
+# writes and NEVER flips the manifest, in every branch.
+#
+# Emits the D-05.3 JSON ledger on stdout (when WIP_JSON) and returns the exit:
+#   - source != vendored → clean no-op: return 0, `{ok, verb, checked:[], drift:[]}`.
+#   - source == vendored, all in-sync → return 0, `{…, checked:[paths], drift:[]}`.
+#   - any drifted/missing role → return 4, kind `agents-drift` (distinct from
+#     `content-drift` / `foreign-plugin-manifest`), `error.paths` = the offending
+#     repo-relative paths.
+# Returns 5 on an internal render failure (render non-zero or mktemp) so the
+# caller maps it to `wip_die 1 internal`, keeping an internal error DISTINCT from
+# the drift exit (rc 4). Mirrors `_wip_setup_agents_vendored`'s rc contract.
+_wip_setup_agents_check() {
+  local root="$1"
+  local verb="setup agents"
+  local source_recorded
+  source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+  if [[ "$source_recorded" != "vendored" ]]; then
+    # Nothing was vendored (source: plugin, or absent) → clean read-only no-op.
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" '{ok:true, verb:$verb, checked:[], drift:[]}'
+    fi
+    return 0
+  fi
+
+  local backend
+  backend="$(yq -r '.features.orchestration.backend // "solo"' "$root/.wip.yaml" 2>/dev/null || printf 'solo')"
+  [[ -n "$backend" && "$backend" != "null" ]] || backend="solo"
+
+  local role rel dest tmp rc
+  local checked=() drift=()
+  for role in orchestrator coordinator researcher builder; do
+    rel=".claude/agents/wip/$role.md"
+    dest="$root/$rel"
+    checked+=("$rel")
+    tmp="$(mktemp)" || {
+      printf 'wip-plumbing: setup agents: --check mktemp failed\n' >&2
+      return 5
+    }
+    set +e
+    wip_flatten_render "$role" "$backend" >"$tmp"
+    rc=$?
+    set -e
+    if [[ "$rc" != "0" ]]; then
+      rm -f -- "$tmp"
+      printf 'wip-plumbing: setup agents: --check render failed for role %s (backend %s, rc=%d)\n' "$role" "$backend" "$rc" >&2
+      return 5
+    fi
+    if [[ ! -f "$dest" ]]; then
+      drift+=("$rel") # missing
+    elif ! cmp -s -- "$tmp" "$dest"; then
+      drift+=("$rel") # drifted
+    fi
+    rm -f -- "$tmp"
+  done
+
+  if [[ "${#drift[@]}" -gt 0 ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" \
+        --argjson paths "$(_wip_setup_arr_json "${drift[@]}")" '
+        {ok:false, verb:$verb,
+         error:{code:4, kind:"agents-drift",
+                message:"installed agent files differ from a fresh re-render; re-run `setup agents` (or `orchestrate backend <name>`) to re-flatten",
+                paths:$paths}}'
+    fi
+    printf 'wip-plumbing: setup agents: --check drift on: %s\n' "${drift[*]}" >&2
+    return 4
+  fi
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    jq -nc --arg verb "$verb" \
+      --argjson checked "$(_wip_setup_arr_json "${checked[@]}")" '
+      {ok:true, verb:$verb, checked:$checked, drift:[]}'
+  fi
   return 0
 }
 

@@ -178,6 +178,105 @@ for role in orchestrator coordinator researcher builder; do
     "[agents wip-owned manifest] .claude/agents/wip/$role.md present"
 done
 
+# --- 6d. setup agents --check — read-only drift gate (Step 5 / Chunk 1) ------
+# The agent-side analog of ADR-0015's `sync-agents-commands --check`, gated by
+# ADR-0020's D6 round-trip determinism: a fresh re-render of the four roles must
+# equal the installed bytes (step-08's D5 disclaimer is present on BOTH sides via
+# the SAME renderer — never special-cased). `--check` writes NOTHING and never
+# flips the manifest, in every branch.
+
+# (i) Clean vendored install → --check exit 0, drift:[], checked names 4 roles,
+#     and the installed tree is byte-unchanged (the ADR-0020 round-trip proof).
+workdir="$tmp/agents-check-clean"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
+pre_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[agents --check clean] exit 0"
+mapfile -t F < <(jq -r '.ok, (.checked | length), (.drift | length)' <<<"$out")
+assert_eq "true" "${F[0]}" "[agents --check clean] ok"
+assert_eq "4" "${F[1]}" "[agents --check clean] checked 4 roles"
+assert_eq "0" "${F[2]}" "[agents --check clean] drift:[]"
+post_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+assert_eq "$pre_sum" "$post_sum" "[agents --check clean] wrote nothing (round-trip byte-stable)"
+
+# (ii) Mutate one installed role → --check exit 4 agents-drift names the role,
+#      and the installed tree stays byte-unchanged (read-only — no repair write).
+echo "# drift injected" >>"$workdir/.claude/agents/wip/coordinator.md"
+mut_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[agents --check drifted] exit 4"
+mapfile -t F < <(jq -r '.error.kind, ([.error.paths[] | select(. == ".claude/agents/wip/coordinator.md")] | length)' <<<"$out")
+assert_eq "agents-drift" "${F[0]}" "[agents --check drifted] kind agents-drift"
+assert_eq "1" "${F[1]}" "[agents --check drifted] names the drifted role path"
+post_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+assert_eq "$mut_sum" "$post_sum" "[agents --check drifted] read-only (no repair write)"
+
+# (iii) Remove one installed role → --check exit 4 agents-drift names it missing
+#       and does NOT re-create it (read-only).
+rm -f "$workdir/.claude/agents/wip/builder.md"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[agents --check missing] exit 4"
+mapfile -t F < <(jq -r '.error.kind, ([.error.paths[] | select(. == ".claude/agents/wip/builder.md")] | length)' <<<"$out")
+assert_eq "agents-drift" "${F[0]}" "[agents --check missing] kind agents-drift"
+assert_eq "1" "${F[1]}" "[agents --check missing] names the missing role path"
+assert_absent "$workdir/.claude/agents/wip/builder.md" "[agents --check missing] not re-created"
+
+# (iv) --source plugin install → --check exit 0 no-op (checked:[]; nothing
+#      vendored to verify — branches on the manifest source, not the flag).
+workdir="$tmp/agents-check-plugin"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup agents --source plugin >/dev/null 2>&1
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[agents --check plugin] exit 0 no-op"
+mapfile -t F < <(jq -r '.ok, (.checked | length), (.drift | length)' <<<"$out")
+assert_eq "true" "${F[0]}" "[agents --check plugin] ok"
+assert_eq "0" "${F[1]}" "[agents --check plugin] checked:[] (nothing vendored)"
+assert_eq "0" "${F[2]}" "[agents --check plugin] drift:[]"
+assert_absent "$workdir/.claude/agents" "[agents --check plugin] still wrote no .claude/agents/"
+
+# (v) Repeat --check on a clean vendored install — read-only and idempotent;
+#     write-flags (--force) and --dry-run are inert under --check (Q-05.1 lean).
+workdir="$tmp/agents-check-repeat"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
+pre_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+for i in 1 2; do
+  set +e
+  out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+  rc=$?
+  set -e
+  assert_eq "0" "$rc" "[agents --check repeat #$i] exit 0"
+  assert_eq "0" "$(jq -r '.drift | length' <<<"$out")" "[agents --check repeat #$i] drift:[]"
+done
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check --force 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[agents --check --force] exit 0 (force inert under --check)"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing --dry-run setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[agents --check --dry-run] exit 0 (dry-run inert under --check)"
+post_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
+assert_eq "$pre_sum" "$post_sum" "[agents --check repeat] wrote nothing across repeats"
+
 # --- 7. Sentinel post-check passes; doctor on a plugin-mode tempdir is clean -
 # Run against the §6b --source plugin install: doctor stays clean even though
 # the no-vendor path wrote no agents (orchestration carries no sentinel).
