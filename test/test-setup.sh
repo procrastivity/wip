@@ -16,6 +16,12 @@ export WIP_NOW="2026-06-14"
 # via the documented seam — mirrors test-flatten-render.sh.
 export WIP_ROLES_DIR="$PWD/roles"
 
+# Canonical vendored command count, DERIVED from the template glob (step-06 /
+# ADR-0015 amend) — never hardcoded, so adding/removing a command can't silently
+# drift the install count without a corresponding template change. The four agent
+# roles stay a fixed literal (the role set is closed); only the command N derives.
+cmd_count="$(find templates/setup/agents/commands -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')"
+
 # --- 1. Template fidelity vs the live repo (step-09 byte-derivation). ----------
 assert_cmp templates/setup/deps/flake.nix flake.nix \
   "deps/flake.nix is byte-equal to flake.nix"
@@ -76,7 +82,10 @@ for verb in deps direnv hygiene release agents; do
     direnv) expected=1 ;;  # .envrc
     hygiene) expected=1 ;; # .pre-commit-config.yaml
     release) expected=2 ;; # cliff.toml + CHANGELOG.md
-    agents) expected=4 ;;  # vendored flattened agents: .claude/agents/wip/{4 roles}.md (ADR-0020 D1)
+    # vendored flattened agents (.claude/agents/wip/{4 roles}.md, ADR-0020 D1)
+    # PLUS the relocated wip slash-commands (.claude/commands/wip/*.md, step-06).
+    # 4 is the closed role set (literal); cmd_count derives from the template glob.
+    agents) expected=$((4 + cmd_count)) ;;
   esac
   assert_eq "$expected" "$wrote_n" "[$verb] wrote $expected files"
   assert_eq "0" "${F[2]}" "[$verb] no refusals"
@@ -114,6 +123,32 @@ assert_eq "vendored" "${FL[4]}" "orchestration source=vendored"
 # Solo block is NOT auto-created (consumer's decision per ADR-0007)
 assert_eq "null" "${FL[5]}" "no auto features.solo block"
 
+# --- 6a. Vendored slash-commands relocated to .claude/commands/wip/ (step-06) -
+# A vendored `setup agents` install (the §5 verb-loop workdir $tmp/v-agents) now
+# copies every templates/setup/agents/commands/<name>.md VERBATIM into
+# .claude/commands/wip/<name>.md (the wip/ subdir yields the /wip:<name> colon
+# invocation, D1/D2). Pure resolver-swap (D3): same filename + bytes, only the
+# destination dir differs. The expected set is DERIVED from the template glob
+# (set-parity, D4) so a dropped command fails here rather than shipping silently.
+# NB: the /wip:<name> INVOCATION is hand-verified against the live Claude Code
+# runtime; the harness proves only the FILE LAYOUT.
+cmd_workdir="$tmp/v-agents"
+installed_cmds=0
+for cmd_tmpl in templates/setup/agents/commands/*.md; do
+  name="$(basename -- "$cmd_tmpl")"
+  installed=".claude/commands/wip/$name"
+  assert_file "$cmd_workdir/$installed" "[agents commands] $installed present"
+  assert_cmp "$cmd_tmpl" "$cmd_workdir/$installed" \
+    "[agents commands] $installed byte-equal to template (pure resolver-swap)"
+  installed_cmds=$((installed_cmds + 1))
+done
+assert_eq "$cmd_count" "$installed_cmds" \
+  "[agents commands] set-parity: installed every template command (derived count)"
+# No stray files in the vendored command dir beyond the template set.
+assert_eq "$cmd_count" \
+  "$(find "$cmd_workdir/.claude/commands/wip" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" \
+  "[agents commands] no extra files in .claude/commands/wip/"
+
 # --- 6b. setup agents --source plugin → vendors nothing (D-03.3) -------------
 # The plugin source mode writes zero files (agents resolve by the bare
 # `wip-<role>` name from the globally-enabled wip plugin); the manifest flip
@@ -128,6 +163,7 @@ assert_eq "0" "${F[1]}" "[agents --source plugin] wrote nothing"
 assert_eq "0" "${F[2]}" "[agents --source plugin] skipped nothing"
 assert_eq "0" "${F[3]}" "[agents --source plugin] refused nothing"
 assert_absent "$workdir/.claude/agents" "[agents --source plugin] no .claude/agents/ written"
+assert_absent "$workdir/.claude/commands" "[agents --source plugin] no .claude/commands/ written"
 mapfile -t FP < <(yq -o=json '.' "$workdir/.wip.yaml" |
   jq -r '.features.orchestration.enabled, .features.orchestration.source')
 assert_eq "true" "${FP[0]}" "[agents --source plugin] orchestration enabled"
@@ -152,6 +188,7 @@ mapfile -t F < <(jq -r '.error.kind, .error.paths[0]' <<<"$out")
 assert_eq "foreign-plugin-manifest" "${F[0]}" "[agents foreign-manifest] guard kind"
 assert_eq ".claude-plugin/plugin.json" "${F[1]}" "[agents foreign-manifest] names the host manifest"
 assert_absent "$workdir/.claude/agents" "[agents foreign-manifest] vendored wrote nothing"
+assert_absent "$workdir/.claude/commands" "[agents foreign-manifest] vendored wrote no commands either"
 
 # Control (a): the SAME foreign repo with --source plugin succeeds — the guard
 # is vendored-path-only and the no-vendor path writes zero files.
@@ -172,7 +209,7 @@ printf '{ "name": "wip", "version": "0.0.0" }\n' >"$workdir/.claude-plugin/plugi
 out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents 2>/dev/null)"
 mapfile -t F < <(jq -r '.ok, (.wrote | length)' <<<"$out")
 assert_eq "true" "${F[0]}" "[agents wip-owned manifest] vendored write proceeds"
-assert_eq "4" "${F[1]}" "[agents wip-owned manifest] wrote 4 role files"
+assert_eq "$((4 + cmd_count))" "${F[1]}" "[agents wip-owned manifest] wrote 4 roles + commands"
 for role in orchestrator coordinator researcher builder; do
   assert_file "$workdir/.claude/agents/wip/$role.md" \
     "[agents wip-owned manifest] .claude/agents/wip/$role.md present"

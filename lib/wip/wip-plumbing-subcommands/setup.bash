@@ -160,9 +160,12 @@ wip_plumbing_cmd_setup() {
   elif [[ "$sub" == "agents" && "$source_mode" == "vendored" ]]; then
     # Vendored agents (ADR-0020 D1 / D-03.2): render the four flattened agent
     # files and land them under .claude/agents/wip/, BYPASSING the old
-    # plugin-tree walk (wip_setup_walk_template_tree). Returns 5 on an internal
-    # render/write failure (distinct from a content-drift refusal at rc=4).
-    raw="$(_wip_setup_agents_vendored "$root")"
+    # plugin-tree walk (wip_setup_walk_template_tree). Then (step-06 / ADR-0015
+    # amend) relocate the canonical wip slash-commands verbatim into
+    # .claude/commands/wip/ — `$td` carries the templates root for that copy.
+    # Returns 5 on an internal render/write failure (distinct from a
+    # content-drift refusal at rc=4).
+    raw="$(_wip_setup_agents_vendored "$root" "$td")"
     rc=$?
   elif [[ "$sub" == "agents" && "$source_mode" == "plugin" ]]; then
     # --source plugin no-vendor path (ADR-0020 D4 / D-03.3): vendor NOTHING.
@@ -315,27 +318,42 @@ _wip_setup_agents_foreign_plugin() {
   [[ "$name" != "wip" ]]
 }
 
-# _wip_setup_agents_vendored <root> — the vendored `setup agents` write path
-# (ADR-0020 D1 / D-03.2). Bypasses wip_setup_walk_template_tree (the old
-# plugin-tree walk): for each role in `orchestrator coordinator researcher
-# builder` (fixed order) it renders the flattened, self-contained agent file via
-# `wip_flatten_render <role> <backend>` to a tmpfile, then lands it with
-# `wip_setup_write_idempotent` at `$root/.claude/agents/wip/<role>.md` (the
-# writer mkdir's the parent and honors WIP_DRY_RUN + WIP_SETUP_FORCE). The
-# backend is read from the manifest as `.features.orchestration.backend //
-# "solo"` (D-03.5; `solo` on a fresh install). Emits one
-# `<status><TAB><relpath>` line per role — relpath is repo-relative
-# (`.claude/agents/wip/<role>.md`), matching the generic path's ledger
-# convention — so the caller folds the statuses into the same
-# wrote/skipped/refused/wrote_forced arrays.
+# _wip_setup_agents_vendored <root> <templates-dir> — the vendored `setup
+# agents` write path (ADR-0020 D1 / D-03.2; step-06 command relocation). Bypasses
+# wip_setup_walk_template_tree (the old plugin-tree walk).
 #
-# Return contract: 0 normally; 4 if any role refused (content drift, recoverable
-# with --force — mirrors the walk's `saw_refused` aggregation); 5 on an internal
-# render/write failure (a render non-zero, an mktemp failure, or a writer I/O
-# error). The caller maps rc=5 to `wip_die 1 internal`, keeping an internal
-# error DISTINCT from a content-drift refusal (rc=4).
+# Two write phases, both folded into one `<status><TAB><relpath>` line stream the
+# caller aggregates into the wrote/skipped/refused/wrote_forced arrays:
+#
+#   1. Agents — for each role in `orchestrator coordinator researcher builder`
+#      (fixed order) render the flattened, self-contained agent file via
+#      `wip_flatten_render <role> <backend>` to a tmpfile, then land it with
+#      `wip_setup_write_idempotent` at `$root/.claude/agents/wip/<role>.md`. The
+#      backend is read from the manifest as `.features.orchestration.backend //
+#      "solo"` (D-03.5; `solo` on a fresh install).
+#   2. Commands (step-06 / ADR-0015 amend) — relocate each canonical wip
+#      slash-command VERBATIM (pure resolver-swap, D3 — no flatten / no
+#      `@`-include resolution; the resolver transform is already baked into the
+#      committed templates) from `<templates-dir>/setup/agents/commands/<name>.md`
+#      to `$root/.claude/commands/wip/<name>.md`. The `wip/` subdir is what yields
+#      the `/wip:<name>` colon invocation (D1/D2). The set is iterated by GLOB
+#      (set-parity, D4) — never a hardcoded count — so a future command addition
+#      installs automatically. `$root/.claude/commands/wip/<name>.md` keeps the
+#      same filename + bytes as its template; only the destination dir differs.
+#
+# `wip_setup_write_idempotent` mkdir's each parent and honors WIP_DRY_RUN +
+# WIP_SETUP_FORCE. relpaths are repo-relative, matching the generic path's ledger
+# convention. The foreign-plugin guard upstream fences BOTH phases (D5) — it runs
+# before this function, so `--source plugin` and a foreign root manifest never
+# reach here.
+#
+# Return contract: 0 normally; 4 if any agent OR command refused (content drift,
+# recoverable with --force — mirrors the walk's `saw_refused` aggregation); 5 on
+# an internal render/write failure (a render non-zero, an mktemp failure, or a
+# writer I/O error). The caller maps rc=5 to `wip_die 1 internal`, keeping an
+# internal error DISTINCT from a content-drift refusal (rc=4).
 _wip_setup_agents_vendored() {
-  local root="$1"
+  local root="$1" td="$2"
   local backend
   backend="$(yq -r '.features.orchestration.backend // "solo"' "$root/.wip.yaml" 2>/dev/null || printf 'solo')"
   [[ -n "$backend" && "$backend" != "null" ]] || backend="solo"
@@ -373,6 +391,32 @@ _wip_setup_agents_vendored() {
     esac
     printf '%s\t%s\n' "$status" "$rel"
   done
+
+  # Phase 2: relocate the canonical wip slash-commands verbatim (set-parity by
+  # glob, D4). A direct idempotent copy — no render — because the resolver swap
+  # is already baked into the committed templates (D3).
+  local cmd_dir="$td/setup/agents/commands"
+  local cmd_tmpl name
+  for cmd_tmpl in "$cmd_dir"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue # empty/absent glob → nothing to vendor
+    name="$(basename -- "$cmd_tmpl")"
+    rel=".claude/commands/wip/$name"
+    dest="$root/$rel"
+    set +e
+    status="$(wip_setup_write_idempotent "$cmd_tmpl" "$dest")"
+    rc=$?
+    set -e
+    case "$rc" in
+      0) ;;
+      4) saw_refused=1 ;;
+      *)
+        printf 'wip-plumbing: setup agents: command write helper failed (%d) for %s\n' "$rc" "$rel" >&2
+        return 5
+        ;;
+    esac
+    printf '%s\t%s\n' "$status" "$rel"
+  done
+
   [[ "$saw_refused" -eq 0 ]] || return 4
   return 0
 }
