@@ -9,6 +9,12 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 export WIP_NO_REGISTRY=1
 export WIP_NOW="2026-06-14"
+# Vendored `setup agents` renders the flattened agents via wip_flatten_render,
+# which resolves roles/ from $root/roles | $CLAUDE_PLUGIN_ROOT/roles | the
+# WIP_ROLES_DIR seam. These cases drive setup against consumer tempdirs
+# (WIP_ROOT=$workdir, no roles/), so point the renderer at the install's roles/
+# via the documented seam — mirrors test-flatten-render.sh.
+export WIP_ROLES_DIR="$PWD/roles"
 
 # --- 1. Template fidelity vs the live repo (step-09 byte-derivation). ----------
 assert_cmp templates/setup/deps/flake.nix flake.nix \
@@ -70,7 +76,7 @@ for verb in deps direnv hygiene release agents; do
     direnv) expected=1 ;;  # .envrc
     hygiene) expected=1 ;; # .pre-commit-config.yaml
     release) expected=2 ;; # cliff.toml + CHANGELOG.md
-    agents) expected=16 ;; # 4 agents + 9 commands + agents/README + plugin/README + plugin.json
+    agents) expected=4 ;;  # vendored flattened agents: .claude/agents/wip/{4 roles}.md (ADR-0020 D1)
   esac
   assert_eq "$expected" "$wrote_n" "[$verb] wrote $expected files"
   assert_eq "0" "${F[2]}" "[$verb] no refusals"
@@ -178,10 +184,15 @@ assert_cmp "$workdir/.pre-commit-config.yaml" .pre-commit-config.yaml \
 # CHANGELOG.md + cliff.toml don't have live equivalents — just assert they landed
 assert_file "$workdir/CHANGELOG.md" "round-trip CHANGELOG.md present"
 assert_file "$workdir/cliff.toml" "round-trip cliff.toml present"
-# agents tree landed with the substituted form
-assert_file "$workdir/.claude-plugin/plugin.json" "round-trip plugin.json present"
-assert_not_grep 'bin/wip-plumbing' "$workdir/.claude-plugin/README.md" \
-  "round-trip agents/ has no bin/wip-plumbing"
+# vendored flattened agents landed (ADR-0020 D1): the four role files under
+# .claude/agents/wip/, and NO plugin tree (.claude-plugin/) or roles/ copied
+# into the consumer.
+for role in orchestrator coordinator researcher builder; do
+  assert_file "$workdir/.claude/agents/wip/$role.md" \
+    "round-trip .claude/agents/wip/$role.md present"
+done
+assert_absent "$workdir/.claude-plugin" "round-trip no .claude-plugin/ in consumer"
+assert_absent "$workdir/roles" "round-trip no roles/ in consumer"
 
 # --- 13. doctor on the round-trip tempdir → clean ---------------------------
 out="$(WIP_ROOT="$workdir" bin/wip-plumbing doctor 2>/dev/null)"
