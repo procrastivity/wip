@@ -101,8 +101,9 @@ the following pinned decisions.
   `[tier-policy.md](./tier-policy.md)`, glossary links). These are **not**
   `@`-includes — Claude Code never resolves them at runtime; they are prose
   decoration in a system-prompt body. v1 leaves them **inert** and prepends one
-  framing line noting that the manuals below are inlined and any `./…`
-  cross-reference points to a section within this same file. This satisfies the
+  framing line noting that the manuals below are inlined in full and that any
+  relative `./…` Markdown link is inert — not resolved at runtime, with the
+  content it names reproduced inline in this same file. This satisfies the
   "zero `@` refs" self-containment test, which forbids `@`-includes, **not**
   inert Markdown links. Anchor-rewriting intra-bundle links to in-document
   anchors is a **deferred** renderer enhancement (step-02 polish), consistent

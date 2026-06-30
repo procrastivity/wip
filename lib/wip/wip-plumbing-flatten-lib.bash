@@ -20,9 +20,11 @@
 #         ^[a-z][a-z0-9-]*$ and has a backends/<backend>.md.
 #   - D3  source dirs resolve like `orchestrate backend` (env-overridable).
 #   - D4  frontmatter + framing read verbatim from the agent template.
-#   - D5  emit order framing + shared.md + <role>.md + tier-policy.md +
-#         backends/<backend>.md; the template's `@`-include set is validated
-#         against the canonical four and FAILS LOUD on drift; the
+#   - D5  emit order framing + D5 disclaimer + shared.md + <role>.md +
+#         tier-policy.md + backends/<backend>.md; the renderer prepends a single
+#         static inlining-disclaimer line (ADR-0020 D5) immediately after the
+#         verbatim framing and before shared.md. The template's `@`-include set
+#         is validated against the canonical four and FAILS LOUD on drift; the
 #         backends/active.md slot is the backend seam (<backend>.md substitutes).
 #   - D6  deterministic join: one blank line between sections, each body
 #         verbatim with a single normalized trailing newline.
@@ -171,6 +173,22 @@ _wip_flatten_join() {
   printf '\n'
 }
 
+# _wip_flatten_disclaimer — ADR-0020 D5. The single static framing line that
+# tells a FLATTENED agent the manuals above are inlined in full below (not linked
+# at runtime), and that any relative `./` Markdown link within them is inert —
+# read as text, not fetched, with its target reproduced inline in this same file.
+# A fixed constant: no timestamp/host/path/role/backend interpolation, so
+# re-render stays byte-identical (D6, step-05's drift gate). It is a
+# renderer-owned constant, NOT an inlined source body, so it is NOT passed
+# through wip_flatten_neutralize_links (the O3 seam). The template's verbatim
+# "linked manuals" framing is correct for source:plugin and is left untouched.
+_wip_flatten_disclaimer() {
+  # SC2016: the backticked `./` and the rest are a LOCKED literal disclaimer —
+  # nothing here is meant to expand; single quotes preserve it byte-for-byte.
+  # shellcheck disable=SC2016
+  printf '%s\n' 'The manuals referenced above are inlined in full below. Any relative `./` Markdown link within them is inert — it is not resolved at runtime; the content it names is reproduced inline in this same file.'
+}
+
 # wip_flatten_render <role> <backend> — the public entry point (D2). Resolve
 # the source dirs (D3), validate inputs, run the D5 drift guard, then inline
 # the four canonical bodies in the fixed emit order (D5) with the
@@ -220,15 +238,17 @@ wip_flatten_render() {
   # D5 drift guard: the template's @-include set must equal the canonical four.
   wip_flatten_parse_template "$template" "$role" || return $?
 
-  # Fixed emit order (D5): framing + shared.md + <role>.md + tier-policy.md +
-  # backends/<backend>.md, with the verbatim frontmatter ahead of the framing.
-  # The active.md seam collapses by reading backends/<backend>.md directly.
-  # Each inlined body passes through the O3 neutralize-links seam (identity in
-  # v1, D7) before normalization. The frontmatter + framing come from the
-  # template verbatim and are NOT passed through the seam (D4).
+  # Fixed emit order (D5): framing + D5 disclaimer + shared.md + <role>.md +
+  # tier-policy.md + backends/<backend>.md, with the verbatim frontmatter ahead
+  # of the framing. The active.md seam collapses by reading backends/<backend>.md
+  # directly. Each inlined body passes through the O3 neutralize-links seam
+  # (identity in v1, D7) before normalization. The frontmatter + framing come
+  # from the template verbatim and are NOT passed through the seam (D4); the D5
+  # disclaimer is a renderer-owned static constant and likewise bypasses it.
   local -a sections=()
   sections+=("$(_wip_flatten_frontmatter "$template" | _wip_flatten_trim)")
   sections+=("$(_wip_flatten_framing "$template" | _wip_flatten_trim)")
+  sections+=("$(_wip_flatten_disclaimer)") # ADR-0020 D5 inlining disclaimer
   sections+=("$(wip_flatten_neutralize_links <"$shared" | _wip_flatten_trim)")
   sections+=("$(wip_flatten_neutralize_links <"$rolebody" | _wip_flatten_trim)")
   sections+=("$(wip_flatten_neutralize_links <"$tier" | _wip_flatten_trim)")

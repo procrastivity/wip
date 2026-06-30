@@ -115,6 +115,13 @@ for role in "${ROLES[@]}"; do
     assert_order "$role/$backend inlines sources in fixed order" "$out" \
       '^# Shared Role Behavior$' "^# $heading\$" '^# Tier Policy$' "$backend_sentinel"
 
+    # ADR-0020 D5: the renderer prepends a static inlining disclaimer after the
+    # verbatim framing and before the first inlined source body (shared.md).
+    assert_grep 'inlined in full below' "$out" \
+      "$role/$backend prepends the D5 inlining disclaimer"
+    assert_order "$role/$backend disclaimer sits between framing and inlined sources" "$out" \
+      'per the linked manuals' 'inlined in full below' '^# Shared Role Behavior$'
+
     # Frontmatter byte-identical to the template (D4).
     tpl_fm="$(wip_mktemp)/tpl.fm"
     out_fm="$(wip_mktemp)/out.fm"
