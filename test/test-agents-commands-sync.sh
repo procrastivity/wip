@@ -45,4 +45,29 @@ rc2=$?
 set -e
 assert_eq "0" "$rc2" "regeneration is idempotent"
 
+# The renderer's INPUT templates under templates/setup/agents/agents/ are
+# byte-for-byte copies of the canonical plugin agents/<role>.md (the renderer
+# reads them as thin-pointer templates — see wip-plumbing-flatten-lib.bash). They
+# are identical today but NO gate keeps them so, so silent drift in the renderer's
+# input would otherwise hide. This is the agent-side sibling of the command-copy
+# gate above: the two copies must be byte-identical with set parity (every plugin
+# role has a template copy and vice-versa — no orphans on either side).
+
+ROLES=(orchestrator coordinator researcher builder)
+
+# 6. Each render-input template is byte-identical to the canonical plugin agent.
+for role in "${ROLES[@]}"; do
+  assert_cmp "templates/setup/agents/agents/$role.md" "agents/$role.md" \
+    "render-input template $role.md matches canonical plugin agents/$role.md"
+done
+
+# 7. Set parity — both trees hold exactly the four role files (no orphan on either
+#    side: a new plugin role without a template copy, or a stray template without a
+#    canonical agent). README.md is documentation, not a render-input role.
+expected="$(printf '%s\n' "${ROLES[@]}" | sort | tr '\n' ' ')"
+plugin_set="$(printf '%s\n' agents/*.md | xargs -n1 basename | grep -vxF README.md | sort | tr '\n' ' ')"
+template_set="$(printf '%s\n' templates/setup/agents/agents/*.md | xargs -n1 basename | grep -vxF README.md | sort | tr '\n' ' ')"
+assert_eq "$expected" "${plugin_set//.md/}" "plugin agents/ holds exactly the four roles (no orphan)"
+assert_eq "$expected" "${template_set//.md/}" "render-input templates hold exactly the four roles (no orphan)"
+
 test_summary
