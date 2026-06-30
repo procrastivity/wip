@@ -67,3 +67,31 @@ switches.
   `tier-policy` files name zero backend tokens; `task.md` names no Solo MCP tool.
 - Deferred: a `tier → model` map for the Task backend (small→Haiku / medium→Sonnet /
   large→Opus via the Task tool's `model` override) and a Duo backend.
+
+## Consumer context (vendored, flattened)
+
+Amended 2026-06-30 (BDS-28, *Flatten vendored orchestration agents*, step-04;
+ADR-0020 nominates step-04 as owner — `0020-…:126`).
+
+The active-backend indirection above describes the **authoring / `source: plugin`**
+path: the four `agents/*.md` `@`-include `roles/backends/active.md`, and the switch
+verb regenerates that pointer from `roles/backends/<backend>.md`. A **`source:
+vendored`** install (ADR-0020) is shaped differently and switches differently:
+
+- A vendored consumer has **no `active.md` and no `roles/`**. `setup agents` resolved
+  each agent's four `@`-includes at install time and emitted four self-contained
+  `.claude/agents/wip/<role>.md` files with the backend baked in; there is no pointer
+  to regenerate.
+- On a vendored install, `wip-plumbing orchestrate backend <name>` flips the manifest
+  `backend` scalar (the same surgical `yq -i .features.orchestration.backend` set) and
+  then **re-flattens** the four agent files — re-rendering each via
+  `wip_flatten_render <role> <name>` (overwrite-iff-differs) — instead of regenerating
+  `active.md`. The discriminator is `features.orchestration.source == "vendored"`;
+  anything else (`plugin`, or absent) takes the `active.md` path above, byte-for-byte
+  unchanged.
+
+The **authoring side is unchanged**: `roles/`, the four thin-pointer agents, the
+`active.md` indirection, and the static-`@`-include rationale all stand exactly as
+decided above and continue to govern the `source: plugin` path (including this repo).
+This note records consumer context only; it does not amend the Decision or
+Consequences.
