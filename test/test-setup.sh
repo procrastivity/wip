@@ -110,9 +110,28 @@ assert_eq "true" "${FL[0]}" "direnv flag flipped"
 assert_eq "true" "${FL[1]}" "changelog flag flipped"
 assert_eq "true" "${FL[2]}" "orchestration enabled"
 assert_eq "solo" "${FL[3]}" "orchestration backend=solo"
-assert_eq "plugin" "${FL[4]}" "orchestration source=plugin"
+assert_eq "vendored" "${FL[4]}" "orchestration source=vendored"
 # Solo block is NOT auto-created (consumer's decision per ADR-0007)
 assert_eq "null" "${FL[5]}" "no auto features.solo block"
+
+# --- 6b. setup agents --source plugin → vendors nothing (D-03.3) -------------
+# The plugin source mode writes zero files (agents resolve by the bare
+# `wip-<role>` name from the globally-enabled wip plugin); the manifest flip
+# still records enabled=true and flips source to `plugin`.
+workdir="$tmp/agents-plugin"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --source plugin 2>/dev/null)"
+mapfile -t F < <(jq -r '.ok, (.wrote | length), (.skipped_idempotent | length), (.refused | length)' <<<"$out")
+assert_eq "true" "${F[0]}" "[agents --source plugin] ok"
+assert_eq "0" "${F[1]}" "[agents --source plugin] wrote nothing"
+assert_eq "0" "${F[2]}" "[agents --source plugin] skipped nothing"
+assert_eq "0" "${F[3]}" "[agents --source plugin] refused nothing"
+assert_absent "$workdir/.claude/agents" "[agents --source plugin] no .claude/agents/ written"
+mapfile -t FP < <(yq -o=json '.' "$workdir/.wip.yaml" |
+  jq -r '.features.orchestration.enabled, .features.orchestration.source')
+assert_eq "true" "${FP[0]}" "[agents --source plugin] orchestration enabled"
+assert_eq "plugin" "${FP[1]}" "[agents --source plugin] source=plugin"
 
 # --- 7. Sentinel post-check passes; doctor on tempdir is clean ---------------
 out="$(WIP_ROOT="$workdir" bin/wip-plumbing doctor 2>/dev/null)"

@@ -136,6 +136,15 @@ wip_plumbing_cmd_setup() {
     # render/write failure (distinct from a content-drift refusal at rc=4).
     raw="$(_wip_setup_agents_vendored "$root")"
     rc=$?
+  elif [[ "$sub" == "agents" && "$source_mode" == "plugin" ]]; then
+    # --source plugin no-vendor path (ADR-0020 D4 / D-03.3): vendor NOTHING.
+    # Write zero files (ledger wrote: []); the agents resolve by the same bare
+    # `wip-<role>` name from the globally-enabled wip plugin. The manifest flip
+    # below records source=plugin. The foreign-plugin guard above is gated on
+    # `source_mode == vendored`, so it never fires here (a foreign root manifest
+    # is the EXPECTED state for a plugin repo — this is the steering target).
+    raw=""
+    rc=0
   else
     raw="$(wip_setup_walk_template_tree "$tmpl_dir" "$root")"
     rc=$?
@@ -187,8 +196,11 @@ wip_plumbing_cmd_setup() {
         wip_die 1 internal "setup $sub: manifest update failed"
       ;;
     agents)
+      # Record the selected source mode (D-03.1): default `vendored` (the bare
+      # verb writes a vendored flattened install) or `plugin` (--source plugin,
+      # no-vendor). enabled/backend stay fixed.
       manifest_status="$(wip_setup_set_feature_flag "$manifest" "orchestration" \
-        "enabled=true" "backend=solo" "source=plugin")" ||
+        "enabled=true" "backend=solo" "source=$source_mode")" ||
         wip_die 1 internal "setup $sub: manifest update failed"
       ;;
     lds)
