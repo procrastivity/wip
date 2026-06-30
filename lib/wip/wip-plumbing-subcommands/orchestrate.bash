@@ -17,6 +17,13 @@
 # selects the *binding*, not a tool. Pure function of .wip.yaml + roadmap + disk.
 # shellcheck shell=bash
 
+# orchestrate.bash does NOT source flatten-lib via the bin dispatcher (which
+# only sources this one subcommand file), so wire it here: the vendored
+# (`source: vendored`) backend switch re-renders the four flattened agent files
+# through `wip_flatten_render` (ADR-0020 / step-04).
+# shellcheck source=lib/wip/wip-plumbing-flatten-lib.bash
+source "$WIP_LIB/wip-plumbing-flatten-lib.bash"
+
 wip_plumbing_cmd_orchestrate() {
   local sub="${1:-}"
   shift || true
@@ -52,6 +59,19 @@ _wip_orchestrate_cmd_backend() {
   root="$(wip_find_root)" || wip_die 4 no-manifest "no .wip.yaml found from $PWD upward"
   mj="$(wip_manifest_json "$root")"
   [[ -n "$mj" ]] || wip_die 4 bad-manifest "could not parse $root/.wip.yaml" ".wip.yaml"
+
+  # D-04.1: branch on .features.orchestration.source. A vendored (flattened)
+  # install has no local roles/ or active.md — its four self-contained
+  # .claude/agents/wip/<role>.md files ARE the agents — so a backend switch
+  # re-renders those files via wip_flatten_render instead of regenerating the
+  # active.md pointer. Anything else (`plugin`, or absent → "plugin") keeps the
+  # existing active.md path below byte-for-byte (this repo is `source: plugin`).
+  local source
+  source="$(jq -r '.features.orchestration.source // "plugin"' <<<"$mj")"
+  if [[ "$source" == "vendored" ]]; then
+    _wip_orchestrate_backend_vendored "$root" "$mj" "$name"
+    return
+  fi
 
   # Resolve the roles/ dir. The generated active.md lives next to the authored
   # backend bindings. In the dev/vendored layout roles/ sits at the repo root;
@@ -129,6 +149,155 @@ _wip_orchestrate_cmd_backend() {
       --argjson manifest_updated "$manifest_updated_json" '
       {ok:true, verb:"orchestrate backend", backend:$b, available:$avail,
        active_regenerated:$regen, manifest_updated:$manifest_updated}'
+  fi
+}
+
+# _wip_orchestrate_backend_vendored <root> <mj> <name> — the vendored
+# (`source: vendored`, flattened install) branch of `orchestrate backend`
+# (ADR-0020 / step-04 D-04.*). A flattened consumer has no roles/ or active.md,
+# so a switch RE-RENDERS the four self-contained .claude/agents/wip/<role>.md
+# files via the pure renderer rather than regenerating the active.md pointer.
+# The renderer resolves roles/ via $CLAUDE_PLUGIN_ROOT (the wip plugin must be
+# enabled at switch time — the same dependency `setup agents` has).
+#
+#   - No <name> → show: report the manifest backend, a best-effort `available`
+#     list, and `active_in_sync:null` (no pointer to compare; D-04.5). A read
+#     must not hard-fail when the plugin is unreachable → `available:[]`.
+#   - <name> → switch: validate the name (reuse the active.md regex), render all
+#     four roles to tmpfiles FIRST (so a render failure leaves NOTHING partial,
+#     D-04.4), flip the manifest backend with the same surgical `yq` set, then
+#     land each file iff it differs (`cmp -s || cp`, mirroring the active.md
+#     branch — D-04.3; honors WIP_DRY_RUN). Emits the D-04.6 JSON shape (with
+#     `reflattened`, no `active_regenerated`).
+_wip_orchestrate_backend_vendored() {
+  local root="$1" mj="$2" name="$3"
+
+  local current
+  current="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
+
+  # Available backends = best-effort from the plugin's backends/, resolved via
+  # the renderer's own roles/ seam ($WIP_ROLES_DIR → $root/roles →
+  # $CLAUDE_PLUGIN_ROOT/roles). Lenient: a read never hard-fails when roles/ is
+  # unreachable (D-04.5) → available:[].
+  local available="[]" rdir=""
+  if rdir="$(_wip_flatten_roles_dir 2>/dev/null)" && [[ -d "$rdir/backends" ]]; then
+    available="$(find "$rdir/backends" -maxdepth 1 -type f -name '*.md' ! -name 'active.md' \
+      -exec basename {} .md \; 2>/dev/null | LC_ALL=C sort | jq -R . | jq -sc .)"
+    [[ -n "$available" ]] || available="[]"
+  else
+    rdir=""
+  fi
+
+  # No name → show. No consumer active.md exists, so active_in_sync is null.
+  if [[ -z "$name" ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg b "$current" --argjson avail "$available" '
+        {ok:true, verb:"orchestrate backend", backend:$b, source:"vendored",
+         available:$avail, active_in_sync:null}'
+    fi
+    return 0
+  fi
+
+  # Switch. Validate the requested backend name (same rules as the active.md
+  # path; active is the reserved generated-pointer name there and is never a
+  # backend).
+  [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] ||
+    wip_die 2 usage "orchestrate backend: backend name must match ^[a-z][a-z0-9-]*$: $name"
+  [[ "$name" != "active" ]] ||
+    wip_die 2 usage "orchestrate backend: 'active' is the generated pointer, not a backend name"
+
+  # Precise unknown-backend error when backends/ is reachable (mirrors the
+  # active.md path); otherwise fall through to the renderer's loud failure
+  # (Q-04.1 / D-04.4).
+  if [[ -n "$rdir" && ! -f "$rdir/backends/$name.md" ]]; then
+    wip_die 4 unknown-backend \
+      "orchestrate backend: no such backend '$name' (available: $(jq -r 'join(", ")' <<<"$available"))"
+  fi
+
+  # Re-render the four self-contained agent files (ADR-0020 D1). Render ALL
+  # roles to tmpfiles first so a render failure (D-04.4) leaves NOTHING partial
+  # — only after every render succeeds do we touch the manifest or any file.
+  local -a roles=(orchestrator coordinator researcher builder) # ADR-0020 D1
+  local -a tmps=() rels=()
+  local role rel tmp rc
+  for role in "${roles[@]}"; do
+    rel=".claude/agents/wip/$role.md" # ADR-0020 D1
+    tmp="$(mktemp)" || {
+      [[ ${#tmps[@]} -gt 0 ]] && rm -f -- "${tmps[@]}"
+      wip_die 1 internal "orchestrate backend: mktemp failed"
+    }
+    tmps+=("$tmp")
+    set +e
+    wip_flatten_render "$role" "$name" >"$tmp"
+    rc=$?
+    set -e
+    if [[ "$rc" != "0" ]]; then
+      rm -f -- "${tmps[@]}"
+      case "$rc" in
+        2) wip_die 2 usage "orchestrate backend: renderer rejected role '$role' / backend '$name' (rc=2)" ;;
+        4) wip_die 4 no-roles-dir \
+          "orchestrate backend: cannot render flattened agents — roles/ unreachable for role '$role' (backend '$name'); the wip plugin must be enabled (\$CLAUDE_PLUGIN_ROOT/roles) at switch time" ;;
+        *) wip_die 4 render-failed \
+          "orchestrate backend: failed to render flattened agent for role '$role' (backend '$name', rc=$rc); no files written" ;;
+      esac
+    fi
+    rels+=("$rel")
+  done
+
+  # All renders succeeded. Flip features.orchestration.backend (idempotent;
+  # honors WIP_DRY_RUN) using the same surgical scalar `yq` set the active.md
+  # path uses, so block style + inline manifest comments survive (D-04.3).
+  local manifest="$root/.wip.yaml" manifest_updated_json="null"
+  if [[ "$current" != "$name" ]]; then
+    if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+      NAME="$name" yq -i '.features.orchestration.backend = strenv(NAME)' "$manifest" ||
+        {
+          rm -f -- "${tmps[@]}"
+          wip_die 1 internal "orchestrate backend: manifest update failed"
+        }
+    fi
+    manifest_updated_json='".wip.yaml"'
+  fi
+
+  # Land each rendered file iff it differs (cmp -s || cp, mirroring the
+  # active.md branch's idempotent regenerate). mkdir -p the parent defensively
+  # so a missing file self-heals (Q-04.4). Honor WIP_DRY_RUN: report would-be
+  # re-renders, write nothing.
+  local -a reflattened=()
+  local i dest
+  for i in "${!roles[@]}"; do
+    rel="${rels[$i]}"
+    tmp="${tmps[$i]}"
+    dest="$root/$rel"
+    if [[ ! -f "$dest" ]] || ! cmp -s "$tmp" "$dest"; then
+      if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+        mkdir -p -- "$(dirname -- "$dest")" ||
+          {
+            rm -f -- "${tmps[@]}"
+            wip_die 1 internal "orchestrate backend: failed to create parent of $rel"
+          }
+        cp -- "$tmp" "$dest" ||
+          {
+            rm -f -- "${tmps[@]}"
+            wip_die 1 internal "orchestrate backend: failed to write $rel"
+          }
+      fi
+      reflattened+=("$rel")
+    fi
+  done
+  rm -f -- "${tmps[@]}"
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    local reflattened_json="[]"
+    if [[ "${#reflattened[@]}" -gt 0 ]]; then
+      reflattened_json="$(printf '%s\n' "${reflattened[@]}" | jq -R . | jq -sc .)"
+    fi
+    jq -nc \
+      --arg b "$name" --argjson avail "$available" \
+      --argjson reflat "$reflattened_json" \
+      --argjson manifest_updated "$manifest_updated_json" '
+      {ok:true, verb:"orchestrate backend", backend:$b, source:"vendored",
+       available:$avail, reflattened:$reflat, manifest_updated:$manifest_updated}'
   fi
 }
 
