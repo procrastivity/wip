@@ -236,7 +236,7 @@ set -e
 assert_eq "0" "$rc" "[agents --check clean] exit 0"
 mapfile -t F < <(jq -r '.ok, (.checked | length), (.drift | length)' <<<"$out")
 assert_eq "true" "${F[0]}" "[agents --check clean] ok"
-assert_eq "4" "${F[1]}" "[agents --check clean] checked 4 roles"
+assert_eq "$((4 + cmd_count))" "${F[1]}" "[agents --check clean] checked 4 roles + commands"
 assert_eq "0" "${F[2]}" "[agents --check clean] drift:[]"
 post_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
 assert_eq "$pre_sum" "$post_sum" "[agents --check clean] wrote nothing (round-trip byte-stable)"
@@ -313,6 +313,50 @@ set -e
 assert_eq "0" "$rc" "[agents --check --dry-run] exit 0 (dry-run inert under --check)"
 post_sum="$(find "$workdir/.claude/agents/wip" -type f -exec cksum {} \; | sort)"
 assert_eq "$pre_sum" "$post_sum" "[agents --check repeat] wrote nothing across repeats"
+
+# --- 6e. setup agents --check covers the relocated commands (step-06 / D6) ---
+# The unified vendored-drift gate also `cmp`s each installed .claude/commands/wip/
+# <name>.md vs its template. A FRESH install isolates command drift from the
+# agent drift exercised above: mutating or removing ONE command alone trips rc 4
+# (kind agents-drift) and names that command path; the gate stays read-only.
+workdir="$tmp/agents-check-cmds"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
+# Pick the first command deterministically (sorted glob) as the drift target.
+drift_cmd=""
+for cmd_tmpl in templates/setup/agents/commands/*.md; do
+  drift_cmd="$(basename -- "$cmd_tmpl")"
+  break
+done
+drift_cmd_rel=".claude/commands/wip/$drift_cmd"
+
+# (i) Mutate one installed command → exit 4 agents-drift names that command path.
+echo "# drift injected" >>"$workdir/$drift_cmd_rel"
+mut_sum="$(find "$workdir/.claude/commands/wip" -type f -exec cksum {} \; | sort)"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[agents --check cmd-drifted] exit 4"
+mapfile -t F < <(jq -r --arg p "$drift_cmd_rel" '.error.kind, ([.error.paths[] | select(. == $p)] | length)' <<<"$out")
+assert_eq "agents-drift" "${F[0]}" "[agents --check cmd-drifted] kind agents-drift"
+assert_eq "1" "${F[1]}" "[agents --check cmd-drifted] names the drifted command path"
+post_sum="$(find "$workdir/.claude/commands/wip" -type f -exec cksum {} \; | sort)"
+assert_eq "$mut_sum" "$post_sum" "[agents --check cmd-drifted] read-only (no repair write)"
+
+# (ii) Remove one installed command → exit 4 agents-drift names it missing; the
+#      gate does NOT re-create it (read-only).
+rm -f "$workdir/$drift_cmd_rel"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[agents --check cmd-missing] exit 4"
+mapfile -t F < <(jq -r --arg p "$drift_cmd_rel" '.error.kind, ([.error.paths[] | select(. == $p)] | length)' <<<"$out")
+assert_eq "agents-drift" "${F[0]}" "[agents --check cmd-missing] kind agents-drift"
+assert_eq "1" "${F[1]}" "[agents --check cmd-missing] names the missing command path"
+assert_absent "$workdir/$drift_cmd_rel" "[agents --check cmd-missing] not re-created"
 
 # --- 7. Sentinel post-check passes; doctor on a plugin-mode tempdir is clean -
 # Run against the §6b --source plugin install: doctor stays clean even though

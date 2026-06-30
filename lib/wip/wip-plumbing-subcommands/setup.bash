@@ -120,7 +120,7 @@ wip_plumbing_cmd_setup() {
   if [[ "$sub" == "agents" && "$check" == "1" ]]; then
     local check_rc
     set +e
-    _wip_setup_agents_check "$root"
+    _wip_setup_agents_check "$root" "$td"
     check_rc=$?
     set -e
     if [[ "$check_rc" == "5" ]]; then
@@ -421,33 +421,45 @@ _wip_setup_agents_vendored() {
   return 0
 }
 
-# _wip_setup_agents_check <root> — the read-only `setup agents --check` drift
-# gate (D-05.1/2/3), the agent-side analog of ADR-0015's
+# _wip_setup_agents_check <root> <templates-dir> — the read-only `setup agents
+# --check` drift gate (D-05.1/2/3), the agent-side analog of ADR-0015's
 # `sync-agents-commands --check`. Branches on the manifest's recorded
-# `.features.orchestration.source`: only `vendored` has installed agent files to
+# `.features.orchestration.source`: only `vendored` has installed files to
 # verify; anything else (`plugin`, absent) vendored nothing, so `--check` is a
-# clean no-op. For each role in `orchestrator coordinator researcher builder`
-# (the vendored write path's fixed order) it re-renders the flattened agent via
-# `wip_flatten_render <role> <backend>` — backend read as
-# `.features.orchestration.backend // "solo"`, the SAME read as
-# `_wip_setup_agents_vendored` — to a tmpfile and `cmp -s` it against the
-# installed `$root/.claude/agents/wip/<role>.md`, classifying in-sync / drifted /
-# missing. The clean re-render === installed comparison IS the ADR-0020
-# round-trip proof (D6): step-08's D5 disclaimer is present on BOTH sides because
-# both go through the same renderer — it is NEVER special-cased. This path NEVER
-# writes and NEVER flips the manifest, in every branch.
+# clean no-op.
+#
+# It mirrors `_wip_setup_agents_vendored`'s two write phases as two verify phases
+# — a single unified vendored-drift gate (kind `agents-drift`, OQ2 lean):
+#
+#   1. Agents — for each role in `orchestrator coordinator researcher builder`
+#      (the vendored write path's fixed order) re-render the flattened agent via
+#      `wip_flatten_render <role> <backend>` — backend read as
+#      `.features.orchestration.backend // "solo"`, the SAME read as
+#      `_wip_setup_agents_vendored` — to a tmpfile and `cmp -s` it against the
+#      installed `$root/.claude/agents/wip/<role>.md`. The clean re-render ===
+#      installed comparison IS the ADR-0020 round-trip proof (D6): step-08's D5
+#      disclaimer is present on BOTH sides via the SAME renderer — never
+#      special-cased.
+#   2. Commands (step-06 / D6) — for each `<templates-dir>/setup/agents/commands/
+#      <name>.md` (set-parity by GLOB, D4) `cmp -s` it DIRECTLY against the
+#      installed `$root/.claude/commands/wip/<name>.md` (no re-render — the
+#      resolver swap is already baked into the template, D3). A missing or
+#      drifted command is the same drift exit. NB (D1a): this proves the FILE
+#      LAYOUT, not the `/wip:<name>` runtime invocation.
+#
+# This path NEVER writes and NEVER flips the manifest, in every branch.
 #
 # Emits the D-05.3 JSON ledger on stdout (when WIP_JSON) and returns the exit:
 #   - source != vendored → clean no-op: return 0, `{ok, verb, checked:[], drift:[]}`.
 #   - source == vendored, all in-sync → return 0, `{…, checked:[paths], drift:[]}`.
-#   - any drifted/missing role → return 4, kind `agents-drift` (distinct from
-#     `content-drift` / `foreign-plugin-manifest`), `error.paths` = the offending
-#     repo-relative paths.
+#   - any drifted/missing agent OR command → return 4, kind `agents-drift`
+#     (distinct from `content-drift` / `foreign-plugin-manifest`), `error.paths` =
+#     the offending repo-relative paths.
 # Returns 5 on an internal render failure (render non-zero or mktemp) so the
 # caller maps it to `wip_die 1 internal`, keeping an internal error DISTINCT from
 # the drift exit (rc 4). Mirrors `_wip_setup_agents_vendored`'s rc contract.
 _wip_setup_agents_check() {
-  local root="$1"
+  local root="$1" td="$2"
   local verb="setup agents"
   local source_recorded
   source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
@@ -488,6 +500,23 @@ _wip_setup_agents_check() {
       drift+=("$rel") # drifted
     fi
     rm -f -- "$tmp"
+  done
+
+  # Phase 2: verify the relocated slash-commands (set-parity by glob, D4) by a
+  # direct template `cmp` — no re-render (D3). Missing/drifted → same drift exit.
+  local cmd_dir="$td/setup/agents/commands"
+  local cmd_tmpl name cmd_rel cmd_dest
+  for cmd_tmpl in "$cmd_dir"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue # empty/absent glob → nothing to verify
+    name="$(basename -- "$cmd_tmpl")"
+    cmd_rel=".claude/commands/wip/$name"
+    cmd_dest="$root/$cmd_rel"
+    checked+=("$cmd_rel")
+    if [[ ! -f "$cmd_dest" ]]; then
+      drift+=("$cmd_rel") # missing
+    elif ! cmp -s -- "$cmd_tmpl" "$cmd_dest"; then
+      drift+=("$cmd_rel") # drifted
+    fi
   done
 
   if [[ "${#drift[@]}" -gt 0 ]]; then
