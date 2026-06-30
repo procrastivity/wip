@@ -286,6 +286,37 @@ done
 assert_absent "$tmpv/roles" "vendored switch: no roles/ created in consumer"
 assert_absent "$tmpv/.claude/agents/wip/active.md" "vendored switch: no active.md created"
 
+# v1b. No-Solo-token (no-leak) gate on the now-task-backend INSTALLED files
+# (BRIEF AC: "Switch re-flattens … passes the no-Solo-token assertion"). The
+# step-04 block above proves the task files DIFFER from solo (v1, line 282) but
+# never that they name ZERO Solo tokens — that single assertion is step-05's.
+# FORBIDDEN is the Solo-specific token set, kept in sync VERBATIM with
+# test/test-roles-backend-seam.sh:38 (mirrored in test-flatten-render.sh:29).
+FORBIDDEN='mcp__solo|solo_process_id|agent_tool_id|spawn_process|scratchpad|todo_create|todo_list|whoami|list_agent_tools|mcp-cli|kv_set|kv_get|timer_set|timer_fire_when_idle|rename_process|wait_for_bound_port|kind="agent"|kind=\\"agent\\"'
+# task.md's own benign FORBIDDEN hit is the bare word `whoami` in PROSE ("There
+# is no whoami ..."), NOT a Solo-tool reference — so the no-leak shape is the
+# hard mcp__solo__ absence PLUS render_hits == src_hits, NOT a naive full
+# FORBIDDEN grep (mirrors test-flatten-render.sh:144-148, applied on-disk).
+task_src_hits="$(grep -Eo -- "$FORBIDDEN" roles/backends/task.md 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+for role in "${vroles[@]}"; do
+  installed="$tmpv/.claude/agents/wip/$role.md"
+  assert_not_grep 'mcp__solo__' "$installed" \
+    "vendored switch no-leak: $role install names no Solo MCP tool"
+  inst_hits="$(grep -Eo -- "$FORBIDDEN" "$installed" 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+  assert_eq "$task_src_hits" "$inst_hits" \
+    "vendored switch no-leak: $role install leaks no Solo token beyond task.md's own prose"
+done
+
+# v1c. `setup agents --check` is CLEAN after the switch — proves --check is
+# backend-aware: it re-renders for the manifest's now-`task` backend and matches
+# the installed bytes (exit 0, drift:[]). The --check flag exists as of Task 1.
+set +e
+vchk="$(WIP_ROLES_DIR="$PWD/roles" CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv" bin/wip-plumbing setup agents --check)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "vendored switch --check: clean exit 0 for task backend"
+assert_eq "[]" "$(jq -c '.drift' <<<"$vchk")" "vendored switch --check: drift empty for task backend"
+
 # v2. Round-trip back to solo reproduces the original install bytes exactly.
 v2="$(runv solo)"
 assert_eq "solo" "$(jq -r '.backend' <<<"$v2")" "vendored round-trip: backend solo"
