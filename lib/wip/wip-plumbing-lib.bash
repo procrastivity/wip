@@ -45,7 +45,9 @@ commands:
                    setup direnv   [--force]   (.envrc; requires flake.nix)
                    setup hygiene  [--force]   (.pre-commit-config.yaml)
                    setup release  [--force]   (cliff.toml + CHANGELOG.md)
-                   setup agents   [--force]   (.claude-plugin/ + commands/ + agents/)
+                   setup agents   [--force] [--source plugin|vendored]
+                                  (default vendored: .claude/agents/wip/*.md;
+                                   plugin: vendor nothing, use the wip plugin)
                    setup lds      [--force] [--sentinel-only]
                                   (LDS scaffold under engineering/)
   graduate  promote a single planning artifact to its LDS canon slot

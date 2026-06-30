@@ -252,7 +252,7 @@ wip_plumbing_cmd_setup() {
        sentinel:$sentinel, sentinel_present:$sentinel_present}'
   fi
 
-  _wip_setup_hint "$sub"
+  _wip_setup_hint "$sub" "$source_mode"
 }
 
 # wip_setup_sentinel_for_verb <verb> — echo the sentinel path the verb's
@@ -393,6 +393,7 @@ _wip_setup_arr_json() {
 # shellcheck disable=SC2016 # backticks in hint strings are literal markdown for users
 _wip_setup_hint() {
   [[ "${WIP_QUIET:-0}" == "1" ]] && return 0
+  local source_mode="${2:-vendored}"
   case "$1" in
     deps)
       printf 'wip-plumbing: setup deps: hint: run `direnv allow` then `make check`\n' >&2
@@ -407,7 +408,12 @@ _wip_setup_hint() {
       printf 'wip-plumbing: setup release: hint: edit `cliff.toml` then `git cliff -o CHANGELOG.md` on tag\n' >&2
       ;;
     agents)
-      printf 'wip-plumbing: setup agents: hint: restart Claude Code to load the wip plugin\n' >&2
+      if [[ "$source_mode" == "plugin" ]]; then
+        printf 'wip-plumbing: setup agents: hint: --source plugin vendored no files; agents resolve by `wip-<role>` from the globally-enabled wip plugin — restart Claude Code to load them\n' >&2
+      else
+        printf 'wip-plumbing: setup agents: hint: vendored the flattened wip agents to `.claude/agents/wip/`; restart Claude Code to load them\n' >&2
+        printf 'wip-plumbing: setup agents: hint: in a repo that is itself a plugin, re-run with `--source plugin` to skip vendoring and use the globally-enabled wip plugin\n' >&2
+      fi
       printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tier_policy in .wip.yaml if Solo is your backend\n' >&2
       ;;
     lds)

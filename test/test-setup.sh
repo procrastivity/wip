@@ -133,7 +133,55 @@ mapfile -t FP < <(yq -o=json '.' "$workdir/.wip.yaml" |
 assert_eq "true" "${FP[0]}" "[agents --source plugin] orchestration enabled"
 assert_eq "plugin" "${FP[1]}" "[agents --source plugin] source=plugin"
 
-# --- 7. Sentinel post-check passes; doctor on tempdir is clean ---------------
+# --- 6c. Conservative-write guard: foreign root .claude-plugin/plugin.json ----
+# (D-03.4 / Outcome 4) The vendored path refuses to install over a host plugin's
+# root manifest it does not own (.name != "wip"): exit 4 with the
+# foreign-plugin-manifest kind, writing NOTHING. Two controls follow: the SAME
+# repo with --source plugin succeeds (the guard is vendored-path-only), and a
+# wip-owned (name: wip) root manifest does NOT trip the guard.
+workdir="$tmp/agents-foreign"
+mkdir -p "$workdir/.claude-plugin"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+printf '{ "name": "clast", "version": "0.0.0" }\n' >"$workdir/.claude-plugin/plugin.json"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "[agents foreign-manifest] vendored exit 4"
+mapfile -t F < <(jq -r '.error.kind, .error.paths[0]' <<<"$out")
+assert_eq "foreign-plugin-manifest" "${F[0]}" "[agents foreign-manifest] guard kind"
+assert_eq ".claude-plugin/plugin.json" "${F[1]}" "[agents foreign-manifest] names the host manifest"
+assert_absent "$workdir/.claude/agents" "[agents foreign-manifest] vendored wrote nothing"
+
+# Control (a): the SAME foreign repo with --source plugin succeeds — the guard
+# is vendored-path-only and the no-vendor path writes zero files.
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --source plugin 2>/dev/null)"
+mapfile -t F < <(jq -r '.ok, (.wrote | length)' <<<"$out")
+assert_eq "true" "${F[0]}" "[agents foreign-manifest] --source plugin succeeds (guard not fired)"
+assert_eq "0" "${F[1]}" "[agents foreign-manifest] --source plugin wrote nothing"
+assert_absent "$workdir/.claude/agents" "[agents foreign-manifest] --source plugin still no .claude/agents/"
+assert_eq "plugin" "$(yq -r '.features.orchestration.source' "$workdir/.wip.yaml")" \
+  "[agents foreign-manifest] --source plugin recorded source=plugin"
+
+# Control (b): a wip-owned (name: wip) root manifest does NOT trip the guard —
+# the vendored write proceeds and lands the four role files.
+workdir="$tmp/agents-wip-owned"
+mkdir -p "$workdir/.claude-plugin"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+printf '{ "name": "wip", "version": "0.0.0" }\n' >"$workdir/.claude-plugin/plugin.json"
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents 2>/dev/null)"
+mapfile -t F < <(jq -r '.ok, (.wrote | length)' <<<"$out")
+assert_eq "true" "${F[0]}" "[agents wip-owned manifest] vendored write proceeds"
+assert_eq "4" "${F[1]}" "[agents wip-owned manifest] wrote 4 role files"
+for role in orchestrator coordinator researcher builder; do
+  assert_file "$workdir/.claude/agents/wip/$role.md" \
+    "[agents wip-owned manifest] .claude/agents/wip/$role.md present"
+done
+
+# --- 7. Sentinel post-check passes; doctor on a plugin-mode tempdir is clean -
+# Run against the §6b --source plugin install: doctor stays clean even though
+# the no-vendor path wrote no agents (orchestration carries no sentinel).
+workdir="$tmp/agents-plugin"
 out="$(WIP_ROOT="$workdir" bin/wip-plumbing doctor 2>/dev/null)"
 mapfile -t F < <(jq -r '.ok, .drift_count' <<<"$out")
 assert_eq "true" "${F[0]}" "doctor ok after all setups"
