@@ -204,4 +204,120 @@ set -e
 assert_eq "4" "$rc" "no roles dir exit 4"
 assert_eq "no-roles-dir" "$(jq -r '.error.kind' <<<"$b8")" "no-roles-dir kind"
 
+# --- orchestrate backend, VENDORED path (ADR-0020 / step-04) -------------
+# A flattened (source: vendored) consumer has NO local roles/ or active.md —
+# its four self-contained .claude/agents/wip/<role>.md files ARE the agents — so
+# a backend switch RE-RENDERS those four via wip_flatten_render instead of
+# regenerating an active.md pointer (D-04.1/.6). Fixture is honest: it seeds the
+# files through the same shipped install path (`setup agents`) and points the
+# renderer at the repo's real roles/ via the WIP_ROLES_DIR seam (mirrors
+# test-setup.sh). b1-b8 above (a source-less / plugin manifest) still exercise
+# the unchanged active.md path — the regression guard for that path.
+
+# Non-equality assertion (helpers.sh has assert_cmp for equality only).
+assert_differ() {
+  local a="$1" b="$2" msg="${3:-assert_differ}"
+  if ! cmp -s -- "$a" "$b"; then
+    _WIP_PASS=$((_WIP_PASS + 1))
+    printf '  ok   %s\n' "$msg"
+  else
+    _WIP_FAIL=$((_WIP_FAIL + 1))
+    printf '  FAIL %s\n       unexpectedly identical: %s == %s\n' "$msg" "$a" "$b" >&2
+  fi
+}
+
+# Reference render: the pure renderer's bytes for <role> <backend>, produced in
+# a subshell so sourcing the libs never leaks state into the test's main shell
+# (mirrors test-flatten-render.sh's source seam).
+render_ref() (
+  export WIP_LIB="$PWD/lib/wip" WIP_TEMPLATES_DIR="$PWD/templates" WIP_ROLES_DIR="$PWD/roles"
+  # shellcheck source=lib/wip/wip-plumbing-lib.bash
+  source "$WIP_LIB/wip-plumbing-lib.bash"
+  # shellcheck source=lib/wip/wip-plumbing-flatten-lib.bash
+  source "$WIP_LIB/wip-plumbing-flatten-lib.bash"
+  wip_flatten_render "$1" "$2"
+)
+
+tmpv="$(wip_mktemp)"
+cat >"$tmpv/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  orchestration: { enabled: true, backend: solo, source: vendored }
+current_initiative: demo
+initiatives: []
+YAML
+
+# Seed the four agent files honestly via the shipped vendored install path. With
+# backend: solo this renders the solo-backend agents — the install bytes the
+# round-trip below must reproduce.
+WIP_ROLES_DIR="$PWD/roles" WIP_ROOT="$tmpv" bin/wip-plumbing setup agents >/dev/null 2>&1
+
+vroles=(orchestrator coordinator researcher builder)
+
+# Snapshot the install (solo) bytes and pre-render the task-backend reference,
+# both outside the consumer tree so they can't be mistaken for consumer state.
+snap="$(wip_mktemp)"
+ref="$(wip_mktemp)"
+for role in "${vroles[@]}"; do
+  cp "$tmpv/.claude/agents/wip/$role.md" "$snap/$role.md"
+  render_ref "$role" task >"$ref/$role.md"
+done
+
+runv() { WIP_ROLES_DIR="$PWD/roles" CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv" bin/wip-plumbing orchestrate backend "$@"; }
+
+# v1. Switch to task: flips manifest, re-flattens the four files (no active.md).
+v1="$(runv task)"
+assert_eq "task" "$(jq -r '.backend' <<<"$v1")" "vendored switch: backend task"
+assert_eq "vendored" "$(jq -r '.source' <<<"$v1")" "vendored switch: source vendored"
+assert_eq ".wip.yaml" "$(jq -r '.manifest_updated' <<<"$v1")" "vendored switch: manifest updated"
+assert_eq '[".claude/agents/wip/orchestrator.md",".claude/agents/wip/coordinator.md",".claude/agents/wip/researcher.md",".claude/agents/wip/builder.md"]' \
+  "$(jq -c '.reflattened' <<<"$v1")" "vendored switch: reflattened lists the four paths"
+# No active.md mechanism fired → the JSON carries no active_regenerated key.
+assert_eq "false" "$(jq -r 'has("active_regenerated")' <<<"$v1")" "vendored switch: no active_regenerated key"
+assert_eq "task" "$(yq -r '.features.orchestration.backend' "$tmpv/.wip.yaml")" "vendored switch: manifest backend == task"
+for role in "${vroles[@]}"; do
+  assert_cmp "$ref/$role.md" "$tmpv/.claude/agents/wip/$role.md" \
+    "vendored switch: $role byte-equal to wip_flatten_render $role task"
+  assert_differ "$snap/$role.md" "$tmpv/.claude/agents/wip/$role.md" \
+    "vendored switch: $role differs from pre-switch (solo) content"
+done
+# No active.md / roles/ ever created in the consumer tree.
+assert_absent "$tmpv/roles" "vendored switch: no roles/ created in consumer"
+assert_absent "$tmpv/.claude/agents/wip/active.md" "vendored switch: no active.md created"
+
+# v2. Round-trip back to solo reproduces the original install bytes exactly.
+v2="$(runv solo)"
+assert_eq "solo" "$(jq -r '.backend' <<<"$v2")" "vendored round-trip: backend solo"
+for role in "${vroles[@]}"; do
+  assert_cmp "$snap/$role.md" "$tmpv/.claude/agents/wip/$role.md" \
+    "vendored round-trip: $role reproduces install bytes"
+done
+
+# v3. Idempotent re-switch to the current backend: nothing re-flattened, manifest noop.
+v3="$(runv solo)"
+assert_eq "[]" "$(jq -c '.reflattened' <<<"$v3")" "vendored idempotent: reflattened empty"
+assert_eq "null" "$(jq -r '.manifest_updated' <<<"$v3")" "vendored idempotent: manifest noop"
+
+# v4. --dry-run switch: reports would-be re-renders, mutates no file and no manifest.
+v4="$(WIP_ROLES_DIR="$PWD/roles" CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv" bin/wip-plumbing --dry-run orchestrate backend task)"
+assert_eq "4" "$(jq -r '.reflattened | length' <<<"$v4")" "vendored dry-run: reports four would-be re-renders"
+assert_eq "solo" "$(yq -r '.features.orchestration.backend' "$tmpv/.wip.yaml")" "vendored dry-run: manifest backend unchanged"
+for role in "${vroles[@]}"; do
+  assert_cmp "$snap/$role.md" "$tmpv/.claude/agents/wip/$role.md" \
+    "vendored dry-run: $role unchanged on disk (still solo)"
+done
+
+# v5. roles/ unreachable (no WIP_ROLES_DIR, no $root/roles, empty CLAUDE_PLUGIN_ROOT)
+# -> exit 4 no-roles-dir, with NO partial write.
+tmpv2="$(wip_mktemp)"
+cp "$tmpv/.wip.yaml" "$tmpv2/.wip.yaml"
+set +e
+v5="$(env -u WIP_ROLES_DIR CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv2" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "vendored roles-unreachable exit 4"
+assert_eq "no-roles-dir" "$(jq -r '.error.kind' <<<"$v5")" "vendored roles-unreachable: no-roles-dir kind"
+assert_absent "$tmpv2/.claude" "vendored roles-unreachable: no partial write"
+
 test_summary
