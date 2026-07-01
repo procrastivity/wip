@@ -1,5 +1,17 @@
 # `agents/` — orchestration role bindings
 
+> **⚠️ Legacy-footprint reference — NOT live consumer docs.** No `setup agents`
+> path has written this file since step-03; ADR-0020 flattened the vendored
+> install to self-contained `.claude/agents/wip/*.md` and ships **no** `agents/`
+> README (F4). It is kept in-tree as the **migration byte-match oracle**: `setup
+> agents --migrate` and the `doctor` legacy-footprint check delete a consumer's
+> root `agents/README.md` **only** when it is byte-equal to this template
+> (ADR-0020 · conservative-delete). Its dead-but-oracle siblings are
+> [`../.claude-plugin/README.md`](../.claude-plugin/README.md) and
+> `../.claude-plugin/plugin.json`. Editing this file re-keys that byte-match; the
+> `@../roles/` includes it describes are the OLD plugin-tree runtime shape, not
+> the flattened install.
+
 Plugin-side agent definitions for the wip orchestration Roles. Gated on
 `features.orchestration.enabled` per
 [ADR-0007](../engineering/decisions/0007-orchestration-backend-seam.md).

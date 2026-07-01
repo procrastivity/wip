@@ -1,5 +1,17 @@
 # `/wip:*` — Claude Code plugin for the `wip` workflow
 
+> **⚠️ Legacy-footprint reference — NOT live consumer docs.** No `setup agents`
+> path has written this file since step-03 (ADR-0020 flattened the vendored
+> install; commands relocated to `.claude/commands/wip/` in step-06). It is kept
+> in-tree as the **migration byte-match oracle**: `setup agents --migrate` and the
+> `doctor` legacy-footprint check delete a consumer's root
+> `.claude-plugin/README.md` **only** when it is byte-equal to this template
+> (ADR-0020 · conservative-delete). Its dead-but-oracle siblings are
+> `.claude-plugin/plugin.json` (deleted iff `.name == "wip"`; carries no prose
+> marker — it is JSON) and [`agents/README.md`](../agents/README.md). Editing this
+> file re-keys that byte-match; do not treat the command table below as a
+> maintained consumer surface.
+
 The third frontend in `wip`'s three-layer architecture
 ([ADR-0001](../engineering/decisions/0001-three-layer-plumbing-porcelain.md)):
 deterministic plumbing → CLI porcelain → this plugin. Claude Code is the
