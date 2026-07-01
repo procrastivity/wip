@@ -247,6 +247,39 @@ wip_plumbing_cmd_doctor() {
     done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
+  # 2g. Orchestration legacy-footprint (pure-disk; ADR-0020 migration path / D8).
+  #     Detect the OLD plugin-tree `setup agents` footprint a pre-flatten install
+  #     left at $root (the 16-file write set: root `.claude-plugin/*`, `agents/*`,
+  #     `commands/*`). Reuse the setup-family classifier VERBATIM — the `--migrate`
+  #     actor and this detector share one oracle, no duplication — by sourcing its
+  #     subcommand file the way intake.bash pulls in its siblings. This is a
+  #     pure-disk existence + ownership-signal scan (does root plugin.json read
+  #     `name==wip`? do `agents/<role>.md` carry `name: wip-<role>`? …); it does
+  #     NOT re-derive the backend or re-render agents — the deferred render fan-in
+  #     (ADR-0015 Q-05.4) stays deferred. Gate on ≥1 `owned` line: a foreign-only
+  #     (host plugin.json, F1) or stray-only (`roles/`/`active.md`) footprint is
+  #     NOT a wip footprint → stay quiet (D5; matches the plugin/fresh-repo case).
+  #     When owned files are present it is real, actionable, F1-risky drift → exit
+  #     4 with a `fix` steering to the safe, tested actor (doctor never deletes).
+  local lf_td lf_owned=() lf_class lf_rel lf_reason lf_paths
+  lf_td="$(wip_templates_dir 2>/dev/null || printf '')"
+  if [[ -n "$lf_td" && -d "$lf_td" ]]; then
+    # shellcheck source=lib/wip/wip-plumbing-subcommands/setup.bash
+    source "$WIP_LIB/wip-plumbing-subcommands/setup.bash"
+    # shellcheck disable=SC2034  # lf_reason: unused third TSV field (class<TAB>relpath<TAB>reason)
+    while IFS=$'\t' read -r lf_class lf_rel lf_reason; do
+      [[ "$lf_class" == "owned" ]] || continue
+      lf_owned+=("$lf_rel")
+    done < <(_wip_setup_agents_legacy_footprint "$root" "$lf_td")
+    if [[ "${#lf_owned[@]}" -gt 0 ]]; then
+      lf_paths="$(printf '%s\n' "${lf_owned[@]}" | jq -Rc . | jq -sc 'sort')"
+      obj="$(jq -nc --argjson paths "$lf_paths" \
+        '{kind:"orchestration", status:"legacy-footprint",
+          fix:"run wip-plumbing setup agents --migrate", paths:$paths}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    fi
+  fi
+
   # 3. Root collision: lds and diataxis must not share a root.
   local collide
   collide="$(printf '%s' "$mj" | jq -r '
