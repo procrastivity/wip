@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.16] - 2026-07-01
+
+### Other
+
+- Step 2 · Task 1: agent-template parser + D5 drift guard
+- Step 1 · Task 1: author ADR 0020 (flattened vendored agents) + index + roadmap layout note
+- Step 2 · Task 1: roles/backend resolution + deterministic inliner
+- Step 2 · Task 1: O3 dangling-cross-link seam (leave-inert identity)
+- Step 2 · Task 1: matrix tests for the flatten renderer
+- Step 3 · Task 1: --source flag surface + flatten-lib wiring in setup agents
+- Step 3 · Task 2: conservative-write guard (vendored-only) for foreign root plugin.json
+- Step 3 · Task 3: vendored render+write path for setup agents (.claude/agents/wip/)
+- Step 3 · Task 4: source:plugin no-vendor path + manifest source flip for setup agents
+- Step 3 · Task 5: conservative-write-guard test + setup agents porcelain
+- Step 4 · Task 2: ADR-0013 consumer-context (vendored, flattened) note
+- Step 4 · Task 1: orchestrate.bash vendored re-flatten path (Chunks 1–3)
+- Step 4 · Task 3: vendored orchestrate backend re-flatten round-trip test
+- Step 8 · Task 1: renderer prepends ADR-0020 D5 inlining disclaimer
+- Step 5 · Task 1: setup agents --check drift gate
+- Step 5 · Task 2: no-Solo-token no-leak assertion on task install
+- Step 5 · Task 3: agent render-input parity gate
+- Step 5 · Task 4: amend ADR-0015 + doctor-fan-in backlog note
+- Step 6 · Task 1: vendored slash-command write path (.claude/commands/wip/) + tests
+- Step 6 · Task 1: setup agents --check drift gate covers vendored commands + tests
+- Step 6 · Task 2: amend ADR-0015 (command relocation + D1a caveat) + setup agents hint
+- Step 7 · Task 1: setup agents --migrate/--dry-run flag surface + dispatch
+- Step 7 · Task 2: legacy-footprint detector helper (pure-disk, shared by migrate + doctor)
+- Step 7 · Task 3: setup agents --migrate actor + test-setup.sh migration cases
+- Step 7 · Task 4: doctor legacy-footprint check (pure-disk) + test-doctor.sh
+- Step 7 · Task 5: mark dead-but-oracle setup/agents READMEs as legacy-footprint reference
+- Step 7 · Task 6: ADR-0020 + ADR-0015 migration amendments, roadmap footprint correction, --migrate hint
+- Remove dead template plugin.json (post-ADR-0020 flattened install)
+
 ## [0.0.15] - 2026-06-29
 
 ### Added
