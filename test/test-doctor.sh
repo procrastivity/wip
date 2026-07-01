@@ -68,6 +68,10 @@ seed_old_footprint() {                # <workdir> — 16-file footprint + source
   mkdir -p "$d"
   WIP_ROOT="$d" bin/wip-plumbing init >/dev/null
   cp -R templates/setup/agents/. "$d/"
+  # The old walk wrote an owned (name: wip) root plugin.json, but the template
+  # no longer ships one (removed as dead footprint post-ADR-0020) — synthesize
+  # it so the seed still mirrors a REAL legacy install (detector keys on .name).
+  printf '{ "name": "wip", "version": "0.0.0" }\n' >"$d/.claude-plugin/plugin.json"
   yq -i '.features.orchestration = {"enabled": true, "backend": "solo", "source": "plugin"}' \
     "$d/.wip.yaml"
 }
