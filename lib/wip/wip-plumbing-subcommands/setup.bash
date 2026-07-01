@@ -26,7 +26,7 @@ wip_plumbing_cmd_setup() {
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0 sentinel_only=0 source_mode="vendored" check=0
+  local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
@@ -37,6 +37,25 @@ wip_plumbing_cmd_setup() {
         [[ "$sub" == "agents" ]] ||
           wip_die 2 usage "setup $sub: --check is only valid for \`setup agents\`"
         check=1
+        shift
+        ;;
+      --migrate)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --migrate is only valid for \`setup agents\`"
+        migrate=1
+        shift
+        ;;
+      --dry-run)
+        # Subcommand-level dry-run for `setup agents` (chiefly `--migrate
+        # --dry-run`, D6): wire straight to the existing WIP_DRY_RUN seam the
+        # writer/manifest-flip helpers already honor. The global `--dry-run`
+        # (before the subcommand) still works for every verb; this scopes the
+        # seam onto the agents verb so `--migrate --dry-run` plans without
+        # touching disk.
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --dry-run is only valid for \`setup agents\` (use the global \`--dry-run\` before the subcommand otherwise)"
+        WIP_DRY_RUN=1
+        export WIP_DRY_RUN
         shift
         ;;
       --sentinel-only)
@@ -50,12 +69,14 @@ wip_plumbing_cmd_setup() {
           wip_die 2 usage "setup $sub: --source is only valid for \`setup agents\`"
         [[ $# -ge 2 ]] || wip_die 2 usage "setup $sub: --source requires an argument"
         source_mode="$2"
+        source_set=1
         shift 2
         ;;
       --source=*)
         [[ "$sub" == "agents" ]] ||
           wip_die 2 usage "setup $sub: --source is only valid for \`setup agents\`"
         source_mode="${1#--source=}"
+        source_set=1
         shift
         ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
@@ -66,6 +87,17 @@ wip_plumbing_cmd_setup() {
     plugin | vendored) ;;
     *) wip_die 2 usage "setup $sub: --source must be \`plugin\` or \`vendored\` (got: $source_mode)" ;;
   esac
+  # --migrate combo rejection (Chunk 1). `--check` is the read-only NEW-layout
+  # drift gate; `--migrate` is the cleanup actor — mutually exclusive. And the
+  # migrate end-state is derived from the ON-DISK footprint (D2/D4), never the
+  # `--source` flag (OQ-07.5 lean: reject), so an explicit `--source` alongside
+  # `--migrate` is a contradiction rather than a hint.
+  if [[ "$migrate" == "1" && "$check" == "1" ]]; then
+    wip_die 2 usage "setup $sub: --migrate and --check are mutually exclusive"
+  fi
+  if [[ "$migrate" == "1" && "$source_set" == "1" ]]; then
+    wip_die 2 usage "setup $sub: --migrate derives the end-state from the on-disk footprint, not --source; drop --source"
+  fi
   if [[ "$force" == "1" ]]; then
     WIP_SETUP_FORCE=1
     export WIP_SETUP_FORCE
@@ -127,6 +159,22 @@ wip_plumbing_cmd_setup() {
       wip_die 1 internal "setup agents: --check render failed (see stderr for the offending role)"
     fi
     exit "$check_rc"
+  fi
+
+  # Migration actor (ADR-0020 migration path / D2–D6): `setup agents --migrate`
+  # cleans the leftover OLD plugin-tree footprint a pre-flatten `setup agents`
+  # left in a consumer repo, then lands (or, for a host-plugin repo, declares)
+  # the flattened end-state. Dispatched BEFORE the foreign-plugin guard below —
+  # migration keys on the on-disk footprint (D2) and handles a foreign root
+  # manifest itself (D4: leave it, host-plugin end-state), so it must not be
+  # refused by the vendored-write guard. The actor honors WIP_DRY_RUN (D6).
+  if [[ "$sub" == "agents" && "$migrate" == "1" ]]; then
+    local migrate_rc
+    set +e
+    _wip_setup_agents_migrate "$root" "$td"
+    migrate_rc=$?
+    set -e
+    exit "$migrate_rc"
   fi
 
   # Conservative-write guard (ADR-0020 / D-03.4): the vendored `setup agents`
@@ -538,6 +586,16 @@ _wip_setup_agents_check() {
       {ok:true, verb:$verb, checked:$checked, drift:[]}'
   fi
   return 0
+}
+
+# _wip_setup_agents_migrate <root> <templates-dir> — the `setup agents --migrate`
+# cleanup actor (ADR-0020 migration path). Chunk 1 wires the flag surface + this
+# dispatch stub; Chunk 3 replaces the body with the real detector-driven actor
+# (delete the wip-owned old-footprint files + rmdir empty parents, choose the
+# vendored vs host-plugin end-state per D4, honor WIP_DRY_RUN, stay idempotent,
+# emit the migrate JSON ledger).
+_wip_setup_agents_migrate() {
+  wip_die 1 internal "setup agents --migrate: not yet implemented (Chunk 3)"
 }
 
 # _wip_setup_lds_sentinel_only <tmpl-root> <dest-root> — write ONLY the LDS
