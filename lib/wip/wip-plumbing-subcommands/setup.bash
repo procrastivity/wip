@@ -710,13 +710,228 @@ _wip_setup_agents_legacy_footprint() {
 }
 
 # _wip_setup_agents_migrate <root> <templates-dir> — the `setup agents --migrate`
-# cleanup actor (ADR-0020 migration path). Chunk 1 wires the flag surface + this
-# dispatch stub; Chunk 3 replaces the body with the real detector-driven actor
-# (delete the wip-owned old-footprint files + rmdir empty parents, choose the
-# vendored vs host-plugin end-state per D4, honor WIP_DRY_RUN, stay idempotent,
-# emit the migrate JSON ledger).
+# cleanup actor (ADR-0020 migration path, D2–D6). Consumes the Chunk-2 detector
+# and moves a repo carrying the OLD plugin-tree footprint to the flattened
+# end-state (or, for a host-plugin repo, declares the correct source:plugin
+# end-state) — surgically, conservatively, idempotently.
+#
+# End-state decision (keys on the ON-DISK footprint, never the manifest flag — D2):
+#   - foreign root manifest present (host plugin, F1) → HOST-PLUGIN end-state (D4):
+#     delete wip's owned old files, LEAVE the foreign manifest (warned), write no
+#     `.claude/agents|commands`, set `source: plugin`. Correct for a repo that is
+#     itself a plugin (relies on the global wip plugin).
+#   - else, owned footprint present → VENDORED end-state (D4): delete owned files,
+#     reuse `_wip_setup_agents_vendored` VERBATIM to land the flattened install,
+#     set `source: vendored`. End state byte-matches a fresh flattened install.
+#   - else (no owned footprint, no foreign manifest): keyed on the recorded source
+#     — `plugin` → NO-OP (D5: a deliberate plugin repo is never converted; source
+#     untouched, nothing written); otherwise → the vendored write (a fresh/already-
+#     migrated repo; idempotent all-skip when already flattened, D6).
+#
+# Conservative delete (D3): only `owned` files are removed; `foreign`/`unrecognized`
+# are collected into `warned` and left in place. Empty parent dirs (.claude-plugin/,
+# agents/, commands/) are rmdir'd only when empty — a dir still holding a consumer
+# file survives. Honors WIP_DRY_RUN: the dry-run branch plans and touches NOTHING
+# (no delete, no write, no manifest flip). `migrated` is false when nothing changed
+# (already-clean / no-op).
+#
+# Emits the migrate JSON ledger on stdout (when WIP_JSON):
+#   real:    {ok, verb, migrate:true, deleted:[], wrote:[], skipped_idempotent:[],
+#             warned:[{path,reason}], manifest_updated, source, migrated}
+#   dry-run: {ok, verb, migrate:true, dry_run:true, would_delete:[], would_write:[],
+#             would_warn:[{path,reason}], source}
+# Returns 0 normally; maps a vendored render/write failure to `wip_die 1 internal`
+# (rc 5) and a content-drift refusal on installed `.claude` files to exit 4
+# (kind content-drift), mirroring the normal write path's contract.
 _wip_setup_agents_migrate() {
-  wip_die 1 internal "setup agents --migrate: not yet implemented (Chunk 3)"
+  local root="$1" td="$2"
+  local verb="setup agents"
+
+  # Classify the on-disk footprint (pure disk, Chunk 2).
+  local owned=() warned_paths=() warned_reasons=() foreign_present=0
+  local class rel reason
+  while IFS=$'\t' read -r class rel reason; do
+    [[ -n "$class" ]] || continue
+    case "$class" in
+      owned) owned+=("$rel") ;;
+      foreign)
+        foreign_present=1
+        warned_paths+=("$rel")
+        warned_reasons+=("$reason")
+        ;;
+      unrecognized)
+        warned_paths+=("$rel")
+        warned_reasons+=("$reason")
+        ;;
+    esac
+  done < <(_wip_setup_agents_legacy_footprint "$root" "$td")
+
+  local source_recorded
+  source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+
+  # Decide the end-state (see header).
+  local end_state
+  if [[ "$foreign_present" == "1" ]]; then
+    end_state="plugin"
+  elif [[ "${#owned[@]}" -gt 0 ]]; then
+    end_state="vendored"
+  elif [[ "$source_recorded" == "plugin" ]]; then
+    end_state="noop-plugin"
+  else
+    end_state="vendored"
+  fi
+
+  # Reported/target source: the host-plugin and deliberate-plugin end-states both
+  # land at `plugin`; everything else at `vendored`.
+  local target_source="vendored"
+  [[ "$end_state" == "vendored" ]] || target_source="plugin"
+
+  # Build the warned:[{path,reason}] JSON once (shared by both branches).
+  local warned_json="[]" i
+  for ((i = 0; i < ${#warned_paths[@]}; i++)); do
+    warned_json="$(jq -nc --argjson a "$warned_json" \
+      --arg p "${warned_paths[i]}" --arg r "${warned_reasons[i]}" \
+      '$a + [{path:$p, reason:$r}]')"
+  done
+
+  # --- Dry-run branch (D6): plan only, touch nothing. ------------------------
+  if [[ "${WIP_DRY_RUN:-0}" == "1" ]]; then
+    local would_write=()
+    if [[ "$end_state" == "vendored" ]]; then
+      # WIP_DRY_RUN is set, so the reused vendored writer plans without writing;
+      # collect the paths it WOULD create/overwrite (skipped == already-present).
+      local vraw vstatus vpath
+      set +e
+      vraw="$(_wip_setup_agents_vendored "$root" "$td")"
+      set -e
+      while IFS=$'\t' read -r vstatus vpath; do
+        [[ -n "$vpath" ]] || continue
+        case "$vstatus" in
+          wrote | wrote_forced) would_write+=("$vpath") ;;
+        esac
+      done <<<"$vraw"
+    fi
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" \
+        --argjson would_delete "$(_wip_setup_arr_json "${owned[@]+"${owned[@]}"}")" \
+        --argjson would_write "$(_wip_setup_arr_json "${would_write[@]+"${would_write[@]}"}")" \
+        --argjson would_warn "$warned_json" \
+        --arg source "$target_source" '
+        {ok:true, verb:$verb, migrate:true, dry_run:true,
+         would_delete:$would_delete, would_write:$would_write,
+         would_warn:$would_warn, source:$source}'
+    fi
+    return 0
+  fi
+
+  # --- Real branch: delete owned, rmdir empty parents, land the end-state. ---
+  local deleted=() p
+  for p in "${owned[@]+"${owned[@]}"}"; do
+    if rm -f -- "$root/$p" 2>/dev/null && [[ ! -e "$root/$p" ]]; then
+      deleted+=("$p")
+    fi
+  done
+  # rmdir the old footprint parent dirs iff now empty (a dir still holding a
+  # consumer file is non-empty → rmdir fails → left in place, D3).
+  local d
+  for d in ".claude-plugin" "agents" "commands"; do
+    [[ -d "$root/$d" ]] || continue
+    rmdir "$root/$d" 2>/dev/null || true
+  done
+
+  local wrote=() skipped=() wrote_forced=() refused=()
+  if [[ "$end_state" == "vendored" ]]; then
+    local vraw rc vstatus vpath
+    set +e
+    vraw="$(_wip_setup_agents_vendored "$root" "$td")"
+    rc=$?
+    set -e
+    if [[ "$rc" == "5" ]]; then
+      wip_die 1 internal "setup agents --migrate: vendored write failed (see stderr for the offending role)"
+    fi
+    while IFS=$'\t' read -r vstatus vpath; do
+      [[ -n "$vpath" ]] || continue
+      case "$vstatus" in
+        wrote) wrote+=("$vpath") ;;
+        skipped) skipped+=("$vpath") ;;
+        wrote_forced) wrote_forced+=("$vpath") ;;
+        refused) refused+=("$vpath") ;;
+      esac
+    done <<<"$vraw"
+    if [[ "$rc" == "4" ]]; then
+      # Content drift on already-installed .claude files (recoverable with
+      # --force via a plain `setup agents`) — mirror the normal path's refusal.
+      if [[ "${WIP_JSON:-1}" == "1" ]]; then
+        jq -nc --arg verb "$verb" \
+          --argjson paths "$(_wip_setup_arr_json "${refused[@]+"${refused[@]}"}")" '
+          {ok:false, verb:$verb,
+           error:{code:4, kind:"content-drift",
+                  message:"installed .claude agent/command files differ from template; re-run `setup agents --force` to overwrite",
+                  paths:$paths}}'
+      fi
+      printf 'wip-plumbing: setup agents --migrate: content drift on: %s\n' "${refused[*]}" >&2
+      exit 4
+    fi
+  fi
+
+  # Manifest flip. Skip entirely for the deliberate-plugin no-op (D5: source
+  # untouched). The host-plugin and vendored end-states set the correct source
+  # (idempotent — a no-op when already correct).
+  local manifest="$root/.wip.yaml" manifest_status="noop"
+  if [[ "$end_state" != "noop-plugin" ]]; then
+    manifest_status="$(wip_setup_set_feature_flag "$manifest" "orchestration" \
+      "enabled=true" "backend=solo" "source=$target_source")" ||
+      wip_die 1 internal "setup agents --migrate: manifest update failed"
+  fi
+
+  # migrated: did anything actually change?
+  local migrated="false"
+  if [[ "${#deleted[@]}" -gt 0 || "${#wrote[@]}" -gt 0 || "${#wrote_forced[@]}" -gt 0 || "$manifest_status" == "updated" ]]; then
+    migrated="true"
+  fi
+  local manifest_updated_json="null"
+  [[ "$manifest_status" == "updated" ]] && manifest_updated_json='".wip.yaml"'
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    jq -nc --arg verb "$verb" \
+      --argjson deleted "$(_wip_setup_arr_json "${deleted[@]+"${deleted[@]}"}")" \
+      --argjson wrote "$(_wip_setup_arr_json "${wrote[@]+"${wrote[@]}"}")" \
+      --argjson skipped "$(_wip_setup_arr_json "${skipped[@]+"${skipped[@]}"}")" \
+      --argjson warned "$warned_json" \
+      --argjson manifest_updated "$manifest_updated_json" \
+      --arg source "$target_source" \
+      --argjson migrated "$migrated" '
+      {ok:true, verb:$verb, migrate:true,
+       deleted:$deleted, wrote:$wrote, skipped_idempotent:$skipped,
+       warned:$warned, manifest_updated:$manifest_updated,
+       source:$source, migrated:$migrated}'
+  fi
+
+  _wip_setup_migrate_hint "$end_state" "${#deleted[@]}" "${#warned_paths[@]}"
+  return 0
+}
+
+# _wip_setup_migrate_hint <end-state> <deleted-count> <warned-count> — stderr hint
+# on a successful migrate (suppressed by -q). Steers on leftover warned paths and
+# names the end-state reached.
+# shellcheck disable=SC2016 # backticks in hint strings are literal markdown for users
+_wip_setup_migrate_hint() {
+  [[ "${WIP_QUIET:-0}" == "1" ]] && return 0
+  local end_state="$1" deleted_n="$2" warned_n="$3"
+  case "$end_state" in
+    vendored)
+      printf 'wip-plumbing: setup agents --migrate: cleaned %s legacy file(s); vendored the flattened wip agents/commands to `.claude/` (source: vendored); restart Claude Code to load them\n' "$deleted_n" >&2
+      ;;
+    plugin)
+      printf 'wip-plumbing: setup agents --migrate: cleaned %s legacy file(s); left the host plugin manifest in place and set source: plugin (relies on the globally-enabled wip plugin)\n' "$deleted_n" >&2
+      ;;
+    noop-plugin)
+      printf 'wip-plumbing: setup agents --migrate: no legacy footprint found on a deliberate `source: plugin` repo; nothing to do\n' >&2
+      ;;
+  esac
+  if [[ "$warned_n" -gt 0 ]]; then
+    printf 'wip-plumbing: setup agents --migrate: %s path(s) left in place (warned) — foreign/unrecognized/consumer-authored; review and remove manually if intended\n' "$warned_n" >&2
+  fi
 }
 
 # _wip_setup_lds_sentinel_only <tmpl-root> <dest-root> — write ONLY the LDS

@@ -358,6 +358,191 @@ assert_eq "agents-drift" "${F[0]}" "[agents --check cmd-missing] kind agents-dri
 assert_eq "1" "${F[1]}" "[agents --check cmd-missing] names the missing command path"
 assert_absent "$workdir/$drift_cmd_rel" "[agents --check cmd-missing] not re-created"
 
+# --- 6f. setup agents --migrate — old-footprint → clean transition ----------
+# (ADR-0020 migration path, D2–D6 / Chunk 3). Seed the REAL 16-file old
+# plugin-tree footprint by copying templates/setup/agents/** verbatim into the
+# repo root (that IS what the old `wip_setup_walk_template_tree` walk did) plus
+# the F2 `source: plugin` mislabel. Migration cleans the wip-owned files, lands
+# the flattened install, and the result byte-matches a fresh flattened install.
+seed_old_footprint() { # <workdir> — 16-file footprint + source:plugin mislabel
+  local d="$1"
+  mkdir -p "$d"
+  WIP_ROOT="$d" bin/wip-plumbing init >/dev/null
+  cp -R templates/setup/agents/. "$d/"
+  yq -i '.features.orchestration = {"enabled": true, "backend": "solo", "source": "plugin"}' \
+    "$d/.wip.yaml"
+}
+# .claude-plugin/{plugin.json,README} (2) + agents/README (1) + N cmds + 4 roles = 16
+migrate_footprint_n=$((2 + 1 + cmd_count + 4))
+migrate_write_n=$((4 + cmd_count)) # flattened .claude/agents/wip/{4} + .claude/commands/wip/{N} = 13
+
+# (i) --dry-run: plan the transition, touch NOTHING (D6).
+workdir="$tmp/migrate-dry"
+seed_old_footprint "$workdir"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate --dry-run 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate --dry-run] exit 0"
+mapfile -t F < <(jq -r '.dry_run, (.would_delete | length), (.would_write | length), (.would_warn | length), .source' <<<"$out")
+assert_eq "true" "${F[0]}" "[migrate --dry-run] dry_run:true"
+assert_eq "$migrate_footprint_n" "${F[1]}" "[migrate --dry-run] would_delete lists the 16 owned paths"
+assert_eq "$migrate_write_n" "${F[2]}" "[migrate --dry-run] would_write lists the 13 flattened paths"
+assert_eq "0" "${F[3]}" "[migrate --dry-run] would_warn empty (clean vendored footprint)"
+assert_eq "vendored" "${F[4]}" "[migrate --dry-run] plans the vendored end-state"
+assert_file "$workdir/.claude-plugin/plugin.json" "[migrate --dry-run] footprint still on disk"
+assert_absent "$workdir/.claude" "[migrate --dry-run] no .claude/ written"
+assert_eq "plugin" "$(yq -r '.features.orchestration.source' "$workdir/.wip.yaml")" \
+  "[migrate --dry-run] manifest unchanged (still source: plugin)"
+
+# (ii) Real --migrate: delete the 16 owned files, rmdir empty parents, land the
+#      13 flattened files, flip source: vendored.
+workdir="$tmp/migrate-real"
+seed_old_footprint "$workdir"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate] exit 0"
+mapfile -t F < <(jq -r '.migrate, (.deleted | length), (.wrote | length), (.skipped_idempotent | length), (.warned | length), .manifest_updated, .source, .migrated' <<<"$out")
+assert_eq "true" "${F[0]}" "[migrate] migrate:true"
+assert_eq "$migrate_footprint_n" "${F[1]}" "[migrate] deleted the 16 owned files"
+assert_eq "$migrate_write_n" "${F[2]}" "[migrate] wrote the 13 flattened files"
+assert_eq "0" "${F[3]}" "[migrate] skipped nothing (fresh vendored write)"
+assert_eq "0" "${F[4]}" "[migrate] warned nothing (clean footprint)"
+assert_eq ".wip.yaml" "${F[5]}" "[migrate] manifest_updated"
+assert_eq "vendored" "${F[6]}" "[migrate] source: vendored"
+assert_eq "true" "${F[7]}" "[migrate] migrated:true"
+assert_absent "$workdir/.claude-plugin" "[migrate] empty .claude-plugin/ removed"
+assert_absent "$workdir/agents" "[migrate] empty root agents/ removed"
+assert_absent "$workdir/commands" "[migrate] empty root commands/ removed"
+for role in orchestrator coordinator researcher builder; do
+  assert_file "$workdir/.claude/agents/wip/$role.md" "[migrate] .claude/agents/wip/$role.md present"
+done
+for cmd_tmpl in templates/setup/agents/commands/*.md; do
+  name="$(basename -- "$cmd_tmpl")"
+  assert_file "$workdir/.claude/commands/wip/$name" "[migrate] .claude/commands/wip/$name present"
+done
+assert_eq "vendored" "$(yq -r '.features.orchestration.source' "$workdir/.wip.yaml")" \
+  "[migrate] manifest source flipped to vendored"
+
+# (ii-b) INVARIANT: the migrated .claude/ tree byte-matches a control FRESH
+#        flattened install (diff the two trees → identical).
+fresh="$tmp/migrate-fresh"
+mkdir -p "$fresh"
+WIP_ROOT="$fresh" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$fresh" bin/wip-plumbing setup agents >/dev/null 2>&1
+set +e
+diff -r "$workdir/.claude" "$fresh/.claude" >/dev/null 2>&1
+dr=$?
+set -e
+assert_eq "0" "$dr" "[migrate] migrated .claude/ byte-matches a fresh flattened install"
+
+# (iii) Idempotence (D6): a second --migrate deletes nothing, the vendored write
+#       is all-skip, migrated:false.
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate idempotent] exit 0"
+mapfile -t F < <(jq -r '(.deleted | length), (.wrote | length), (.skipped_idempotent | length), .migrated' <<<"$out")
+assert_eq "0" "${F[0]}" "[migrate idempotent] deleted nothing"
+assert_eq "0" "${F[1]}" "[migrate idempotent] wrote nothing"
+assert_eq "$migrate_write_n" "${F[2]}" "[migrate idempotent] all 13 skipped_idempotent"
+assert_eq "false" "${F[3]}" "[migrate idempotent] migrated:false (already clean)"
+
+# (iv) --check is clean on the migrated repo (passes the NEW drift gate).
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --check 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate → --check] exit 0 clean"
+assert_eq "0" "$(jq -r '.drift | length' <<<"$out")" "[migrate → --check] drift:[]"
+
+# (v) Protection — host-plugin (F1): a foreign root plugin.json (name != wip) is
+#     NEVER deleted. Migration cleans wip's owned agents/commands, LEAVES the
+#     foreign manifest (warned), writes no .claude/agents, sets source: plugin.
+workdir="$tmp/migrate-host-plugin"
+seed_old_footprint "$workdir"
+printf '{ "name": "clast", "version": "0.0.0" }\n' >"$workdir/.claude-plugin/plugin.json"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate host-plugin] exit 0"
+mapfile -t F < <(jq -r '(.deleted | length), (.wrote | length), .source, ([.warned[] | select(.path == ".claude-plugin/plugin.json")] | length)' <<<"$out")
+assert_eq "$((migrate_footprint_n - 1))" "${F[0]}" "[migrate host-plugin] deleted 15 owned (foreign plugin.json excluded)"
+assert_eq "0" "${F[1]}" "[migrate host-plugin] wrote no vendored files"
+assert_eq "plugin" "${F[2]}" "[migrate host-plugin] source: plugin end-state"
+assert_eq "1" "${F[3]}" "[migrate host-plugin] foreign plugin.json is in warned"
+assert_file "$workdir/.claude-plugin/plugin.json" "[migrate host-plugin] foreign manifest survives"
+assert_eq "clast" "$(jq -r '.name' "$workdir/.claude-plugin/plugin.json")" \
+  "[migrate host-plugin] foreign manifest untouched (name: clast)"
+assert_absent "$workdir/.claude/agents" "[migrate host-plugin] no vendored .claude/agents/"
+assert_absent "$workdir/agents/orchestrator.md" "[migrate host-plugin] wip role agents cleaned"
+assert_eq "plugin" "$(yq -r '.features.orchestration.source' "$workdir/.wip.yaml")" \
+  "[migrate host-plugin] manifest source: plugin"
+
+# (vi) Protection — consumer-authored files survive; their parent dirs are NOT
+#      removed (non-empty). A commands/mine.md (no template match) and an
+#      agents/my-agent.md (no wip-* frontmatter) are never classified as owned.
+workdir="$tmp/migrate-consumer"
+seed_old_footprint "$workdir"
+printf '# my own command\n' >"$workdir/commands/mine.md"
+printf -- '---\nname: my-agent\n---\nbody\n' >"$workdir/agents/my-agent.md"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate consumer] exit 0"
+assert_eq "$migrate_footprint_n" "$(jq -r '.deleted | length' <<<"$out")" \
+  "[migrate consumer] deleted only the 16 wip-owned files"
+assert_file "$workdir/commands/mine.md" "[migrate consumer] commands/mine.md survives"
+assert_file "$workdir/agents/my-agent.md" "[migrate consumer] agents/my-agent.md survives"
+assert_eq "yes" "$([[ -d "$workdir/commands" ]] && echo yes || echo no)" \
+  "[migrate consumer] commands/ dir kept (non-empty)"
+assert_eq "yes" "$([[ -d "$workdir/agents" ]] && echo yes || echo no)" \
+  "[migrate consumer] agents/ dir kept (non-empty)"
+
+# (vii) Protection — deliberate plugin repo (D5): source: plugin, no footprint →
+#       --migrate is a no-op (nothing deleted/written, source stays plugin).
+workdir="$tmp/migrate-deliberate-plugin"
+mkdir -p "$workdir"
+WIP_ROOT="$workdir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$workdir" bin/wip-plumbing setup agents --source plugin >/dev/null 2>&1
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate deliberate-plugin] exit 0"
+mapfile -t F < <(jq -r '(.deleted | length), (.wrote | length), .manifest_updated, .source, .migrated' <<<"$out")
+assert_eq "0" "${F[0]}" "[migrate deliberate-plugin] deleted nothing"
+assert_eq "0" "${F[1]}" "[migrate deliberate-plugin] wrote nothing"
+assert_eq "null" "${F[2]}" "[migrate deliberate-plugin] manifest untouched"
+assert_eq "plugin" "${F[3]}" "[migrate deliberate-plugin] source stays plugin"
+assert_eq "false" "${F[4]}" "[migrate deliberate-plugin] migrated:false (no-op)"
+assert_eq "plugin" "$(yq -r '.features.orchestration.source' "$workdir/.wip.yaml")" \
+  "[migrate deliberate-plugin] manifest source: plugin unchanged"
+assert_absent "$workdir/.claude/agents" "[migrate deliberate-plugin] no vendored .claude/agents/"
+
+# (viii) Protection — stray root roles/ + active.md (never part of the real
+#        footprint, OQ-07.1) are warned, never deleted.
+workdir="$tmp/migrate-stray"
+seed_old_footprint "$workdir"
+mkdir -p "$workdir/roles"
+printf 'shared\n' >"$workdir/roles/shared.md"
+printf 'active\n' >"$workdir/active.md"
+set +e
+out="$(WIP_ROOT="$workdir" bin/wip-plumbing setup agents --migrate 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "[migrate stray] exit 0"
+mapfile -t F < <(jq -r '([.warned[] | select(.path == "roles")] | length), ([.warned[] | select(.path == "active.md")] | length)' <<<"$out")
+assert_eq "1" "${F[0]}" "[migrate stray] roles/ is warned"
+assert_eq "1" "${F[1]}" "[migrate stray] active.md is warned"
+assert_file "$workdir/roles/shared.md" "[migrate stray] roles/ survives (not deleted)"
+assert_file "$workdir/active.md" "[migrate stray] active.md survives (not deleted)"
+
 # --- 7. Sentinel post-check passes; doctor on a plugin-mode tempdir is clean -
 # Run against the §6b --source plugin install: doctor stays clean even though
 # the no-vendor path wrote no agents (orchestration carries no sentinel).
