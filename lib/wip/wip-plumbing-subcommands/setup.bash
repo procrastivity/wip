@@ -588,6 +588,127 @@ _wip_setup_agents_check() {
   return 0
 }
 
+# _wip_setup_agents_frontmatter_name <file> — echo the `name:` value from a
+# markdown YAML frontmatter block (the leading `---`…`---` fence), or empty when
+# the file has no frontmatter or no `name:` key. The legacy-footprint detector
+# uses it to recognize a thin-pointer wip agent by its version-robust
+# `name: wip-<role>` signature (D3) rather than a fragile byte-match. Only the
+# leading fence is scanned, so a stray `name:` in the body never false-matches.
+_wip_setup_agents_frontmatter_name() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  awk '
+    NR == 1 && $0 !~ /^---[[:space:]]*$/ { exit }
+    NR == 1 { infm = 1; next }
+    infm && /^---[[:space:]]*$/ { exit }
+    infm && /^name:[[:space:]]/ {
+      sub(/^name:[[:space:]]*/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }
+  ' "$file" 2>/dev/null
+}
+
+# _wip_setup_agents_legacy_footprint <root> <templates-dir> — pure-disk scan of a
+# consumer repo for the OLD plugin-tree `setup agents` footprint (the 16-file
+# write set a pre-flatten install left at $root: `.claude-plugin/{plugin.json,
+# README.md}`, `agents/README.md`, `agents/{orchestrator,coordinator,researcher,
+# builder}.md`, `commands/<name>.md` ×N). It CLASSIFIES each footprint path it
+# finds and emits one `<class><TAB><relpath><TAB><reason>` line per EXISTING path
+# on stdout; it never writes, never renders, never deletes. Shared verbatim by the
+# `--migrate` actor (Chunk 3) and the doctor legacy-footprint check (Chunk 4).
+#
+# Classes (D3 conservative-delete signals):
+#   owned        — positively identified as a wip-installed file → the actor may
+#                  delete it. Signals: plugin.json `.name == "wip"`;
+#                  `agents/<role>.md` frontmatter `name: wip-<role>` (version-
+#                  robust); README / command byte-equal to its surviving template
+#                  (the same oracle `--check` uses, D8/D9).
+#   foreign      — a host plugin's own root `.claude-plugin/plugin.json` (`.name`
+#                  != wip, the F1 case) → NEVER delete; the actor warns + leaves it
+#                  and derives the host-plugin end-state (D4). Reuses
+#                  `_wip_setup_agents_foreign_plugin` (inverted: true when NOT
+#                  wip-owned, so an unparseable/nameless manifest reads foreign —
+#                  conservative: warn rather than risk a clobber).
+#   unrecognized — a drifted / consumer-authored / version-skewed file at a
+#                  footprint path, plus the warn-only-if-present stray root
+#                  `roles/` and `active.md` (never part of the real footprint,
+#                  OQ-07.1) → warn, never delete. The operator decides.
+#
+# Emits nothing when no footprint path exists (a fresh flattened install or a
+# clean deliberate `source: plugin` repo → callers treat empty as "clean"). Only
+# wip footprint paths are scanned; a consumer's own non-wip file (e.g.
+# `commands/mine.md`, `agents/my-agent.md`) is simply never visited — it survives
+# untouched and keeps its parent dir non-empty (so the actor's rmdir leaves it).
+# Returns 0 always (absence of a footprint is not an error).
+_wip_setup_agents_legacy_footprint() {
+  local root="$1" td="$2"
+
+  # 1. Root plugin manifest — owned iff wip-owned, else the host's own (foreign).
+  local pj_rel=".claude-plugin/plugin.json"
+  if [[ -f "$root/$pj_rel" ]]; then
+    if _wip_setup_agents_foreign_plugin "$root"; then
+      printf 'foreign\t%s\t%s\n' "$pj_rel" "foreign-plugin-json"
+    else
+      printf 'owned\t%s\t%s\n' "$pj_rel" "plugin-json-wip"
+    fi
+  fi
+
+  # 2. READMEs — owned iff byte-equal to the surviving template oracle (D9).
+  local readme_rel readme_tmpl
+  for readme_rel in ".claude-plugin/README.md" "agents/README.md"; do
+    [[ -f "$root/$readme_rel" ]] || continue
+    readme_tmpl="$td/setup/agents/$readme_rel"
+    if [[ -f "$readme_tmpl" ]] && cmp -s -- "$readme_tmpl" "$root/$readme_rel"; then
+      printf 'owned\t%s\t%s\n' "$readme_rel" "readme-bytematch"
+    else
+      printf 'unrecognized\t%s\t%s\n' "$readme_rel" "readme-drift"
+    fi
+  done
+
+  # 3. Thin-pointer role agents — owned iff frontmatter name: wip-<role> (D3,
+  #    version-robust). A consumer's own agents/<role>.md is unrecognized/warn.
+  local role role_rel fname
+  for role in orchestrator coordinator researcher builder; do
+    role_rel="agents/$role.md"
+    [[ -f "$root/$role_rel" ]] || continue
+    fname="$(_wip_setup_agents_frontmatter_name "$root/$role_rel")"
+    if [[ "$fname" == "wip-$role" ]]; then
+      printf 'owned\t%s\t%s\n' "$role_rel" "agent-frontmatter"
+    else
+      printf 'unrecognized\t%s\t%s\n' "$role_rel" "agent-drift"
+    fi
+  done
+
+  # 4. Old plugin-tree slash-commands — owned iff byte-equal to the command
+  #    template (set-parity by GLOB over templates, never a hardcoded list).
+  #    Version skew → unrecognized/warn (OQ-07.3: warn > wrongful delete).
+  local cmd_tmpl name cmd_rel
+  for cmd_tmpl in "$td/setup/agents/commands"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue # empty/absent glob → no commands to scan
+    name="$(basename -- "$cmd_tmpl")"
+    cmd_rel="commands/$name"
+    [[ -f "$root/$cmd_rel" ]] || continue
+    if cmp -s -- "$cmd_tmpl" "$root/$cmd_rel"; then
+      printf 'owned\t%s\t%s\n' "$cmd_rel" "command-bytematch"
+    else
+      printf 'unrecognized\t%s\t%s\n' "$cmd_rel" "command-drift"
+    fi
+  done
+
+  # 5. Defensive stray paths — never written by the old install (OQ-07.1); if a
+  #    consumer / hand-vendored copy is present, warn-only, never auto-delete (D3).
+  if [[ -e "$root/roles" ]]; then
+    printf 'unrecognized\t%s\t%s\n' "roles" "stray-roles"
+  fi
+  if [[ -e "$root/active.md" ]]; then
+    printf 'unrecognized\t%s\t%s\n' "active.md" "stray-active-md"
+  fi
+
+  return 0
+}
+
 # _wip_setup_agents_migrate <root> <templates-dir> — the `setup agents --migrate`
 # cleanup actor (ADR-0020 migration path). Chunk 1 wires the flag surface + this
 # dispatch stub; Chunk 3 replaces the body with the real detector-driven actor
