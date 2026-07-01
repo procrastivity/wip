@@ -999,6 +999,7 @@ _wip_setup_hint() {
         printf 'wip-plumbing: setup agents: hint: vendored the flattened wip agents to `.claude/agents/wip/` and the wip slash-commands to `.claude/commands/wip/` (invoked as `/wip:<name>`); restart Claude Code to load them\n' >&2
         printf 'wip-plumbing: setup agents: hint: in a repo that is itself a plugin, re-run with `--source plugin` to skip vendoring and use the globally-enabled wip plugin (its global `/wip:*`)\n' >&2
       fi
+      printf 'wip-plumbing: setup agents: hint: on a repo that ran the OLD plugin-tree `setup agents` (leftover root `.claude-plugin/`, `agents/`, `commands/`)? run `setup agents --migrate` to clean the legacy footprint safely (`--dry-run` previews; `wip-plumbing doctor` flags it)\n' >&2
       printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tier_policy in .wip.yaml if Solo is your backend\n' >&2
       ;;
     lds)

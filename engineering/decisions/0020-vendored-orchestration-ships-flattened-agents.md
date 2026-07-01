@@ -151,3 +151,85 @@ only points at them.
   checks; it changes no runtime behavior on its own.
 - Anchor-rewriting inert cross-links stays deferred; revisit only if the inert
   links measurably confuse a spawned agent reading its own prompt.
+
+## Amendment — migration path for repos on the old plugin-tree shape (step-07)
+
+Amended 2026-07-01 (BDS-28, *Flatten vendored orchestration agents*, step-07,
+Round 2; resolves BRIEF **O5**). This ADR's decision stopped *shipping* the
+plugin-shaped tree; step-07 adds the supported path to *clean up* the leftover
+footprint an OLD (pre-step-03) `setup agents` already wrote into a consumer repo,
+so a migrated repo byte-matches a fresh flattened install.
+
+### The real footprint — OQ-07.1 correction (roles/ + active.md were never vendored)
+
+The Context and F3 above frame the old vendor path as copying a tree that
+included `roles/`, and the roadmap/BRIEF described the leftover as a "root
+`.claude-plugin/` + `roles/` + `active.md`". **Verified against the code and git
+history, that is imprecise and is corrected here.** The old plugin-tree
+`setup agents` was `wip_setup_walk_template_tree templates/setup/agents/** →
+$root`, whose exact write set the pre-step-03 test pinned as `agents) expected=16`
+(*"4 agents + 9 commands + agents/README + plugin/README + plugin.json"*). The
+real on-disk old footprint is therefore exactly **16 files**:
+
+| Root path (old vendored footprint) | Count | Ownership signal (delete predicate) |
+|---|---|---|
+| `.claude-plugin/plugin.json` | 1 | `.name == "wip"` |
+| `.claude-plugin/README.md` | 1 | byte-equal `templates/setup/agents/.claude-plugin/README.md` |
+| `agents/README.md` | 1 | byte-equal `templates/setup/agents/agents/README.md` (the F4 phantom) |
+| `agents/{orchestrator,coordinator,researcher,builder}.md` | 4 | frontmatter `name: wip-<role>` (thin-pointer signature) |
+| `commands/<name>.md` | 9 | byte-equal `templates/setup/agents/commands/<name>.md` |
+
+**There is NO root `roles/` and NO root `active.md`.** The old thin-pointer agents
+referenced roles at runtime via `@../roles/…` includes (resolved against the
+plugin, not a vendored copy); `active.md` is an authoring-side generated pointer
+(ADR-0013) that was never vendored into a consumer. Any stray root
+`roles/`/`active.md` are a consumer's own or a hand-vendored copy and are handled
+**warn-only-if-present**, never an auto-delete target. Migration also flips the
+tell-tale mislabel: the old install recorded `features.orchestration.source:
+plugin` (the F2 bug) despite vendoring a full tree. This correction is mirrored in
+the initiative roadmap.
+
+### The actor — `setup agents --migrate [--dry-run]`
+
+`--migrate` is a flag on `setup agents` (alongside `--check`/`--source`/`--force`),
+because that verb already owns the flattened write path, the idempotent writer, the
+JSON ledger, and the foreign-manifest guard. It is **not** a new top-level
+subcommand.
+
+- **Keys on the on-disk footprint, not the `source` flag.** The trigger for
+  cleanup is the presence of wip-owned old-footprint files on disk — never the
+  manifest `source` value. This is what protects a deliberate `source: plugin`
+  repo: it carries no footprint → migration is a no-op regardless of the flag.
+- **Conservative delete (the deletion analog of the conservative-write guard
+  above).** A file at a footprint path is **deleted only when it matches its
+  ownership signal** in the table above; anything that does not match (drifted,
+  version-skewed, consumer-authored) is **warned, never deleted**. A **foreign**
+  `.claude-plugin/plugin.json` (`name != wip`, the F1 host-plugin case) is never
+  touched. Empty parent dirs (`.claude-plugin/`, `agents/`, `commands/`) are
+  `rmdir`-ed only once empty. Command/README byte-match is version-*fragile* (an
+  older wip version's bytes won't match the current template → warn + manual
+  cleanup); the `name`-based agent/plugin signals are version-robust.
+- **Two end-states, chosen from disk (not the flag).** If a **foreign** root
+  manifest is present → host-plugin end-state: clean wip's owned old
+  `agents/`/`commands/`, leave the foreign manifest (warned), write no
+  `.claude/agents`/`.claude/commands`, set `source: plugin` (the correct end state
+  for a repo that is itself a plugin — and this also repairs a host plugin that was
+  mis-installed under the old path). Otherwise → vendored end-state: clean the owned
+  footprint, run the flattened vendored write (`_wip_setup_agents_vendored`, reused
+  verbatim), flip `source: vendored`. The vendored end-state **byte-matches a fresh
+  flattened install** (proven by `test-setup.sh` diffing the migrated `.claude/`
+  against a control fresh install).
+- **Dry-run + idempotence.** `--migrate --dry-run` reports the plan
+  (`{dry_run:true, would_delete, would_write, would_warn}`) and touches nothing. A
+  repeat `--migrate` on an already-migrated repo deletes nothing, the vendored write
+  reports all-`skipped_idempotent`, and the ledger records `migrated:false`.
+
+### Detection — `doctor` (pure-disk)
+
+`doctor` runs a **pure-disk** legacy-footprint scan (no render) and, on an owned
+footprint, appends `{kind:"orchestration", status:"legacy-footprint",
+fix:"run wip-plumbing setup agents --migrate", paths:[…]}` (counts as drift → exit
+4). It never deletes. The gate keys on ≥1 `owned` file, so a foreign-only or
+stray-only footprint stays quiet. This pure-disk check is deliberately distinct
+from the still-deferred render fan-in (ADR-0015 Q-05.4); see that ADR's step-07
+amendment.

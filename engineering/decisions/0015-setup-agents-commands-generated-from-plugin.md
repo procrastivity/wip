@@ -188,3 +188,32 @@ and deferred the **commands**. Step-06 completes Round 2's first half: a
   `cmp`, no re-render — because of D3); a missing or drifted command is the same
   drift exit (rc 4, kind `agents-drift` — the unified vendored-drift gate). This
   proves the file **layout**, not the invocation (see the caveat above).
+
+## Amendment — doctor's legacy-footprint check is pure-disk (Q-05.4 stays deferred) (step-07)
+
+Amended 2026-07-01 (BDS-28, *Flatten vendored orchestration agents*, step-07,
+Round 2). Step-07 adds a `doctor` check that detects the OLD plugin-tree
+`setup agents` footprint and steers the operator to `setup agents --migrate`
+(the migration path is recorded in ADR-0020's step-07 amendment). This amendment
+exists to keep that new check from being **conflated** with the render fan-in the
+Consequences above **deferred** as Q-05.4.
+
+- **Two different doctor hooks, not one.** The deferred item (Q-05.4) is fanning
+  the **agent render drift gate** — `setup agents --check`'s re-render-from-`roles/`
+  -and-`cmp` — into `doctor`. That is expensive: it must re-source `flatten-lib`,
+  re-derive the recorded backend, and re-render the four roles. It remains
+  **backlogged** (this repo is `source: plugin`, so a render fan-in adds no
+  coverage here).
+- **The legacy-footprint check is cheaper and different.** It is a **pure-disk**
+  existence + ownership-signal scan (does root `.claude-plugin/plugin.json` have
+  `.name == "wip"`? do root `agents/<role>.md` carry `name: wip-<role>`? do the
+  README/command bytes match their templates?) — **no rendering, no `flatten-lib`,
+  no backend derivation**. It fits `doctor`'s existing pure-disk model (like the
+  closeout/tracker checks) and shares the setup-family classifier
+  (`_wip_setup_agents_legacy_footprint`) with the `--migrate` actor, so detection
+  and cleanup can never disagree on what "owned" means.
+- **Adding the pure-disk check does NOT reopen Q-05.4.** Detecting a *stale
+  footprint* on disk and detecting *render drift* in an installed vendored agent
+  are orthogonal: the former needs only `stat`/`cmp`-against-template, the latter
+  needs a re-render. Q-05.4 stays deferred; the step-07 pure-disk check ships
+  independently of it.
