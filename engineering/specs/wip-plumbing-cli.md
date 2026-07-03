@@ -51,6 +51,9 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
 | `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
 | `setup lds` | Write the LDS install scaffold to `engineering/` (manifest + nine layer dirs + maintenance copies); flip `features.lds.{enabled, root: engineering}`. | step-15 follow-up |
+| `setup solo` | Flip `features.solo.enabled`; optional `--force-tier`/`--fallback-tool` write `features.solo.agent_tier_policy`. Config-echo (no files, no sentinel). | ADR-0021 |
+| `setup forge` | Flip `features.forge.enabled` (no backend arg — gh/glab probe-detected). Config-echo. | ADR-0021 |
+| `setup issue-tracker` | Flip `features.issue-tracker.{enabled, backend: <linear\|github>}` (backend required). Config-echo. | ADR-0021 |
 | `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
 | `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
 
@@ -570,15 +573,27 @@ local hook that fires when `.wip.yaml`, `.wip/GLOSSARY.md`, or any
 `templates/glossary/*.md` changes — the three drift modes the seam
 catches: content drift, manifest drift, partial drift.
 
-### `wip-plumbing setup <deps|direnv|hygiene|release|agents|lds> [--force]`
+### `wip-plumbing setup <deps|direnv|hygiene|release|agents|lds|solo|forge|issue-tracker> [--force]`
 
 Install-time deterministic scaffold writers, one per capability (step-14
 shipped the first five; `setup lds` is the step-15 follow-up — the
 sixth verb, see [Sub-section below](#setup-lds-the-sixth-verb-the-lds-scaffold)).
-Each verb writes verbatim files from `templates/setup/<verb>/` into the
-consumer repo, flips its mapped feature flag in `.wip.yaml` where
+Each **file-writing** verb writes verbatim files from `templates/setup/<verb>/`
+into the consumer repo, flips its mapped feature flag in `.wip.yaml` where
 applicable, and verifies its sentinel exists post-write. No `{{key}}`
 substitution — these are infrastructure files, not artifacts.
+
+**Config-echo verbs (`solo`, `forge`, `issue-tracker` — ADR-0021)** are the
+exception: they write *no* template files and have *no* sentinel. Each flips
+only its `.wip.yaml` feature stanza (config-echo, `active == enabled`) and emits
+the same JSON envelope, with the feature key as the ledger unit — a real write
+reports it under `wrote`, an idempotent re-run under `skipped_idempotent`. They
+honor `--dry-run` and take verb-specific args: `setup solo` accepts optional
+`--force-tier <tier>` / `--fallback-tool <name>` (writing
+`features.solo.agent_tier_policy`, never defaulted — ADR-0007); `setup forge`
+takes no backend (gh/glab is probe-detected at `status --probe-forge` time —
+ADR-0018); `setup issue-tracker` **requires** a `<linear|github>` backend and
+rejects an unknown/missing one (ADR-0019).
 
 **Per-file write contract (three-way):**
 
@@ -633,11 +648,18 @@ already-flipped verb is a manifest no-op).
 | `setup release` | `features.changelog.enabled: true` | `CHANGELOG.md` |
 | `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
 | `setup lds` | `features.lds.{enabled, root: engineering}` | `engineering/.lds-manifest.yaml` |
+| `setup solo` | `features.solo.{enabled}` (+ `agent_tier_policy` when `--force-tier`/`--fallback-tool`) | (none — config-echo) |
+| `setup forge` | `features.forge.{enabled}` | (none — config-echo) |
+| `setup issue-tracker` | `features.issue-tracker.{enabled, backend}` | (none — config-echo) |
 
 `setup agents` deliberately does NOT auto-create the `features.solo`
 block (per ADR-0007, that block carries the consumer's backend-specific
 `agent_tier_policy`; a default would be presumptuous). Stderr emits a
-hint to configure `features.solo.agent_tier_policy` after the verb.
+hint to configure `features.solo.agent_tier_policy` after the verb. The
+dedicated **`setup solo`** verb (ADR-0021) is the guided path for that block:
+it writes the bare `features.solo.enabled: true` and adds the
+`agent_tier_policy` only when `--force-tier`/`--fallback-tool` are passed —
+guided, still never defaulted.
 
 **stdout (success):**
 ```json
