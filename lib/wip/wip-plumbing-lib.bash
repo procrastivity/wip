@@ -187,6 +187,14 @@ wip_features_json() {
         | { backend: .backend }
         | with_entries(select(.value != null))
         | if length == 0 then null else . end')"
+    elif [[ "$name" == "forge" ]]; then
+      # Config echo of the declared forge backend (ADR-0021 / D6), parallel to
+      # issue-tracker. No resolution — "declared", not "answering".
+      detail="$(printf '%s' "$mj" | jq -c '
+        (.features.forge // {})
+        | { backend: .backend }
+        | with_entries(select(.value != null))
+        | if length == 0 then null else . end')"
     fi
     if [[ -n "$sentinel" ]]; then
       if [[ -e "$root/$sentinel" ]]; then exists="true"; else exists="false"; fi
