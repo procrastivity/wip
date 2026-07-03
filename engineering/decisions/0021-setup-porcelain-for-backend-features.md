@@ -1,6 +1,6 @@
 # 0021 — guided `setup` porcelain for the backend features
 
-- Status: accepted
+- Status: accepted (§2 no-backend-arg superseded in part by ADR-0022)
 - Date: 2026-07-03
 - Source: `setup-backends` initiative, Round 1 (step-01); BRIEF.md; ADR-0002, ADR-0007, ADR-0014, ADR-0015, ADR-0018, ADR-0019
 
@@ -60,7 +60,10 @@ always-committed `.wip.yaml`, and nothing else:
 All three are config-echo features (no sentinel — ADR-0002), so the write alone
 makes the feature `active`. `setup forge` takes **no backend argument**: the
 forge kind (gh vs glab) is auto-detected at `status --probe-forge` time
-(ADR-0018), so there is no field to set. `setup issue-tracker` **requires** a
+(ADR-0018), so there is no field to set. (Superseded in part by ADR-0022:
+`setup forge [gh|glab]` now *optionally* writes `features.forge.backend` — the
+primary forge selector — while bare `setup forge` stays a pure enable flip.)
+`setup issue-tracker` **requires** a
 backend argument (`linear` | `github`) and rejects an unknown or missing value,
 because the tracker backend *is* stored in config (ADR-0019).
 

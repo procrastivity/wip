@@ -1,6 +1,6 @@
 # 0018 — the forge observation surface
 
-- Status: accepted
+- Status: accepted (§3 detection premise superseded in part by ADR-0022)
 - Date: 2026-06-28
 - Source: `forge-surface` initiative, Round 1 (step-01); BRIEF.md; Linear BDS-22 (refinement of BDS-20); ADR-0002, ADR-0006, ADR-0014, ADR-0016
 
@@ -68,7 +68,9 @@ changing its observation contract.
 The forge transport mirrors the solo-CLI probe shape (ADR-0014):
 
 - **Detection:** `command -v gh` (preferred), then `command -v glab`. Absent →
-  `forge_reachable: null`, no signal, no failure.
+  `forge_reachable: null`, no signal, no failure. This binary probe is now the
+  zero-config **fallback** selector — see ADR-0022, which supersedes it as the
+  *primary* selector (`features.forge.backend` config is now primary).
 - **Two overridable shell-out seams** so tests inject fakes and never touch the
   network:
   - `WIP_FORGE_STATUS_CMD` — liveness (e.g. `gh auth status`).
