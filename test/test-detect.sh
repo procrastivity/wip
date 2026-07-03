@@ -84,4 +84,44 @@ rm -rf "$tmpB"
 assert_eq "large" "$(jq -r '.features[]|select(.name=="solo").detail.force_tier' <<<"$outB")" "solo detail force_tier (no fallback)"
 assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail.fallback_tool // "null"' <<<"$outB")" "solo detail fallback_tool omitted"
 
+# --- detail echo: forge backend surfaced under the forge feature (pure config read, D6) ---
+# Case C: pinned forge backend -> backend echoed under forge detail.
+tmpC="$(mktemp -d)"
+cat >"$tmpC/.wip.yaml" <<'YAML'
+version: 1
+current_initiative: demo
+features:
+  forge:
+    enabled: true
+    backend: glab
+initiatives:
+  - slug: demo
+    status: in-flight
+    active_step: step-01
+    brief: .wip/initiatives/demo/brief.md
+YAML
+
+outC="$(WIP_ROOT="$tmpC" bin/wip-plumbing detect)"
+rm -rf "$tmpC"
+assert_eq "glab" "$(jq -r '.features[]|select(.name=="forge").detail.backend' <<<"$outC")" "forge detail backend (pinned)"
+
+# Case D: unpinned forge -> no backend -> detail omitted (backward-compatible).
+tmpD="$(mktemp -d)"
+cat >"$tmpD/.wip.yaml" <<'YAML'
+version: 1
+current_initiative: demo
+features:
+  forge:
+    enabled: true
+initiatives:
+  - slug: demo
+    status: in-flight
+    active_step: step-01
+    brief: .wip/initiatives/demo/brief.md
+YAML
+
+outD="$(WIP_ROOT="$tmpD" bin/wip-plumbing detect)"
+rm -rf "$tmpD"
+assert_eq "null" "$(jq -r '.features[]|select(.name=="forge")|.detail // "null"' <<<"$outD")" "forge detail omitted (unpinned)"
+
 test_summary

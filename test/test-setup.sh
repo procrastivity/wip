@@ -873,10 +873,33 @@ WIP_ROOT="$cfg" bin/wip-plumbing setup solo --fallback-tool 456 >/dev/null 2>&1
 assert_eq "!!str" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool | tag' "$cfg/.wip.yaml")" "[solo] fallback_tool remains a string"
 assert_eq "456" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] numeric-looking fallback_tool preserved"
 
-# setup forge → forge:{enabled:true}, no backend arg.
+# setup forge (bare) → forge:{enabled:true}, NO backend (regression guard, D3).
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge 2>/dev/null)"
 assert_eq "features.forge" "$(jq -r '.wrote | join(",")' <<<"$out")" "[forge] wrote the feature"
 assert_eq "true" "$(yq -r '.features.forge.enabled' "$cfg/.wip.yaml")" "[forge] enabled:true written"
+assert_eq "null" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] bare setup writes no backend"
+
+# setup forge glab → optional positional pins the backend (D3/D4).
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge glab 2>/dev/null)"
+assert_eq "features.forge" "$(jq -r '.wrote | join(",")' <<<"$out")" "[forge] glab pin wrote the feature"
+assert_eq "glab" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] backend:glab written"
+assert_eq "true" "$(yq -r '.features.forge.enabled' "$cfg/.wip.yaml")" "[forge] enabled stays true with backend"
+
+# setup forge gh → both CLI names accepted (D4).
+WIP_ROOT="$cfg" bin/wip-plumbing setup forge gh >/dev/null 2>&1
+assert_eq "gh" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] backend:gh written"
+
+# Re-set to glab, then re-run identically → idempotent.
+WIP_ROOT="$cfg" bin/wip-plumbing setup forge glab >/dev/null 2>&1
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge glab 2>/dev/null)"
+mapfile -t F < <(jq -r '(.wrote | length), (.skipped_idempotent | join(",")), .manifest_updated' <<<"$out")
+assert_eq "0" "${F[0]}" "[forge] idempotent re-run wrote nothing"
+assert_eq "features.forge" "${F[1]}" "[forge] idempotent re-run skipped_idempotent"
+assert_eq "null" "${F[2]}" "[forge] idempotent re-run manifest noop"
+
+# Bare `setup forge` after a pin PRESERVES the backend (D5 merge, not reset).
+WIP_ROOT="$cfg" bin/wip-plumbing setup forge >/dev/null 2>&1
+assert_eq "glab" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] bare re-run preserves pinned backend"
 
 # setup issue-tracker <backend> → issue-tracker:{enabled:true, backend:...}.
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker linear 2>/dev/null)"
@@ -915,6 +938,14 @@ WIP_ROOT="$cfg" bin/wip-plumbing setup forge --force-tier large >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "2" "$rc" "[forge] --force-tier rejected (solo-only)"
+# forge backend is optional, but an unknown positional is rejected (D4); writes nothing.
+set +e
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge bogus 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "[forge] unknown backend exit 2"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[forge] unknown backend usage"
+assert_eq "glab" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] bogus backend wrote nothing (pin intact)"
 set +e
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier banana 2>/dev/null)"
 rc=$?
@@ -931,7 +962,7 @@ assert_eq "2" "$rc" "[solo] stray positional rejected"
 dry="$tmp/cfg-dry"
 mkdir -p "$dry"
 WIP_ROOT="$dry" bin/wip-plumbing init >/dev/null
-out="$(WIP_ROOT="$dry" bin/wip-plumbing --dry-run setup forge 2>/dev/null)"
+out="$(WIP_ROOT="$dry" bin/wip-plumbing --dry-run setup forge glab 2>/dev/null)"
 assert_eq ".wip.yaml" "$(jq -r '.manifest_updated' <<<"$out")" "[forge] dry-run reports the plan"
 assert_eq "null" "$(yq -r '.features.forge' "$dry/.wip.yaml")" "[forge] dry-run wrote nothing"
 

@@ -181,8 +181,9 @@ wip_plumbing_cmd_status() {
   #           step-02) resolves the command; WIP_FORGE_STATUS_CMD overrides it.
   local forge_reachable="null"
   if [[ "$probe_forge" == "1" && "$forge_available" == "true" ]]; then
-    local fcli fcmd
-    fcli="$(_wip_forge_detect)"
+    local fcli fcmd forge_backend
+    forge_backend="$(jq -r '.features.forge.backend // ""' <<<"$mj")"
+    fcli="$(_wip_forge_detect "$forge_backend")"
     fcmd="$(_wip_forge_status_cmd "$fcli")"
     if [[ -n "$fcmd" ]] && _wip_forge_run "$fcmd" >/dev/null 2>&1; then
       forge_reachable="true"

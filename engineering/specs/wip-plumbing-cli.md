@@ -52,7 +52,7 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
 | `setup lds` | Write the LDS install scaffold to `engineering/` (manifest + nine layer dirs + maintenance copies); flip `features.lds.{enabled, root: engineering}`. | step-15 follow-up |
 | `setup solo` | Flip `features.solo.enabled`; optional `--force-tier`/`--fallback-tool` write `features.solo.agent_tier_policy`. Config-echo (no files, no sentinel). | ADR-0021 |
-| `setup forge` | Flip `features.forge.enabled` (no backend arg — gh/glab probe-detected). Config-echo. | ADR-0021 |
+| `setup forge [gh\|glab]` | Flip `features.forge.enabled`; optional backend pin writes `features.forge.{enabled, backend?}` — the pin is now the **primary** forge selector, gh/glab probe demoted to fallback. Config-echo. | ADR-0021, ADR-0022 |
 | `setup issue-tracker` | Flip `features.issue-tracker.{enabled, backend: <linear\|github>}` (backend required). Config-echo. | ADR-0021 |
 | `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
 | `extract` | Run the deterministic LDS Extract phase against an approved manifest. v1: verbatim+content modes only. | step-15 |
@@ -590,8 +590,10 @@ the same JSON envelope, with the feature key as the ledger unit — a real write
 reports it under `wrote`, an idempotent re-run under `skipped_idempotent`. They
 honor `--dry-run` and take verb-specific args: `setup solo` accepts optional
 `--force-tier <tier>` / `--fallback-tool <name>` (writing
-`features.solo.agent_tier_policy`, never defaulted — ADR-0007); `setup forge`
-takes no backend (gh/glab is probe-detected at `status --probe-forge` time —
+`features.solo.agent_tier_policy`, never defaulted — ADR-0007); bare
+`setup forge` is a pure enable flip, while `setup forge <gh|glab>` also writes
+`features.forge.backend` and rejects an unknown value (exit 2) — the pin is the
+primary forge selector, the gh/glab probe its fallback (ADR-0022, amending
 ADR-0018); `setup issue-tracker` **requires** a `<linear|github>` backend and
 rejects an unknown/missing one (ADR-0019).
 
@@ -649,7 +651,7 @@ already-flipped verb is a manifest no-op).
 | `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
 | `setup lds` | `features.lds.{enabled, root: engineering}` | `engineering/.lds-manifest.yaml` |
 | `setup solo` | `features.solo.{enabled}` (+ `agent_tier_policy` when `--force-tier`/`--fallback-tool`) | (none — config-echo) |
-| `setup forge` | `features.forge.{enabled}` | (none — config-echo) |
+| `setup forge` | `features.forge.{enabled, backend?}` | (none — config-echo) |
 | `setup issue-tracker` | `features.issue-tracker.{enabled, backend}` | (none — config-echo) |
 
 `setup agents` deliberately does NOT auto-create the `features.solo`

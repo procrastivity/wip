@@ -122,9 +122,10 @@ wip_plumbing_cmd_setup() {
         ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
       *)
-        # `setup issue-tracker <backend>` takes one positional backend
-        # (linear|github); every other verb rejects positionals.
-        if [[ "$sub" == "issue-tracker" && "$tracker_backend_set" == "0" ]]; then
+        # `setup issue-tracker <backend>` (linear|github) and `setup forge
+        # [gh|glab]` each take one positional backend; every other verb rejects
+        # positionals.
+        if [[ ("$sub" == "issue-tracker" || "$sub" == "forge") && "$tracker_backend_set" == "0" ]]; then
           tracker_backend="$1"
           tracker_backend_set=1
           shift
@@ -1075,10 +1076,24 @@ _wip_setup_config_verb() {
       ;;
     forge)
       feature="forge"
-      # No backend arg: the forge kind (gh/glab) is probe-detected at
-      # `status --probe-forge` time (ADR-0018), so this is a pure enable flip.
-      status="$(wip_setup_set_feature_flag "$manifest" "forge" "enabled=true")" ||
-        wip_die 1 internal "setup forge: manifest update failed"
+      # Backend is OPTIONAL here (D3), the one intentional divergence from the
+      # issue-tracker mirror below. Bare `setup forge` is a pure enable flip:
+      # the forge kind (gh/glab) is probe-detected at `status --probe-forge`
+      # time (ADR-0018) when unpinned. A `setup forge [gh|glab]` positional
+      # validates against the CLI names (D4) and pins features.forge.backend.
+      # No "missing backend" hard-fail (unlike issue-tracker) — bare is valid.
+      if [[ "$backend_set" == "1" ]]; then
+        case "$backend" in
+          gh | glab) ;;
+          *) wip_die 2 usage "setup forge: unknown backend: $backend (expected gh|glab)" ;;
+        esac
+        status="$(wip_setup_set_feature_flag "$manifest" "forge" \
+          "enabled=true" "backend=$backend")" ||
+          wip_die 1 internal "setup forge: manifest update failed"
+      else
+        status="$(wip_setup_set_feature_flag "$manifest" "forge" "enabled=true")" ||
+          wip_die 1 internal "setup forge: manifest update failed"
+      fi
       ;;
     issue-tracker)
       feature="issue-tracker"
@@ -1160,6 +1175,7 @@ _wip_setup_hint() {
       ;;
     forge)
       printf 'wip-plumbing: setup forge: hint: verify liveness with `wip-plumbing status --probe-forge` (auto-detects gh/glab)\n' >&2
+      printf 'wip-plumbing: setup forge: hint: `setup forge [gh|glab]` pins features.forge.backend (otherwise probe-detected)\n' >&2
       ;;
     issue-tracker)
       printf 'wip-plumbing: setup issue-tracker: hint: `wip-plumbing sync` reconciles the wip lifecycle with the tracker\n' >&2

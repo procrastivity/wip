@@ -90,8 +90,9 @@ wip_plumbing_cmd_ship() {
   # (the Linear write that consumes it is BDS-20's).
   local transition="in-review"
   if [[ "$(jq -r '.features.forge.enabled // false' <<<"$mj")" == "true" ]]; then
-    local fcli fcmd
-    fcli="$(_wip_forge_detect)"
+    local fcli fcmd forge_backend
+    forge_backend="$(jq -r '.features.forge.backend // ""' <<<"$mj")"
+    fcli="$(_wip_forge_detect "$forge_backend")"
     fcmd="$(_wip_forge_status_cmd "$fcli")"
     if [[ -n "$fcmd" ]] && _wip_forge_run "$fcmd" >/dev/null 2>&1; then
       transition="stood-down"

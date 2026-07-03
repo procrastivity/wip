@@ -6,12 +6,27 @@
 # forge. Mirrors the solo-CLI probe shape (status.bash, ADR-0014).
 # shellcheck shell=bash
 
-# _wip_forge_detect — which forge CLI is usable. Echoes "gh" | "glab" | "".
-# gh wins when both are present. WIP_FORGE_CLI forces the answer (test seam /
-# explicit pin); a *set-but-empty* WIP_FORGE_CLI forces "none".
+# _wip_forge_detect [configured_cli] — which forge CLI is usable.
+# Echoes "gh" | "glab" | "". Resolution order is env → config → probe:
+#   1. WIP_FORGE_CLI env forces the answer (test seam / explicit process pin);
+#      a *set-but-empty* WIP_FORGE_CLI forces "none" and short-circuits.
+#   2. configured_cli (arg 1 — the committed .features.forge.backend pin) is
+#      returned verbatim when non-empty. Authoritative as a *value*: it is NOT
+#      re-validated against PATH, so a repo that pins `glab` gets glab even when
+#      only gh is installed (the pin is a deliberate statement of which remote
+#      this repo targets; reachability stays `status --probe-forge`'s concern).
+#   3. binary probe: gh wins when both are present, else glab, else "".
+# Load-bearing asymmetry vs. the env layer: an empty/absent arg 1 means "not
+# configured" and falls through to the probe (reproducing today's zero-config
+# gh-wins default), whereas a *set-but-empty* WIP_FORGE_CLI forces "none".
 _wip_forge_detect() {
   if [[ -n "${WIP_FORGE_CLI+x}" ]]; then
     printf '%s' "${WIP_FORGE_CLI}"
+    return 0
+  fi
+  local configured="${1:-}"
+  if [[ -n "$configured" ]]; then
+    printf '%s' "$configured"
     return 0
   fi
   if command -v gh >/dev/null 2>&1; then
