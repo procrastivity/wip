@@ -35,6 +35,34 @@ assert_eq "" "$(
   PATH="$stub" _wip_forge_detect
 )" "detect echoes none when neither present"
 
+# --- detection: config layer (arg 1) — env → config → probe (step-06) -------
+# A non-empty configured pin (arg 1) is the NEW middle layer: it beats the
+# binary probe and is authoritative as a value (D4 — honored without its binary,
+# never re-validated against PATH). env still wins; an empty arg falls through.
+cfg="$(wip_mktemp)"
+printf '#!/bin/sh\nexit 0\n' >"$cfg/gh" && chmod +x "$cfg/gh"
+# config wins over probe: only gh on PATH, but the pin selects glab (core fix).
+assert_eq "glab" "$(
+  unset WIP_FORGE_CLI
+  PATH="$cfg" _wip_forge_detect "glab"
+)" "config pin beats gh-wins probe (core bug fix)"
+# env beats config: WIP_FORGE_CLI overrides the pin.
+assert_eq "gh" "$(WIP_FORGE_CLI=gh _wip_forge_detect "glab")" "env WIP_FORGE_CLI beats config pin"
+# set-but-empty env still forces none, even over a config pin (D3 precedence edge).
+assert_eq "" "$(WIP_FORGE_CLI='' _wip_forge_detect "glab")" "set-but-empty WIP_FORGE_CLI forces none over config pin"
+# empty config arg = "not configured" -> fall through to probe (D3 asymmetry).
+printf '#!/bin/sh\nexit 0\n' >"$cfg/glab" && chmod +x "$cfg/glab"
+assert_eq "gh" "$(
+  unset WIP_FORGE_CLI
+  PATH="$cfg" _wip_forge_detect ""
+)" "empty config arg falls through to probe (gh-wins, D3)"
+# pin honored without its binary present at all (D4 — no PATH revalidation).
+nobin="$(wip_mktemp)"
+assert_eq "glab" "$(
+  unset WIP_FORGE_CLI
+  PATH="$nobin" _wip_forge_detect "glab"
+)" "config pin honored without its binary on PATH (D4)"
+
 # --- status command resolution ---------------------------------------------
 assert_eq "gh auth status" "$(
   unset WIP_FORGE_STATUS_CMD

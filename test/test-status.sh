@@ -230,6 +230,19 @@ assert_eq "false" "$(jq -r '.forge_reachable' <<<"$f5")" "declared but no forge 
 assert_eq "1" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f5")" \
   "missing forge CLI + forge declared -> forge-unreachable signal"
 
+# f6. A committed .features.forge.backend pin must not break the probe path
+# (step-06): status reads the pin from mj and passes it to _wip_forge_detect,
+# but the liveness probe still keys off the resolved status cmd (WIP_FORGE_STATUS_CMD
+# seam). The f2/f3 up/down assertions hold unchanged with a pin present.
+WIP_ROOT="$tmpF" yq -i '.features.forge.backend = "glab"' "$tmpF/.wip.yaml"
+f6up="$(WIP_FORGE_STATUS_CMD="true" runf --probe-forge)"
+assert_eq "true" "$(jq -r '.forge_reachable' <<<"$f6up")" "pin present + probe up -> forge_reachable true"
+f6down="$(WIP_FORGE_STATUS_CMD="false" runf --probe-forge)"
+assert_eq "false" "$(jq -r '.forge_reachable' <<<"$f6down")" "pin present + probe down -> forge_reachable false"
+assert_eq "1" "$(jq -r '.signals | map(select(. == "forge-unreachable")) | length' <<<"$f6down")" \
+  "pin present + probe down -> forge-unreachable signal still emitted"
+WIP_ROOT="$tmpF" yq -i 'del(.features.forge.backend)' "$tmpF/.wip.yaml"
+
 # ---- Closeout hint (half-done-closeout, step-06) ------------------------
 # active_step names a not-yet-shipped step whose workplan is already archived ->
 # signals carries "half-done-closeout" (single-sourced with doctor's check). The

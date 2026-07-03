@@ -79,8 +79,9 @@ _wip_forge_cmd_observe() {
   # Transport: detect CLI, resolve the observe command, run it. A non-zero exit
   # or empty output means "no PR / no answer" for observation purposes; liveness
   # belongs to `status --probe-forge`, so do not collapse that into unreachable.
-  local cli observe_cmd raw="" reachable="null"
-  cli="$(_wip_forge_detect)"
+  local cli observe_cmd raw="" reachable="null" forge_backend
+  forge_backend="$(jq -r '.features.forge.backend // ""' <<<"$mj")"
+  cli="$(_wip_forge_detect "$forge_backend")"
   observe_cmd="$(_wip_forge_observe_cmd "$cli" "$branch")"
   if [[ -n "$observe_cmd" ]]; then
     if raw="$(_wip_forge_run "$observe_cmd")" && [[ -n "$raw" ]]; then

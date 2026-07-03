@@ -63,6 +63,19 @@ o4="$(obs "$tmp/glab.json")"
 assert_eq "done" "$(jq -r '.intent' <<<"$o4")" "glab merged -> done"
 assert_eq "http://gl/1" "$(jq -r '.observed.url' <<<"$o4")" "glab web_url normalized to url"
 
+# --- config pin (.features.forge.backend) reaches detection (step-06) -------
+# Pin the backend in the manifest; with WIP_FORGE_CLI unset, _wip_forge_detect's
+# config layer selects it (authoritative as a value, regardless of PATH) and it
+# surfaces via the already-emitted .forge.cli. Proves C2's read+pass wiring
+# end-to-end. Restore the fixture afterward so later assertions are unaffected.
+WIP_ROOT="$tmp" yq -i '.features.forge.backend = "glab"' "$tmp/.wip.yaml"
+oc="$(
+  unset WIP_FORGE_CLI
+  obs "$tmp/open.json"
+)"
+assert_eq "glab" "$(jq -r '.forge.cli' <<<"$oc")" "config pin backend=glab -> .forge.cli glab"
+WIP_ROOT="$tmp" yq -i 'del(.features.forge.backend)' "$tmp/.wip.yaml"
+
 # --- no PR / forge didn't answer (cmd exits nonzero) ------------------------
 o5="$(WIP_ROOT="$tmp" WIP_FORGE_OBSERVE_CMD="false" bin/wip-plumbing forge observe --branch feat)"
 assert_eq "none" "$(jq -r '.intent' <<<"$o5")" "no PR -> intent none"
