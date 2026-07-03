@@ -339,16 +339,52 @@ for role in "${vroles[@]}"; do
     "vendored dry-run: $role unchanged on disk (still solo)"
 done
 
-# v5. roles/ unreachable (no WIP_ROLES_DIR, no $root/roles, empty CLAUDE_PLUGIN_ROOT)
-# -> exit 4 no-roles-dir, with NO partial write.
+# v5. roles/ genuinely unreachable -> exit 4 no-roles-dir, with NO partial write.
+# The renderer self-locates roles/ from its own install tree ($WIP_LIB/../../roles,
+# mirroring the templates/ seam), so clearing WIP_ROLES_DIR / $root/roles /
+# CLAUDE_PLUGIN_ROOT alone is NOT enough — a real install always ships roles/ next
+# to lib/. To exercise the clean-failure path we point WIP_LIB at a lib-only copy
+# whose sibling roles/ does not exist (a truly broken/partial install).
 tmpv2="$(wip_mktemp)"
 cp "$tmpv/.wip.yaml" "$tmpv2/.wip.yaml"
+brokenlib="$(wip_mktemp)"
+mkdir -p "$brokenlib/lib"
+cp -R lib/wip "$brokenlib/lib/wip" # no sibling roles/ → self-locating seam misses
 set +e
-v5="$(env -u WIP_ROLES_DIR CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv2" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
+v5="$(env -u WIP_ROLES_DIR WIP_TEMPLATES_DIR="$PWD/templates" CLAUDE_PLUGIN_ROOT="" \
+  WIP_LIB="$brokenlib/lib/wip" WIP_ROOT="$tmpv2" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
 rc=$?
 set -e
 assert_eq "4" "$rc" "vendored roles-unreachable exit 4"
 assert_eq "no-roles-dir" "$(jq -r '.error.kind' <<<"$v5")" "vendored roles-unreachable: no-roles-dir kind"
 assert_absent "$tmpv2/.claude" "vendored roles-unreachable: no partial write"
+
+# v6. Self-locating install seam: a vendored consumer with EVERY roles env seam
+# cleared (no WIP_ROLES_DIR, no $root/roles, empty CLAUDE_PLUGIN_ROOT) still
+# re-flattens successfully, because the renderer finds roles/ next to its own
+# lib/ via $WIP_LIB/../../roles — the same self-location templates/ already uses.
+# Regression guard for the direct-invocation / no-CLAUDE_PLUGIN_ROOT case
+# (running bin/wip-plumbing by absolute path from a foreign repo).
+tmpv6="$(wip_mktemp)"
+cat >"$tmpv6/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  orchestration: { enabled: true, backend: solo, source: vendored }
+current_initiative: demo
+initiatives: []
+YAML
+# Seed the vendored install honestly (roles self-located; no env seams needed).
+env -u WIP_ROLES_DIR CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv6" bin/wip-plumbing setup agents >/dev/null 2>&1
+set +e
+v6="$(env -u WIP_ROLES_DIR CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmpv6" bin/wip-plumbing orchestrate backend task 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "0" "$rc" "self-locating roles: vendored switch succeeds with no env seams"
+assert_eq "task" "$(jq -r '.backend' <<<"$v6")" "self-locating roles: backend switched to task"
+for role in "${vroles[@]}"; do
+  assert_cmp "$ref/$role.md" "$tmpv6/.claude/agents/wip/$role.md" \
+    "self-locating roles: $role byte-equal to reference task render"
+done
 
 test_summary

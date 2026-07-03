@@ -113,7 +113,15 @@ wip_flatten_neutralize_links() { cat; }
 #   1. $WIP_ROLES_DIR (must contain backends/)            [test/install seam]
 #   2. $root/roles      when $root/roles/backends exists  [dev/vendored layout]
 #   3. $CLAUDE_PLUGIN_ROOT/roles when it has backends/    [shared plugin install]
-#   4. else: stderr diagnostic + non-zero (no-roles-dir)
+#   4. $WIP_LIB/../../roles when it has backends/         [self-locating install]
+#   5. else: stderr diagnostic + non-zero (no-roles-dir)
+#
+# Step 4 mirrors wip_templates_dir's `$WIP_LIB/../../templates` fallback: roles/
+# ships in the same install tree as lib/ and templates/, so the renderer can
+# always find its own roles/ from $WIP_LIB alone — even when invoked directly by
+# absolute path (no $CLAUDE_PLUGIN_ROOT, consumer repo carries no vendored
+# roles/ per ADR-0020's F3). Without it, `setup agents` outside the plugin
+# harness fails no-roles-dir despite roles/ sitting right next to the binary.
 _wip_flatten_roles_dir() {
   if [[ -n "${WIP_ROLES_DIR:-}" ]]; then
     if [[ -d "$WIP_ROLES_DIR/backends" ]]; then
@@ -132,7 +140,16 @@ _wip_flatten_roles_dir() {
     printf '%s' "$CLAUDE_PLUGIN_ROOT/roles"
     return 0
   fi
-  _wip_flatten_err "no-roles-dir: roles/backends/ not found (looked in \$WIP_ROLES_DIR, \$root/roles, \$CLAUDE_PLUGIN_ROOT/roles)"
+  if [[ -n "${WIP_LIB:-}" ]]; then
+    local self_roles
+    # shellcheck disable=SC1007
+    if self_roles="$(CDPATH= cd -- "$WIP_LIB/../../roles" 2>/dev/null && pwd)" &&
+      [[ -n "$self_roles" && -d "$self_roles/backends" ]]; then
+      printf '%s' "$self_roles"
+      return 0
+    fi
+  fi
+  _wip_flatten_err "no-roles-dir: roles/backends/ not found (looked in \$WIP_ROLES_DIR, \$root/roles, \$CLAUDE_PLUGIN_ROOT/roles, \$WIP_LIB/../../roles)"
   return 4
 }
 
