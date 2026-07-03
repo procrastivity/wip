@@ -208,4 +208,19 @@ WIP_ROOT="$tmp" yq -i '.features.forge.enabled = true' "$manifest"
 out="$(WIP_FORGE_STATUS_CMD=false run demo step-02)"
 assert_eq "in-review" "$(jq -r '.transition' <<<"$out")" "F: unreachable forge leaves Tier-0 transition active"
 
+# Pinned backend must drive ship's forge stand-down probe, matching status/observe.
+# In this mixed-env fixture both CLIs are present, but gh fails and glab succeeds.
+# Without passing features.forge.backend into _wip_forge_detect, gh would be
+# selected by the fallback probe and ship would incorrectly keep Tier-0 active.
+setup_e2e
+WIP_ROOT="$tmp" yq -i '.features.forge.enabled = true | .features.forge.backend = "glab"' "$manifest"
+fakebin="$(wip_mktemp)"
+printf '#!/bin/sh\nexit 1\n' >"$fakebin/gh" && chmod +x "$fakebin/gh"
+printf '#!/bin/sh\nexit 0\n' >"$fakebin/glab" && chmod +x "$fakebin/glab"
+out="$(
+  unset WIP_FORGE_CLI WIP_FORGE_STATUS_CMD
+  PATH="$fakebin:$PATH" run demo step-02
+)"
+assert_eq "stood-down" "$(jq -r '.transition' <<<"$out")" "G: backend pin glab drives ship stand-down"
+
 test_summary
