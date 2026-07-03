@@ -101,4 +101,48 @@ WIP_ROOT="$tmp" bin/wip-plumbing forge observe --branch >/dev/null 2>&1
 assert_eq "2" "$?" "--branch without arg -> exit 2"
 set -e
 
+# --- CLOSEOUT: mixed-env repro (fake gh/glab on PATH) — BDS-60 --------------
+# The round's end-to-end proof (workplan D4 / Chunk 3). The seam-based blocks
+# above stub WIP_FORGE_OBSERVE_CMD verbatim *regardless of the detected CLI*, so
+# they prove normalization but not *selection*. This block instead drives the
+# REAL detect -> observe-cmd -> run path with fake gh/glab executables on a
+# PREPENDED PATH (pattern: test-forge-transport.sh:19-64), so the ONLY variable
+# is the .features.forge.backend pin. That makes a flipped intent unambiguous
+# evidence the pin overrides the gh-wins probe. WIP_FORGE_CLI and
+# WIP_FORGE_OBSERVE_CMD stay UNSET so the config layer + real commands drive.
+fakebin="$(wip_mktemp)"
+glab_payload="$fakebin/mr.json"
+# gh: models `gh pr view feat` on a GitLab remote — no PR: nonzero + empty stdout.
+printf '#!/bin/sh\nexit 1\n' >"$fakebin/gh" && chmod +x "$fakebin/gh"
+# glab: emits the GitLab MR JSON for the current leg (real `glab mr view` path).
+printf '#!/bin/sh\ncat %q\n' "$glab_payload" >"$fakebin/glab" && chmod +x "$fakebin/glab"
+
+closeout_obs() {
+  unset WIP_FORGE_CLI WIP_FORGE_OBSERVE_CMD
+  WIP_ROOT="$tmp" PATH="$fakebin:$PATH" bin/wip-plumbing forge observe --branch feat
+}
+
+# Fix leg — pin backend=glab. Config pin beats the gh-wins probe, so the real
+# `glab mr view` runs; open MR -> in-review, merged MR -> done. THE FIX.
+WIP_ROOT="$tmp" yq -i '.features.forge.backend = "glab"' "$tmp/.wip.yaml"
+printf '%s' '{"state":"opened","merged_at":null,"web_url":"http://gl/1"}' >"$glab_payload"
+co_open="$(closeout_obs)"
+assert_eq "glab" "$(jq -r '.forge.cli' <<<"$co_open")" "closeout pin=glab -> .forge.cli glab (fix)"
+assert_eq "in-review" "$(jq -r '.intent' <<<"$co_open")" "closeout pin=glab open MR -> in-review (fix)"
+
+printf '%s' '{"state":"merged","merged_at":"2026-06-28T00:00:00Z","web_url":"http://gl/1"}' >"$glab_payload"
+co_merged="$(closeout_obs)"
+assert_eq "glab" "$(jq -r '.forge.cli' <<<"$co_merged")" "closeout pin=glab merged -> .forge.cli glab (fix)"
+assert_eq "done" "$(jq -r '.intent' <<<"$co_merged")" "closeout pin=glab merged MR -> done (fix, merged->done via real glab)"
+
+# Bug leg — remove the pin. The remote-blind probe picks gh (both CLIs present),
+# `gh pr view` returns nothing on this GitLab-shaped env, and forge observe goes
+# blind: cli=gh, intent=none, observed=null — the BDS-60 mis-selection, reproduced
+# deterministically. This `del` also restores the manifest so the pin can't leak.
+WIP_ROOT="$tmp" yq -i 'del(.features.forge.backend)' "$tmp/.wip.yaml"
+co_bug="$(closeout_obs)"
+assert_eq "gh" "$(jq -r '.forge.cli' <<<"$co_bug")" "closeout no pin -> gh mis-selected (.forge.cli gh, BDS-60)"
+assert_eq "none" "$(jq -r '.intent' <<<"$co_bug")" "closeout no pin -> intent none (BDS-60 blind observer)"
+assert_eq "null" "$(jq -r '.observed' <<<"$co_bug")" "closeout no pin -> observed null (gh returned no PR)"
+
 test_summary
