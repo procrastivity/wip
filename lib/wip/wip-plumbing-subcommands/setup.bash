@@ -87,6 +87,10 @@ wip_plumbing_cmd_setup() {
           wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
         [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --force-tier requires an argument"
         force_tier="$2"
+        case "$force_tier" in
+          small | medium | large) ;;
+          *) wip_die 2 usage "setup solo: --force-tier must be small, medium, or large (got: $force_tier)" ;;
+        esac
         tier_set=1
         shift 2
         ;;
@@ -94,6 +98,10 @@ wip_plumbing_cmd_setup() {
         [[ "$sub" == "solo" ]] ||
           wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
         force_tier="${1#--force-tier=}"
+        case "$force_tier" in
+          small | medium | large) ;;
+          *) wip_die 2 usage "setup solo: --force-tier must be small, medium, or large (got: $force_tier)" ;;
+        esac
         tier_set=1
         shift
         ;;

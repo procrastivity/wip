@@ -210,7 +210,9 @@ wip_setup_set_feature_flag() {
 #
 # Idempotently merge each key=value into the nested object
 # features.<feature>.<subkey>, creating it (and its parents) if absent and
-# preserving sibling keys not named here. One level deeper than
+# preserving sibling keys not named here. Values are written as strings, because
+# the current nested setup surface is agent_tier_policy and both force_tier /
+# fallback_tool are string policy fields. One level deeper than
 # wip_setup_set_feature_flag — used for features.solo.agent_tier_policy
 # (ADR-0021 §3), whose {force_tier, fallback_tool} are a nested block, not
 # flat feature keys. Bracket-indexed via strenv so a hyphenated <feature>
@@ -234,8 +236,7 @@ wip_setup_set_feature_subblock() {
       *=*)
         key="${kv%%=*}"
         val="${kv#*=}"
-        desired_json="$(KEY="$key" jq -c \
-          --argjson v "$(_wip_setup_jsonify "$val")" \
+        desired_json="$(KEY="$key" jq -c --arg v "$val" \
           '.[env.KEY] = $v' <<<"$desired_json")" || return 1
         ;;
       *)

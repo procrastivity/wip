@@ -868,6 +868,10 @@ assert_eq "Claude" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$c
 # A bare re-run PRESERVES the existing tier policy (merge, not clobber).
 WIP_ROOT="$cfg" bin/wip-plumbing setup solo >/dev/null 2>&1
 assert_eq "large" "$(yq -r '.features.solo.agent_tier_policy.force_tier' "$cfg/.wip.yaml")" "[solo] bare re-run preserves tier policy"
+# Policy values are string fields, even when a tool name happens to be numeric.
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo --fallback-tool 456 >/dev/null 2>&1
+assert_eq "!!str" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool | tag' "$cfg/.wip.yaml")" "[solo] fallback_tool remains a string"
+assert_eq "456" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] numeric-looking fallback_tool preserved"
 
 # setup forge → forge:{enabled:true}, no backend arg.
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge 2>/dev/null)"
@@ -911,6 +915,12 @@ WIP_ROOT="$cfg" bin/wip-plumbing setup forge --force-tier large >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "2" "$rc" "[forge] --force-tier rejected (solo-only)"
+set +e
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier banana 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "[solo] invalid --force-tier rejected"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[solo] invalid --force-tier usage"
 set +e
 WIP_ROOT="$cfg" bin/wip-plumbing setup solo extra >/dev/null 2>&1
 rc=$?
