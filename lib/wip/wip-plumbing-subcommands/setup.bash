@@ -21,12 +21,15 @@ wip_plumbing_cmd_setup() {
     shift
   fi
   case "$sub" in
-    deps | direnv | hygiene | release | agents | lds) ;;
-    "") wip_die 2 usage "setup: missing subcommand (deps|direnv|hygiene|release|agents|lds)" ;;
+    deps | direnv | hygiene | release | agents | lds | solo | forge | issue-tracker) ;;
+    "") wip_die 2 usage "setup: missing subcommand (deps|direnv|hygiene|release|agents|lds|solo|forge|issue-tracker)" ;;
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
   local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0
+  # Config-echo verbs (ADR-0021): solo/forge/issue-tracker write only a .wip.yaml
+  # feature stanza — no template files, no sentinel. Their verb-specific args.
+  local force_tier="" fallback_tool="" tier_set=0 tracker_backend="" tracker_backend_set=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
@@ -79,8 +82,48 @@ wip_plumbing_cmd_setup() {
         source_set=1
         shift
         ;;
+      --force-tier)
+        [[ "$sub" == "solo" ]] ||
+          wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
+        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --force-tier requires an argument"
+        force_tier="$2"
+        tier_set=1
+        shift 2
+        ;;
+      --force-tier=*)
+        [[ "$sub" == "solo" ]] ||
+          wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
+        force_tier="${1#--force-tier=}"
+        tier_set=1
+        shift
+        ;;
+      --fallback-tool)
+        [[ "$sub" == "solo" ]] ||
+          wip_die 2 usage "setup $sub: --fallback-tool is only valid for \`setup solo\`"
+        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --fallback-tool requires an argument"
+        fallback_tool="$2"
+        tier_set=1
+        shift 2
+        ;;
+      --fallback-tool=*)
+        [[ "$sub" == "solo" ]] ||
+          wip_die 2 usage "setup $sub: --fallback-tool is only valid for \`setup solo\`"
+        fallback_tool="${1#--fallback-tool=}"
+        tier_set=1
+        shift
+        ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
-      *) wip_die 2 usage "setup $sub: unexpected arg: $1" ;;
+      *)
+        # `setup issue-tracker <backend>` takes one positional backend
+        # (linear|github); every other verb rejects positionals.
+        if [[ "$sub" == "issue-tracker" && "$tracker_backend_set" == "0" ]]; then
+          tracker_backend="$1"
+          tracker_backend_set=1
+          shift
+        else
+          wip_die 2 usage "setup $sub: unexpected arg: $1"
+        fi
+        ;;
     esac
   done
   case "$source_mode" in
@@ -112,6 +155,18 @@ wip_plumbing_cmd_setup() {
   fi
   [[ -n "$root" && -f "$root/.wip.yaml" ]] ||
     wip_die 3 missing-manifest "setup $sub: no .wip.yaml found; run \`init\` first"
+
+  # Config-echo verbs (ADR-0021): solo/forge/issue-tracker write only a
+  # .wip.yaml feature stanza — no template files, no sentinel — so they skip the
+  # template-dir resolution + walk below entirely.
+  case "$sub" in
+    solo | forge | issue-tracker)
+      _wip_setup_config_verb "$root" "$sub" \
+        "$tracker_backend" "$tracker_backend_set" \
+        "$tier_set" "$force_tier" "$fallback_tool"
+      return 0
+      ;;
+  esac
 
   local td tmpl_dir
   td="$(wip_templates_dir)"
@@ -974,6 +1029,90 @@ _wip_setup_arr_json() {
   printf '%s' "$out"
 }
 
+# _wip_setup_config_verb <root> <verb> <backend> <backend-set> <tier-set>
+#                        <force-tier> <fallback-tool>
+#
+# The config-echo setup path (ADR-0021): solo / forge / issue-tracker are pure
+# .wip.yaml feature writers. Validate the verb's args, flip the feature stanza
+# idempotently (wip_setup_set_feature_flag, plus the nested agent_tier_policy
+# for `setup solo` when tier flags are given), then emit the standard setup JSON
+# envelope + the per-verb hint. No template files, no sentinel. Honors
+# WIP_DRY_RUN via the shared setters. The feature key is the ledger unit: an
+# actual write reports it under `wrote`, an idempotent re-run under
+# `skipped_idempotent`.
+_wip_setup_config_verb() {
+  local root="$1" verb="$2" backend="$3" backend_set="$4"
+  local tier_set="$5" force_tier="$6" fallback_tool="$7"
+  local manifest="$root/.wip.yaml"
+
+  local feature status sub_status="noop"
+  case "$verb" in
+    solo)
+      feature="solo"
+      status="$(wip_setup_set_feature_flag "$manifest" "solo" "enabled=true")" ||
+        wip_die 1 internal "setup solo: manifest update failed"
+      # Optional agent_tier_policy (ADR-0021 §3): NEVER defaulted — written only
+      # when --force-tier / --fallback-tool are supplied. Merged into any
+      # existing policy so a bare re-run preserves it.
+      if [[ "$tier_set" == "1" ]]; then
+        local -a tier_kv=()
+        [[ -n "$force_tier" ]] && tier_kv+=("force_tier=$force_tier")
+        [[ -n "$fallback_tool" ]] && tier_kv+=("fallback_tool=$fallback_tool")
+        if [[ ${#tier_kv[@]} -gt 0 ]]; then
+          sub_status="$(wip_setup_set_feature_subblock "$manifest" "solo" "agent_tier_policy" \
+            "${tier_kv[@]}")" ||
+            wip_die 1 internal "setup solo: agent_tier_policy update failed"
+        fi
+      fi
+      ;;
+    forge)
+      feature="forge"
+      # No backend arg: the forge kind (gh/glab) is probe-detected at
+      # `status --probe-forge` time (ADR-0018), so this is a pure enable flip.
+      status="$(wip_setup_set_feature_flag "$manifest" "forge" "enabled=true")" ||
+        wip_die 1 internal "setup forge: manifest update failed"
+      ;;
+    issue-tracker)
+      feature="issue-tracker"
+      [[ "$backend_set" == "1" && -n "$backend" ]] ||
+        wip_die 2 usage "setup issue-tracker: missing backend (linear|github)"
+      case "$backend" in
+        linear | github) ;;
+        *) wip_die 2 usage "setup issue-tracker: unknown backend: $backend (expected linear|github)" ;;
+      esac
+      status="$(wip_setup_set_feature_flag "$manifest" "issue-tracker" \
+        "enabled=true" "backend=$backend")" ||
+        wip_die 1 internal "setup issue-tracker: manifest update failed"
+      ;;
+  esac
+
+  local changed="false"
+  [[ "$status" == "updated" || "$sub_status" == "updated" ]] && changed="true"
+  local wrote_json="[]" skipped_json="[]" manifest_updated_json="null"
+  if [[ "$changed" == "true" ]]; then
+    wrote_json="$(wip_json_string_array "features.$feature")"
+    manifest_updated_json='".wip.yaml"'
+  else
+    skipped_json="$(wip_json_string_array "features.$feature")"
+  fi
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    jq -nc \
+      --arg verb "setup $verb" \
+      --arg feature "$feature" \
+      --argjson wrote "$wrote_json" \
+      --argjson skipped "$skipped_json" \
+      --argjson manifest_updated "$manifest_updated_json" '
+      {ok:true, verb:$verb, feature:$feature,
+       wrote:$wrote, skipped_idempotent:$skipped,
+       wrote_forced:[], refused:[],
+       manifest_updated:$manifest_updated,
+       sentinel:null, sentinel_present:null}'
+  fi
+
+  _wip_setup_hint "$verb"
+}
+
 # _wip_setup_hint <verb> — per-verb stderr hint on success (suppressed by -q).
 # shellcheck disable=SC2016 # backticks in hint strings are literal markdown for users
 _wip_setup_hint() {
@@ -1005,6 +1144,17 @@ _wip_setup_hint() {
     lds)
       printf 'wip-plumbing: setup lds: hint: run `wip-plumbing doctor` to verify the LDS sentinel\n' >&2
       printf 'wip-plumbing: setup lds: hint: `wip-plumbing graduate <artifact>` now works against this repo\n' >&2
+      ;;
+    solo)
+      printf 'wip-plumbing: setup solo: hint: verify liveness with `wip-plumbing status --probe-solo`\n' >&2
+      printf 'wip-plumbing: setup solo: hint: pin a tier policy with `--force-tier <tier>` / `--fallback-tool <name>` (writes features.solo.agent_tier_policy)\n' >&2
+      printf 'wip-plumbing: setup solo: hint: this wires the control plane (features.solo); `setup agents` picks the orchestration backend (features.orchestration.backend)\n' >&2
+      ;;
+    forge)
+      printf 'wip-plumbing: setup forge: hint: verify liveness with `wip-plumbing status --probe-forge` (auto-detects gh/glab)\n' >&2
+      ;;
+    issue-tracker)
+      printf 'wip-plumbing: setup issue-tracker: hint: `wip-plumbing sync` reconciles the wip lifecycle with the tracker\n' >&2
       ;;
   esac
 }

@@ -206,6 +206,58 @@ wip_setup_set_feature_flag() {
   return 0
 }
 
+# wip_setup_set_feature_subblock <manifest> <feature> <subkey> <key=value>...
+#
+# Idempotently merge each key=value into the nested object
+# features.<feature>.<subkey>, creating it (and its parents) if absent and
+# preserving sibling keys not named here. One level deeper than
+# wip_setup_set_feature_flag — used for features.solo.agent_tier_policy
+# (ADR-0021 §3), whose {force_tier, fallback_tool} are a nested block, not
+# flat feature keys. Bracket-indexed via strenv so a hyphenated <feature>
+# (e.g. issue-tracker) resolves correctly. Honors $WIP_DRY_RUN (no write).
+# Echoes "updated" or "noop"; returns 1 on a jq/yq error.
+wip_setup_set_feature_subblock() {
+  local manifest="$1" feature="$2" subkey="$3"
+  shift 3
+  [[ -f "$manifest" ]] || {
+    printf 'wip-plumbing: setup: manifest missing: %s\n' "$manifest" >&2
+    return 1
+  }
+  local current_json desired_json
+  current_json="$(FEATURE="$feature" SUB="$subkey" \
+    yq -o=json -I=0 '.features[strenv(FEATURE)][strenv(SUB)] // {}' "$manifest" 2>/dev/null)" ||
+    current_json="{}"
+  desired_json="$current_json"
+  local kv key val
+  for kv in "$@"; do
+    case "$kv" in
+      *=*)
+        key="${kv%%=*}"
+        val="${kv#*=}"
+        desired_json="$(KEY="$key" jq -c \
+          --argjson v "$(_wip_setup_jsonify "$val")" \
+          '.[env.KEY] = $v' <<<"$desired_json")" || return 1
+        ;;
+      *)
+        printf 'wip-plumbing: setup: bad feature kv: %s\n' "$kv" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [[ "$(jq -cS . <<<"$current_json")" == "$(jq -cS . <<<"$desired_json")" ]]; then
+    printf 'noop'
+    return 0
+  fi
+  if [[ "${WIP_DRY_RUN:-0}" == "1" ]]; then
+    printf 'updated'
+    return 0
+  fi
+  FEATURE="$feature" SUB="$subkey" DESIRED="$desired_json" \
+    yq -i '.features[strenv(FEATURE)][strenv(SUB)] = (strenv(DESIRED) | from_json)' "$manifest" || return 1
+  printf 'updated'
+  return 0
+}
+
 # _wip_setup_jsonify <val> — convert a bash string to a JSON scalar. "true",
 # "false", and pure integers become JSON booleans/numbers; everything else is
 # a JSON string. Keeps the manifest tidy (no quoted "true").
