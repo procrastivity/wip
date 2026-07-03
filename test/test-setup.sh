@@ -832,4 +832,107 @@ assert_eq "true" "${F[0]}" "[dogfood] glossary assemble ok"
 assert_eq "1" "${F[1]}" "[dogfood] glossary lists lds partial as included"
 assert_eq "0" "${F[2]}" "[dogfood] lds partial not in skipped"
 
+# --- 25. Config-echo backend verbs: solo / forge / issue-tracker (ADR-0021) ---
+# Pure .wip.yaml feature writers — no template files, no sentinel. The feature
+# key is the ledger unit: a write reports it under `wrote`, an idempotent re-run
+# under `skipped_idempotent`.
+cfg="$tmp/cfg"
+mkdir -p "$cfg"
+WIP_ROOT="$cfg" bin/wip-plumbing init >/dev/null
+
+# setup solo (bare) → solo:{enabled:true}, no agent_tier_policy (never defaulted).
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo 2>/dev/null)"
+mapfile -t F < <(jq -r '.ok, .verb, .feature, (.wrote | join(",")), (.skipped_idempotent | length), .manifest_updated, .sentinel' <<<"$out")
+assert_eq "true" "${F[0]}" "[solo] ok"
+assert_eq "setup solo" "${F[1]}" "[solo] verb"
+assert_eq "solo" "${F[2]}" "[solo] feature"
+assert_eq "features.solo" "${F[3]}" "[solo] wrote lists the feature key"
+assert_eq "0" "${F[4]}" "[solo] nothing skipped on first write"
+assert_eq ".wip.yaml" "${F[5]}" "[solo] manifest_updated"
+assert_eq "null" "${F[6]}" "[solo] no sentinel"
+assert_eq "true" "$(yq -r '.features.solo.enabled' "$cfg/.wip.yaml")" "[solo] enabled:true written"
+assert_eq "null" "$(yq -r '.features.solo.agent_tier_policy' "$cfg/.wip.yaml")" "[solo] no tier policy defaulted"
+
+# setup solo (re-run) → idempotent: skipped_idempotent, manifest_updated null.
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo 2>/dev/null)"
+mapfile -t F < <(jq -r '(.wrote | length), (.skipped_idempotent | join(",")), .manifest_updated' <<<"$out")
+assert_eq "0" "${F[0]}" "[solo] re-run wrote nothing"
+assert_eq "features.solo" "${F[1]}" "[solo] re-run skipped_idempotent lists the feature"
+assert_eq "null" "${F[2]}" "[solo] re-run manifest noop"
+
+# setup solo --force-tier / --fallback-tool → nested agent_tier_policy written.
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier large --fallback-tool Claude 2>/dev/null)"
+assert_eq "features.solo" "$(jq -r '.wrote | join(",")' <<<"$out")" "[solo] tier flags write the feature"
+assert_eq "large" "$(yq -r '.features.solo.agent_tier_policy.force_tier' "$cfg/.wip.yaml")" "[solo] force_tier written"
+assert_eq "Claude" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] fallback_tool written"
+# A bare re-run PRESERVES the existing tier policy (merge, not clobber).
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo >/dev/null 2>&1
+assert_eq "large" "$(yq -r '.features.solo.agent_tier_policy.force_tier' "$cfg/.wip.yaml")" "[solo] bare re-run preserves tier policy"
+# Policy values are string fields, even when a tool name happens to be numeric.
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo --fallback-tool 456 >/dev/null 2>&1
+assert_eq "!!str" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool | tag' "$cfg/.wip.yaml")" "[solo] fallback_tool remains a string"
+assert_eq "456" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] numeric-looking fallback_tool preserved"
+
+# setup forge → forge:{enabled:true}, no backend arg.
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge 2>/dev/null)"
+assert_eq "features.forge" "$(jq -r '.wrote | join(",")' <<<"$out")" "[forge] wrote the feature"
+assert_eq "true" "$(yq -r '.features.forge.enabled' "$cfg/.wip.yaml")" "[forge] enabled:true written"
+
+# setup issue-tracker <backend> → issue-tracker:{enabled:true, backend:...}.
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker linear 2>/dev/null)"
+mapfile -t F < <(jq -r '.feature, (.wrote | join(","))' <<<"$out")
+assert_eq "issue-tracker" "${F[0]}" "[tracker] hyphenated feature key"
+assert_eq "features.issue-tracker" "${F[1]}" "[tracker] wrote the feature"
+assert_eq "true" "$(yq -r '.features["issue-tracker"].enabled' "$cfg/.wip.yaml")" "[tracker] enabled:true"
+assert_eq "linear" "$(yq -r '.features["issue-tracker"].backend' "$cfg/.wip.yaml")" "[tracker] backend:linear"
+# Switch backend → idempotent update to github.
+WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker github >/dev/null 2>&1
+assert_eq "github" "$(yq -r '.features["issue-tracker"].backend' "$cfg/.wip.yaml")" "[tracker] backend switches to github"
+
+# detect + doctor stay drift-free with all three declared (config-echo, no sentinel).
+assert_eq "true" "$(WIP_ROOT="$cfg" bin/wip-plumbing detect 2>/dev/null | jq -r '[.features[] | select(.name=="solo" or .name=="forge" or .name=="issue-tracker") | .active] | all')" \
+  "[cfg] all three features active in detect"
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing doctor 2>/dev/null)"
+assert_eq "0" "$(jq -r '.drift_count' <<<"$out")" "[cfg] doctor drift_count 0"
+
+# --- 26. Config-echo verb error + dry-run guards (ADR-0021) -----------------
+# issue-tracker requires a backend; unknown backend rejected.
+set +e
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "[tracker] missing backend exit 2"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[tracker] missing backend usage"
+set +e
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker gitlab 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "[tracker] unknown backend exit 2"
+
+# Tier flags are solo-only; a stray positional is rejected.
+set +e
+WIP_ROOT="$cfg" bin/wip-plumbing setup forge --force-tier large >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "[forge] --force-tier rejected (solo-only)"
+set +e
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier banana 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "[solo] invalid --force-tier rejected"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[solo] invalid --force-tier usage"
+set +e
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo extra >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "[solo] stray positional rejected"
+
+# --dry-run reports the plan but writes nothing.
+dry="$tmp/cfg-dry"
+mkdir -p "$dry"
+WIP_ROOT="$dry" bin/wip-plumbing init >/dev/null
+out="$(WIP_ROOT="$dry" bin/wip-plumbing --dry-run setup forge 2>/dev/null)"
+assert_eq ".wip.yaml" "$(jq -r '.manifest_updated' <<<"$out")" "[forge] dry-run reports the plan"
+assert_eq "null" "$(yq -r '.features.forge' "$dry/.wip.yaml")" "[forge] dry-run wrote nothing"
+
 test_summary
