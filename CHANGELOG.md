@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.17] - 2026-07-03
+
+### Fixed
+
+- Fix(flatten): self-locate roles/ from the install tree
+
 ## [0.0.16] - 2026-07-01
 
 ### Other
