@@ -3,7 +3,10 @@
 # issue backward, never writes wip's truth from the tracker. A tracker found
 # ahead of wip is reported for visibility, not mutated. When no write transport
 # is wired (the agent/MCP path), sync emits the forward plan as `pending` for the
-# agent to apply — plumbing stays pure. Honors --dry-run.
+# agent to apply — plumbing stays pure. Every emitted row (pending and applied)
+# carries `min_rank`, the semantic rank of its target state, so the MCP applier
+# has a floor to enforce (apply only when the issue's live rank < min_rank) on the
+# path where plumbing has no live tracker read. Honors --dry-run.
 # shellcheck shell=bash
 
 # wip_plumbing_cmd_sync [services…] [--initiative <slug>] [--dry-run]
@@ -97,7 +100,9 @@ wip_plumbing_cmd_sync() {
     wip_rank="$(_wip_tracker_semantic_rank "$sem")"
 
     # Read the tracker's current state (visibility + backward guard). Absent read
-    # transport ⇒ unknown (rank -1): we still emit the forward plan as pending.
+    # transport ⇒ unknown (rank -1): we still emit the forward plan as pending,
+    # but the emitted row now carries `min_rank` (below) — a floor the MCP applier
+    # enforces via a live re-read, since plumbing cannot guard backward moves here.
     tracker_sem=""
     tracker_rank=-1
     if [[ -n "$read_cmd" ]]; then
@@ -125,8 +130,13 @@ wip_plumbing_cmd_sync() {
     # Forward transition (wip ahead of, or unknown to, the tracker). Apply when a
     # write transport is wired and not --dry-run; otherwise it is pending for the
     # agent/MCP path to apply.
+    # min_rank = the semantic rank of the target state (the in-scope wip_rank).
+    # Both pending and applied rows carry it uniformly: it is the applier's floor
+    # on the MCP path and merely informational on rows the CLI guard already
+    # cleared.
     local row
-    row="$(jq -nc --arg n "$node" --arg i "$issue" --arg to "$target" '{node:$n, issue:$i, to:$to}')"
+    row="$(jq -nc --arg n "$node" --arg i "$issue" --arg to "$target" --argjson mr "$wip_rank" \
+      '{node:$n, issue:$i, to:$to, min_rank:$mr}')"
     if [[ -n "$write_cmd" && "$dry_run" != "1" ]]; then
       if bash -c "$write_cmd \"\$1\" \"\$2\"" _ "$issue" "$target" >/dev/null 2>&1; then
         applied="$(jq -nc --argjson a "$applied" --argjson r "$row" '$a + [$r]')"
