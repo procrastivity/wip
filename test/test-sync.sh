@@ -67,6 +67,31 @@ assert_eq "3" "$(jq -r '.pending | length' <<<"$p")" "mcp path: 3 forward transi
 assert_eq "no wip state" "$(jq -r '.skipped[] | select(.node=="demo/step-04") | .reason' <<<"$p")" \
   "unmapped-in-cache node -> skipped no wip state"
 
+# (a) FLOOR PRESENT (BDS-29 chunk 1 landed in b35c495): on the empty-read_cmd
+# (default MCP) path plumbing has no live tracker read, so it can no longer guard
+# a backward move here — instead EVERY emitted pending row carries `min_rank`, the
+# semantic rank of its target state (todo=0 < in-progress=1 < in-review=2 < done=3;
+# _wip_tracker_semantic_rank), which the MCP applier enforces as a floor. Assert no
+# pending row is bare (all carry a floor) and the floor matches each row's `to`.
+assert_eq "0" "$(jq -r '[.pending[] | select(.min_rank == null)] | length' <<<"$p")" \
+  "every mcp pending row carries a min_rank floor (none bare/unguarded)"
+assert_eq "2" "$(jq -r '.pending[] | select(.node=="demo/step-01") | .min_rank' <<<"$p")" \
+  "step-01 pending floor = rank of In Review (2)"
+assert_eq "0" "$(jq -r '.pending[] | select(.node=="demo/step-03") | .min_rank' <<<"$p")" \
+  "step-03 pending floor = rank of Todo (0)"
+
+# (b) BDS-14 REPRO: step-02's wip cache floor is `in-progress` (rank 1). On this
+# empty-read_cmd path plumbing is BLIND to the tracker's live state — in the BDS-14
+# regression that state was actually `Done` (ahead of in-progress), and the old
+# bare `{node,issue,to}` row let the applier stamp In Progress back over Done.
+# Plumbing now emits `min_rank:1` on the pending row: the applier's refusal hook,
+# which applies only a strictly-forward move against the issue's live rank, so a
+# live-Done issue is never moved backward. Assert the guarded forward plan + floor.
+assert_eq "In Progress" "$(jq -r '.pending[] | select(.node=="demo/step-02") | .to' <<<"$p")" \
+  "BDS-14 repro: in-progress cache floor plans a forward move to In Progress"
+assert_eq "1" "$(jq -r '.pending[] | select(.node=="demo/step-02") | .min_rank' <<<"$p")" \
+  "BDS-14 repro: pending row carries min_rank 1 (applier's refusal floor vs live Done)"
+
 # --- read+write transport: apply / skip / observe ---------------------------
 rm -f "$tmp/writes.log"
 s="$(WIP_ROOT="$tmp" WIP_LINEAR_READ_CMD="$tmp/read.sh" WIP_LINEAR_WRITE_CMD="$tmp/write.sh" $WIP sync)"
