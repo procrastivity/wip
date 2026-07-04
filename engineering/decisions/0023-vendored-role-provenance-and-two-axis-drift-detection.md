@@ -100,38 +100,52 @@ With `B = baseline_hash`, `R_now = sha256(re-render now)` (agents) /
 These are **independent**. The 4-quadrant table (plus three degenerate states)
 and the recommended action:
 
-| State | `upstream_advanced` | `locally_modified` | Meaning | Action |
+The six states (`upstream_advanced` carries a **direction**, D2a):
+
+| State | `upstream_advanced` | `locally_modified` | Meaning | Action (by direction) |
 |---|---|---|---|---|
 | `clean` | no | no | disk == baseline == current render | none |
-| `upstream-advanced` | yes | no | plugin moved forward; file untouched | **auto-sync** (re-render, overwrite, restamp) |
-| `upstream-behind` | yes | no | plugin moved *behind* the stamp (see D2a) | **skip**; upgrade the plugin first (never regress) |
-| `locally-modified` | no | yes | plugin unchanged; file hand-edited | **warn**; sync would clobber → require `--force`; surface diff |
-| `both-diverged` | yes | yes | plugin moved AND file hand-edited | **conflict**; `--force` takes upstream + backs up local |
-| `unstamped` | — | — | no sidecar entry (legacy vendor, e.g. Duo today) | run `--sync` to establish the baseline |
+| `upstream-advanced` | yes | no | plugin render differs; file untouched | **ahead** → auto-sync (re-render, overwrite, restamp); **behind**/**indeterminate** → skip-and-warn (recoverable via `--force`) |
+| `locally-modified` | no | yes | plugin unchanged; file hand-edited | **warn**; sync would clobber → require `--force` (backs up `.orig`) |
+| `both-diverged` | yes | yes | plugin render differs AND file hand-edited | **conflict**; `--force` takes upstream + backs up local |
+| `unstamped` | — | — | no sidecar entry (legacy vendor, e.g. Duo today) | run `--sync` to **adopt-in-place** (stamp current bytes; never re-render) |
 | `missing` | — | — | sidecar names a file that is gone | run `--sync` to re-vendor |
 
-`upstream-advanced` and `upstream-behind` share the `upstream_advanced` axis;
-they are distinguished by **direction** (D2a). In the `--status` summary counts
-they fold into a single `upstream_advanced` bucket (six mutually-exclusive
-buckets: `clean` / `upstream_advanced` / `locally_modified` / `both_diverged` /
-`unstamped` / `missing`); the per-file `state` string keeps the seven-way
-distinction.
+The `--status` summary has six mutually-exclusive buckets (`clean` /
+`upstream_advanced` / `locally_modified` / `both_diverged` / `unstamped` /
+`missing`); the per-file record additionally carries `direction`.
 
-### D2a — Record divergence DIRECTION, not just the boolean
+### D2a — Direction is a 3-value taxonomy, gated by an ordering invariant
 
-`upstream_advanced` fires whether the plugin is *ahead of* or *behind* the
-stamp. The step-01 interim is the "behind" case: Duo's `coordinator.md` was
-forward-ported from the wip working tree, so once stamped its `plugin_version`
-is *newer* than the installed released plugin — a naive sync would **regress**
-it to stale bytes. The stamp carries `plugin_version`, so `--status`/`--sync`
-compare it to the installed version (via `sort -V` semver ordering):
+`upstream_advanced` (`R_now != B`) means the plugin render no longer matches the
+baseline — but says nothing about *which* byte-set is newer. The stamp carries
+`plugin_version`; comparing it (component-wise semver, `_wip_setup_version_lt` —
+pure-bash, no `sort -V`) to the freshly-read installed version yields:
 
-- installed `>=` stamped → **ahead** → `upstream-advanced` (safe to auto-sync).
-- installed `<` stamped → **behind** → `upstream-behind` (**do NOT auto-sync**;
-  wait for the plugin release).
+- installed **>** stamped → **ahead** — the plugin genuinely moved forward.
+- installed **<** stamped → **behind** — the installed plugin lags a newer stamp.
+- installed **==** stamped (or either `unknown`) **but content differs** →
+  **indeterminate** — the versions cannot tell us which is newer. This is the
+  **Duo forward-port case**: `coordinator.md` was forward-ported from the wip
+  working tree, but the working tree and the released plugin *both* label
+  `0.0.17` while rendering differently, so no version delta exists (verified
+  in-repo: installed cache, wip `main`, and the forward-port source are all
+  `0.0.17`). The DoD's original `upstream-behind` label for this case assumed a
+  version delta that does not exist; the honest classification is
+  `upstream-advanced / indeterminate`.
 
-This directly discharges step-01's inherited open question "Plugin re-release /
-version lag."
+**Ordering invariant (load-bearing).** Auto-sync REQUIRES a **proven** `ahead`
+(installed > stamped). `behind` and `indeterminate` both fall to skip-and-warn,
+recoverable via `--force`. Rationale: a wrong auto-sync is a **silent,
+unrecoverable regression** (it overwrites a forward-port with stale bytes; the
+copy is gitignored, so there is no VCS undo), whereas a wrong skip costs only one
+`--force`. When the axes are ambiguous, protect the disk.
+
+This discharges step-01's inherited open question "Plugin re-release / version
+lag." A true `behind` demo (and Duo eventually classifying `clean`) is a
+**documented follow-up**: bump the plugin version so the forward-port carries a
+newer stamp than the released cache. It is NOT required for this step — the
+`indeterminate` skip-and-warn already delivers the regression-safety.
 
 ### D3 — The update path is FLAGS on the incumbent `setup agents`
 
@@ -146,12 +160,26 @@ subcommands. So the roadmap's floated `wip vendor status`/`sync` shape lands as:
   envelope on stdout: `{ok, verb, files:[{path,kind,state,stamped_version,
   installed_version,action}], summary:{clean,upstream_advanced,locally_modified,
   both_diverged,unstamped,missing}}`. **Exit 0 always** (reporting, not gating).
-- **`setup agents --sync [--force] [--dry-run]`** — the action, per-state (D2).
-  `--dry-run` routes through the existing `WIP_DRY_RUN` seam. JSON:
-  `{ok, verb, synced, skipped_clean, skipped_regressive, refused_local,
-  backed_up, restamped}`. Refuses `locally-modified`/`both-diverged` without
-  `--force` (rc 4); with `--force` writes a `<file>.orig` backup (there is no git
-  undo — the copy is gitignored) then takes upstream + restamps.
+- **`setup agents --sync [--force] [--dry-run]`** — the action, per (state,
+  direction). `--dry-run` routes through the existing `WIP_DRY_RUN` seam. JSON:
+  `{ok, verb, dry_run, synced, skipped_clean, skipped_regressive, refused_local,
+  backed_up, restamped}`. Per-state:
+  - `clean` → skip.
+  - `upstream-advanced` **ahead** → re-render + overwrite + restamp; **behind** /
+    **indeterminate** → `skipped_regressive` (distinct warning per direction);
+    **`--force`** is the explicit override — take the installed render + restamp
+    (no `.orig`: the file was not locally modified).
+  - `locally-modified` / `both-diverged` → refuse (rc 4) without `--force`; with
+    `--force` write a `<file>.orig` backup (no git undo — gitignored) then take
+    upstream + restamp.
+  - **`unstamped` → adopt-in-place**: stamp `baseline_hash = sha256(on-disk
+    bytes)`, `plugin_version = installed`, and **write NO file bytes**. The
+    on-disk bytes are the only defensible baseline for a legacy pre-step-02
+    install. **Never re-render-overwrite an unstamped file** — doing so would
+    clobber a forward-port (Duo's `coordinator.md`) with the stale installed
+    render *before* the direction logic ever runs. (Fresh installs stamp at write
+    time per C2, so `unstamped` only ever arises for legacy installs.)
+  - `missing` → re-vendor + stamp.
 
 Both flags are agents-only and, like `--check`, inert to the write-flags. The
 shared engine is `_wip_setup_agents_provenance_classify <root> <td>` — **one
@@ -170,8 +198,8 @@ Do **not** change `--check`'s exit contract (any difference → rc 4). That keep
 `test-setup.sh` / `test-agents-commands-sync.sh` green and the CI gate simple.
 The refined classification is **additive**: `--status` reports the quadrant +
 direction; `--sync` acts on it; `doctor` surfaces it. Teaching `--check` to
-suppress the `upstream-behind` false positive is noted as an open question, lean
-defer.
+suppress the `upstream-advanced` (behind/indeterminate) false positive is noted
+as an open question, lean defer.
 
 ### D5 — Land the DEFERRED doctor fan-in, closing ADR-0015 Q-05.4
 
@@ -232,6 +260,11 @@ sidecar artifact).
   repo-relative path — one read/write, mirrors the unified gate; the agents dir
   is the always-present anchor.
 - **`--check` false-positive suppression (deferred).** `--check` stays blunt; the
-  `upstream-behind` nuance routes through `--status`/`doctor`.
+  `upstream-advanced` behind/indeterminate nuance routes through `--status`/`doctor`.
+- **Plugin version bump for a true `behind` (documented follow-up).** Bumping the
+  wip plugin version so a forward-port carries a newer stamp than the released
+  cache would let Duo's `coordinator.md` classify a genuine `behind` (and,
+  post-release, `clean`). Not required this step — `indeterminate` skip-and-warn
+  already delivers the regression-safety (D2a ordering invariant).
 - **Per-role `--role` selector (deferred).** `--status`/`--sync` operate on the
   whole install (parity with `--check`/`--migrate`).

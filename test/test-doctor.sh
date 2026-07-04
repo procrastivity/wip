@@ -170,6 +170,28 @@ assert_eq "0" "$vd_rc2" "[vendored-clean] doctor exits 0 on a clean vendored ins
 assert_eq "0" "$(jq -r '[.checks[]|select(.status=="vendored-drift")]|length' <<<"$vd_out2")" \
   "[vendored-clean] no vendored-drift check when in sync"
 
+# (ii-b) Duo forward-port shape (unstamped-adopted → upstream-advanced/
+#        indeterminate): the direction-aware fix is `setup agents --sync --force`,
+#        and doctor still exits 4. Proves the fan-in surfaces the forward-port case.
+vd_ind="$tmp/vendored-indeterminate"
+mkdir -p "$vd_ind"
+WIP_ROOT="$vd_ind" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$vd_ind" bin/wip-plumbing setup agents >/dev/null 2>&1
+printf '\n<!-- forward port -->\n' >>"$vd_ind/.claude/agents/wip/coordinator.md"
+rm "$vd_ind/.claude/agents/wip/.provenance.json"
+WIP_ROOT="$vd_ind" bin/wip-plumbing setup agents --sync >/dev/null 2>&1 # adopt-in-place
+set +e
+vd_outi="$(WIP_ROOT="$vd_ind" bin/wip-plumbing doctor)"
+vd_rci=$?
+set -e
+assert_eq "4" "$vd_rci" "[vendored-indeterminate] doctor exits 4"
+assert_eq "upstream-advanced" "$(jq -r '.checks[]|select(.status=="vendored-drift")|.state' <<<"$vd_outi")" \
+  "[vendored-indeterminate] state upstream-advanced"
+assert_eq "indeterminate" "$(jq -r '.checks[]|select(.status=="vendored-drift")|.direction' <<<"$vd_outi")" \
+  "[vendored-indeterminate] direction indeterminate"
+assert_eq "setup agents --sync --force" "$(jq -r '.checks[]|select(.status=="vendored-drift")|.fix' <<<"$vd_outi")" \
+  "[vendored-indeterminate] fix is --sync --force (direction-aware)"
+
 # (iii) source: plugin → probe SKIPPED entirely (no render cost, no check).
 vd_plugin="$tmp/vendored-plugin"
 mkdir -p "$vd_plugin"

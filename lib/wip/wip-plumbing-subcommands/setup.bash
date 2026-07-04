@@ -772,23 +772,48 @@ _wip_setup_version_lt() {
   return 1
 }
 
+# _wip_setup_direction <installed> <stamped> — the 3-value divergence-direction
+# taxonomy (ADR-0023 D2a) for an upstream_advanced file, by SEMVER-comparing the
+# installed plugin version to the stamped one:
+#   ahead         — installed >  stamped  (the plugin genuinely moved forward)
+#   behind        — installed <  stamped  (installed lags a newer stamp)
+#   indeterminate — installed == stamped (or either "unknown") but the CONTENT
+#                   differs (R_now != B) — the versions can't tell us which
+#                   byte-set is newer (the Duo forward-port case: released 0.0.17
+#                   and the forward-port both label 0.0.17 yet render differently).
+# The ORDERING INVARIANT (ADR-0023): auto-sync REQUIRES a PROVEN `ahead`. `behind`
+# and `indeterminate` both fall to skip-and-warn (recoverable via --force),
+# because a wrong auto-sync is a silent, unrecoverable regression while a wrong
+# skip costs only one --force.
+_wip_setup_direction() {
+  local installed="$1" stamped="$2"
+  if _wip_setup_version_lt "$installed" "$stamped"; then
+    printf 'behind'
+  elif _wip_setup_version_lt "$stamped" "$installed"; then
+    printf 'ahead'
+  else
+    printf 'indeterminate'
+  fi
+}
+
 # _wip_setup_provenance_state <has_entry> <exists> <B> <R_now> <D_now> <installed>
 #                             <stamped>
 # The pure two-axis + direction state machine (ADR-0023 D2/D2a). Given a file's
 # sidecar-entry presence, on-disk presence, stamped baseline `B`, current render
 # hash `R_now`, on-disk hash `D_now`, and the installed vs stamped plugin
 # versions, echo `<state><TAB><direction>` where state ∈ {clean, upstream-advanced,
-# upstream-behind, locally-modified, both-diverged, unstamped, missing} and
-# direction ∈ {none, ahead, behind}. Kept side-effect-free so the classifier and
-# its tests share one oracle.
+# locally-modified, both-diverged, unstamped, missing} and direction ∈ {none,
+# ahead, behind, indeterminate}. Kept side-effect-free so the classifier and its
+# tests share one oracle.
 #
 #   upstream_advanced := R_now != B   (the plugin render moved off the baseline)
 #   locally_modified  := D_now != B   (the on-disk file moved off the baseline)
 #
 # Degenerate first: no sidecar entry → unstamped (file present) / missing (gone);
-# entry but file gone → missing. Then the 4 quadrants; for the upstream-only
-# quadrant the version compare splits ahead (auto-syncable) from behind
-# (`upstream-behind`, never auto-sync — protects a forward-ported copy).
+# entry but file gone → missing. Then the 4 quadrants; the upstream-only quadrant
+# is always `upstream-advanced` and carries the 3-value DIRECTION (D2a) — the
+# action, not the state, splits ahead (auto-syncable) from behind/indeterminate
+# (skip-and-warn, protects a forward-ported copy from regression).
 _wip_setup_provenance_state() {
   local has_entry="$1" exists="$2" B="$3" R_now="$4" D_now="$5" installed="$6" stamped="$7"
   if [[ "$has_entry" != "1" ]]; then
@@ -807,22 +832,16 @@ _wip_setup_provenance_state() {
     return 0
   fi
   if [[ "$ua" == "1" && "$lm" == "0" ]]; then
-    if _wip_setup_version_lt "$installed" "$stamped"; then
-      printf 'upstream-behind\tbehind'
-    else
-      printf 'upstream-advanced\tahead'
-    fi
+    printf 'upstream-advanced\t%s' "$(_wip_setup_direction "$installed" "$stamped")"
     return 0
   fi
   if [[ "$ua" == "0" && "$lm" == "1" ]]; then
     printf 'locally-modified\tnone'
     return 0
   fi
-  # both-diverged — direction still recorded (a behind + hand-edited file is a
-  # genuine conflict; --sync --force takes upstream but the direction is surfaced).
-  local dir="ahead"
-  _wip_setup_version_lt "$installed" "$stamped" && dir="behind"
-  printf 'both-diverged\t%s' "$dir"
+  # both-diverged — direction still recorded (a behind/indeterminate + hand-edited
+  # file is a genuine conflict; --sync --force takes upstream, direction surfaced).
+  printf 'both-diverged\t%s' "$(_wip_setup_direction "$installed" "$stamped")"
 }
 
 # _wip_setup_agents_provenance_classify <root> <templates-dir> — the SHARED
@@ -916,14 +935,22 @@ _wip_setup_agents_provenance_classify() {
   return 0
 }
 
-# _wip_setup_agents_action_for <state> — map a classifier state to the `--status`
-# ACTION token (a stable machine word; the human table + JSON both use it). The
-# `doctor` fan-in (Chunk 5) maps the same states to its `fix` sentence.
+# _wip_setup_agents_action_for <state> <direction> — map a classifier
+# (state, direction) to the `--status` ACTION token (a stable machine word; the
+# human table + JSON both use it). For `upstream-advanced` the DIRECTION decides
+# (D2a ordering invariant): only a proven `ahead` earns `sync`; `behind` →
+# `upgrade-plugin`; `indeterminate` → `review` (skip-and-warn, --force to override).
 _wip_setup_agents_action_for() {
-  case "$1" in
+  local state="$1" direction="$2"
+  case "$state" in
     clean) printf 'none' ;;
-    upstream-advanced) printf 'sync' ;;
-    upstream-behind) printf 'upgrade-plugin' ;;
+    upstream-advanced)
+      case "$direction" in
+        ahead) printf 'sync' ;;
+        behind) printf 'upgrade-plugin' ;;
+        *) printf 'review' ;; # indeterminate
+      esac
+      ;;
     locally-modified) printf 'sync-force' ;;
     both-diverged) printf 'sync-force' ;;
     unstamped) printf 'sync' ;;
@@ -981,10 +1008,10 @@ _wip_setup_agents_status() {
       stamped="$(jq -r --arg p "$path" '(.files[]? | select(.path == $p) | .plugin_version) // "unknown"' <<<"$sidecar_json" 2>/dev/null || printf 'unknown')"
       [[ -n "$stamped" ]] || stamped="unknown"
     fi
-    action="$(_wip_setup_agents_action_for "$state")"
+    action="$(_wip_setup_agents_action_for "$state" "$direction")"
     case "$state" in
       clean) c_clean=$((c_clean + 1)) ;;
-      upstream-advanced | upstream-behind) c_ua=$((c_ua + 1)) ;;
+      upstream-advanced) c_ua=$((c_ua + 1)) ;;
       locally-modified) c_lm=$((c_lm + 1)) ;;
       both-diverged) c_both=$((c_both + 1)) ;;
       unstamped) c_uns=$((c_uns + 1)) ;;
@@ -996,8 +1023,8 @@ _wip_setup_agents_status() {
       --arg action "$action" '
       $a + [{path:$path, kind:$kind, state:$state, direction:$dir,
              stamped_version:$stamped, installed_version:$installed, action:$action}]')"
-    printf 'wip-plumbing: setup agents --status: %-40s %-8s %-16s stamped=%-8s installed=%-8s → %s\n' \
-      "$path" "$kind" "$state" "$stamped" "$installed" "$action" >&2
+    printf 'wip-plumbing: setup agents --status: %-40s %-8s %-18s dir=%-13s stamped=%-8s installed=%-8s → %s\n' \
+      "$path" "$kind" "$state" "$direction" "$stamped" "$installed" "$action" >&2
   done <<<"$raw"
 
   if [[ "${WIP_JSON:-1}" == "1" ]]; then
@@ -1169,17 +1196,35 @@ _wip_setup_agents_sync() {
       clean)
         skipped_clean+=("$path")
         ;;
-      upstream-behind)
-        skipped_regressive+=("$path")
-        printf 'wip-plumbing: setup agents --sync: %s: installed plugin is older than the stamp (upstream-behind); skipped — upgrade the plugin first\n' "$path" >&2
+      upstream-advanced)
+        # Ordering invariant (D2a): auto-sync ONLY a PROVEN `ahead`. `behind` and
+        # `indeterminate` are skip-and-warn — a wrong sync silently, unrecoverably
+        # regresses; a wrong skip costs one --force. `--force` is that explicit
+        # override: take the installed render regardless of direction.
+        if [[ "$direction" == "ahead" || "$force" == "1" ]]; then
+          _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+          synced+=("$path")
+        else
+          skipped_regressive+=("$path")
+          if [[ "$direction" == "behind" ]]; then
+            printf 'wip-plumbing: setup agents --sync: %s: installed plugin is OLDER than the stamp (upstream-advanced/behind); skipped — upgrade the plugin first, or --force to take the installed render\n' "$path" >&2
+          else
+            printf 'wip-plumbing: setup agents --sync: %s: installed version equals the stamp but the render differs (upstream-advanced/indeterminate — cannot prove direction); skipped — review, or --force to take the installed render\n' "$path" >&2
+          fi
+        fi
         ;;
-      upstream-advanced | missing)
+      missing)
         _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
         synced+=("$path")
         ;;
       unstamped)
-        # Establish the baseline from the CURRENT bytes — non-destructive (no
-        # overwrite); the restamp below records the on-disk hash.
+        # ADOPT-IN-PLACE (D2a, load-bearing): the on-disk bytes ARE the only
+        # defensible baseline for a legacy pre-step-02 install (Duo). Stamp them
+        # as baseline (the restamp below records sha256(on-disk)); WRITE NO FILE
+        # BYTES. NEVER re-render-overwrite an unstamped file — that would clobber a
+        # forward-port with the stale installed render BEFORE the direction logic
+        # ever runs. (Fresh installs stamp at write time (C2), so unstamped only
+        # ever arises for legacy installs.)
         synced+=("$path")
         ;;
       locally-modified | both-diverged)

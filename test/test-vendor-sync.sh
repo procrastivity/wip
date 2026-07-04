@@ -68,9 +68,14 @@ assert_eq "false" "$(jq -r '.restamped' <<<"$out")" "[clean] no restamp"
 post="$(find "$w/.claude" -type f -exec cksum {} \; | sort)"
 assert_eq "$pre" "$post" "[clean] tree byte-stable"
 
-# --- 2. upstream-advanced → re-render, overwrite, restamp. -------------------
+# --- 2. upstream-advanced / ahead → re-render, overwrite, restamp. -----------
+#        Auto-sync requires a PROVEN ahead (installed > stamped, D2a ordering
+#        invariant) — rewrite the builder stamp to an older version.
 w="$tmp/upstream"
 fresh_install "$w"
+sc="$w/.claude/agents/wip/.provenance.json"
+jq '(.files[] | select(.path == ".claude/agents/wip/builder.md") | .plugin_version) = "0.0.1"' "$sc" >"$tmp/sc-ahead.json"
+cp "$tmp/sc-ahead.json" "$sc"
 run_sync "$w" "$roles_ahead"
 assert_eq "0" "$SYNC_RC" "[upstream] exit 0"
 assert_eq "$AGENT" "$(jq -r '.synced[0]' <<<"$out")" "[upstream] synced the advanced agent"
@@ -113,7 +118,8 @@ chk=$?
 set -e
 assert_eq "0" "$chk" "[local --force] live file == fresh re-render after force"
 
-# --- 5. upstream-behind → NEVER auto-sync, even with --force (D2a). ----------
+# --- 5. upstream-advanced / behind → skip-and-warn without --force; --force is
+#        the explicit override that takes the installed render (D2a). ----------
 w="$tmp/behind"
 fresh_install "$w"
 sc="$w/.claude/agents/wip/.provenance.json"
@@ -122,13 +128,26 @@ cp "$tmp/sc.json" "$sc"
 before="$(cksum "$w/$AGENT")"
 run_sync "$w" "$roles_ahead"
 assert_eq "0" "$SYNC_RC" "[behind] exit 0"
-assert_eq "$AGENT" "$(jq -r '.skipped_regressive[0]' <<<"$out")" "[behind] skipped_regressive"
-assert_eq "0" "$(jq -r '.synced | length' <<<"$out")" "[behind] synced nothing"
-assert_eq "$before" "$(cksum "$w/$AGENT")" "[behind] file untouched"
-# Even --force must not regress a forward-ported copy.
+assert_eq "$AGENT" "$(jq -r '.skipped_regressive[0]' <<<"$out")" "[behind] skipped_regressive (no --force)"
+assert_eq "0" "$(jq -r '.synced | length' <<<"$out")" "[behind] synced nothing without --force"
+assert_eq "$before" "$(cksum "$w/$AGENT")" "[behind] file untouched without --force"
+# --force is the explicit override: take the installed render (no .orig — the
+# file was not locally modified; D_now == baseline).
 run_sync "$w" "$roles_ahead" --force
-assert_eq "$AGENT" "$(jq -r '.skipped_regressive[0]' <<<"$out")" "[behind --force] still skipped_regressive"
-assert_eq "$before" "$(cksum "$w/$AGENT")" "[behind --force] still untouched (forward-port protected)"
+assert_eq "$AGENT" "$(jq -r '.synced[0]' <<<"$out")" "[behind --force] synced (explicit override)"
+assert_eq "0" "$(jq -r '.skipped_regressive | length' <<<"$out")" "[behind --force] no longer skipped"
+
+# --- 5b. upstream-advanced / indeterminate → skip-and-warn without --force
+#         (equal version, differing content — the Duo forward-port shape). -----
+w="$tmp/indeterminate"
+fresh_install "$w"
+before="$(cksum "$w/$AGENT")"
+run_sync "$w" "$roles_ahead"
+assert_eq "0" "$SYNC_RC" "[indeterminate] exit 0"
+assert_eq "$AGENT" "$(jq -r '.skipped_regressive[0]' <<<"$out")" "[indeterminate] skipped_regressive (no --force)"
+assert_eq "$before" "$(cksum "$w/$AGENT")" "[indeterminate] file untouched (forward-port protected)"
+run_sync "$w" "$roles_ahead" --force
+assert_eq "$AGENT" "$(jq -r '.synced[0]' <<<"$out")" "[indeterminate --force] synced (explicit override)"
 
 # --- 6. unstamped → establish baseline from CURRENT bytes, non-destructive. --
 w="$tmp/unstamped"
@@ -156,9 +175,12 @@ assert_eq ".claude/agents/wip/researcher.md" \
   "$(jq -r '.synced[] | select(. == ".claude/agents/wip/researcher.md")' <<<"$out")" \
   "[missing] reported synced"
 
-# --- 8. --dry-run → plan only, touch nothing. --------------------------------
+# --- 8. --dry-run → plan only, touch nothing (genuine ahead → would-sync). ---
 w="$tmp/dry"
 fresh_install "$w"
+sc="$w/.claude/agents/wip/.provenance.json"
+jq '(.files[] | select(.path == ".claude/agents/wip/builder.md") | .plugin_version) = "0.0.1"' "$sc" >"$tmp/sc-dry.json"
+cp "$tmp/sc-dry.json" "$sc"
 pre="$(find "$w/.claude" -type f -exec cksum {} \; | sort)"
 run_sync "$w" "$roles_ahead" --dry-run
 assert_eq "true" "$(jq -r '.dry_run' <<<"$out")" "[dry-run] dry_run:true"
@@ -176,5 +198,44 @@ run_sync "$w" "$ORIG_ROLES"
 assert_eq "0" "$SYNC_RC" "[plugin] exit 0"
 assert_eq "0" "$(jq -r '.synced | length' <<<"$out")" "[plugin] synced nothing"
 assert_eq "false" "$(jq -r '.restamped' <<<"$out")" "[plugin] no restamp"
+
+# --- 10. The Duo forward-port TRIAD (C6-pt2, portable synthetic shape). -------
+#     Reproduces the live-Duo acceptance without depending on ~/Code/duo: a
+#     legacy install (no sidecar) whose coordinator carries forward-ported
+#     content the installed render lacks. Proves the forward-port SURVIVES:
+#     (1) adopt-in-place stamps current bytes (no overwrite); (2) --status →
+#     upstream-advanced/indeterminate + siblings clean; (3) --sync leaves it in
+#     skipped_regressive, never synced.
+w="$tmp/duo-shape"
+fresh_install "$w"
+COORD=".claude/agents/wip/coordinator.md"
+printf '\n<!-- forward-ported from a newer wip working tree -->\n' >>"$w/$COORD"
+fp="$(cksum "$w/$COORD")"
+rm "$w/.claude/agents/wip/.provenance.json" # the legacy unstamped Duo shape
+
+# (1) adopt-in-place — baseline = current forward-port bytes, NO overwrite.
+run_sync "$w" "$ORIG_ROLES"
+assert_eq "0" "$SYNC_RC" "[duo] adopt-stamp exit 0"
+assert_eq "$fp" "$(cksum "$w/$COORD")" "[duo] coordinator NOT overwritten (adopt-in-place, never re-vendor)"
+assert_eq "$(sha256_of "$w/$COORD")" "$(baseline_of "$COORD" "$w/.claude/agents/wip/.provenance.json")" \
+  "[duo] baseline established from the forward-port bytes"
+
+# (2) --status → coordinator upstream-advanced/indeterminate, siblings clean.
+set +e
+sout="$(WIP_ROLES_DIR="$ORIG_ROLES" WIP_ROOT="$w" bin/wip-plumbing setup agents --status 2>/dev/null)"
+set -e
+assert_eq "upstream-advanced" "$(jq -r --arg p "$COORD" '.files[]|select(.path==$p)|.state' <<<"$sout")" \
+  "[duo] coordinator upstream-advanced (not spurious local drift)"
+assert_eq "indeterminate" "$(jq -r --arg p "$COORD" '.files[]|select(.path==$p)|.direction' <<<"$sout")" \
+  "[duo] direction indeterminate (equal version, differing content)"
+assert_eq "clean" "$(jq -r '.files[]|select(.path==".claude/agents/wip/builder.md")|.state' <<<"$sout")" \
+  "[duo] sibling role clean once stamped"
+
+# (3) --sync --dry-run → coordinator in skipped_regressive, NOT synced.
+run_sync "$w" "$ORIG_ROLES" --dry-run
+assert_eq "$COORD" "$(jq -r '.skipped_regressive[]|select(test("coordinator"))' <<<"$out")" \
+  "[duo] coordinator skipped_regressive"
+assert_eq "0" "$(jq -r '[.synced[]|select(test("coordinator"))]|length' <<<"$out")" \
+  "[duo] coordinator NOT synced — the forward-port survives (regression-safety proof)"
 
 test_summary

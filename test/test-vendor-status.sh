@@ -83,9 +83,14 @@ roles_ahead="$tmp/roles-ahead"
 mkdir -p "$roles_ahead"
 cp -R "$ORIG_ROLES/." "$roles_ahead/"
 printf '\n<!-- upstream advanced -->\n' >>"$roles_ahead/builder.md"
+# A genuine `ahead` needs installed > stamped (D2a ordering invariant: only a
+# PROVEN ahead auto-syncs). Rewrite the builder stamp to an older version.
+sc="$w/.claude/agents/wip/.provenance.json"
+jq '(.files[] | select(.path == ".claude/agents/wip/builder.md") | .plugin_version) = "0.0.1"' "$sc" >"$tmp/sc-ahead.json"
+cp "$tmp/sc-ahead.json" "$sc"
 out="$(status_json "$w" "$roles_ahead")"
 assert_eq "upstream-advanced" "$(state_of "$AGENT" "$out")" "[upstream] agent upstream-advanced"
-assert_eq "ahead" "$(dir_of "$AGENT" "$out")" "[upstream] direction ahead"
+assert_eq "ahead" "$(dir_of "$AGENT" "$out")" "[upstream] direction ahead (installed > stamped)"
 assert_eq "sync" "$(action_of "$AGENT" "$out")" "[upstream] agent action sync"
 # The other three roles are untouched → still clean.
 assert_eq "clean" "$(state_of ".claude/agents/wip/orchestrator.md" "$out")" "[upstream] sibling role still clean"
@@ -93,18 +98,30 @@ assert_eq "1" "$(jq -r '.summary.upstream_advanced' <<<"$out")" "[upstream] summ
 
 # --- 4. upstream-behind: same upstream move, but the STAMP is newer than the
 #        installed plugin (a forward-port — D2a) → must NOT auto-sync. ----------
+# --- 4. upstream-advanced / behind: stamp version NEWER than installed (D2a). -
+#        State is upstream-advanced; the DIRECTION is `behind` (installed lags a
+#        newer stamp). Genuine behind: bump the stamp version above installed.
 w="$tmp/behind"
 fresh_install "$w"
-# Bump the stamped plugin_version above any installed version.
 sc="$w/.claude/agents/wip/.provenance.json"
 jq '(.files[] | select(.path == ".claude/agents/wip/builder.md") | .plugin_version) = "999.0.0"' "$sc" >"$tmp/sc.json"
 cp "$tmp/sc.json" "$sc"
 out="$(status_json "$w" "$roles_ahead")"
-assert_eq "upstream-behind" "$(state_of "$AGENT" "$out")" "[behind] agent upstream-behind"
+assert_eq "upstream-advanced" "$(state_of "$AGENT" "$out")" "[behind] state upstream-advanced"
 assert_eq "behind" "$(dir_of "$AGENT" "$out")" "[behind] direction behind"
 assert_eq "upgrade-plugin" "$(action_of "$AGENT" "$out")" "[behind] action upgrade-plugin (never auto-sync)"
-# Folds into the upstream_advanced summary bucket (six mutually-exclusive buckets).
-assert_eq "1" "$(jq -r '.summary.upstream_advanced' <<<"$out")" "[behind] folds into upstream_advanced bucket"
+assert_eq "1" "$(jq -r '.summary.upstream_advanced' <<<"$out")" "[behind] counts in upstream_advanced bucket"
+
+# --- 4b. upstream-advanced / indeterminate: content differs but versions are
+#         EQUAL — the Duo forward-port case. Cannot prove direction → review /
+#         skip-and-warn (never auto-sync). Fresh install stamps installed version;
+#         the mutated seam holds that same version, so stamped == installed.
+w="$tmp/indeterminate"
+fresh_install "$w"
+out="$(status_json "$w" "$roles_ahead")"
+assert_eq "upstream-advanced" "$(state_of "$AGENT" "$out")" "[indeterminate] state upstream-advanced"
+assert_eq "indeterminate" "$(dir_of "$AGENT" "$out")" "[indeterminate] direction indeterminate (equal version, differing content)"
+assert_eq "review" "$(action_of "$AGENT" "$out")" "[indeterminate] action review (not auto-sync)"
 
 # --- 5. both-diverged: upstream moved AND the file was hand-edited. -----------
 w="$tmp/both"

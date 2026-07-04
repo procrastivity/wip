@@ -293,7 +293,7 @@ wip_plumbing_cmd_doctor() {
   #     classifier/render failure is swallowed (no crash, no false drift) — the
   #     blunt `setup agents --check` gate is the place that surfaces a render error.
   if [[ "$(jq -r '.features.orchestration.source // ""' <<<"$mj")" == "vendored" ]]; then
-    local vd_td vd_raw vd_rc vd_map vd_state vd_path vd_fix vd_paths
+    local vd_td vd_raw vd_rc vd_map vd_state vd_dir vd_path vd_fix vd_paths vd_key
     vd_td="$(wip_templates_dir 2>/dev/null || printf '')"
     if [[ -n "$vd_td" && -d "$vd_td" ]]; then
       # shellcheck source=lib/wip/wip-plumbing-subcommands/setup.bash
@@ -303,21 +303,33 @@ wip_plumbing_cmd_doctor() {
       vd_rc=$?
       set -e
       if [[ "$vd_rc" == "0" ]]; then
+        # Group by state+direction — for upstream-advanced the DIRECTION (D2a)
+        # decides the fix (ahead→sync, behind→upgrade, indeterminate→--sync --force
+        # override), so a mixed install emits one check per distinct (state,dir).
         vd_map="{}"
-        while IFS=$'\t' read -r vd_state vd_path _; do
+        while IFS=$'\t' read -r vd_state vd_path vd_dir; do
           [[ -n "$vd_path" && "$vd_state" != "clean" ]] || continue
-          vd_map="$(jq -c --arg s "$vd_state" --arg p "$vd_path" '.[$s] += [$p]' <<<"$vd_map")"
+          vd_key="$vd_state|$vd_dir"
+          vd_map="$(jq -c --arg k "$vd_key" --arg p "$vd_path" '.[$k] += [$p]' <<<"$vd_map")"
         done <<<"$vd_raw"
-        while IFS= read -r vd_state; do
-          [[ -n "$vd_state" ]] || continue
+        while IFS= read -r vd_key; do
+          [[ -n "$vd_key" ]] || continue
+          vd_state="${vd_key%%|*}"
+          vd_dir="${vd_key##*|}"
           case "$vd_state" in
             locally-modified | both-diverged) vd_fix="setup agents --sync --force" ;;
-            upstream-behind) vd_fix="upgrade the plugin" ;;
-            *) vd_fix="setup agents --sync" ;;
+            upstream-advanced)
+              case "$vd_dir" in
+                ahead) vd_fix="setup agents --sync" ;;
+                behind) vd_fix="upgrade the plugin" ;;
+                *) vd_fix="setup agents --sync --force" ;; # indeterminate
+              esac
+              ;;
+            *) vd_fix="setup agents --sync" ;; # unstamped, missing
           esac
-          vd_paths="$(jq -c --arg s "$vd_state" '.[$s] | sort' <<<"$vd_map")"
-          obj="$(jq -nc --arg state "$vd_state" --arg fix "$vd_fix" --argjson paths "$vd_paths" \
-            '{kind:"orchestration", status:"vendored-drift", state:$state, fix:$fix, paths:$paths}')"
+          vd_paths="$(jq -c --arg k "$vd_key" '.[$k] | sort' <<<"$vd_map")"
+          obj="$(jq -nc --arg state "$vd_state" --arg dir "$vd_dir" --arg fix "$vd_fix" --argjson paths "$vd_paths" \
+            '{kind:"orchestration", status:"vendored-drift", state:$state, direction:$dir, fix:$fix, paths:$paths}')"
           checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
         done < <(jq -r 'keys[]' <<<"$vd_map")
       fi
