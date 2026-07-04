@@ -35,6 +35,38 @@ wip_plumbing_cmd_orchestrate() {
   esac
 }
 
+# _wip_orchestrate_active_drift <backends_dir> <backend> — the ONE drift oracle
+# for the generated `active.md` backend pointer (ADR-0013 / step-04 D2). Byte-
+# compares roles/backends/<backend>.md against roles/backends/active.md;
+# generation is a literal `cp`, so identity is byte-identity. Pure read — NEVER
+# writes. Echoes exactly one status token on stdout and always returns 0:
+#
+#   in-sync    — active.md exists and is byte-identical to <backend>.md
+#   drift      — active.md is missing OR differs from <backend>.md (D5: a
+#                missing pointer is drift, never a silent "in sync")
+#   no-source  — <backend> is empty, or roles/backends/<backend>.md itself is
+#                missing (the caller decides: the show path folds it into
+#                active_in_sync:false; --check surfaces it as `unknown-backend`)
+#
+# The offending path is invariant — always <backends_dir>/active.md — so callers
+# hardcode the repo-relative `roles/backends/active.md` for their error `paths`.
+# One oracle, three callers: the show path, `--check`, and a future `wip doctor`
+# probe (D2).
+_wip_orchestrate_active_drift() {
+  local backends_dir="$1" backend="$2"
+  local src="$backends_dir/$backend.md" dst="$backends_dir/active.md"
+  if [[ -z "$backend" || ! -f "$src" ]]; then
+    printf 'no-source\n'
+    return 0
+  fi
+  if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+    printf 'in-sync\n'
+    return 0
+  fi
+  printf 'drift\n'
+  return 0
+}
+
 # orchestrate backend [<name>] — show or switch the active orchestration
 # backend. With no argument, reports the configured backend + whether the
 # generated pointer `roles/backends/active.md` is in sync with it. With a
@@ -97,12 +129,12 @@ _wip_orchestrate_cmd_backend() {
   local current
   current="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
 
-  # No name → report current + sync state, do not mutate.
+  # No name → report current + sync state, do not mutate. The drift check is the
+  # shared oracle (D2): in-sync → true; drift or no-source (missing <backend>.md)
+  # → false, preserving this path's original behavior byte-for-byte.
   if [[ -z "$name" ]]; then
-    local in_sync="false" src="$backends_dir/$current.md" dst="$backends_dir/active.md"
-    if [[ -n "$current" && -f "$src" && -f "$dst" ]] && cmp -s "$src" "$dst"; then
-      in_sync="true"
-    fi
+    local in_sync="false"
+    [[ "$(_wip_orchestrate_active_drift "$backends_dir" "$current")" == "in-sync" ]] && in_sync="true"
     if [[ "${WIP_JSON:-1}" == "1" ]]; then
       jq -nc --arg b "$current" --argjson avail "$available" --argjson sync "$in_sync" '
         {ok:true, verb:"orchestrate backend", backend:$b, available:$avail, active_in_sync:$sync}'
