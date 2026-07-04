@@ -14,6 +14,72 @@ source "$WIP_LIB/wip-plumbing-setup-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-flatten-lib.bash
 source "$WIP_LIB/wip-plumbing-flatten-lib.bash"
 
+# _wip_sha256 <file> — echo the lowercase hex sha256 of <file> (no trailing
+# newline, no filename). Prefers `sha256sum` (Linux/coreutils), falls back to
+# `shasum -a 256` (macOS) — the same cross-platform parity the rest of the repo
+# assumes. The provenance sidecar's `baseline_hash` (ADR-0023 D1) is this over
+# the bytes written at vendor time. Returns non-zero + a stderr diagnostic if no
+# sha256 tool is available or the hash fails.
+_wip_sha256() {
+  local f="$1" out
+  if command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum -- "$f")" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 -- "$f")" || return 1
+  else
+    printf 'wip-plumbing: setup agents: no sha256 tool found (need sha256sum or shasum)\n' >&2
+    return 1
+  fi
+  printf '%s' "${out%% *}"
+}
+
+# _wip_plugin_version — echo the installed wip plugin `.version` (ADR-0023 D1),
+# resolved through a fallback ladder so the stamp records a real version wherever
+# the vendor path runs, and `"unknown"` rather than failing the vendor if none
+# resolves:
+#   1. $CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json   [plugin runtime sets this]
+#   2. <resolved roles dir>/../.claude-plugin/plugin.json
+#      (the roles/ the renderer actually reads — its parent is the plugin/install
+#      root; also the test seam, where WIP_ROLES_DIR points at the repo's roles/)
+#   3. $WIP_LIB/../../.claude-plugin/plugin.json         [self-locating install]
+# The stamped version is later compared (numeric-component, `_wip_setup_version_lt`)
+# against a fresh read of this same oracle to name the divergence DIRECTION (D2a:
+# upstream-behind never auto-syncs).
+_wip_plugin_version() {
+  local v manifest roles_dir
+  if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+    manifest="$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  if roles_dir="$(_wip_flatten_roles_dir 2>/dev/null)" && [[ -n "$roles_dir" ]]; then
+    manifest="$roles_dir/../.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  if [[ -n "${WIP_LIB:-}" ]]; then
+    manifest="$WIP_LIB/../../.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  printf 'unknown'
+}
+
 wip_plumbing_cmd_setup() {
   local sub=""
   if [[ $# -gt 0 ]]; then
@@ -26,7 +92,7 @@ wip_plumbing_cmd_setup() {
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0
+  local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0 status=0 sync=0
   # Config-echo verbs (ADR-0021): solo/forge/issue-tracker write only a .wip.yaml
   # feature stanza — no template files, no sentinel. Their verb-specific args.
   local force_tier="" fallback_tool="" tier_set=0 tracker_backend="" tracker_backend_set=0
@@ -46,6 +112,18 @@ wip_plumbing_cmd_setup() {
         [[ "$sub" == "agents" ]] ||
           wip_die 2 usage "setup $sub: --migrate is only valid for \`setup agents\`"
         migrate=1
+        shift
+        ;;
+      --status)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --status is only valid for \`setup agents\`"
+        status=1
+        shift
+        ;;
+      --sync)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --sync is only valid for \`setup agents\`"
+        sync=1
         shift
         ;;
       --dry-run)
@@ -147,6 +225,20 @@ wip_plumbing_cmd_setup() {
   if [[ "$migrate" == "1" && "$check" == "1" ]]; then
     wip_die 2 usage "setup $sub: --migrate and --check are mutually exclusive"
   fi
+  # --status is a read-only report; it must not be combined with the other
+  # agents actors/gates (--check, --migrate). --source/--force are inert under it.
+  if [[ "$status" == "1" && ("$check" == "1" || "$migrate" == "1") ]]; then
+    wip_die 2 usage "setup $sub: --status is read-only; do not combine it with --check or --migrate"
+  fi
+  # --sync is the provenance actor; it stands alone (not with --check/--migrate/
+  # --status). --force / --dry-run are its own modifiers (parsed above), not a
+  # conflict.
+  if [[ "$sync" == "1" && ("$check" == "1" || "$migrate" == "1" || "$status" == "1") ]]; then
+    wip_die 2 usage "setup $sub: --sync must not be combined with --check, --migrate, or --status"
+  fi
+  if [[ "$sync" == "1" && "$source_set" == "1" ]]; then
+    wip_die 2 usage "setup $sub: --sync acts on the recorded vendored install, not --source; drop --source"
+  fi
   if [[ "$migrate" == "1" && "$source_set" == "1" ]]; then
     wip_die 2 usage "setup $sub: --migrate derives the end-state from the on-disk footprint, not --source; drop --source"
   fi
@@ -223,6 +315,40 @@ wip_plumbing_cmd_setup() {
       wip_die 1 internal "setup agents: --check render failed (see stderr for the offending role)"
     fi
     exit "$check_rc"
+  fi
+
+  # Read-only two-axis status report (ADR-0023 D3). Like --check it writes NOTHING
+  # and never flips the manifest; unlike --check it always exits 0 (reporting, not
+  # gating). Dispatched here before the write path AND the foreign-plugin guard for
+  # the same reason --check is. A classifier failure surfaces as rc 5 → internal.
+  if [[ "$sub" == "agents" && "$status" == "1" ]]; then
+    local status_rc
+    set +e
+    _wip_setup_agents_status "$root" "$td"
+    status_rc=$?
+    set -e
+    if [[ "$status_rc" == "5" ]]; then
+      wip_die 1 internal "setup agents: --status render failed (see stderr for the offending role)"
+    fi
+    exit 0
+  fi
+
+  # Provenance actor (ADR-0023 D3): `setup agents --sync [--force] [--dry-run]`
+  # refreshes drifted vendored files per their two-axis state. Dispatched here
+  # (before the foreign-plugin guard) like --check/--status; it is source-gated on
+  # `vendored` internally and a genuinely-vendored repo carries no foreign root
+  # manifest, so the guard is moot. Returns 4 when it refused locally-modified
+  # files without --force; 5 (render/classifier failure) → internal.
+  if [[ "$sub" == "agents" && "$sync" == "1" ]]; then
+    local sync_rc
+    set +e
+    _wip_setup_agents_sync "$root" "$td"
+    sync_rc=$?
+    set -e
+    if [[ "$sync_rc" == "5" ]]; then
+      wip_die 1 internal "setup agents: --sync render failed (see stderr for the offending role)"
+    fi
+    exit "$sync_rc"
   fi
 
   # Migration actor (ADR-0020 migration path / D2–D6): `setup agents --migrate`
@@ -530,6 +656,622 @@ _wip_setup_agents_vendored() {
   done
 
   [[ "$saw_refused" -eq 0 ]] || return 4
+
+  # Provenance sidecar (ADR-0023 D1). Stamp AFTER the agent/command files land —
+  # one entry per file, `baseline_hash = sha256(the bytes just written)`. This is
+  # a SIDE artifact: it emits NO ledger line (no `wrote`/`skipped` TSV), so the
+  # install counts the caller aggregates stay exactly `4 + N`. Skipped under
+  # WIP_DRY_RUN (plan, write nothing) — including the migrate dry-run reuse, which
+  # calls this writer with WIP_DRY_RUN=1. A stamp failure maps to rc 5 (internal),
+  # mirroring the render/write failure contract above.
+  if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+    _wip_setup_agents_stamp_provenance "$root" "$td" "$backend" || {
+      printf 'wip-plumbing: setup agents: provenance stamp failed\n' >&2
+      return 5
+    }
+  fi
+  return 0
+}
+
+# _wip_setup_agents_stamp_provenance <root> <templates-dir> <backend> — write (or
+# refresh) the provenance sidecar `.claude/agents/wip/.provenance.json` (ADR-0023
+# D1) AFTER a successful vendored write. Re-derives the vendored file set exactly
+# as `_wip_setup_agents_vendored` does — the four fixed roles plus the command
+# GLOB (set-parity, never a hardcoded count) — and for each ON-DISK file records
+# `{path, kind, source_ref, plugin_version, baseline_hash, vendored_at}`:
+#   - source_ref: agent → `roles/<role>.md @ backend <b>`; command →
+#     `templates/setup/agents/commands/<name>.md` (the vendor input, D1).
+#   - baseline_hash: sha256 of the on-disk bytes (== bytes just written, whether
+#     the writer reported wrote / wrote_forced / skipped-idempotent).
+#   - plugin_version: `_wip_plugin_version` (the pivot for the D2a direction).
+#   - vendored_at: today's date, honoring the WIP_NOW test seam.
+# Envelope `{schema:1, files:[…]}`. Written atomically via a tmpfile + mv, so a
+# crash never leaves a half-written sidecar. The tmpfile is dot-prefixed and not
+# `*.md`, so it is never globbed as a subagent and is gitignore-safe like the
+# sidecar itself. Returns 0 on success; 5 on any hash/mkdir/mktemp/jq/mv failure.
+_wip_setup_agents_stamp_provenance() {
+  local root="$1" td="$2" backend="$3"
+  local pv when sidecar_dir sidecar
+  pv="$(_wip_plugin_version)"
+  when="${WIP_NOW:-$(date +%F)}"
+  sidecar_dir="$root/.claude/agents/wip"
+  sidecar="$sidecar_dir/.provenance.json"
+  mkdir -p -- "$sidecar_dir" || return 5
+
+  local files_json="[]"
+  local role rel dest h
+  for role in orchestrator coordinator researcher builder; do
+    rel=".claude/agents/wip/$role.md"
+    dest="$root/$rel"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 5
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$rel" --arg kind "agent" \
+      --arg ref "roles/$role.md @ backend $backend" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 5
+  done
+
+  local cmd_dir="$td/setup/agents/commands" cmd_tmpl name
+  for cmd_tmpl in "$cmd_dir"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue # empty/absent glob → no commands to stamp
+    name="$(basename -- "$cmd_tmpl")"
+    rel=".claude/commands/wip/$name"
+    dest="$root/$rel"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 5
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$rel" --arg kind "command" \
+      --arg ref "templates/setup/agents/commands/$name" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 5
+  done
+
+  local tmp
+  tmp="$(mktemp -- "$sidecar.XXXXXX")" || return 5
+  if ! jq -nc --argjson files "$files_json" '{schema:1, files:$files}' >"$tmp"; then
+    rm -f -- "$tmp"
+    return 5
+  fi
+  mv -f -- "$tmp" "$sidecar" || {
+    rm -f -- "$tmp"
+    return 5
+  }
+  return 0
+}
+
+# _wip_setup_version_lt <a> <b> — true (rc 0) iff version <a> is strictly less
+# than version <b>, compared component-wise on `.`-split numeric fields (pure
+# bash — no `sort -V`, so it is portable to a stock macOS `sort`). A trailing
+# non-numeric suffix on a component (e.g. `18-dev`) is truncated to its numeric
+# prefix. `"unknown"` on either side, or equality, is NOT-less-than (rc 1) — so a
+# missing/unknown version can never be mistaken for "behind" (D2a: only a
+# positively-older installed plugin protects a forward-port from regression).
+_wip_setup_version_lt() {
+  local a="$1" b="$2"
+  [[ "$a" == "unknown" || "$b" == "unknown" ]] && return 1
+  [[ "$a" == "$b" ]] && return 1
+  local IFS=.
+  # shellcheck disable=SC2206  # deliberate word-split on the dot IFS
+  local -a av=($a) bv=($b)
+  local i max="${#av[@]}"
+  [[ "${#bv[@]}" -gt "$max" ]] && max="${#bv[@]}"
+  local ai bi
+  for ((i = 0; i < max; i++)); do
+    ai="${av[i]:-0}"
+    bi="${bv[i]:-0}"
+    ai="${ai%%[!0-9]*}"
+    bi="${bi%%[!0-9]*}"
+    ai="${ai:-0}"
+    bi="${bi:-0}"
+    if ((10#$ai < 10#$bi)); then return 0; fi
+    if ((10#$ai > 10#$bi)); then return 1; fi
+  done
+  return 1
+}
+
+# _wip_setup_direction <installed> <stamped> — the 3-value divergence-direction
+# taxonomy (ADR-0023 D2a) for an upstream_advanced file, by SEMVER-comparing the
+# installed plugin version to the stamped one:
+#   ahead         — installed >  stamped  (the plugin genuinely moved forward)
+#   behind        — installed <  stamped  (installed lags a newer stamp)
+#   indeterminate — installed == stamped (or either "unknown") but the CONTENT
+#                   differs (R_now != B) — the versions can't tell us which
+#                   byte-set is newer (the Duo forward-port case: released 0.0.17
+#                   and the forward-port both label 0.0.17 yet render differently).
+# The ORDERING INVARIANT (ADR-0023): auto-sync REQUIRES a PROVEN `ahead`. `behind`
+# and `indeterminate` both fall to skip-and-warn (recoverable via --force),
+# because a wrong auto-sync is a silent, unrecoverable regression while a wrong
+# skip costs only one --force.
+_wip_setup_direction() {
+  local installed="$1" stamped="$2"
+  if _wip_setup_version_lt "$installed" "$stamped"; then
+    printf 'behind'
+  elif _wip_setup_version_lt "$stamped" "$installed"; then
+    printf 'ahead'
+  else
+    printf 'indeterminate'
+  fi
+}
+
+# _wip_setup_provenance_state <has_entry> <exists> <B> <R_now> <D_now> <installed>
+#                             <stamped>
+# The pure two-axis + direction state machine (ADR-0023 D2/D2a). Given a file's
+# sidecar-entry presence, on-disk presence, stamped baseline `B`, current render
+# hash `R_now`, on-disk hash `D_now`, and the installed vs stamped plugin
+# versions, echo `<state><TAB><direction>` where state ∈ {clean, upstream-advanced,
+# locally-modified, both-diverged, unstamped, missing} and direction ∈ {none,
+# ahead, behind, indeterminate}. Kept side-effect-free so the classifier and its
+# tests share one oracle.
+#
+#   upstream_advanced := R_now != B   (the plugin render moved off the baseline)
+#   locally_modified  := D_now != B   (the on-disk file moved off the baseline)
+#
+# Degenerate first: no sidecar entry → unstamped (file present) / missing (gone);
+# entry but file gone → missing. Then the 4 quadrants; the upstream-only quadrant
+# is always `upstream-advanced` and carries the 3-value DIRECTION (D2a) — the
+# action, not the state, splits ahead (auto-syncable) from behind/indeterminate
+# (skip-and-warn, protects a forward-ported copy from regression).
+_wip_setup_provenance_state() {
+  local has_entry="$1" exists="$2" B="$3" R_now="$4" D_now="$5" installed="$6" stamped="$7"
+  if [[ "$has_entry" != "1" ]]; then
+    if [[ "$exists" == "1" ]]; then printf 'unstamped\tnone'; else printf 'missing\tnone'; fi
+    return 0
+  fi
+  if [[ "$exists" != "1" ]]; then
+    printf 'missing\tnone'
+    return 0
+  fi
+  local ua=0 lm=0
+  [[ "$R_now" != "$B" ]] && ua=1
+  [[ "$D_now" != "$B" ]] && lm=1
+  if [[ "$ua" == "0" && "$lm" == "0" ]]; then
+    printf 'clean\tnone'
+    return 0
+  fi
+  if [[ "$ua" == "1" && "$lm" == "0" ]]; then
+    printf 'upstream-advanced\t%s' "$(_wip_setup_direction "$installed" "$stamped")"
+    return 0
+  fi
+  if [[ "$ua" == "0" && "$lm" == "1" ]]; then
+    printf 'locally-modified\tnone'
+    return 0
+  fi
+  # both-diverged — direction still recorded (a behind/indeterminate + hand-edited
+  # file is a genuine conflict; --sync --force takes upstream, direction surfaced).
+  printf 'both-diverged\t%s' "$(_wip_setup_direction "$installed" "$stamped")"
+}
+
+# _wip_setup_agents_provenance_classify <root> <templates-dir> — the SHARED
+# two-axis vendored-drift classifier (ADR-0023 D3 — the single oracle reused by
+# `--status`, `--sync`, and the `doctor` fan-in). Re-derives the vendored file
+# set exactly as the writer/`--check` do (four fixed roles + the command GLOB),
+# and for each emits one `<state><TAB><path><TAB><direction>` line on stdout.
+#
+# Per file: read its sidecar entry (baseline_hash `B`, stamped plugin_version)
+# from `.claude/agents/wip/.provenance.json`; compute `D_now` (sha256 of the
+# on-disk file) and `R_now` (agent: sha256 of a fresh `wip_flatten_render`;
+# command: sha256 of the current template); read the installed plugin version
+# once; then hand all of it to `_wip_setup_provenance_state`. Returns 0 normally,
+# 5 on an internal render/hash failure (the caller maps rc 5 → internal error).
+_wip_setup_agents_provenance_classify() {
+  local root="$1" td="$2"
+  local backend installed sidecar sidecar_json
+  backend="$(yq -r '.features.orchestration.backend // "solo"' "$root/.wip.yaml" 2>/dev/null || printf 'solo')"
+  [[ -n "$backend" && "$backend" != "null" ]] || backend="solo"
+  installed="$(_wip_plugin_version)"
+  sidecar="$root/.claude/agents/wip/.provenance.json"
+  sidecar_json=""
+  [[ -f "$sidecar" ]] && sidecar_json="$(cat -- "$sidecar" 2>/dev/null || printf '')"
+
+  local role rel dest entry has_entry B stamped exists D_now R_now tmp sd state direction
+  for role in orchestrator coordinator researcher builder; do
+    rel=".claude/agents/wip/$role.md"
+    dest="$root/$rel"
+    has_entry=0
+    B=""
+    stamped="unknown"
+    if [[ -n "$sidecar_json" ]]; then
+      entry="$(jq -c --arg p "$rel" '.files[]? | select(.path == $p)' <<<"$sidecar_json" 2>/dev/null || printf '')"
+      if [[ -n "$entry" ]]; then
+        has_entry=1
+        B="$(jq -r '.baseline_hash // ""' <<<"$entry")"
+        stamped="$(jq -r '.plugin_version // "unknown"' <<<"$entry")"
+      fi
+    fi
+    exists=0
+    D_now=""
+    if [[ -f "$dest" ]]; then
+      exists=1
+      D_now="$(_wip_sha256 "$dest")" || return 5
+    fi
+    tmp="$(mktemp)" || return 5
+    if ! wip_flatten_render "$role" "$backend" >"$tmp" 2>/dev/null; then
+      rm -f -- "$tmp"
+      return 5
+    fi
+    R_now="$(_wip_sha256 "$tmp")" || {
+      rm -f -- "$tmp"
+      return 5
+    }
+    rm -f -- "$tmp"
+    sd="$(_wip_setup_provenance_state "$has_entry" "$exists" "$B" "$R_now" "$D_now" "$installed" "$stamped")"
+    state="${sd%%$'\t'*}"
+    direction="${sd##*$'\t'}"
+    printf '%s\t%s\t%s\n' "$state" "$rel" "$direction"
+  done
+
+  local cmd_dir="$td/setup/agents/commands" cmd_tmpl name
+  for cmd_tmpl in "$cmd_dir"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue
+    name="$(basename -- "$cmd_tmpl")"
+    rel=".claude/commands/wip/$name"
+    dest="$root/$rel"
+    has_entry=0
+    B=""
+    stamped="unknown"
+    if [[ -n "$sidecar_json" ]]; then
+      entry="$(jq -c --arg p "$rel" '.files[]? | select(.path == $p)' <<<"$sidecar_json" 2>/dev/null || printf '')"
+      if [[ -n "$entry" ]]; then
+        has_entry=1
+        B="$(jq -r '.baseline_hash // ""' <<<"$entry")"
+        stamped="$(jq -r '.plugin_version // "unknown"' <<<"$entry")"
+      fi
+    fi
+    exists=0
+    D_now=""
+    if [[ -f "$dest" ]]; then
+      exists=1
+      D_now="$(_wip_sha256 "$dest")" || return 5
+    fi
+    R_now="$(_wip_sha256 "$cmd_tmpl")" || return 5
+    sd="$(_wip_setup_provenance_state "$has_entry" "$exists" "$B" "$R_now" "$D_now" "$installed" "$stamped")"
+    state="${sd%%$'\t'*}"
+    direction="${sd##*$'\t'}"
+    printf '%s\t%s\t%s\n' "$state" "$rel" "$direction"
+  done
+  return 0
+}
+
+# _wip_setup_agents_action_for <state> <direction> — map a classifier
+# (state, direction) to the `--status` ACTION token (a stable machine word; the
+# human table + JSON both use it). For `upstream-advanced` the DIRECTION decides
+# (D2a ordering invariant): only a proven `ahead` earns `sync`; `behind` →
+# `upgrade-plugin`; `indeterminate` → `review` (skip-and-warn, --force to override).
+_wip_setup_agents_action_for() {
+  local state="$1" direction="$2"
+  case "$state" in
+    clean) printf 'none' ;;
+    upstream-advanced)
+      case "$direction" in
+        ahead) printf 'sync' ;;
+        behind) printf 'upgrade-plugin' ;;
+        *) printf 'review' ;; # indeterminate
+      esac
+      ;;
+    locally-modified) printf 'sync-force' ;;
+    both-diverged) printf 'sync-force' ;;
+    unstamped) printf 'sync' ;;
+    missing) printf 'sync' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# _wip_setup_agents_status <root> <templates-dir> — the read-only `setup agents
+# --status` two-axis report (ADR-0023 D3). Runs the shared classifier and emits a
+# JSON envelope on stdout + a human table on stderr; **exits 0 always** (reporting,
+# not gating — the blunt CI gate stays `--check`, D4). Branches on the recorded
+# `.features.orchestration.source`: only `vendored` has vendored files; anything
+# else reports an empty set. Returns 5 on an internal classifier failure (caller
+# maps to `wip_die 1 internal`).
+_wip_setup_agents_status() {
+  local root="$1" td="$2"
+  local verb="setup agents"
+  local source_recorded
+  source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+  if [[ "$source_recorded" != "vendored" ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" '
+        {ok:true, verb:$verb, files:[],
+         summary:{clean:0, upstream_advanced:0, locally_modified:0,
+                  both_diverged:0, unstamped:0, missing:0}}'
+    fi
+    return 0
+  fi
+
+  local installed
+  installed="$(_wip_plugin_version)"
+  local sidecar="$root/.claude/agents/wip/.provenance.json" sidecar_json=""
+  [[ -f "$sidecar" ]] && sidecar_json="$(cat -- "$sidecar" 2>/dev/null || printf '')"
+
+  local raw rc
+  set +e
+  raw="$(_wip_setup_agents_provenance_classify "$root" "$td")"
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || return 5
+
+  local files_json="[]"
+  local c_clean=0 c_ua=0 c_lm=0 c_both=0 c_uns=0 c_mis=0
+  local state path direction kind stamped action
+  while IFS=$'\t' read -r state path direction; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      .claude/agents/wip/*) kind="agent" ;;
+      .claude/commands/wip/*) kind="command" ;;
+      *) kind="unknown" ;;
+    esac
+    stamped="unknown"
+    if [[ -n "$sidecar_json" ]]; then
+      stamped="$(jq -r --arg p "$path" '(.files[]? | select(.path == $p) | .plugin_version) // "unknown"' <<<"$sidecar_json" 2>/dev/null || printf 'unknown')"
+      [[ -n "$stamped" ]] || stamped="unknown"
+    fi
+    action="$(_wip_setup_agents_action_for "$state" "$direction")"
+    case "$state" in
+      clean) c_clean=$((c_clean + 1)) ;;
+      upstream-advanced) c_ua=$((c_ua + 1)) ;;
+      locally-modified) c_lm=$((c_lm + 1)) ;;
+      both-diverged) c_both=$((c_both + 1)) ;;
+      unstamped) c_uns=$((c_uns + 1)) ;;
+      missing) c_mis=$((c_mis + 1)) ;;
+    esac
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$path" --arg kind "$kind" --arg state "$state" \
+      --arg dir "$direction" --arg stamped "$stamped" --arg installed "$installed" \
+      --arg action "$action" '
+      $a + [{path:$path, kind:$kind, state:$state, direction:$dir,
+             stamped_version:$stamped, installed_version:$installed, action:$action}]')"
+    printf 'wip-plumbing: setup agents --status: %-40s %-8s %-18s dir=%-13s stamped=%-8s installed=%-8s → %s\n' \
+      "$path" "$kind" "$state" "$direction" "$stamped" "$installed" "$action" >&2
+  done <<<"$raw"
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    jq -nc --arg verb "$verb" --argjson files "$files_json" \
+      --argjson clean "$c_clean" --argjson ua "$c_ua" --argjson lm "$c_lm" \
+      --argjson both "$c_both" --argjson uns "$c_uns" --argjson mis "$c_mis" '
+      {ok:true, verb:$verb, files:$files,
+       summary:{clean:$clean, upstream_advanced:$ua, locally_modified:$lm,
+                both_diverged:$both, unstamped:$uns, missing:$mis}}'
+  fi
+  return 0
+}
+
+# _wip_setup_agents_sync_write <root> <templates-dir> <backend> <path> <kind> —
+# overwrite one vendored file with its upstream bytes: an agent is re-rendered
+# (`wip_flatten_render <role> <backend>`), a command is re-copied verbatim from
+# its template. Atomic (tmpfile + mv via `_wip_setup_copy_atomic`). A no-op under
+# WIP_DRY_RUN (plan only). Returns 0 on success, 1 on render/copy failure.
+_wip_setup_agents_sync_write() {
+  local root="$1" td="$2" backend="$3" path="$4" kind="$5"
+  local dest="$root/$path"
+  [[ "${WIP_DRY_RUN:-0}" == "1" ]] && return 0
+  if [[ "$kind" == "agent" ]]; then
+    local role="${path##*/}"
+    role="${role%.md}"
+    local tmp
+    tmp="$(mktemp)" || return 1
+    if ! wip_flatten_render "$role" "$backend" >"$tmp" 2>/dev/null; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    _wip_setup_copy_atomic "$tmp" "$dest" || {
+      rm -f -- "$tmp"
+      return 1
+    }
+    rm -f -- "$tmp"
+  else
+    local name="${path##*/}"
+    local tmpl="$td/setup/agents/commands/$name"
+    [[ -f "$tmpl" ]] || return 1
+    _wip_setup_copy_atomic "$tmpl" "$dest" || return 1
+  fi
+  return 0
+}
+
+# _wip_setup_agents_restamp_files <root> <templates-dir> <backend> <paths...> —
+# UPSERT the sidecar entries for exactly <paths...> (baseline_hash = sha256 of
+# their CURRENT on-disk bytes, plugin_version = installed, vendored_at = now),
+# PRESERVING every other existing entry verbatim. This targeted merge — never a
+# wholesale rewrite — is what keeps a skipped `upstream-behind` file's newer
+# stamped version intact across a `--sync` that touches its siblings (D2a). For
+# an `unstamped` file it establishes the baseline from the current bytes (no
+# overwrite); for a re-rendered file it records the fresh render's hash. Atomic
+# (tmpfile + mv). Returns 0 on success, 1 on any hash/jq/mv failure.
+_wip_setup_agents_restamp_files() {
+  local root="$1" td="$2" backend="$3"
+  shift 3
+  local sidecar="$root/.claude/agents/wip/.provenance.json"
+  local pv when files_json
+  pv="$(_wip_plugin_version)"
+  when="${WIP_NOW:-$(date +%F)}"
+  if [[ -f "$sidecar" ]]; then
+    files_json="$(jq -c '.files // []' "$sidecar" 2>/dev/null || printf '[]')"
+  else
+    files_json="[]"
+  fi
+  [[ -n "$files_json" ]] || files_json="[]"
+
+  local path dest kind ref role name h
+  for path in "$@"; do
+    dest="$root/$path"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 1
+    case "$path" in
+      .claude/agents/wip/*)
+        kind="agent"
+        role="${path##*/}"
+        role="${role%.md}"
+        ref="roles/$role.md @ backend $backend"
+        ;;
+      .claude/commands/wip/*)
+        kind="command"
+        name="${path##*/}"
+        ref="templates/setup/agents/commands/$name"
+        ;;
+      *)
+        kind="unknown"
+        ref=""
+        ;;
+    esac
+    files_json="$(jq -c --arg p "$path" 'map(select(.path != $p))' <<<"$files_json")" || return 1
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$path" --arg kind "$kind" --arg ref "$ref" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 1
+  done
+
+  local dir="$root/.claude/agents/wip" tmp
+  mkdir -p -- "$dir" || return 1
+  tmp="$(mktemp -- "$sidecar.XXXXXX")" || return 1
+  if ! jq -nc --argjson files "$files_json" '{schema:1, files:$files}' >"$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$sidecar" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  return 0
+}
+
+# _wip_setup_agents_sync <root> <templates-dir> — the `setup agents --sync
+# [--force] [--dry-run]` per-state actor (ADR-0023 D3, actions per D2). Runs the
+# shared classifier and acts on each vendored file:
+#   clean              → skip (skipped_clean)
+#   upstream-advanced  → re-render + overwrite + restamp (synced)
+#   upstream-behind    → SKIP with a version warning (skipped_regressive); NEVER
+#                        auto-sync — protects a forward-ported copy from regressing
+#   unstamped          → establish the baseline from current bytes + stamp (synced;
+#                        non-destructive — no overwrite)
+#   missing            → re-render/re-copy the gone file + stamp (synced)
+#   locally-modified / both-diverged →
+#       without --force → REFUSE (refused_local; the run exits 4)
+#       with --force    → back up `<file>.orig` (no git undo — gitignored), take
+#                         upstream, restamp (backed_up + synced)
+# Reuses `_wip_setup_agents_provenance_classify` (C3), `_wip_setup_agents_sync_write`,
+# and `_wip_setup_agents_restamp_files`. Honors WIP_DRY_RUN (plan; write nothing,
+# no restamp) and WIP_SETUP_FORCE (the --force gate). Source-gated on
+# `vendored`. Emits the D3 JSON ledger; returns 0, 4 (any refused_local), or 5
+# (internal classifier/render failure → caller maps to internal).
+_wip_setup_agents_sync() {
+  local root="$1" td="$2"
+  local verb="setup agents"
+  local dry="${WIP_DRY_RUN:-0}" force="${WIP_SETUP_FORCE:-0}"
+
+  local source_recorded
+  source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+  if [[ "$source_recorded" != "vendored" ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" '
+        {ok:true, verb:$verb, synced:[], skipped_clean:[], skipped_regressive:[],
+         refused_local:[], backed_up:[], restamped:false}'
+    fi
+    return 0
+  fi
+
+  local backend
+  backend="$(yq -r '.features.orchestration.backend // "solo"' "$root/.wip.yaml" 2>/dev/null || printf 'solo')"
+  [[ -n "$backend" && "$backend" != "null" ]] || backend="solo"
+
+  local raw rc
+  set +e
+  raw="$(_wip_setup_agents_provenance_classify "$root" "$td")"
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || return 5
+
+  local synced=() skipped_clean=() skipped_regressive=() refused_local=() backed_up=()
+  local state path direction kind
+  while IFS=$'\t' read -r state path direction; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      .claude/agents/wip/*) kind="agent" ;;
+      .claude/commands/wip/*) kind="command" ;;
+      *) kind="unknown" ;;
+    esac
+    case "$state" in
+      clean)
+        skipped_clean+=("$path")
+        ;;
+      upstream-advanced)
+        # Ordering invariant (D2a): auto-sync ONLY a PROVEN `ahead`. `behind` and
+        # `indeterminate` are skip-and-warn — a wrong sync silently, unrecoverably
+        # regresses; a wrong skip costs one --force. `--force` is that explicit
+        # override: take the installed render regardless of direction.
+        if [[ "$direction" == "ahead" || "$force" == "1" ]]; then
+          _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+          synced+=("$path")
+        else
+          skipped_regressive+=("$path")
+          if [[ "$direction" == "behind" ]]; then
+            printf 'wip-plumbing: setup agents --sync: %s: installed plugin is OLDER than the stamp (upstream-advanced/behind); skipped — upgrade the plugin first, or --force to take the installed render\n' "$path" >&2
+          else
+            printf 'wip-plumbing: setup agents --sync: %s: installed version equals the stamp but the render differs (upstream-advanced/indeterminate — cannot prove direction); skipped — review, or --force to take the installed render\n' "$path" >&2
+          fi
+        fi
+        ;;
+      missing)
+        _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+        synced+=("$path")
+        ;;
+      unstamped)
+        # ADOPT-IN-PLACE (D2a, load-bearing): the on-disk bytes ARE the only
+        # defensible baseline for a legacy pre-step-02 install (Duo). Stamp them
+        # as baseline (the restamp below records sha256(on-disk)); WRITE NO FILE
+        # BYTES. NEVER re-render-overwrite an unstamped file — that would clobber a
+        # forward-port with the stale installed render BEFORE the direction logic
+        # ever runs. (Fresh installs stamp at write time (C2), so unstamped only
+        # ever arises for legacy installs.)
+        synced+=("$path")
+        ;;
+      locally-modified | both-diverged)
+        if [[ "$force" == "1" ]]; then
+          if [[ "$dry" != "1" && -f "$root/$path" ]]; then
+            cp -- "$root/$path" "$root/$path.orig" || return 5
+          fi
+          backed_up+=("$path")
+          _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+          synced+=("$path")
+        else
+          refused_local+=("$path")
+        fi
+        ;;
+    esac
+  done <<<"$raw"
+
+  local restamped="false"
+  if [[ "${#synced[@]}" -gt 0 && "$dry" != "1" ]]; then
+    _wip_setup_agents_restamp_files "$root" "$td" "$backend" "${synced[@]}" || return 5
+    restamped="true"
+  fi
+
+  local ok="true"
+  [[ "${#refused_local[@]}" -gt 0 ]] && ok="false"
+  if [[ "${#refused_local[@]}" -gt 0 ]]; then
+    printf 'wip-plumbing: setup agents --sync: refused %s locally-modified file(s) without --force: %s\n' \
+      "${#refused_local[@]}" "${refused_local[*]}" >&2
+  fi
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    local dry_json="false"
+    [[ "$dry" == "1" ]] && dry_json="true"
+    jq -nc --arg verb "$verb" --argjson ok "$ok" --argjson dry_run "$dry_json" \
+      --argjson synced "$(_wip_setup_arr_json "${synced[@]+"${synced[@]}"}")" \
+      --argjson skipped_clean "$(_wip_setup_arr_json "${skipped_clean[@]+"${skipped_clean[@]}"}")" \
+      --argjson skipped_regressive "$(_wip_setup_arr_json "${skipped_regressive[@]+"${skipped_regressive[@]}"}")" \
+      --argjson refused_local "$(_wip_setup_arr_json "${refused_local[@]+"${refused_local[@]}"}")" \
+      --argjson backed_up "$(_wip_setup_arr_json "${backed_up[@]+"${backed_up[@]}"}")" \
+      --argjson restamped "$restamped" '
+      {ok:$ok, verb:$verb, dry_run:$dry_run,
+       synced:$synced, skipped_clean:$skipped_clean,
+       skipped_regressive:$skipped_regressive, refused_local:$refused_local,
+       backed_up:$backed_up, restamped:$restamped}'
+  fi
+
+  [[ "${#refused_local[@]}" -gt 0 ]] && return 4
   return 0
 }
 
@@ -1162,6 +1904,7 @@ _wip_setup_hint() {
         printf 'wip-plumbing: setup agents: hint: in a repo that is itself a plugin, re-run with `--source plugin` to skip vendoring and use the globally-enabled wip plugin (its global `/wip:*`)\n' >&2
       fi
       printf 'wip-plumbing: setup agents: hint: on a repo that ran the OLD plugin-tree `setup agents` (leftover root `.claude-plugin/`, `agents/`, `commands/`)? run `setup agents --migrate` to clean the legacy footprint safely (`--dry-run` previews; `wip-plumbing doctor` flags it)\n' >&2
+      printf 'wip-plumbing: setup agents: hint: has the plugin moved on since you vendored? run `setup agents --status` to see per-file drift (upstream-advanced vs locally-modified), then `setup agents --sync` to refresh (`--force` overwrites local edits; upstream-behind is left alone)\n' >&2
       printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tier_policy in .wip.yaml if Solo is your backend\n' >&2
       ;;
     lds)

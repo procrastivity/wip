@@ -111,21 +111,33 @@ and a Builder a human is using is never closed or injected into.
 
 1. Verify the Step's shipping criteria.
 2. Run the post-build evaluation and append a retro entry.
-3. Archive the workplan and the shared note under
-   `.wip/initiatives/<slug>/archive/`.
-4. Write the step-shipped state with `wip-plumbing ship <slug>
+3. Archive the workplan and **persist the shared note's content** under
+   `.wip/initiatives/<slug>/archive/` (the durable file record of the
+   Step's rolling context).
+4. **Close the live shared note.** Archive the Step shared note
+   (`<slug>-step-NN-context`) itself via the backend's **shared-note
+   archival** primitive (see the active backend binding's substrate
+   table), so no live rolling-context note leaks past teardown. This is
+   distinct from item 3's filesystem copy — persisting the content does
+   **not** close the live note. Under a backend where the shared note is
+   a live handle this is the only action that stops it showing as open.
+   Ordered after item 3 (content is safely persisted before the live
+   note is hidden) and before closing the Researcher and the Coordinator
+   processes below (so the note is closed while the Coordinator is still
+   alive to do it).
+5. Write the step-shipped state with `wip-plumbing ship <slug>
    <step-id>` — this marks the step's `✅ shipped <date>` roadmap
    bullet **and** clears the manifest's `active_step` when it points at
    this step, in one idempotent call (ADR-0016). Re-running is a no-op;
    `--dry-run` previews without writing. This is what keeps
    `status`/`next` from nominating an already-shipped step, while the
    prior archive step keeps `doctor` clean once the boundary completes.
-5. **If this Step closes a Round** (last Step in its Round on the
+6. **If this Step closes a Round** (last Step in its Round on the
    Roadmap): also archive the Round's intake artifacts referenced by
    that Round under `.wip/initiatives/<slug>/archive/`. Verify no
    orphaned references remain.
-6. Post a step-shipped comment on the Step's ledger entry.
-7. **Complete the Step's ledger entries** before closing any process:
+7. Post a step-shipped comment on the Step's ledger entry.
+8. **Complete the Step's ledger entries** before closing any process:
    mark complete every still-open entry in this Step's `<slug>/step-NN`
    scope that this boundary owns — the Coordinator's own
    `coordinator-context` entry, plus any `task` entries left open by
@@ -134,7 +146,7 @@ and a Builder a human is using is never closed or injected into.
    gate on the human). After this, the ledger's open-entries view for the
    scope should be empty. (See [`shared.md`](./shared.md) §Ledger
    Ownership & Completion.)
-8. Before closing the Researcher or Coordinator, apply the
+9. Before closing the Researcher or Coordinator, apply the
    operator-engagement guard to each process; if either is held or
    operator-engaged, re-arm and wait instead of closing it.
-9. Close the Researcher and the Coordinator processes.
+10. Close the Researcher and the Coordinator processes.
