@@ -280,6 +280,50 @@ wip_plumbing_cmd_doctor() {
     fi
   fi
 
+  # 2h. Vendored role/command drift (ADR-0023 D5 — CLOSES ADR-0015 Q-05.4). Gated
+  #     STRICTLY on `.features.orchestration.source == "vendored"`: only a vendored
+  #     consumer has installed agent/command copies to re-render and compare, so
+  #     this repo's own `source: plugin` doctor pays NO render cost and is
+  #     unaffected. Runs the SAME two-axis classifier as `setup agents --status` /
+  #     `--sync` (one oracle, ADR-0020 D8) and, for each non-`clean` file, appends
+  #     a `vendored-drift` check GROUPED BY state (one object per distinct state,
+  #     each carrying that state's `fix` + its paths). This IS the render fan-in
+  #     backlogged as Q-05.4 — distinct from §2g's pure-disk legacy-footprint scan
+  #     (a stale on-disk footprint vs. installed-render drift are orthogonal). A
+  #     classifier/render failure is swallowed (no crash, no false drift) — the
+  #     blunt `setup agents --check` gate is the place that surfaces a render error.
+  if [[ "$(jq -r '.features.orchestration.source // ""' <<<"$mj")" == "vendored" ]]; then
+    local vd_td vd_raw vd_rc vd_map vd_state vd_path vd_fix vd_paths
+    vd_td="$(wip_templates_dir 2>/dev/null || printf '')"
+    if [[ -n "$vd_td" && -d "$vd_td" ]]; then
+      # shellcheck source=lib/wip/wip-plumbing-subcommands/setup.bash
+      source "$WIP_LIB/wip-plumbing-subcommands/setup.bash"
+      set +e
+      vd_raw="$(_wip_setup_agents_provenance_classify "$root" "$vd_td")"
+      vd_rc=$?
+      set -e
+      if [[ "$vd_rc" == "0" ]]; then
+        vd_map="{}"
+        while IFS=$'\t' read -r vd_state vd_path _; do
+          [[ -n "$vd_path" && "$vd_state" != "clean" ]] || continue
+          vd_map="$(jq -c --arg s "$vd_state" --arg p "$vd_path" '.[$s] += [$p]' <<<"$vd_map")"
+        done <<<"$vd_raw"
+        while IFS= read -r vd_state; do
+          [[ -n "$vd_state" ]] || continue
+          case "$vd_state" in
+            locally-modified | both-diverged) vd_fix="setup agents --sync --force" ;;
+            upstream-behind) vd_fix="upgrade the plugin" ;;
+            *) vd_fix="setup agents --sync" ;;
+          esac
+          vd_paths="$(jq -c --arg s "$vd_state" '.[$s] | sort' <<<"$vd_map")"
+          obj="$(jq -nc --arg state "$vd_state" --arg fix "$vd_fix" --argjson paths "$vd_paths" \
+            '{kind:"orchestration", status:"vendored-drift", state:$state, fix:$fix, paths:$paths}')"
+          checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+        done < <(jq -r 'keys[]' <<<"$vd_map")
+      fi
+    fi
+  fi
+
   # 3. Root collision: lds and diataxis must not share a root.
   local collide
   collide="$(printf '%s' "$mj" | jq -r '

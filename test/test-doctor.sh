@@ -10,6 +10,7 @@ source test/helpers.sh
 # roles/ via the WIP_ROLES_DIR seam (matches test-setup.sh).
 export WIP_NO_REGISTRY=1
 export WIP_ROLES_DIR="$PWD/roles"
+export WIP_NOW="2026-06-14"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -128,5 +129,56 @@ lf_out4="$(WIP_ROOT="$lf_fresh" bin/wip-plumbing doctor)"
 set -e
 assert_eq "0" "$(jq -r '[.checks[]|select(.kind=="orchestration" and .status=="legacy-footprint")]|length' <<<"$lf_out4")" \
   "[legacy] quiet on fresh flattened repo"
+
+# --- Vendored role/command drift fan-in (ADR-0023 C5 — closes ADR-0015 Q-05.4) -
+# doctor runs the shared two-axis provenance classifier ONLY on a
+# `source: vendored` repo and surfaces each non-clean file as an
+# orchestration/vendored-drift check (exit 4). This is the render fan-in Q-05.4
+# backlogged — distinct from the pure-disk legacy-footprint scan above.
+
+# (i) vendored + injected local drift → one vendored-drift check, right state +
+#     fix + path, exit 4.
+vd_dir="$tmp/vendored-drift"
+mkdir -p "$vd_dir"
+WIP_ROOT="$vd_dir" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$vd_dir" bin/wip-plumbing setup agents >/dev/null 2>&1
+printf '\n# hand edit\n' >>"$vd_dir/.claude/agents/wip/builder.md"
+set +e
+vd_out="$(WIP_ROOT="$vd_dir" bin/wip-plumbing doctor)"
+vd_rc=$?
+set -e
+assert_eq "4" "$vd_rc" "[vendored-drift] doctor exits 4 on vendored drift"
+assert_eq "1" "$(jq -r '[.checks[]|select(.kind=="orchestration" and .status=="vendored-drift")]|length' <<<"$vd_out")" \
+  "[vendored-drift] one vendored-drift check"
+assert_eq "locally-modified" "$(jq -r '.checks[]|select(.status=="vendored-drift").state' <<<"$vd_out")" \
+  "[vendored-drift] state locally-modified"
+assert_eq "setup agents --sync --force" "$(jq -r '.checks[]|select(.status=="vendored-drift").fix' <<<"$vd_out")" \
+  "[vendored-drift] fix names --sync --force"
+assert_eq ".claude/agents/wip/builder.md" "$(jq -r '.checks[]|select(.status=="vendored-drift").paths[0]' <<<"$vd_out")" \
+  "[vendored-drift] paths names the drifted file"
+
+# (ii) clean vendored install → no vendored-drift check, exit 0.
+vd_clean="$tmp/vendored-clean"
+mkdir -p "$vd_clean"
+WIP_ROOT="$vd_clean" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$vd_clean" bin/wip-plumbing setup agents >/dev/null 2>&1
+set +e
+vd_out2="$(WIP_ROOT="$vd_clean" bin/wip-plumbing doctor)"
+vd_rc2=$?
+set -e
+assert_eq "0" "$vd_rc2" "[vendored-clean] doctor exits 0 on a clean vendored install"
+assert_eq "0" "$(jq -r '[.checks[]|select(.status=="vendored-drift")]|length' <<<"$vd_out2")" \
+  "[vendored-clean] no vendored-drift check when in sync"
+
+# (iii) source: plugin → probe SKIPPED entirely (no render cost, no check).
+vd_plugin="$tmp/vendored-plugin"
+mkdir -p "$vd_plugin"
+WIP_ROOT="$vd_plugin" bin/wip-plumbing init >/dev/null
+WIP_ROOT="$vd_plugin" bin/wip-plumbing setup agents --source plugin >/dev/null 2>&1
+set +e
+vd_out3="$(WIP_ROOT="$vd_plugin" bin/wip-plumbing doctor)"
+set -e
+assert_eq "0" "$(jq -r '[.checks[]|select(.status=="vendored-drift")]|length' <<<"$vd_out3")" \
+  "[vendored-plugin] vendored-drift probe skipped on source: plugin"
 
 test_summary
