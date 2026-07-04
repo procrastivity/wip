@@ -217,3 +217,22 @@ Consequences above **deferred** as Q-05.4.
   are orthogonal: the former needs only `stat`/`cmp`-against-template, the latter
   needs a re-render. Q-05.4 stays deferred; the step-07 pure-disk check ships
   independently of it.
+
+## Amendment — Q-05.4 doctor render fan-in is CLOSED (BDS-58, step-02)
+
+Amended 2026-07-03 (BDS-58, *Detect & refresh stale vendored wip role/agent
+copies*, initiative `wip-orchestration-robustness`, step-02). **See
+[ADR-0023](./0023-vendored-role-provenance-and-two-axis-drift-detection.md).**
+
+The render fan-in deferred above as **Q-05.4** — fanning the agent render drift
+gate (`setup agents --check`'s re-render-from-`roles/`-and-`cmp`) into `doctor`
+— is now **implemented and closed**. ADR-0023 adds a `doctor` check gated on
+`.features.orchestration.source == "vendored"` that runs the shared two-axis
+classifier (`_wip_setup_agents_provenance_classify`) and, on any non-`clean`
+vendored file, appends `{kind:"orchestration", status:"vendored-drift", state,
+fix, paths}` → exit 4. Gating on `source: vendored` keeps this repo's own
+(`source: plugin`) `doctor` unaffected and render-cost-free — the concern the
+step-07 amendment raised. It is the **second** doctor orchestration hook, still
+distinct from the step-07 pure-disk legacy-footprint check: stale *footprint*
+(pure-disk) vs. installed *render drift* (provenance-anchored) remain orthogonal
+probes, now both present.
