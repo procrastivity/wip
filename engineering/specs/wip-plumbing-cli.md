@@ -50,6 +50,8 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup hygiene` | Write `.pre-commit-config.yaml` (local hooks mirroring `make check`). | step-14 |
 | `setup release` | Write `cliff.toml` + `CHANGELOG.md`; flip `features.changelog.enabled`. | step-14 |
 | `setup agents` | Vendor `.claude-plugin/` into the consumer; flip `features.orchestration.{enabled, backend: solo, source: plugin}`. | step-14 |
+| `setup agents --status` | Read-only two-axis vendored-drift report (per file: `clean` / `upstream-advanced` / `upstream-behind` / `locally-modified` / `both-diverged` / `unstamped` / `missing`); JSON envelope + human table, **always exit 0** (reporting, not gating). | ADR-0023 |
+| `setup agents --sync [--force] [--dry-run]` | Refresh drifted vendored files per state: auto-sync `upstream-advanced`, refuse `locally-modified`/`both-diverged` without `--force` (backs up `<file>.orig` with it), **skip `upstream-behind`** (never regress a forward-port). | ADR-0023 |
 | `setup lds` | Write the LDS install scaffold to `engineering/` (manifest + nine layer dirs + maintenance copies); flip `features.lds.{enabled, root: engineering}`. | step-15 follow-up |
 | `setup solo` | Flip `features.solo.enabled`; optional `--force-tier`/`--fallback-tool` write `features.solo.agent_tier_policy`. Config-echo (no files, no sentinel). | ADR-0021 |
 | `setup forge [gh\|glab]` | Flip `features.forge.enabled`; optional backend pin writes `features.forge.{enabled, backend?}` — the pin is now the **primary** forge selector, gh/glab probe demoted to fallback. Config-echo. | ADR-0021, ADR-0022 |
