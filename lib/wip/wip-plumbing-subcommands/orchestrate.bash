@@ -111,7 +111,7 @@ _wip_orchestrate_cmd_backend() {
   local source
   source="$(jq -r '.features.orchestration.source // "plugin"' <<<"$mj")"
   if [[ "$source" == "vendored" ]]; then
-    _wip_orchestrate_backend_vendored "$root" "$mj" "$name"
+    _wip_orchestrate_backend_vendored "$root" "$mj" "$name" "$check"
     return
   fi
 
@@ -275,10 +275,24 @@ _wip_orchestrate_backend_check() {
 #     branch — D-04.3; honors WIP_DRY_RUN). Emits the D-04.6 JSON shape (with
 #     `reflattened`, no `active_regenerated`).
 _wip_orchestrate_backend_vendored() {
-  local root="$1" mj="$2" name="$3"
+  local root="$1" mj="$2" name="$3" check="${4:-0}"
 
   local current
   current="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
+
+  # --check (D4): a flattened consumer has no active.md / roles/ pointer to gate,
+  # so the commit-time pointer drift gate is a clean no-op here — exit 0,
+  # active_in_sync:null (symmetric with the vendored show path), drift:[]. Emitted
+  # BEFORE any plugin-reachability work; NEVER writes. (The vendored agent-FILE
+  # drift gate is `setup agents --check`, a separate surface — ADR-0015/0020.)
+  if [[ "$check" == "1" ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg b "$current" '
+        {ok:true, verb:"orchestrate backend", backend:$b, source:"vendored",
+         active_in_sync:null, drift:[]}'
+    fi
+    return 0
+  fi
 
   # Available backends = best-effort from the plugin's backends/, resolved via
   # the renderer's own roles/ seam ($WIP_ROLES_DIR → $root/roles →
