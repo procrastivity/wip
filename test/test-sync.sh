@@ -123,6 +123,73 @@ set -e
 assert_eq "4" "$drc" "sync refuses stale tracker mirror"
 assert_eq "tracker-mirror-drift" "$(jq -r '.error.kind' <<<"$drift")" "sync drift error kind"
 
+# --- node granularity: initiative (anchor) + round nodes flow through sync ---
+# (ADR-0024) The intake `tracker_anchor` surfaces as an `initiative` node and a
+# `## Round N [tracker: ID]` heading as a `round-N` node, alongside steps — all
+# push-forward-only, in one `pending` set. The anchor is a sibling of tracker_map,
+# so it must NOT trip the mirror-drift gate (rmap == mmap compares steps+rounds).
+g="$(wip_mktemp)"
+mkdir -p "$g/.wip/initiatives/demo"
+cat >"$g/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip }, issue-tracker: { enabled: true, backend: linear } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    tracker_anchor: BDS-56
+    tracker_map: { step-01: BDS-90, round-1: BDS-100 }
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$g/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One [tracker: BDS-100]
+
+- **step-01 — First** — x. [tracker: BDS-90]
+MD
+_wip_tracker_cache_set "$g" "demo/initiative" "in-progress" "start" "2026-07-04" >/dev/null
+_wip_tracker_cache_set "$g" "demo/round-1" "in-progress" "start" "2026-07-04" >/dev/null
+_wip_tracker_cache_set "$g" "demo/step-01" "in-progress" "start" "2026-07-04" >/dev/null
+
+# No transport -> all three forward/unknown transitions are pending; the anchor
+# (BDS-56, absent from tracker_map) does NOT trip the mirror-drift gate.
+gp="$(WIP_ROOT="$g" $WIP sync)"
+assert_eq "true" "$(jq -r '.ok' <<<"$gp")" "granularity sync ok (anchor doesn't trip drift gate)"
+assert_eq "3" "$(jq -r '.pending | length' <<<"$gp")" "initiative + round-1 + step-01 all pending"
+assert_eq "In Progress" "$(jq -r '.pending[] | select(.node=="demo/initiative") | .to' <<<"$gp")" \
+  "initiative node pending (from the anchor)"
+assert_eq "In Progress" "$(jq -r '.pending[] | select(.node=="demo/round-1") | .to' <<<"$gp")" \
+  "round-1 node pending"
+
+# push-forward-only: tracker reports the initiative Done (AHEAD of wip in-progress)
+# -> observed, never moved backward, never pending.
+cat >"$g/tracker.json" <<'J'
+{"BDS-56":"Done"}
+J
+cat >"$g/gread.sh" <<SH
+#!/bin/sh
+jq -r --arg i "\$1" '.[\$i] // ""' "$g/tracker.json"
+SH
+chmod +x "$g/gread.sh"
+go="$(WIP_ROOT="$g" WIP_LINEAR_READ_CMD="$g/gread.sh" $WIP sync)"
+assert_eq "demo/initiative" "$(jq -r '.observed[] | select(.node=="demo/initiative") | .node' <<<"$go")" \
+  "tracker-ahead initiative -> observed (push-forward only)"
+assert_eq "done" "$(jq -r '.observed[] | select(.node=="demo/initiative") | .tracker_state' <<<"$go")" \
+  "observed records the ahead tracker state"
+assert_eq "0" "$(jq -r '[.pending[] | select(.node=="demo/initiative")] | length' <<<"$go")" \
+  "tracker-ahead initiative never pending"
+
+# The mirror-drift gate STILL fires on a genuine round/step mismatch (the round IS
+# part of the mirror) — proving the anchor exclusion did not disable the gate.
+WIP_ROOT="$g" yq -i '.initiatives[0].tracker_map["round-1"] = "BDS-999"' "$g/.wip.yaml"
+set +e
+gdrift="$(WIP_ROOT="$g" $WIP sync 2>/dev/null)"
+gdrc=$?
+set -e
+assert_eq "4" "$gdrc" "mirror drift on a round node still fails sync"
+assert_eq "tracker-mirror-drift" "$(jq -r '.error.kind' <<<"$gdrift")" "round drift -> drift error kind"
+
 # --- error envelopes --------------------------------------------------------
 set +e
 WIP_ROOT="$tmp" $WIP sync --initiative nope >/dev/null 2>&1

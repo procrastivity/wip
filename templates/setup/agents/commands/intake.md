@@ -162,6 +162,17 @@ authoritative until `apply` returns or the flow errors out.
       editing the same file; when in doubt, keep it sequential and say why.
       Surface the lane proposal in the same review so the human can confirm or
       flatten it — don't silently linearize independent tracks.
+
+      When `issue-tracker` is enabled, you can also **address tracker nodes** as
+      you author (ADR-0024). A step bullet or a `## Round N — title` heading may
+      carry a trailing `[tracker: BDS-XX]` marker; `wip sync` then surfaces and
+      pushes that node's lifecycle forward alongside the steps. Do **not** put a
+      `[tracker:]` key on a `### Lane` heading — a lane is a grouping, not a
+      lifecycle node (ADR-0010), so the parser ignores a lane tracker key. The
+      **initiative-level** anchor is NOT authored in the roadmap: it is captured
+      at intake (`--anchor <ID>` or the `tracker-anchor:` brief front-matter,
+      step 6) and persisted to `.wip.yaml` as the `initiative` node — leave it
+      out of the roadmap entirely.
     - **concrete `step-NN`** — render it and note that `/wip:start <id>`
       activates it.
 

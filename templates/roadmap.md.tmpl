@@ -28,6 +28,15 @@ prereq in the main lane (a bare bullet), then one `### Lane <name>` subheading
 per track. Lanes run in parallel; steps within a lane stay sequential. Step ids
 stay globally sequential — the lane is a grouping, not a numbering namespace.
 
+Issue-tracker addressing (ADR-0024): when `issue-tracker` is enabled, a step
+bullet or a `## Round <N> — <title>` heading may carry a trailing
+`[tracker: BDS-XX]` marker naming that node's tracker issue — `wip sync` then
+surfaces and pushes its lifecycle forward. A `### Lane` heading takes NO tracker
+key: a lane is a grouping, not a lifecycle node (ADR-0010), so it is never a
+tracker node. The initiative-level anchor is NOT authored here — it is captured
+at `/wip:intake` (`--anchor <ID>` or the brief `tracker-anchor:` front-matter
+key) and persisted to `.wip.yaml` as the `initiative` node.
+
 - **step-02 — shared prereq** — must land before either lane.
 
 ### Lane A
