@@ -207,4 +207,83 @@ assert_eq "true" "$(jq -r '.ok' <<<"$out")" "dry-run ok"
 assert_absent "$tmp-dry/.wip/initiatives/ephemeral/BRIEF.md" "dry-run wrote no BRIEF"
 rm -rf "$tmp-dry"
 
+# 10. brief apply --anchor flag persists tracker_anchor on the record (ADR-0024).
+cat >"$tmp/anchor-flag.md" <<'MD'
+---
+slug: anchored-flag
+---
+# Anchored Flag
+
+## Goal
+
+Persist an anchor via the CLI flag.
+MD
+out="$(run "$tmp/anchor-flag.md" --kind brief --anchor BDS-56)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "anchor-flag ok"
+assert_eq "BDS-56" "$(yq -r '.initiatives[] | select(.slug=="anchored-flag") | .tracker_anchor' "$tmp/.wip.yaml")" "anchor flag persisted"
+
+# 11. shaped front-matter tracker-anchor: key is honored when no flag is passed.
+cat >"$tmp/anchor-fm.md" <<'MD'
+---
+slug: anchored-fm
+tracker-anchor: BDS-77
+---
+# Anchored FM
+
+## Goal
+
+Persist an anchor via front-matter.
+MD
+out="$(run "$tmp/anchor-fm.md" --kind brief)"
+assert_eq "BDS-77" "$(yq -r '.initiatives[] | select(.slug=="anchored-fm") | .tracker_anchor' "$tmp/.wip.yaml")" "front-matter anchor persisted"
+
+# 12. flag wins over front-matter.
+cat >"$tmp/anchor-both.md" <<'MD'
+---
+slug: anchored-both
+tracker-anchor: BDS-11
+---
+# Anchored Both
+
+## Goal
+
+Flag should win.
+MD
+out="$(run "$tmp/anchor-both.md" --kind brief --anchor BDS-22)"
+assert_eq "BDS-22" "$(yq -r '.initiatives[] | select(.slug=="anchored-both") | .tracker_anchor' "$tmp/.wip.yaml")" "flag wins over front-matter"
+
+# 13. neither flag nor front-matter -> no tracker_anchor field (back-compat); a
+#     brief that omits the key still validates and applies.
+cat >"$tmp/anchor-none.md" <<'MD'
+---
+slug: anchored-none
+---
+# Anchored None
+
+## Goal
+
+No anchor at all.
+MD
+out="$(run "$tmp/anchor-none.md" --kind brief)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out")" "no-anchor brief still applies"
+assert_eq "false" "$(yq -o=json '.initiatives[] | select(.slug=="anchored-none") | has("tracker_anchor")' "$tmp/.wip.yaml")" "no anchor -> no field"
+
+# 14. a malformed front-matter anchor fails at apply (init is the single gate).
+cat >"$tmp/anchor-bad.md" <<'MD'
+---
+slug: anchored-bad
+tracker-anchor: not-an-id
+---
+# Anchored Bad
+
+## Goal
+
+Bad anchor shape.
+MD
+set +e
+run "$tmp/anchor-bad.md" --kind brief >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "malformed front-matter anchor exit 2"
+
 test_summary

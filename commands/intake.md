@@ -1,6 +1,6 @@
 ---
 description: Shape an inbound plan file into the canonical wip kind and apply it.
-argument-hint: "<file> [--kind <k>] [--target <slug|slug/step>]"
+argument-hint: "<file> [--kind <k>] [--target <slug|slug/step>] [--anchor <ID>]"
 allowed-tools: [Bash, Read, Write, Edit]
 ---
 
@@ -42,8 +42,10 @@ authoritative until `apply` returns or the flow errors out.
    resolver if a later step starts in a fresh shell.
 
 2. **Parse `$ARGUMENTS`.** Extract the positional `<file>` plus optional
-   `--kind <k>` and `--target <t>`. `<file>` is required; if missing,
-   stop and ask the user which file to shape.
+   `--kind <k>`, `--target <t>`, and `--anchor <ID>`. `<file>` is required;
+   if missing, stop and ask the user which file to shape. `--anchor <ID>` is
+   the durable initiative→source-issue link (ADR-0024); it applies to a
+   `brief` only and forwards to `intake apply --anchor` in step 9.
 
 3. **Classify (plumbing).** Run `"$WIP" intake classify <file>`.
    On exit ≠ 0, surface the error envelope verbatim and stop.
@@ -70,8 +72,15 @@ authoritative until `apply` returns or the flow errors out.
 
 6. **Shape.** Read the inbound file (Read tool). Rewrite it into a
    tempfile per the shape rules. Use `mktemp -t wip-intake.XXXXXX.md`
-   for the path (then Write to it). If a required field is missing and
-   you cannot confidently infer it from the artifact:
+   for the path (then Write to it). For a `brief`, also fill the optional
+   `tracker-anchor: <ID>` front-matter key (ADR-0024) — the durable
+   source-issue anchor: take it from an explicit `--anchor <ID>`, else the
+   source issue the plan came from (e.g. a Linear id named in the artifact),
+   else ASK the user once ("Which issue anchors this initiative? (or none)")
+   and omit the key if they say none. For a **bundle** the anchor is the
+   lead/epic issue if one exists, else the primary source issue (per-child
+   issues ride their own step/round `[tracker:]` keys). If a required field
+   is missing and you cannot confidently infer it from the artifact:
    - Ask the user ONE short clarifying question inline in this chat.
    - Wait for the answer.
    - Incorporate the answer and re-shape.
@@ -89,7 +98,10 @@ authoritative until `apply` returns or the flow errors out.
    - User-supplied `--target` wins.
    - For `brief`: derive slug from shaped front-matter `slug:` or the
      H1; confirm with the user in chat ("New initiative `<slug>` — go
-     ahead?") before applying.
+     ahead?") before applying. Carry the anchor through: a `--anchor <ID>`
+     on the command line wins; otherwise `apply` reads the shaped
+     `tracker-anchor:` front-matter key (step 6). Pass `--anchor <ID>` to
+     the apply call in step 9 when it came from the command line.
    - For `amendment`: read `target:` + the directive
      (`insert-after`/`replace`/`append-round`) from the shaped
      front-matter. Validate has already enforced their presence; no
@@ -126,7 +138,7 @@ authoritative until `apply` returns or the flow errors out.
      is safe via the amendment hash markers.
 
 9. **Apply (plumbing).** Run
-   `"$WIP" intake apply --kind <k> [--target <t>] <tempfile>`.
+   `"$WIP" intake apply --kind <k> [--target <t>] [--anchor <ID>] <tempfile>`.
    Echo the resulting write ledger (the JSON output) in a code block,
    plus a one-line prose summary like "amended distillation/roadmap.md:
    insert-after step-06". On exit-4 from apply, report the envelope

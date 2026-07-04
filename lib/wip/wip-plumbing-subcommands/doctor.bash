@@ -247,6 +247,35 @@ wip_plumbing_cmd_doctor() {
     done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
+  # 2h. Missing tracker anchor (ADR-0024 / D7). An initiative captured before the
+  #     anchor field existed — or via an intake that ran without `--anchor` — has
+  #     no durable initiative→source-issue link (`.wip.yaml tracker_anchor`).
+  #     Surface it as an INFORMATIONAL suggestion, modeled on §2f (tracker-unfiled),
+  #     NOT §2d (mirror-drift): status stays "ok", so doctor never fails / exits 4
+  #     just because a pre-existing initiative predates the anchor. Retrofitting
+  #     anchors fleet-wide must not turn every anchor-less repo red on the day the
+  #     feature lands; harden to real drift in a follow-on once anchors are
+  #     backfilled (Open Q3). Scoped to enabled + in-flight/proposed initiatives,
+  #     mirroring every other doctor tracker check.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local arec aslug astatus aanchor
+    while IFS= read -r arec; do
+      [[ -n "$arec" ]] || continue
+      aslug="$(jq -r '.slug // ""' <<<"$arec")"
+      [[ -n "$aslug" ]] || continue
+      astatus="$(jq -r '.status // ""' <<<"$arec")"
+      [[ "$astatus" == "shipped" || "$astatus" == "archived" ]] && continue
+      aanchor="$(jq -r '.tracker_anchor // ""' <<<"$arec")"
+      [[ -n "$aanchor" ]] && continue
+      obj="$(jq -nc --arg slug "$aslug" \
+        --arg fix "re-run intake with --anchor <ID>, or add a tracker-anchor: <ID> BRIEF front-matter key and wip init --tracker-anchor" \
+        '{kind:"tracker-anchor", slug:$slug, status:"ok",
+          message:"initiative has no tracker_anchor (durable source-issue link); suggestion, never auto-set",
+          fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+  fi
+
   # 2g. Orchestration legacy-footprint (pure-disk; ADR-0020 migration path / D8).
   #     Detect the OLD plugin-tree `setup agents` footprint a pre-flatten install
   #     left at $root (the 16-file write set: root `.claude-plugin/*`, `agents/*`,

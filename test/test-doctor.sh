@@ -129,4 +129,40 @@ set -e
 assert_eq "0" "$(jq -r '[.checks[]|select(.kind=="orchestration" and .status=="legacy-footprint")]|length' <<<"$lf_out4")" \
   "[legacy] quiet on fresh flattened repo"
 
+# --- Missing tracker anchor (ADR-0024 / D7) ---------------------------------
+# An enabled + in-flight initiative with no tracker_anchor gets an INFORMATIONAL
+# tracker-anchor check (status:"ok"), which must NOT flip ok:false / exit 4.
+anc="$tmp/anchor"
+mkdir -p "$anc/.wip/initiatives/demo"
+cat >"$anc/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip }, issue-tracker: { enabled: true, backend: linear } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+printf '# Roadmap — demo\n\n## Round 1 — One\n\n- **step-01 — First** — x.\n' \
+  >"$anc/.wip/initiatives/demo/roadmap.md"
+set +e
+anc_out="$(WIP_ROOT="$anc" bin/wip-plumbing doctor)"
+anc_rc=$?
+set -e
+assert_eq "0" "$anc_rc" "[anchor] doctor stays exit 0 (suggestion is not drift)"
+anc_chk="$(jq -c '.checks[]|select(.kind=="tracker-anchor")' <<<"$anc_out")"
+assert_eq "ok" "$(jq -r '.status' <<<"$anc_chk")" "[anchor] tracker-anchor status ok"
+assert_eq "demo" "$(jq -r '.slug' <<<"$anc_chk")" "[anchor] names the anchor-less slug"
+assert_eq "0" "$(jq -r '.drift_count' <<<"$anc_out")" "[anchor] does not raise drift_count"
+
+# With an anchor present -> no tracker-anchor check.
+yq -i '.initiatives[0].tracker_anchor = "BDS-56"' "$anc/.wip.yaml"
+assert_eq "0" "$(WIP_ROOT="$anc" bin/wip-plumbing doctor 2>/dev/null | jq '[.checks[]|select(.kind=="tracker-anchor")]|length')" \
+  "[anchor] silent once tracker_anchor is set"
+
+# issue-tracker disabled -> no tracker-anchor check even when anchor-less.
+yq -i 'del(.initiatives[0].tracker_anchor) | del(.features."issue-tracker")' "$anc/.wip.yaml"
+assert_eq "0" "$(WIP_ROOT="$anc" bin/wip-plumbing doctor 2>/dev/null | jq '[.checks[]|select(.kind=="tracker-anchor")]|length')" \
+  "[anchor] silent when issue-tracker disabled"
+
 test_summary

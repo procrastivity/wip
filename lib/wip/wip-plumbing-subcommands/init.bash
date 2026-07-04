@@ -3,9 +3,18 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_init() {
-  local slug="" title="" intake="ad-hoc" brief_body=""
+  local slug="" title="" intake="ad-hoc" brief_body="" tracker_anchor=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --tracker-anchor)
+        [[ $# -ge 2 ]] || wip_die 2 usage "init: --tracker-anchor requires an argument"
+        tracker_anchor="$2"
+        shift 2
+        ;;
+      --tracker-anchor=*)
+        tracker_anchor="${1#--tracker-anchor=}"
+        shift
+        ;;
       --title)
         [[ $# -ge 2 ]] || wip_die 2 usage "init: --title requires an argument"
         title="$2"
@@ -50,6 +59,13 @@ wip_plumbing_cmd_init() {
     *) wip_die 2 usage "init: --intake must be ad-hoc or structured" ;;
   esac
 
+  # A tracker anchor is the durable initiative→source-issue link (ADR-0024 / D6).
+  # Validate its lexical shape up front (single gate; intake-apply forwards here),
+  # reusing the canonical tracker-id shape from _wip_tracker_id_valid.
+  if [[ -n "$tracker_anchor" ]] && ! _wip_tracker_id_valid "$tracker_anchor"; then
+    wip_die 2 usage "init: --tracker-anchor must be a tracker id (e.g. BDS-56): $tracker_anchor"
+  fi
+
   local templates_dir
   templates_dir="$(_wip_init_templates_dir)" ||
     wip_die 1 internal "init: templates/ directory not found"
@@ -57,6 +73,8 @@ wip_plumbing_cmd_init() {
   if [[ -z "$slug" ]]; then
     [[ -z "$brief_body" ]] ||
       wip_die 2 usage "init: --brief-body requires a <slug> (initiative-level)"
+    [[ -z "$tracker_anchor" ]] ||
+      wip_die 2 usage "init: --tracker-anchor requires a <slug> (initiative-level)"
     _wip_init_repo "$templates_dir"
   else
     _wip_init_validate_slug "$slug"
@@ -64,7 +82,7 @@ wip_plumbing_cmd_init() {
       [[ -f "$brief_body" && -r "$brief_body" ]] ||
         wip_die 2 not-found "init: --brief-body file not readable: $brief_body"
     fi
-    _wip_init_initiative "$templates_dir" "$slug" "$title" "$intake" "$brief_body"
+    _wip_init_initiative "$templates_dir" "$slug" "$title" "$intake" "$brief_body" "$tracker_anchor"
   fi
 }
 
@@ -241,7 +259,7 @@ _wip_init_relpaths() {
 # Initiative-level scaffold: ensure manifest, then scaffold the initiative
 # directory and append a registry entry.
 _wip_init_initiative() {
-  local templates_dir="$1" slug="$2" title="$3" intake="$4" brief_body="${5:-}"
+  local templates_dir="$1" slug="$2" title="$3" intake="$4" brief_body="${5:-}" tracker_anchor="${6:-}"
   [[ -n "$title" ]] || title="$(_wip_init_humanize "$slug")"
 
   local target
@@ -280,7 +298,7 @@ _wip_init_initiative() {
     wrote skipped "slug=$slug" "title=$title" "date=$date"
 
   if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
-    _wip_init_append_initiative "$target/.wip.yaml" "$slug" "$title" "$intake" ||
+    _wip_init_append_initiative "$target/.wip.yaml" "$slug" "$title" "$intake" "$tracker_anchor" ||
       wip_die 1 internal "init: failed to update manifest"
     manifest_updated=".wip.yaml"
   else
@@ -302,7 +320,7 @@ _wip_init_initiative() {
 }
 
 _wip_init_append_initiative() {
-  local manifest="$1" slug="$2" title="$3" intake="$4"
+  local manifest="$1" slug="$2" title="$3" intake="$4" tracker_anchor="${5:-}"
   local brief=".wip/initiatives/$slug/BRIEF.md"
   local roadmap=".wip/initiatives/$slug/roadmap.md"
 
@@ -322,6 +340,17 @@ _wip_init_append_initiative() {
         "roadmap": strenv(ROADMAP)
       }])
     ' "$manifest" || return 1
+
+  # The record carries a top-level `tracker_anchor` ONLY when captured at intake
+  # (ADR-0024 / D3): it is intake-anchored, NOT roadmap-authored, so it is a
+  # sibling of `tracker_map` (never inside it — preserving ADR-0019 §C's "roadmap
+  # is SoT for tracker_map"). Written as a separate conditional set on the record
+  # just appended (`.initiatives[-1]`) so the field is simply ABSENT when no anchor
+  # is supplied (back-compat) — no empty-string key on legacy inits.
+  if [[ -n "$tracker_anchor" ]]; then
+    ANCHOR="$tracker_anchor" \
+      yq -i '.initiatives[-1].tracker_anchor = strenv(ANCHOR)' "$manifest" || return 1
+  fi
 
   if [[ "$pre_count" == "0" && -z "$pre_current" ]]; then
     SLUG="$slug" yq -i '.current_initiative = strenv(SLUG)' "$manifest" || return 1

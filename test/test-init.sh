@@ -121,4 +121,32 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "--brief-body missing file exit 2"
 
+# 13. --tracker-anchor persists a top-level tracker_anchor on the record
+#     (ADR-0024 / D3); the field is a sibling of tracker_map, never inside it.
+mkdir -p "$tmp/h"
+WIP_ROOT="$tmp/h" bin/wip-plumbing init anchored --title Anchored --tracker-anchor BDS-56 >/dev/null
+assert_eq "BDS-56" "$(yq -r '.initiatives[] | select(.slug=="anchored") | .tracker_anchor' "$tmp/h/.wip.yaml")" "tracker_anchor persisted"
+assert_eq "null" "$(yq -o=json '.initiatives[] | select(.slug=="anchored") | .tracker_map' "$tmp/h/.wip.yaml")" "anchor is NOT inside tracker_map"
+
+# 14. no --tracker-anchor -> field absent (back-compat).
+WIP_ROOT="$tmp/h" bin/wip-plumbing init plain --title Plain >/dev/null
+assert_eq "false" "$(yq -o=json '.initiatives[] | select(.slug=="plain") | has("tracker_anchor")' "$tmp/h/.wip.yaml")" "no anchor -> no field"
+
+# 15. malformed anchor shape exits 2 (validated against [A-Z][A-Z0-9]*-[0-9]+).
+for bad in "bds-56" "BDS56" "BDS-" "not-an-id"; do
+  set +e
+  WIP_ROOT="$tmp/h" bin/wip-plumbing init "bad-$RANDOM" --tracker-anchor "$bad" >/dev/null 2>&1
+  rc=$?
+  set -e
+  assert_eq "2" "$rc" "bad anchor '$bad' exit 2"
+done
+
+# 16. --tracker-anchor without a slug (repo-level) exits 2.
+mkdir -p "$tmp/i"
+set +e
+WIP_ROOT="$tmp/i" bin/wip-plumbing init --tracker-anchor BDS-1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "--tracker-anchor without slug exit 2"
+
 test_summary

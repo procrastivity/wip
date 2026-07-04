@@ -107,7 +107,7 @@ _wip_intake_cmd_validate() {
 }
 
 _wip_intake_cmd_apply() {
-  local file="" kind="" target=""
+  local file="" kind="" target="" anchor=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --kind)
@@ -117,6 +117,15 @@ _wip_intake_cmd_apply() {
         ;;
       --kind=*)
         kind="${1#--kind=}"
+        shift
+        ;;
+      --anchor)
+        [[ $# -ge 2 ]] || wip_die 2 usage "intake apply: --anchor requires an argument"
+        anchor="$2"
+        shift 2
+        ;;
+      --anchor=*)
+        anchor="${1#--anchor=}"
         shift
         ;;
       --target)
@@ -156,7 +165,7 @@ _wip_intake_cmd_apply() {
   fi
 
   case "$kind" in
-    brief) _wip_intake_apply_brief "$file" ;;
+    brief) _wip_intake_apply_brief "$file" "$anchor" ;;
     amendment) _wip_intake_apply_amendment "$file" "$target" ;;
     workplan-seed) _wip_intake_apply_workplan_seed "$file" "$target" ;;
     spec)
@@ -173,12 +182,19 @@ _wip_intake_cmd_apply() {
 }
 
 _wip_intake_apply_brief() {
-  local file="$1"
-  local slug h1
+  local file="$1" cli_anchor="${2:-}"
+  local slug h1 fm anchor
   slug="$(wip_intake_derive_slug "$file")"
   [[ -n "$slug" ]] || wip_die 4 bad-slug "intake apply: could not derive slug from $file" "$file"
 
   h1="$(wip_intake_read_h1 "$file")"
+
+  # Tracker anchor (ADR-0024 / D6): the CLI `--anchor` flag wins; otherwise fall
+  # back to the shaped brief's optional `tracker-anchor:` front-matter key. Either
+  # forwards to `init --tracker-anchor`, which is the single shape-validation gate.
+  fm="$(wip_intake_read_front_matter "$file")"
+  anchor="$cli_anchor"
+  [[ -n "$anchor" ]] || anchor="$(_wip_intake_fm_str "$fm" "tracker-anchor")"
 
   # Source init.bash so its function is in scope.
   # shellcheck disable=SC1091
@@ -187,13 +203,14 @@ _wip_intake_apply_brief() {
   # Persist the shaped artifact as the brief body (not just slug + title) — the
   # shape phase already validated it; apply should capture the plan, not an
   # empty skeleton.
+  local -a init_args=("$slug")
+  [[ -n "$h1" ]] && init_args+=(--title "$h1")
+  init_args+=(--brief-body "$file")
+  [[ -n "$anchor" ]] && init_args+=(--tracker-anchor "$anchor")
+
   local ledger rc
   set +e
-  if [[ -n "$h1" ]]; then
-    ledger="$(wip_plumbing_cmd_init "$slug" --title "$h1" --brief-body "$file")"
-  else
-    ledger="$(wip_plumbing_cmd_init "$slug" --brief-body "$file")"
-  fi
+  ledger="$(wip_plumbing_cmd_init "${init_args[@]}")"
   rc=$?
   set -e
 
