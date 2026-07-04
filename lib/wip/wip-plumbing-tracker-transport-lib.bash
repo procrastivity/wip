@@ -63,14 +63,29 @@ _wip_tracker_provider_to_semantic() {
 # _wip_tracker_bind_plan <root> <mj> <slug> [<node>] — echo a JSON array of bind
 # plans, one per mapped node (or just <node> when given). Each:
 #   {node, issue, semantic_state, target_state}
-# issue comes from the `.wip.yaml` tracker_map mirror; semantic_state from the
-# cache floor (null when no cache entry); target_state from the provider mapping.
-# Nodes without a tracker mapping are skipped.
+# issue comes from the `.wip.yaml` tracker_map mirror (steps + rounds, ADR-0024)
+# UNIONED with the intake-anchored `initiative` node (see below); semantic_state
+# from the cache floor (null when no cache entry); target_state from the provider
+# mapping. Nodes without a tracker mapping are skipped.
 _wip_tracker_bind_plan() {
   local root="$1" mj="$2" slug="$3" only="${4:-}"
-  local backend mirror cache
+  local backend mirror cache anchor
   backend="$(jq -r '.features["issue-tracker"].backend // ""' <<<"$mj")"
   mirror="$(_wip_tracker_map_from_manifest "$mj" "$slug")"
+  # Union the intake-anchored initiative node (ADR-0024 §D3). `tracker_anchor` is a
+  # top-level initiative field — a SIBLING of tracker_map, NOT part of the
+  # roadmap-derived mirror — with intake as its source of truth, so it is
+  # deliberately absent from the `rmap == mmap` mirror-drift equality gate (in
+  # sync / tracker map). We fold it in HERE, downstream of that gate, as node
+  # `initiative` so sync / tracker bind surface and push-forward all three levels
+  # (step / round / initiative). The anchor wins the `initiative` key on the
+  # (structurally impossible) collision — the roadmap harvest only ever yields
+  # `step-NN` / `round-N` keys.
+  anchor="$(jq -r --arg s "$slug" \
+    '[.initiatives[]? | select(.slug == $s)] | (.[0].tracker_anchor // "")' <<<"$mj")"
+  if [[ -n "$anchor" ]]; then
+    mirror="$(jq -c --arg a "$anchor" '. + { initiative: $a }' <<<"$mirror")"
+  fi
   cache="$(_wip_tracker_cache_read "$root")"
 
   local out="[]" node issue sem target entry

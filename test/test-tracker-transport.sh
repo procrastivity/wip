@@ -75,6 +75,47 @@ assert_eq "demo/step-01" "$(jq -r '.bindings[0].node' <<<"$bn")" "bind --node se
 bc="$(WIP_ROOT="$tmp" WIP_LINEAR_WRITE_CMD='true' $WIP tracker bind)"
 assert_eq "cli" "$(jq -r '.transport' <<<"$bc")" "wired write seam -> transport cli"
 
+# --- initiative anchor unions into the bind plan (ADR-0024 §D3) --------------
+# The intake `tracker_anchor` is a top-level initiative field (sibling of
+# tracker_map, NOT harvested from the roadmap); the bind plan folds it in as the
+# `initiative` node so all three levels (step / round / initiative) surface. A
+# cache entry seeded at the init/intake boundary gives the node a target_state.
+anc="$(wip_mktemp)"
+mkdir -p "$anc/.wip/initiatives/demo"
+cat >"$anc/.wip.yaml" <<'YAML'
+version: 1
+features: { wip: { enabled: true, root: .wip }, issue-tracker: { enabled: true, backend: linear } }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    tracker_anchor: BDS-56
+    tracker_map: { step-01: BDS-90, round-1: BDS-100 }
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+printf '# Roadmap — demo\n\n## Round 1 — One [tracker: BDS-100]\n\n- **step-01 — First** — x. [tracker: BDS-90]\n' \
+  >"$anc/.wip/initiatives/demo/roadmap.md"
+# Seed the initiative-start cache entry (the boundary emission from Chunk 2).
+_wip_tracker_cache_set "$anc" "demo/initiative" "in-progress" "start" "2026-07-04" >/dev/null
+
+ab="$(WIP_ROOT="$anc" $WIP tracker bind)"
+assert_eq "3" "$(jq -r '.bindings | length' <<<"$ab")" "bind: step + round + initiative all surface"
+assert_eq "BDS-56" "$(jq -r '.bindings[] | select(.node=="demo/initiative") | .issue' <<<"$ab")" \
+  "bind: initiative node issue comes from the anchor"
+assert_eq "In Progress" "$(jq -r '.bindings[] | select(.node=="demo/initiative") | .target_state' <<<"$ab")" \
+  "bind: seeded initiative-start -> In Progress target"
+assert_eq "BDS-100" "$(jq -r '.bindings[] | select(.node=="demo/round-1") | .issue' <<<"$ab")" \
+  "bind: round-1 node surfaces from the mirror"
+# --node initiative filters to just the anchor node.
+abn="$(WIP_ROOT="$anc" $WIP tracker bind --node initiative)"
+assert_eq "1" "$(jq -r '.bindings | length' <<<"$abn")" "bind --node initiative filters to one"
+assert_eq "demo/initiative" "$(jq -r '.bindings[0].node' <<<"$abn")" \
+  "bind --node initiative selects the anchor node"
+# Absent anchor -> no initiative node (back-compat with pre-anchor initiatives).
+noa="$(WIP_ROOT="$tmp" $WIP tracker bind)"
+assert_eq "0" "$(jq -r '[.bindings[] | select(.node=="demo/initiative")] | length' <<<"$noa")" \
+  "bind: no anchor -> no initiative node"
+
 # --- error envelopes --------------------------------------------------------
 set +e
 WIP_ROOT="$tmp" $WIP tracker bind --initiative nope >/dev/null 2>&1
