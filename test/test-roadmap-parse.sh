@@ -236,4 +236,51 @@ assert_eq "2026-06-16" "$(jq -r '.rounds[0].steps[0].shipped_date' <<<"$bb")" "b
 assert_eq "Vertical spine" "$(jq -r '.rounds[0].steps[1].title' <<<"$bb")" "bold-body: unshipped step title clean despite body bold"
 assert_eq "false" "$(jq -r '.rounds[0].steps[1].shipped' <<<"$bb")" "bold-body: unshipped step not shipped"
 
+# --- Round-level tracker key + lane exclusion (ADR-0024 / D1–D3) --------------
+# A `## Round N — title [tracker: ID]` heading yields rounds[].tracker; the key
+# is stripped from the title; a shipped marker co-occurring parses too. A
+# `[tracker:]` on a `### Lane` heading is IGNORED (lane exclusion) — no tracker
+# is recorded and the lane name stays clean.
+cat >"$tmp/round-tracker.md" <<'MD'
+# Roadmap — round tracker fixture
+
+## Round 1 — Foundations [tracker: BDS-99]
+
+- **step-01 — Groundwork** — body. [tracker: BDS-01]
+
+### Lane A [tracker: BDS-98]
+- **step-02 — Track A** — parallel work.
+
+## Round 2 — Shipped round [tracker: BDS-77] ✅ shipped 2026-06-30
+
+- **step-03 — Tail** — body.
+
+## Round 3 — Plain round
+
+- **step-04 — Nothing here** — body.
+MD
+rt="$(wip_roadmap_parse "$tmp/round-tracker.md")"
+
+# Round carries the tracker; title is clean (bracket stripped).
+assert_eq "BDS-99" "$(jq -r '.rounds[0].tracker' <<<"$rt")" "round-1 tracker parsed"
+assert_eq "Foundations" "$(jq -r '.rounds[0].title' <<<"$rt")" "round-1 title clean (tracker stripped)"
+# Round-level tracker does not bleed into the step's own tracker (still authored).
+assert_eq "BDS-01" "$(jq -r '.rounds[0].steps[0].tracker' <<<"$rt")" "step-01 keeps its own tracker"
+
+# Lane exclusion (D1): the `### Lane A [tracker: BDS-98]` heading records NO
+# tracker anywhere and the lane name is clean ("A", not "A [tracker: BDS-98]").
+assert_eq '["A"]' "$(jq -c '.rounds[0].lanes' <<<"$rt")" "lane name clean (tracker key stripped, not harvested)"
+assert_eq "0" "$(jq '[.. | objects | select(has("tracker")) | .tracker | select(. == "BDS-98")] | length' <<<"$rt")" "lane tracker BDS-98 harvested nowhere"
+
+# Shipped marker + tracker co-occur on a round heading: both parse, title clean.
+assert_eq "BDS-77" "$(jq -r '.rounds[1].tracker' <<<"$rt")" "round-2 tracker parsed alongside shipped"
+assert_eq "true" "$(jq -r '.rounds[1].shipped' <<<"$rt")" "round-2 shipped true"
+assert_eq "2026-06-30" "$(jq -r '.rounds[1].shipped_date' <<<"$rt")" "round-2 shipped_date parsed"
+assert_eq "Shipped round" "$(jq -r '.rounds[1].title' <<<"$rt")" "round-2 title clean (tracker + shipped stripped)"
+
+# A round with no tracker key -> tracker is null.
+assert_eq "null" "$(jq -r '.rounds[2].tracker' <<<"$rt")" "round-3 has no tracker"
+# No lane errors introduced by the tracker keys.
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$rt")" "round-tracker fixture: no lane errors"
+
 test_summary

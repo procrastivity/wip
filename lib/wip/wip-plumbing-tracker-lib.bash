@@ -16,11 +16,18 @@ _wip_tracker_id_valid() {
   [[ "$1" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]
 }
 
-# _wip_tracker_map_from_roadmap <roadmap-doc> — echo {step-id: tracker-id} for
-# every step carrying a `tracker` key, in roadmap order. `{}` when none.
+# _wip_tracker_map_from_roadmap <roadmap-doc> — echo {node-id: tracker-id} for
+# every addressable node carrying a `tracker` key, in roadmap order. `{}` when
+# none. Nodes are steps (`step-NN`) and rounds (`round-N`, ADR-0024 / D2): a round
+# heading's `[tracker: ID]` is unioned in ahead of its own steps. Lanes are
+# excluded by construction — the parser never records a lane tracker (ADR-0024 §D1).
 _wip_tracker_map_from_roadmap() {
   jq -c '
-    [ .rounds[].steps[] | select(.tracker != null) | {key: .id, value: .tracker} ]
+    [ .rounds[]
+      | ( [ select(.tracker != null) | {key: ("round-" + (.n | tostring)), value: .tracker} ]
+          + [ .steps[] | select(.tracker != null) | {key: .id, value: .tracker} ] )
+    ]
+    | (add // [])
     | from_entries
   ' <<<"$1"
 }

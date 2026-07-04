@@ -305,18 +305,47 @@ _wip_init_initiative() {
     [[ -z "$manifest_updated" ]] && manifest_updated=".wip.yaml"
   fi
 
+  # Tier-0 lifecycle — the initiative START boundary (ADR-0024 / ADR-0019 §A).
+  # `init`/intake-apply is the initiative's In-Progress *start*: when a
+  # `tracker_anchor` names the source issue AND issue-tracker is enabled, emit an
+  # {to:in-progress, reason:start} intent into the cache floor under the node key
+  # `<slug>/initiative` (ADR-0024 / D2). Headless — no transport, no forge; writing
+  # the cache IS the emission. Dry-run parity with `workplan init --activate`:
+  # under --dry-run the intent shape is echoed but the cache is never touched.
+  #
+  # DEFERRED (D4 / Open Q1, approved): the initiative-CLOSEOUT `done` auto-emitter
+  # is NOT built here. No initiative-closeout boundary writer exists yet (nothing
+  # writes initiatives[].status = shipped; ADR-0016 scoped round/initiative closeout
+  # out of `ship`), so there is no boundary to hang a `done` emission on. This step
+  # lands addressing + the START emission + sync push-forward; the `done` writers
+  # are the documented follow-on — NOT a silent skip.
+  local intent="null"
+  if [[ -n "$tracker_anchor" ]]; then
+    local emj
+    emj="$(wip_manifest_json "$target")"
+    if [[ -n "$emj" && "$(_wip_tracker_enabled "$emj")" == "true" ]]; then
+      if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+        intent="$(_wip_tracker_emit_intent "$target" "$slug" "initiative" "in-progress" "start" "$date")"
+      else
+        intent="$(jq -nc --arg n "$slug/initiative" '{node:$n, to:"in-progress", reason:"start"}')"
+      fi
+    fi
+  fi
+
   jq -nc \
     --arg slug "$slug" \
     --argjson wrote "$(_wip_init_relpaths "$target" "${wrote[@]+"${wrote[@]}"}")" \
     --argjson skipped "$(_wip_init_relpaths "$target" "${skipped[@]+"${skipped[@]}"}")" \
-    --arg manifest "$manifest_updated" '
+    --arg manifest "$manifest_updated" \
+    --argjson intent "$intent" '
     {
       ok: true,
       slug: $slug,
       wrote: $wrote,
       skipped_protected: $skipped,
       manifest_updated: (if $manifest == "" then null else $manifest end)
-    }'
+    }
+    + (if $intent != null then { intent: $intent } else {} end)'
 }
 
 _wip_init_append_initiative() {

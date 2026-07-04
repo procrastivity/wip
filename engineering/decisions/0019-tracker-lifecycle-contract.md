@@ -97,6 +97,12 @@ did). The suggestion surface (decision: Round 5) treats both **`Todo` and
   BDS-23.
 - **Round/lane auto-transition** — only step + initiative completion boundaries
   auto-fire at first; round/lane levels fall back to `sync`/manual with `doctor`
-  drift flagging until their boundaries land.
+  drift flagging until their boundaries land. **Resolved by
+  [ADR-0024](./0024-node-level-tracker-granularity.md)**: the granularity model is
+  boundary-local emission at {step, round, initiative} with **lane excluded**;
+  round nodes become roadmap-addressable and the initiative is intake-anchored.
+  ADR-0024 ships node addressing + the initiative-START emission and defers the
+  round-closer / initiative-closeout `done` writers (consistent with this bullet)
+  until their boundary commands land.
 - **Tier-1 push/merge → Done wiring** depends on BDS-22 merging; until then the
   Tier-0 `review complete` is the Done path.

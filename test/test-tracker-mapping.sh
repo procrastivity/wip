@@ -121,6 +121,61 @@ drcN=$?
 set -e
 assert_eq "0" "$drcN" "no tracker keys -> doctor clean (quiet)"
 
+# --- round-level tracker nodes + anchor stays out of the mirror (ADR-0024) --
+# A `## Round N — title [tracker: ID]` heading is an addressable node: the map
+# harvests a `round-N` entry alongside its steps; --write mirrors it; the
+# `tracker_anchor` (intake-anchored, D3) is NEVER folded into tracker_map.
+rnd="$(wip_mktemp)"
+mkdir -p "$rnd/.wip/initiatives/demo"
+cat >"$rnd/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  issue-tracker: { enabled: true, backend: linear }
+current_initiative: demo
+initiatives:
+  - slug: demo
+    status: in-flight
+    tracker_anchor: BDS-56
+    roadmap: .wip/initiatives/demo/roadmap.md
+YAML
+cat >"$rnd/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+## Round 1 — One [tracker: BDS-100]
+
+- **step-01 — First** — scoped. [tracker: BDS-90]
+- **step-02 — Second** — no mapping.
+
+## Round 2 — Two
+
+- **step-03 — Third** — scoped. [tracker: BDS-91]
+MD
+
+rmap="$(WIP_ROOT="$rnd" $WIP tracker map)"
+assert_eq "BDS-100" "$(jq -r '.tracker_map["round-1"]' <<<"$rmap")" "map harvests round-1 node"
+assert_eq "BDS-90" "$(jq -r '.tracker_map["step-01"]' <<<"$rmap")" "map still harvests step-01"
+assert_eq "BDS-91" "$(jq -r '.tracker_map["step-03"]' <<<"$rmap")" "map still harvests step-03"
+assert_eq "null" "$(jq -r '.tracker_map["round-2"]' <<<"$rmap")" "round-2 (no key) absent from map"
+# The intake anchor is NOT part of the roadmap-derived map.
+assert_eq "null" "$(jq -r '.tracker_map["initiative"]' <<<"$rmap")" "anchor not a tracker_map node"
+
+# --write mirrors the round node into .wip.yaml; anchor stays a sibling field.
+wmap="$(WIP_ROOT="$rnd" $WIP tracker map --write)"
+assert_eq "true" "$(jq -r '.agrees' <<<"$wmap")" "round-map write agrees"
+assert_eq "BDS-100" "$(SLUG=demo yq -r '.initiatives[0].tracker_map["round-1"]' "$rnd/.wip.yaml")" \
+  "write: round-1 persisted to mirror"
+assert_eq "BDS-56" "$(yq -r '.initiatives[0].tracker_anchor' "$rnd/.wip.yaml")" "anchor untouched by map --write"
+assert_eq "false" "$(yq -o=json '.initiatives[0].tracker_map | has("initiative")' "$rnd/.wip.yaml")" \
+  "anchor NOT written into tracker_map"
+
+# doctor agrees after mirroring the round node (no drift from the round entry).
+set +e
+WIP_ROOT="$rnd" $WIP doctor >/dev/null 2>&1
+rdrc=$?
+set -e
+assert_eq "0" "$rdrc" "doctor clean after round node mirrored"
+
 # --- error envelopes --------------------------------------------------------
 set +e
 WIP_ROOT="$tmp" $WIP tracker >/dev/null 2>&1

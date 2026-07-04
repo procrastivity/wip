@@ -149,4 +149,52 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "--tracker-anchor without slug exit 2"
 
+# 17. Initiative START emission (ADR-0024 / D1–D2): with issue-tracker enabled AND
+#     an anchor, init seeds a `<slug>/initiative` in-progress cache entry and
+#     echoes the intent (parity with `workplan init --activate`).
+mkdir -p "$tmp/j/.wip"
+cat >"$tmp/j/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  issue-tracker: { enabled: true, backend: linear }
+YAML
+out17="$(WIP_ROOT="$tmp/j" bin/wip-plumbing init tracked --title Tracked --tracker-anchor BDS-56)"
+assert_eq "tracked/initiative" "$(jq -r '.intent.node' <<<"$out17")" "init emits initiative intent node"
+assert_eq "in-progress" "$(jq -r '.intent.to' <<<"$out17")" "init intent to=in-progress"
+assert_eq "start" "$(jq -r '.intent.reason' <<<"$out17")" "init intent reason=start"
+cache="$tmp/j/.wip/tracker-cache.json"
+assert_file "$cache" "tracker cache written"
+assert_eq "in-progress" "$(jq -r '.["tracked/initiative"].state' "$cache")" "cache seeds initiative in-progress"
+assert_eq "start" "$(jq -r '.["tracked/initiative"].reason' "$cache")" "cache reason=start"
+
+# 18. Emission gate: anchor present but issue-tracker DISABLED -> no intent, no cache.
+mkdir -p "$tmp/k/.wip"
+cat >"$tmp/k/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+YAML
+out18="$(WIP_ROOT="$tmp/k" bin/wip-plumbing init untracked --tracker-anchor BDS-56)"
+assert_eq "false" "$(jq -r 'has("intent")' <<<"$out18")" "issue-tracker disabled -> no intent"
+assert_absent "$tmp/k/.wip/tracker-cache.json" "issue-tracker disabled -> no cache"
+
+# 19. Emission gate: issue-tracker enabled but NO anchor -> no intent.
+out19="$(WIP_ROOT="$tmp/j" bin/wip-plumbing init noanchor)"
+assert_eq "false" "$(jq -r 'has("intent")' <<<"$out19")" "no anchor -> no intent"
+
+# 20. Dry-run parity: the intent shape is emitted but the cache is never written.
+mkdir -p "$tmp/l/.wip"
+cat >"$tmp/l/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  issue-tracker: { enabled: true, backend: linear }
+YAML
+out20="$(WIP_ROOT="$tmp/l" bin/wip-plumbing --dry-run init dryinit --tracker-anchor BDS-77)"
+assert_eq "dryinit/initiative" "$(jq -r '.intent.node' <<<"$out20")" "dry-run emits intent node"
+assert_eq "in-progress" "$(jq -r '.intent.to' <<<"$out20")" "dry-run intent to=in-progress"
+assert_eq "start" "$(jq -r '.intent.reason' <<<"$out20")" "dry-run intent reason=start"
+assert_absent "$tmp/l/.wip/tracker-cache.json" "dry-run writes no cache"
+
 test_summary

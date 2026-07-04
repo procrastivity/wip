@@ -56,14 +56,25 @@ wip_roadmap_parse() {
     if [[ "$line" =~ ^\#\#\ Round\ ([0-9]+)\ —\ (.+)$ ]]; then
       local n="${BASH_REMATCH[1]}"
       local rest="${BASH_REMATCH[2]}"
+      # A round heading may carry a `[tracker: ID]` key (ADR-0024 / D3): the round
+      # is an addressable lifecycle node (`round-N`). Extract the id, then strip the
+      # bracket so it never leaks into the round title — a step carries the key
+      # outside its bold `**…**` title, but a round title has no such delimiter, so
+      # it must be stripped here. Order-independent vs the ✅ shipped marker.
+      local rtrk
+      rtrk="$(_wip_roadmap_extract_tracker "$rest")"
+      if [[ "$rest" =~ (\[tracker:[[:space:]]*[A-Z][A-Z0-9]*-[0-9]+[[:space:]]*\]) ]]; then
+        rest="${rest/"${BASH_REMATCH[1]}"/}"
+      fi
       local shipped="false" shipped_date="" title="$rest"
       _wip_roadmap_extract_shipped "$rest" shipped shipped_date title
       doc="$(jq -c \
-        --argjson n "$n" --arg title "$title" \
+        --argjson n "$n" --arg title "$title" --arg trk "$rtrk" \
         --argjson shipped "$shipped" --arg shipped_date "$shipped_date" '
         .rounds += [{
           n: $n, title: $title, shipped: $shipped,
           shipped_date: (if $shipped_date == "" then null else $shipped_date end),
+          tracker: (if $trk == "" then null else $trk end),
           lanes: [], steps: []
         }]' <<<"$doc")"
       mode="round"
@@ -111,6 +122,15 @@ wip_roadmap_parse() {
           doc="$(jq -c '.lane_errors += [{kind:"nested-lane", round:.rounds[-1].n}]' <<<"$doc")"
         elif [[ "$line" =~ ^\#\#\#\ Lane\ (.+)$ ]]; then
           local lane_name="${BASH_REMATCH[1]}"
+          # Lane exclusion (ADR-0024 / D1, ADR-0010): a lane is a *grouping*, not a
+          # lifecycle-emitting node. A `[tracker: ID]` on a `### Lane` heading is
+          # deliberately IGNORED — strip it from the lane name (so it never pollutes
+          # the name) and never harvest a mapping for it, so an author can't wire a
+          # lane auto-transition by mistake. (A lane-level epic maps to its enclosing
+          # round or an out-of-band parent link, not an auto-transitioned wip node.)
+          if [[ "$lane_name" =~ (\[tracker:[[:space:]]*[A-Z][A-Z0-9]*-[0-9]+[[:space:]]*\]) ]]; then
+            lane_name="${lane_name/"${BASH_REMATCH[1]}"/}"
+          fi
           # Trim trailing whitespace from the lane name.
           lane_name="${lane_name%"${lane_name##*[![:space:]]}"}"
           doc="$(jq -c --arg lane "$lane_name" '
