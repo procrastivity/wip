@@ -14,6 +14,72 @@ source "$WIP_LIB/wip-plumbing-setup-lib.bash"
 # shellcheck source=lib/wip/wip-plumbing-flatten-lib.bash
 source "$WIP_LIB/wip-plumbing-flatten-lib.bash"
 
+# _wip_sha256 <file> — echo the lowercase hex sha256 of <file> (no trailing
+# newline, no filename). Prefers `sha256sum` (Linux/coreutils), falls back to
+# `shasum -a 256` (macOS) — the same cross-platform parity the rest of the repo
+# assumes. The provenance sidecar's `baseline_hash` (ADR-0023 D1) is this over
+# the bytes written at vendor time. Returns non-zero + a stderr diagnostic if no
+# sha256 tool is available or the hash fails.
+_wip_sha256() {
+  local f="$1" out
+  if command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum -- "$f")" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 -- "$f")" || return 1
+  else
+    printf 'wip-plumbing: setup agents: no sha256 tool found (need sha256sum or shasum)\n' >&2
+    return 1
+  fi
+  printf '%s' "${out%% *}"
+}
+
+# _wip_plugin_version — echo the installed wip plugin `.version` (ADR-0023 D1),
+# resolved through a fallback ladder so the stamp records a real version wherever
+# the vendor path runs, and `"unknown"` rather than failing the vendor if none
+# resolves:
+#   1. $CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json   [plugin runtime sets this]
+#   2. <resolved roles dir>/../.claude-plugin/plugin.json
+#      (the roles/ the renderer actually reads — its parent is the plugin/install
+#      root; also the test seam, where WIP_ROLES_DIR points at the repo's roles/)
+#   3. $WIP_LIB/../../.claude-plugin/plugin.json         [self-locating install]
+# The stamped version is later compared (sort -V) against a fresh read of this
+# same oracle to name the divergence DIRECTION (D2a: upstream-behind never
+# auto-syncs).
+_wip_plugin_version() {
+  local v manifest roles_dir
+  if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+    manifest="$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  if roles_dir="$(_wip_flatten_roles_dir 2>/dev/null)" && [[ -n "$roles_dir" ]]; then
+    manifest="$roles_dir/../.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  if [[ -n "${WIP_LIB:-}" ]]; then
+    manifest="$WIP_LIB/../../.claude-plugin/plugin.json"
+    if [[ -f "$manifest" ]]; then
+      v="$(jq -r '.version // ""' "$manifest" 2>/dev/null || printf '')"
+      [[ -n "$v" ]] && {
+        printf '%s' "$v"
+        return 0
+      }
+    fi
+  fi
+  printf 'unknown'
+}
+
 wip_plumbing_cmd_setup() {
   local sub=""
   if [[ $# -gt 0 ]]; then
@@ -530,6 +596,89 @@ _wip_setup_agents_vendored() {
   done
 
   [[ "$saw_refused" -eq 0 ]] || return 4
+
+  # Provenance sidecar (ADR-0023 D1). Stamp AFTER the agent/command files land —
+  # one entry per file, `baseline_hash = sha256(the bytes just written)`. This is
+  # a SIDE artifact: it emits NO ledger line (no `wrote`/`skipped` TSV), so the
+  # install counts the caller aggregates stay exactly `4 + N`. Skipped under
+  # WIP_DRY_RUN (plan, write nothing) — including the migrate dry-run reuse, which
+  # calls this writer with WIP_DRY_RUN=1. A stamp failure maps to rc 5 (internal),
+  # mirroring the render/write failure contract above.
+  if [[ "${WIP_DRY_RUN:-0}" != "1" ]]; then
+    _wip_setup_agents_stamp_provenance "$root" "$td" "$backend" || {
+      printf 'wip-plumbing: setup agents: provenance stamp failed\n' >&2
+      return 5
+    }
+  fi
+  return 0
+}
+
+# _wip_setup_agents_stamp_provenance <root> <templates-dir> <backend> — write (or
+# refresh) the provenance sidecar `.claude/agents/wip/.provenance.json` (ADR-0023
+# D1) AFTER a successful vendored write. Re-derives the vendored file set exactly
+# as `_wip_setup_agents_vendored` does — the four fixed roles plus the command
+# GLOB (set-parity, never a hardcoded count) — and for each ON-DISK file records
+# `{path, kind, source_ref, plugin_version, baseline_hash, vendored_at}`:
+#   - source_ref: agent → `roles/<role>.md @ backend <b>`; command →
+#     `templates/setup/agents/commands/<name>.md` (the vendor input, D1).
+#   - baseline_hash: sha256 of the on-disk bytes (== bytes just written, whether
+#     the writer reported wrote / wrote_forced / skipped-idempotent).
+#   - plugin_version: `_wip_plugin_version` (the pivot for the D2a direction).
+#   - vendored_at: today's date, honoring the WIP_NOW test seam.
+# Envelope `{schema:1, files:[…]}`. Written atomically via a tmpfile + mv, so a
+# crash never leaves a half-written sidecar. The tmpfile is dot-prefixed and not
+# `*.md`, so it is never globbed as a subagent and is gitignore-safe like the
+# sidecar itself. Returns 0 on success; 5 on any hash/mkdir/mktemp/jq/mv failure.
+_wip_setup_agents_stamp_provenance() {
+  local root="$1" td="$2" backend="$3"
+  local pv when sidecar_dir sidecar
+  pv="$(_wip_plugin_version)"
+  when="${WIP_NOW:-$(date +%F)}"
+  sidecar_dir="$root/.claude/agents/wip"
+  sidecar="$sidecar_dir/.provenance.json"
+  mkdir -p -- "$sidecar_dir" || return 5
+
+  local files_json="[]"
+  local role rel dest h
+  for role in orchestrator coordinator researcher builder; do
+    rel=".claude/agents/wip/$role.md"
+    dest="$root/$rel"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 5
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$rel" --arg kind "agent" \
+      --arg ref "roles/$role.md @ backend $backend" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 5
+  done
+
+  local cmd_dir="$td/setup/agents/commands" cmd_tmpl name
+  for cmd_tmpl in "$cmd_dir"/*.md; do
+    [[ -e "$cmd_tmpl" ]] || continue # empty/absent glob → no commands to stamp
+    name="$(basename -- "$cmd_tmpl")"
+    rel=".claude/commands/wip/$name"
+    dest="$root/$rel"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 5
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$rel" --arg kind "command" \
+      --arg ref "templates/setup/agents/commands/$name" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 5
+  done
+
+  local tmp
+  tmp="$(mktemp -- "$sidecar.XXXXXX")" || return 5
+  if ! jq -nc --argjson files "$files_json" '{schema:1, files:$files}' >"$tmp"; then
+    rm -f -- "$tmp"
+    return 5
+  fi
+  mv -f -- "$tmp" "$sidecar" || {
+    rm -f -- "$tmp"
+    return 5
+  }
   return 0
 }
 

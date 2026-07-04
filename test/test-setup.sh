@@ -16,6 +16,17 @@ export WIP_NOW="2026-06-14"
 # via the documented seam — mirrors test-flatten-render.sh.
 export WIP_ROLES_DIR="$PWD/roles"
 
+# sha256_of <file> — hex sha256, mirroring lib's _wip_sha256 (sha256sum →
+# shasum -a 256 fallback). Used to independently verify the provenance sidecar's
+# baseline_hash entries (ADR-0023 C2).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  fi
+}
+
 # Canonical vendored command count, DERIVED from the template glob (step-06 /
 # ADR-0015 amend) — never hardcoded, so adding/removing a command can't silently
 # drift the install count without a corresponding template change. The four agent
@@ -148,6 +159,46 @@ assert_eq "$cmd_count" "$installed_cmds" \
 assert_eq "$cmd_count" \
   "$(find "$cmd_workdir/.claude/commands/wip" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" \
   "[agents commands] no extra files in .claude/commands/wip/"
+
+# --- 6a2. Provenance sidecar written on a vendored install (ADR-0023 C2) ------
+# A vendored `setup agents` now stamps .claude/agents/wip/.provenance.json AFTER
+# the files land: one entry per agent (4, fixed) + command (cmd_count, glob),
+# each recording path/kind/source_ref/plugin_version/baseline_hash/vendored_at.
+# The sidecar is a SIDE artifact (not in the write ledger — §5 already proved the
+# fresh agents install wrote exactly 4+cmd_count files, so it is uncounted).
+prov="$cmd_workdir/.claude/agents/wip/.provenance.json"
+assert_file "$prov" "[provenance] sidecar present after vendored install"
+if jq -e . "$prov" >/dev/null 2>&1; then
+  assert_eq "1" "1" "[provenance] sidecar is valid JSON"
+else
+  assert_eq "valid-json" "invalid-json" "[provenance] sidecar is valid JSON"
+fi
+assert_eq "4" "$(jq '[.files[] | select(.kind == "agent")] | length' "$prov")" \
+  "[provenance] 4 agent entries"
+assert_eq "$cmd_count" "$(jq '[.files[] | select(.kind == "command")] | length' "$prov")" \
+  "[provenance] cmd_count ($cmd_count) command entries"
+# Every baseline_hash equals the sha256 of its on-disk file.
+prov_hash_ok=1
+while IFS=$'\t' read -r ppath phash; do
+  [[ -n "$ppath" ]] || continue
+  [[ "$(sha256_of "$cmd_workdir/$ppath")" == "$phash" ]] || prov_hash_ok=0
+done < <(jq -r '.files[] | "\(.path)\t\(.baseline_hash)"' "$prov")
+assert_eq "1" "$prov_hash_ok" "[provenance] every baseline_hash == sha256(file)"
+# plugin_version is populated from the installed manifest (roles-dir parent seam),
+# derived — never asserted against a frozen literal — so a version bump can't
+# spuriously fail here.
+repo_pv="$(jq -r '.version' .claude-plugin/plugin.json)"
+assert_eq "$repo_pv" "$(jq -r '.files[0].plugin_version' "$prov")" \
+  "[provenance] plugin_version stamped from the installed manifest"
+# source_ref shape: an agent entry names roles/<role>.md @ backend <b>.
+assert_eq "roles/coordinator.md @ backend solo" \
+  "$(jq -r '.files[] | select(.path == ".claude/agents/wip/coordinator.md") | .source_ref' "$prov")" \
+  "[provenance] agent source_ref names the role + backend"
+# Idempotent re-run: the sidecar is byte-stable (WIP_NOW fixed, hashes stable).
+cp "$prov" "$tmp/prov-before"
+WIP_ROOT="$cmd_workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
+assert_cmp "$tmp/prov-before" "$prov" \
+  "[provenance] sidecar byte-stable on idempotent re-run"
 
 # --- 6b. setup agents --source plugin → vendors nothing (D-03.3) -------------
 # The plugin source mode writes zero files (agents resolve by the bare
