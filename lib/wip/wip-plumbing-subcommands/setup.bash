@@ -92,7 +92,7 @@ wip_plumbing_cmd_setup() {
     *) wip_die 2 usage "setup: unknown subcommand: $sub" ;;
   esac
 
-  local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0 status=0
+  local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0 status=0 sync=0
   # Config-echo verbs (ADR-0021): solo/forge/issue-tracker write only a .wip.yaml
   # feature stanza — no template files, no sentinel. Their verb-specific args.
   local force_tier="" fallback_tool="" tier_set=0 tracker_backend="" tracker_backend_set=0
@@ -118,6 +118,12 @@ wip_plumbing_cmd_setup() {
         [[ "$sub" == "agents" ]] ||
           wip_die 2 usage "setup $sub: --status is only valid for \`setup agents\`"
         status=1
+        shift
+        ;;
+      --sync)
+        [[ "$sub" == "agents" ]] ||
+          wip_die 2 usage "setup $sub: --sync is only valid for \`setup agents\`"
+        sync=1
         shift
         ;;
       --dry-run)
@@ -224,6 +230,15 @@ wip_plumbing_cmd_setup() {
   if [[ "$status" == "1" && ("$check" == "1" || "$migrate" == "1") ]]; then
     wip_die 2 usage "setup $sub: --status is read-only; do not combine it with --check or --migrate"
   fi
+  # --sync is the provenance actor; it stands alone (not with --check/--migrate/
+  # --status). --force / --dry-run are its own modifiers (parsed above), not a
+  # conflict.
+  if [[ "$sync" == "1" && ("$check" == "1" || "$migrate" == "1" || "$status" == "1") ]]; then
+    wip_die 2 usage "setup $sub: --sync must not be combined with --check, --migrate, or --status"
+  fi
+  if [[ "$sync" == "1" && "$source_set" == "1" ]]; then
+    wip_die 2 usage "setup $sub: --sync acts on the recorded vendored install, not --source; drop --source"
+  fi
   if [[ "$migrate" == "1" && "$source_set" == "1" ]]; then
     wip_die 2 usage "setup $sub: --migrate derives the end-state from the on-disk footprint, not --source; drop --source"
   fi
@@ -316,6 +331,24 @@ wip_plumbing_cmd_setup() {
       wip_die 1 internal "setup agents: --status render failed (see stderr for the offending role)"
     fi
     exit 0
+  fi
+
+  # Provenance actor (ADR-0023 D3): `setup agents --sync [--force] [--dry-run]`
+  # refreshes drifted vendored files per their two-axis state. Dispatched here
+  # (before the foreign-plugin guard) like --check/--status; it is source-gated on
+  # `vendored` internally and a genuinely-vendored repo carries no foreign root
+  # manifest, so the guard is moot. Returns 4 when it refused locally-modified
+  # files without --force; 5 (render/classifier failure) → internal.
+  if [[ "$sub" == "agents" && "$sync" == "1" ]]; then
+    local sync_rc
+    set +e
+    _wip_setup_agents_sync "$root" "$td"
+    sync_rc=$?
+    set -e
+    if [[ "$sync_rc" == "5" ]]; then
+      wip_die 1 internal "setup agents: --sync render failed (see stderr for the offending role)"
+    fi
+    exit "$sync_rc"
   fi
 
   # Migration actor (ADR-0020 migration path / D2–D6): `setup agents --migrate`
@@ -975,6 +1008,225 @@ _wip_setup_agents_status() {
        summary:{clean:$clean, upstream_advanced:$ua, locally_modified:$lm,
                 both_diverged:$both, unstamped:$uns, missing:$mis}}'
   fi
+  return 0
+}
+
+# _wip_setup_agents_sync_write <root> <templates-dir> <backend> <path> <kind> —
+# overwrite one vendored file with its upstream bytes: an agent is re-rendered
+# (`wip_flatten_render <role> <backend>`), a command is re-copied verbatim from
+# its template. Atomic (tmpfile + mv via `_wip_setup_copy_atomic`). A no-op under
+# WIP_DRY_RUN (plan only). Returns 0 on success, 1 on render/copy failure.
+_wip_setup_agents_sync_write() {
+  local root="$1" td="$2" backend="$3" path="$4" kind="$5"
+  local dest="$root/$path"
+  [[ "${WIP_DRY_RUN:-0}" == "1" ]] && return 0
+  if [[ "$kind" == "agent" ]]; then
+    local role="${path##*/}"
+    role="${role%.md}"
+    local tmp
+    tmp="$(mktemp)" || return 1
+    if ! wip_flatten_render "$role" "$backend" >"$tmp" 2>/dev/null; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    _wip_setup_copy_atomic "$tmp" "$dest" || {
+      rm -f -- "$tmp"
+      return 1
+    }
+    rm -f -- "$tmp"
+  else
+    local name="${path##*/}"
+    local tmpl="$td/setup/agents/commands/$name"
+    [[ -f "$tmpl" ]] || return 1
+    _wip_setup_copy_atomic "$tmpl" "$dest" || return 1
+  fi
+  return 0
+}
+
+# _wip_setup_agents_restamp_files <root> <templates-dir> <backend> <paths...> —
+# UPSERT the sidecar entries for exactly <paths...> (baseline_hash = sha256 of
+# their CURRENT on-disk bytes, plugin_version = installed, vendored_at = now),
+# PRESERVING every other existing entry verbatim. This targeted merge — never a
+# wholesale rewrite — is what keeps a skipped `upstream-behind` file's newer
+# stamped version intact across a `--sync` that touches its siblings (D2a). For
+# an `unstamped` file it establishes the baseline from the current bytes (no
+# overwrite); for a re-rendered file it records the fresh render's hash. Atomic
+# (tmpfile + mv). Returns 0 on success, 1 on any hash/jq/mv failure.
+_wip_setup_agents_restamp_files() {
+  local root="$1" td="$2" backend="$3"
+  shift 3
+  local sidecar="$root/.claude/agents/wip/.provenance.json"
+  local pv when files_json
+  pv="$(_wip_plugin_version)"
+  when="${WIP_NOW:-$(date +%F)}"
+  if [[ -f "$sidecar" ]]; then
+    files_json="$(jq -c '.files // []' "$sidecar" 2>/dev/null || printf '[]')"
+  else
+    files_json="[]"
+  fi
+  [[ -n "$files_json" ]] || files_json="[]"
+
+  local path dest kind ref role name h
+  for path in "$@"; do
+    dest="$root/$path"
+    [[ -f "$dest" ]] || continue
+    h="$(_wip_sha256 "$dest")" || return 1
+    case "$path" in
+      .claude/agents/wip/*)
+        kind="agent"
+        role="${path##*/}"
+        role="${role%.md}"
+        ref="roles/$role.md @ backend $backend"
+        ;;
+      .claude/commands/wip/*)
+        kind="command"
+        name="${path##*/}"
+        ref="templates/setup/agents/commands/$name"
+        ;;
+      *)
+        kind="unknown"
+        ref=""
+        ;;
+    esac
+    files_json="$(jq -c --arg p "$path" 'map(select(.path != $p))' <<<"$files_json")" || return 1
+    files_json="$(jq -nc --argjson a "$files_json" \
+      --arg path "$path" --arg kind "$kind" --arg ref "$ref" \
+      --arg pv "$pv" --arg bh "$h" --arg at "$when" \
+      '$a + [{path:$path, kind:$kind, source_ref:$ref,
+              plugin_version:$pv, baseline_hash:$bh, vendored_at:$at}]')" || return 1
+  done
+
+  local dir="$root/.claude/agents/wip" tmp
+  mkdir -p -- "$dir" || return 1
+  tmp="$(mktemp -- "$sidecar.XXXXXX")" || return 1
+  if ! jq -nc --argjson files "$files_json" '{schema:1, files:$files}' >"$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$sidecar" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  return 0
+}
+
+# _wip_setup_agents_sync <root> <templates-dir> — the `setup agents --sync
+# [--force] [--dry-run]` per-state actor (ADR-0023 D3, actions per D2). Runs the
+# shared classifier and acts on each vendored file:
+#   clean              → skip (skipped_clean)
+#   upstream-advanced  → re-render + overwrite + restamp (synced)
+#   upstream-behind    → SKIP with a version warning (skipped_regressive); NEVER
+#                        auto-sync — protects a forward-ported copy from regressing
+#   unstamped          → establish the baseline from current bytes + stamp (synced;
+#                        non-destructive — no overwrite)
+#   missing            → re-render/re-copy the gone file + stamp (synced)
+#   locally-modified / both-diverged →
+#       without --force → REFUSE (refused_local; the run exits 4)
+#       with --force    → back up `<file>.orig` (no git undo — gitignored), take
+#                         upstream, restamp (backed_up + synced)
+# Reuses `_wip_setup_agents_provenance_classify` (C3), `_wip_setup_agents_sync_write`,
+# and `_wip_setup_agents_restamp_files`. Honors WIP_DRY_RUN (plan; write nothing,
+# no restamp) and WIP_SETUP_FORCE (the --force gate). Source-gated on
+# `vendored`. Emits the D3 JSON ledger; returns 0, 4 (any refused_local), or 5
+# (internal classifier/render failure → caller maps to internal).
+_wip_setup_agents_sync() {
+  local root="$1" td="$2"
+  local verb="setup agents"
+  local dry="${WIP_DRY_RUN:-0}" force="${WIP_SETUP_FORCE:-0}"
+
+  local source_recorded
+  source_recorded="$(yq -r '.features.orchestration.source // ""' "$root/.wip.yaml" 2>/dev/null || printf '')"
+  if [[ "$source_recorded" != "vendored" ]]; then
+    if [[ "${WIP_JSON:-1}" == "1" ]]; then
+      jq -nc --arg verb "$verb" '
+        {ok:true, verb:$verb, synced:[], skipped_clean:[], skipped_regressive:[],
+         refused_local:[], backed_up:[], restamped:false}'
+    fi
+    return 0
+  fi
+
+  local backend
+  backend="$(yq -r '.features.orchestration.backend // "solo"' "$root/.wip.yaml" 2>/dev/null || printf 'solo')"
+  [[ -n "$backend" && "$backend" != "null" ]] || backend="solo"
+
+  local raw rc
+  set +e
+  raw="$(_wip_setup_agents_provenance_classify "$root" "$td")"
+  rc=$?
+  set -e
+  [[ "$rc" == "0" ]] || return 5
+
+  local synced=() skipped_clean=() skipped_regressive=() refused_local=() backed_up=()
+  local state path direction kind
+  while IFS=$'\t' read -r state path direction; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      .claude/agents/wip/*) kind="agent" ;;
+      .claude/commands/wip/*) kind="command" ;;
+      *) kind="unknown" ;;
+    esac
+    case "$state" in
+      clean)
+        skipped_clean+=("$path")
+        ;;
+      upstream-behind)
+        skipped_regressive+=("$path")
+        printf 'wip-plumbing: setup agents --sync: %s: installed plugin is older than the stamp (upstream-behind); skipped — upgrade the plugin first\n' "$path" >&2
+        ;;
+      upstream-advanced | missing)
+        _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+        synced+=("$path")
+        ;;
+      unstamped)
+        # Establish the baseline from the CURRENT bytes — non-destructive (no
+        # overwrite); the restamp below records the on-disk hash.
+        synced+=("$path")
+        ;;
+      locally-modified | both-diverged)
+        if [[ "$force" == "1" ]]; then
+          if [[ "$dry" != "1" && -f "$root/$path" ]]; then
+            cp -- "$root/$path" "$root/$path.orig" || return 5
+          fi
+          backed_up+=("$path")
+          _wip_setup_agents_sync_write "$root" "$td" "$backend" "$path" "$kind" || return 5
+          synced+=("$path")
+        else
+          refused_local+=("$path")
+        fi
+        ;;
+    esac
+  done <<<"$raw"
+
+  local restamped="false"
+  if [[ "${#synced[@]}" -gt 0 && "$dry" != "1" ]]; then
+    _wip_setup_agents_restamp_files "$root" "$td" "$backend" "${synced[@]}" || return 5
+    restamped="true"
+  fi
+
+  local ok="true"
+  [[ "${#refused_local[@]}" -gt 0 ]] && ok="false"
+  if [[ "${#refused_local[@]}" -gt 0 ]]; then
+    printf 'wip-plumbing: setup agents --sync: refused %s locally-modified file(s) without --force: %s\n' \
+      "${#refused_local[@]}" "${refused_local[*]}" >&2
+  fi
+
+  if [[ "${WIP_JSON:-1}" == "1" ]]; then
+    local dry_json="false"
+    [[ "$dry" == "1" ]] && dry_json="true"
+    jq -nc --arg verb "$verb" --argjson ok "$ok" --argjson dry_run "$dry_json" \
+      --argjson synced "$(_wip_setup_arr_json "${synced[@]+"${synced[@]}"}")" \
+      --argjson skipped_clean "$(_wip_setup_arr_json "${skipped_clean[@]+"${skipped_clean[@]}"}")" \
+      --argjson skipped_regressive "$(_wip_setup_arr_json "${skipped_regressive[@]+"${skipped_regressive[@]}"}")" \
+      --argjson refused_local "$(_wip_setup_arr_json "${refused_local[@]+"${refused_local[@]}"}")" \
+      --argjson backed_up "$(_wip_setup_arr_json "${backed_up[@]+"${backed_up[@]}"}")" \
+      --argjson restamped "$restamped" '
+      {ok:$ok, verb:$verb, dry_run:$dry_run,
+       synced:$synced, skipped_clean:$skipped_clean,
+       skipped_regressive:$skipped_regressive, refused_local:$refused_local,
+       backed_up:$backed_up, restamped:$restamped}'
+  fi
+
+  [[ "${#refused_local[@]}" -gt 0 ]] && return 4
   return 0
 }
 
