@@ -121,4 +121,80 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "--brief-body missing file exit 2"
 
+# 13. --tracker-anchor persists a top-level tracker_anchor on the record
+#     (ADR-0024 / D3); the field is a sibling of tracker_map, never inside it.
+mkdir -p "$tmp/h"
+WIP_ROOT="$tmp/h" bin/wip-plumbing init anchored --title Anchored --tracker-anchor BDS-56 >/dev/null
+assert_eq "BDS-56" "$(yq -r '.initiatives[] | select(.slug=="anchored") | .tracker_anchor' "$tmp/h/.wip.yaml")" "tracker_anchor persisted"
+assert_eq "null" "$(yq -o=json '.initiatives[] | select(.slug=="anchored") | .tracker_map' "$tmp/h/.wip.yaml")" "anchor is NOT inside tracker_map"
+
+# 14. no --tracker-anchor -> field absent (back-compat).
+WIP_ROOT="$tmp/h" bin/wip-plumbing init plain --title Plain >/dev/null
+assert_eq "false" "$(yq -o=json '.initiatives[] | select(.slug=="plain") | has("tracker_anchor")' "$tmp/h/.wip.yaml")" "no anchor -> no field"
+
+# 15. malformed anchor shape exits 2 (validated against [A-Z][A-Z0-9]*-[0-9]+).
+for bad in "bds-56" "BDS56" "BDS-" "not-an-id"; do
+  set +e
+  WIP_ROOT="$tmp/h" bin/wip-plumbing init "bad-$RANDOM" --tracker-anchor "$bad" >/dev/null 2>&1
+  rc=$?
+  set -e
+  assert_eq "2" "$rc" "bad anchor '$bad' exit 2"
+done
+
+# 16. --tracker-anchor without a slug (repo-level) exits 2.
+mkdir -p "$tmp/i"
+set +e
+WIP_ROOT="$tmp/i" bin/wip-plumbing init --tracker-anchor BDS-1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "--tracker-anchor without slug exit 2"
+
+# 17. Initiative START emission (ADR-0024 / D1–D2): with issue-tracker enabled AND
+#     an anchor, init seeds a `<slug>/initiative` in-progress cache entry and
+#     echoes the intent (parity with `workplan init --activate`).
+mkdir -p "$tmp/j/.wip"
+cat >"$tmp/j/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  issue-tracker: { enabled: true, backend: linear }
+YAML
+out17="$(WIP_ROOT="$tmp/j" bin/wip-plumbing init tracked --title Tracked --tracker-anchor BDS-56)"
+assert_eq "tracked/initiative" "$(jq -r '.intent.node' <<<"$out17")" "init emits initiative intent node"
+assert_eq "in-progress" "$(jq -r '.intent.to' <<<"$out17")" "init intent to=in-progress"
+assert_eq "start" "$(jq -r '.intent.reason' <<<"$out17")" "init intent reason=start"
+cache="$tmp/j/.wip/tracker-cache.json"
+assert_file "$cache" "tracker cache written"
+assert_eq "in-progress" "$(jq -r '.["tracked/initiative"].state' "$cache")" "cache seeds initiative in-progress"
+assert_eq "start" "$(jq -r '.["tracked/initiative"].reason' "$cache")" "cache reason=start"
+
+# 18. Emission gate: anchor present but issue-tracker DISABLED -> no intent, no cache.
+mkdir -p "$tmp/k/.wip"
+cat >"$tmp/k/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+YAML
+out18="$(WIP_ROOT="$tmp/k" bin/wip-plumbing init untracked --tracker-anchor BDS-56)"
+assert_eq "false" "$(jq -r 'has("intent")' <<<"$out18")" "issue-tracker disabled -> no intent"
+assert_absent "$tmp/k/.wip/tracker-cache.json" "issue-tracker disabled -> no cache"
+
+# 19. Emission gate: issue-tracker enabled but NO anchor -> no intent.
+out19="$(WIP_ROOT="$tmp/j" bin/wip-plumbing init noanchor)"
+assert_eq "false" "$(jq -r 'has("intent")' <<<"$out19")" "no anchor -> no intent"
+
+# 20. Dry-run parity: the intent shape is emitted but the cache is never written.
+mkdir -p "$tmp/l/.wip"
+cat >"$tmp/l/.wip.yaml" <<'YAML'
+version: 1
+features:
+  wip: { enabled: true, root: .wip }
+  issue-tracker: { enabled: true, backend: linear }
+YAML
+out20="$(WIP_ROOT="$tmp/l" bin/wip-plumbing --dry-run init dryinit --tracker-anchor BDS-77)"
+assert_eq "dryinit/initiative" "$(jq -r '.intent.node' <<<"$out20")" "dry-run emits intent node"
+assert_eq "in-progress" "$(jq -r '.intent.to' <<<"$out20")" "dry-run intent to=in-progress"
+assert_eq "start" "$(jq -r '.intent.reason' <<<"$out20")" "dry-run intent reason=start"
+assert_absent "$tmp/l/.wip/tracker-cache.json" "dry-run writes no cache"
+
 test_summary

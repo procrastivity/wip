@@ -33,6 +33,11 @@ insert-after: step-06
   (overrides heuristics).
 - `target` — initiative slug (for `amendment`, `workplan-seed`) or `<slug>/<step-id>`
   (for `workplan-seed`).
+- `tracker-anchor` — `brief`-only, optional (ADR-0024). A tracker issue id (shape
+  `[A-Z][A-Z0-9]*-[0-9]+`, e.g. `BDS-56`) naming the source issue the initiative
+  came from; the durable initiative→issue anchor. `intake apply` forwards it to
+  `init --tracker-anchor`, persisting it as the top-level `tracker_anchor` field on
+  the `.wip.yaml` initiative record (a sibling of `tracker_map`, never inside it).
 - `insert-after` / `replace` / `append-round` / `append-lane` / `insert-step-in-lane` —
   amendment-only directives (see `amendment` shape rules). `append-lane` and
   `insert-step-in-lane` additionally require `target-round: <N>`.
@@ -46,7 +51,7 @@ be consumed by other tools that may use `kind:` for their own purposes.
 
 | Kind | Required shape (validator rules) | Destination |
 |------|----------------------------------|-------------|
-| `brief` | Title heading (`# <Title>`), one of `## Goal` or `## Summary`, no `target:` referencing an existing initiative slug. | `init <slug>` |
+| `brief` | Title heading (`# <Title>`), one of `## Goal` or `## Summary`, no `target:` referencing an existing initiative slug. Optional `tracker-anchor: <ID>` (see §1) — accepted but **not** required; existing anchor-less briefs stay valid. | `init <slug>` |
 | `amendment` | `target: <initiative-slug>` in front-matter or first section; **one** of `insert-after: step-NN`, `replace: step-NN`, `append-round: <title>`, `append-lane: <name>`, or `insert-step-in-lane: <name>` (the last two also need `target-round: <N>`). Body sections per amendment directive (see §3). | `roadmap amend <slug>` |
 | `workplan-seed` | `target: <slug>/<step-id>` in front-matter; narrative body (no required section set). Step **must** exist in the named initiative's roadmap. | `workplan init <slug> <step-id>` |
 | `spec` | LDS-template conformance — heading set per `docs/specs/_template.md` if present in the consuming repo. Validator delegates to LDS when available (ADR-0006); falls back to a minimal heading check (`## Summary`, `## User stories` or `## Requirements`). | LDS seam |

@@ -233,3 +233,22 @@ fix:"run wip-plumbing setup agents --migrate", paths:[…]}` (counts as drift �
 stray-only footprint stays quiet. This pure-disk check is deliberately distinct
 from the still-deferred render fan-in (ADR-0015 Q-05.4); see that ADR's step-07
 amendment.
+
+## Amendment — provenance-anchored two-axis drift detection (BDS-58, step-02)
+
+Amended 2026-07-03 (BDS-58, *Detect & refresh stale vendored wip role/agent
+copies*, initiative `wip-orchestration-robustness`, step-02). **See
+[ADR-0023](./0023-vendored-role-provenance-and-two-axis-drift-detection.md).**
+
+ADR-0020's `setup agents --check` is a single `cmp` of `render_now` vs the
+on-disk file — one comparison, so it cannot say *why* a file drifted. ADR-0023
+adds a **third anchor** (the vendor-time render, persisted as `baseline_hash` in
+a new `.claude/agents/wip/.provenance.json` sidecar) and splits drift into two
+independent axes: `upstream_advanced` (`render_now != baseline`) ⟂
+`locally_modified` (`disk_now != baseline`), plus a divergence *direction* from
+the stamped `plugin_version`. The refined classification lands as **additive**
+flags — `setup agents --status` (read-only report, exit 0) and `setup agents
+--sync [--force] [--dry-run]` (per-state actor) — sharing one classifier
+(`_wip_setup_agents_provenance_classify`). `--check`'s blunt rc-4-on-any-diff
+contract is **unchanged** (ADR-0023 D4). The sidecar keeps the agent/command
+bytes pristine, so this ADR's render-and-diff invariant survives verbatim.

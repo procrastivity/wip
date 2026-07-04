@@ -16,6 +16,17 @@ export WIP_NOW="2026-06-14"
 # via the documented seam — mirrors test-flatten-render.sh.
 export WIP_ROLES_DIR="$PWD/roles"
 
+# sha256_of <file> — hex sha256, mirroring lib's _wip_sha256 (sha256sum →
+# shasum -a 256 fallback). Used to independently verify the provenance sidecar's
+# baseline_hash entries (ADR-0023 C2).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  fi
+}
+
 # Canonical vendored command count, DERIVED from the template glob (step-06 /
 # ADR-0015 amend) — never hardcoded, so adding/removing a command can't silently
 # drift the install count without a corresponding template change. The four agent
@@ -29,8 +40,30 @@ assert_cmp templates/setup/deps/flake.lock flake.lock \
   "deps/flake.lock is byte-equal to flake.lock"
 assert_cmp templates/setup/direnv/.envrc .envrc \
   "direnv/.envrc is byte-equal to .envrc"
-assert_cmp templates/setup/hygiene/.pre-commit-config.yaml .pre-commit-config.yaml \
-  "hygiene/.pre-commit-config.yaml is byte-equal to .pre-commit-config.yaml"
+# The consumer hygiene template and the live authoring config INTENTIONALLY
+# diverge by exactly one hook: `wip-active-backend` (ADR-0013 step-04 D6/OQ4)
+# gates the generated roles/backends/active.md pointer, which only the authoring
+# (`source: plugin`) repo owns — a vendored consumer has no active.md/roles/ to
+# gate (the check no-ops there per D4), so the hook lives in the plugin config
+# ONLY, never the installed template. Assert that intent directly, then keep the
+# strong drift guard: the template equals the live config with that one hook
+# elided (no OTHER drift permitted).
+assert_not_grep 'wip-active-backend' templates/setup/hygiene/.pre-commit-config.yaml \
+  "hygiene template omits the plugin-only wip-active-backend hook (OQ4/D6)"
+assert_grep 'wip-active-backend' .pre-commit-config.yaml \
+  "live config carries the plugin-only wip-active-backend hook (D6)"
+# Live config minus the trailing plugin-only hook (and its blank separator) ==
+# the consumer template, byte-for-byte. The awk stops at the hook and drops the
+# one blank line preceding it (the hook is appended at EOF).
+live_minus_hook="$tmp/pre-commit-live-minus-hook.yaml"
+awk '
+  /^[[:space:]]*- id: wip-active-backend$/ { exit }
+  NR > 1 { print buf }
+  { buf = $0 }
+  END { if (buf !~ /^[[:space:]]*$/) print buf }
+' .pre-commit-config.yaml >"$live_minus_hook"
+assert_cmp templates/setup/hygiene/.pre-commit-config.yaml "$live_minus_hook" \
+  "hygiene template == live config minus the plugin-only wip-active-backend hook"
 
 # --- 2. Plugin substitution check on the agents/ template subtree. ------------
 # The template's plugin must reference `wip-plumbing` (no `bin/` prefix), since
@@ -148,6 +181,46 @@ assert_eq "$cmd_count" "$installed_cmds" \
 assert_eq "$cmd_count" \
   "$(find "$cmd_workdir/.claude/commands/wip" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" \
   "[agents commands] no extra files in .claude/commands/wip/"
+
+# --- 6a2. Provenance sidecar written on a vendored install (ADR-0023 C2) ------
+# A vendored `setup agents` now stamps .claude/agents/wip/.provenance.json AFTER
+# the files land: one entry per agent (4, fixed) + command (cmd_count, glob),
+# each recording path/kind/source_ref/plugin_version/baseline_hash/vendored_at.
+# The sidecar is a SIDE artifact (not in the write ledger — §5 already proved the
+# fresh agents install wrote exactly 4+cmd_count files, so it is uncounted).
+prov="$cmd_workdir/.claude/agents/wip/.provenance.json"
+assert_file "$prov" "[provenance] sidecar present after vendored install"
+if jq -e . "$prov" >/dev/null 2>&1; then
+  assert_eq "1" "1" "[provenance] sidecar is valid JSON"
+else
+  assert_eq "valid-json" "invalid-json" "[provenance] sidecar is valid JSON"
+fi
+assert_eq "4" "$(jq '[.files[] | select(.kind == "agent")] | length' "$prov")" \
+  "[provenance] 4 agent entries"
+assert_eq "$cmd_count" "$(jq '[.files[] | select(.kind == "command")] | length' "$prov")" \
+  "[provenance] cmd_count ($cmd_count) command entries"
+# Every baseline_hash equals the sha256 of its on-disk file.
+prov_hash_ok=1
+while IFS=$'\t' read -r ppath phash; do
+  [[ -n "$ppath" ]] || continue
+  [[ "$(sha256_of "$cmd_workdir/$ppath")" == "$phash" ]] || prov_hash_ok=0
+done < <(jq -r '.files[] | "\(.path)\t\(.baseline_hash)"' "$prov")
+assert_eq "1" "$prov_hash_ok" "[provenance] every baseline_hash == sha256(file)"
+# plugin_version is populated from the installed manifest (roles-dir parent seam),
+# derived — never asserted against a frozen literal — so a version bump can't
+# spuriously fail here.
+repo_pv="$(jq -r '.version' .claude-plugin/plugin.json)"
+assert_eq "$repo_pv" "$(jq -r '.files[0].plugin_version' "$prov")" \
+  "[provenance] plugin_version stamped from the installed manifest"
+# source_ref shape: an agent entry names roles/<role>.md @ backend <b>.
+assert_eq "roles/coordinator.md @ backend solo" \
+  "$(jq -r '.files[] | select(.path == ".claude/agents/wip/coordinator.md") | .source_ref' "$prov")" \
+  "[provenance] agent source_ref names the role + backend"
+# Idempotent re-run: the sidecar is byte-stable (WIP_NOW fixed, hashes stable).
+cp "$prov" "$tmp/prov-before"
+WIP_ROOT="$cmd_workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
+assert_cmp "$tmp/prov-before" "$prov" \
+  "[provenance] sidecar byte-stable on idempotent re-run"
 
 # --- 6b. setup agents --source plugin → vendors nothing (D-03.3) -------------
 # The plugin source mode writes zero files (agents resolve by the bare
@@ -615,8 +688,11 @@ WIP_ROOT="$workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
 
 assert_cmp "$workdir/flake.nix" flake.nix "round-trip flake.nix == live"
 assert_cmp "$workdir/.envrc" .envrc "round-trip .envrc == live"
-assert_cmp "$workdir/.pre-commit-config.yaml" .pre-commit-config.yaml \
-  "round-trip .pre-commit-config.yaml == live"
+# `setup hygiene` installs the TEMPLATE verbatim; assert the round-trip against
+# it (not the live config, which intentionally carries the extra plugin-only
+# wip-active-backend hook — OQ4/D6, see the fidelity block near the top).
+assert_cmp "$workdir/.pre-commit-config.yaml" templates/setup/hygiene/.pre-commit-config.yaml \
+  "round-trip .pre-commit-config.yaml == hygiene template"
 # CHANGELOG.md + cliff.toml don't have live equivalents — just assert they landed
 assert_file "$workdir/CHANGELOG.md" "round-trip CHANGELOG.md present"
 assert_file "$workdir/cliff.toml" "round-trip cliff.toml present"

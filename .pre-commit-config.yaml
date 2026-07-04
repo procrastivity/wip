@@ -45,3 +45,10 @@ repos:
         language: system
         pass_filenames: false
         files: '^(commands/.*\.md|templates/setup/agents/commands/.*\.md|contrib/sync-agents-commands)$'
+
+      - id: wip-active-backend
+        name: active.md backend pointer in sync (ADR-0013)
+        entry: bin/wip-plumbing orchestrate backend --check
+        language: system
+        pass_filenames: false
+        files: '^(roles/backends/.*\.md|\.wip\.yaml)$'

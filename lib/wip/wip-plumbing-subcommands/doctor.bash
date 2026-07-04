@@ -247,6 +247,35 @@ wip_plumbing_cmd_doctor() {
     done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
+  # 2h. Missing tracker anchor (ADR-0024 / D7). An initiative captured before the
+  #     anchor field existed — or via an intake that ran without `--anchor` — has
+  #     no durable initiative→source-issue link (`.wip.yaml tracker_anchor`).
+  #     Surface it as an INFORMATIONAL suggestion, modeled on §2f (tracker-unfiled),
+  #     NOT §2d (mirror-drift): status stays "ok", so doctor never fails / exits 4
+  #     just because a pre-existing initiative predates the anchor. Retrofitting
+  #     anchors fleet-wide must not turn every anchor-less repo red on the day the
+  #     feature lands; harden to real drift in a follow-on once anchors are
+  #     backfilled (Open Q3). Scoped to enabled + in-flight/proposed initiatives,
+  #     mirroring every other doctor tracker check.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local arec aslug astatus aanchor
+    while IFS= read -r arec; do
+      [[ -n "$arec" ]] || continue
+      aslug="$(jq -r '.slug // ""' <<<"$arec")"
+      [[ -n "$aslug" ]] || continue
+      astatus="$(jq -r '.status // ""' <<<"$arec")"
+      [[ "$astatus" == "shipped" || "$astatus" == "archived" ]] && continue
+      aanchor="$(jq -r '.tracker_anchor // ""' <<<"$arec")"
+      [[ -n "$aanchor" ]] && continue
+      obj="$(jq -nc --arg slug "$aslug" \
+        --arg fix "re-run intake with --anchor <ID>, or add a tracker-anchor: <ID> BRIEF front-matter key and wip init --tracker-anchor" \
+        '{kind:"tracker-anchor", slug:$slug, status:"ok",
+          message:"initiative has no tracker_anchor (durable source-issue link); suggestion, never auto-set",
+          fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+  fi
+
   # 2g. Orchestration legacy-footprint (pure-disk; ADR-0020 migration path / D8).
   #     Detect the OLD plugin-tree `setup agents` footprint a pre-flatten install
   #     left at $root (the 16-file write set: root `.claude-plugin/*`, `agents/*`,
@@ -277,6 +306,62 @@ wip_plumbing_cmd_doctor() {
         '{kind:"orchestration", status:"legacy-footprint",
           fix:"run wip-plumbing setup agents --migrate", paths:$paths}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    fi
+  fi
+
+  # 2i. Vendored role/command drift (ADR-0023 D5 — CLOSES ADR-0015 Q-05.4). Gated
+  #     STRICTLY on `.features.orchestration.source == "vendored"`: only a vendored
+  #     consumer has installed agent/command copies to re-render and compare, so
+  #     this repo's own `source: plugin` doctor pays NO render cost and is
+  #     unaffected. Runs the SAME two-axis classifier as `setup agents --status` /
+  #     `--sync` (one oracle, ADR-0020 D8) and, for each non-`clean` file, appends
+  #     a `vendored-drift` check GROUPED BY state (one object per distinct state,
+  #     each carrying that state's `fix` + its paths). This IS the render fan-in
+  #     backlogged as Q-05.4 — distinct from §2g's pure-disk legacy-footprint scan
+  #     (a stale on-disk footprint vs. installed-render drift are orthogonal). A
+  #     classifier/render failure is swallowed (no crash, no false drift) — the
+  #     blunt `setup agents --check` gate is the place that surfaces a render error.
+  if [[ "$(jq -r '.features.orchestration.source // ""' <<<"$mj")" == "vendored" ]]; then
+    local vd_td vd_raw vd_rc vd_map vd_state vd_dir vd_path vd_fix vd_paths vd_key
+    vd_td="$(wip_templates_dir 2>/dev/null || printf '')"
+    if [[ -n "$vd_td" && -d "$vd_td" ]]; then
+      # shellcheck source=lib/wip/wip-plumbing-subcommands/setup.bash
+      source "$WIP_LIB/wip-plumbing-subcommands/setup.bash"
+      set +e
+      vd_raw="$(_wip_setup_agents_provenance_classify "$root" "$vd_td")"
+      vd_rc=$?
+      set -e
+      if [[ "$vd_rc" == "0" ]]; then
+        # Group by state+direction — for upstream-advanced the DIRECTION (D2a)
+        # decides the fix (ahead→sync, behind→upgrade, indeterminate→--sync --force
+        # override), so a mixed install emits one check per distinct (state,dir).
+        vd_map="{}"
+        while IFS=$'\t' read -r vd_state vd_path vd_dir; do
+          [[ -n "$vd_path" && "$vd_state" != "clean" ]] || continue
+          vd_key="$vd_state|$vd_dir"
+          vd_map="$(jq -c --arg k "$vd_key" --arg p "$vd_path" '.[$k] += [$p]' <<<"$vd_map")"
+        done <<<"$vd_raw"
+        while IFS= read -r vd_key; do
+          [[ -n "$vd_key" ]] || continue
+          vd_state="${vd_key%%|*}"
+          vd_dir="${vd_key##*|}"
+          case "$vd_state" in
+            locally-modified | both-diverged) vd_fix="setup agents --sync --force" ;;
+            upstream-advanced)
+              case "$vd_dir" in
+                ahead) vd_fix="setup agents --sync" ;;
+                behind) vd_fix="upgrade the plugin" ;;
+                *) vd_fix="setup agents --sync --force" ;; # indeterminate
+              esac
+              ;;
+            *) vd_fix="setup agents --sync" ;; # unstamped, missing
+          esac
+          vd_paths="$(jq -c --arg k "$vd_key" '.[$k] | sort' <<<"$vd_map")"
+          obj="$(jq -nc --arg state "$vd_state" --arg dir "$vd_dir" --arg fix "$vd_fix" --argjson paths "$vd_paths" \
+            '{kind:"orchestration", status:"vendored-drift", state:$state, direction:$dir, fix:$fix, paths:$paths}')"
+          checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+        done < <(jq -r 'keys[]' <<<"$vd_map")
+      fi
     fi
   fi
 
