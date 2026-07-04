@@ -29,8 +29,30 @@ assert_cmp templates/setup/deps/flake.lock flake.lock \
   "deps/flake.lock is byte-equal to flake.lock"
 assert_cmp templates/setup/direnv/.envrc .envrc \
   "direnv/.envrc is byte-equal to .envrc"
-assert_cmp templates/setup/hygiene/.pre-commit-config.yaml .pre-commit-config.yaml \
-  "hygiene/.pre-commit-config.yaml is byte-equal to .pre-commit-config.yaml"
+# The consumer hygiene template and the live authoring config INTENTIONALLY
+# diverge by exactly one hook: `wip-active-backend` (ADR-0013 step-04 D6/OQ4)
+# gates the generated roles/backends/active.md pointer, which only the authoring
+# (`source: plugin`) repo owns — a vendored consumer has no active.md/roles/ to
+# gate (the check no-ops there per D4), so the hook lives in the plugin config
+# ONLY, never the installed template. Assert that intent directly, then keep the
+# strong drift guard: the template equals the live config with that one hook
+# elided (no OTHER drift permitted).
+assert_not_grep 'wip-active-backend' templates/setup/hygiene/.pre-commit-config.yaml \
+  "hygiene template omits the plugin-only wip-active-backend hook (OQ4/D6)"
+assert_grep 'wip-active-backend' .pre-commit-config.yaml \
+  "live config carries the plugin-only wip-active-backend hook (D6)"
+# Live config minus the trailing plugin-only hook (and its blank separator) ==
+# the consumer template, byte-for-byte. The awk stops at the hook and drops the
+# one blank line preceding it (the hook is appended at EOF).
+live_minus_hook="$tmp/pre-commit-live-minus-hook.yaml"
+awk '
+  /^[[:space:]]*- id: wip-active-backend$/ { exit }
+  NR > 1 { print buf }
+  { buf = $0 }
+  END { if (buf !~ /^[[:space:]]*$/) print buf }
+' .pre-commit-config.yaml >"$live_minus_hook"
+assert_cmp templates/setup/hygiene/.pre-commit-config.yaml "$live_minus_hook" \
+  "hygiene template == live config minus the plugin-only wip-active-backend hook"
 
 # --- 2. Plugin substitution check on the agents/ template subtree. ------------
 # The template's plugin must reference `wip-plumbing` (no `bin/` prefix), since
@@ -615,8 +637,11 @@ WIP_ROOT="$workdir" bin/wip-plumbing setup agents >/dev/null 2>&1
 
 assert_cmp "$workdir/flake.nix" flake.nix "round-trip flake.nix == live"
 assert_cmp "$workdir/.envrc" .envrc "round-trip .envrc == live"
-assert_cmp "$workdir/.pre-commit-config.yaml" .pre-commit-config.yaml \
-  "round-trip .pre-commit-config.yaml == live"
+# `setup hygiene` installs the TEMPLATE verbatim; assert the round-trip against
+# it (not the live config, which intentionally carries the extra plugin-only
+# wip-active-backend hook — OQ4/D6, see the fidelity block near the top).
+assert_cmp "$workdir/.pre-commit-config.yaml" templates/setup/hygiene/.pre-commit-config.yaml \
+  "round-trip .pre-commit-config.yaml == hygiene template"
 # CHANGELOG.md + cliff.toml don't have live equivalents — just assert they landed
 assert_file "$workdir/CHANGELOG.md" "round-trip CHANGELOG.md present"
 assert_file "$workdir/cliff.toml" "round-trip cliff.toml present"

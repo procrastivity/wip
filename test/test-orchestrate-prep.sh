@@ -135,12 +135,13 @@ YAML
 
 runb() { CLAUDE_PLUGIN_ROOT="" WIP_ROOT="$tmp2" bin/wip-plumbing orchestrate backend "$@"; }
 
-# b1. show (no arg): current backend + available list + in-sync pointer.
+# b1. show (no arg): current backend + available list. The show-path
+# `active_in_sync` assertions migrated to test-orchestrate-backend.sh (step-04
+# C5), which owns the backend verb's drift-oracle coverage.
 b1="$(runb)"
 assert_eq "true" "$(jq -r '.ok' <<<"$b1")" "backend show ok"
 assert_eq "solo" "$(jq -r '.backend' <<<"$b1")" "backend show: current solo"
 assert_eq '["solo","task"]' "$(jq -c '.available' <<<"$b1")" "backend show: available list"
-assert_eq "true" "$(jq -r '.active_in_sync' <<<"$b1")" "backend show: active.md in sync"
 
 # b2. switch to task: regenerates pointer + flips manifest.
 b2="$(runb task)"
