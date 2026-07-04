@@ -75,9 +75,13 @@ _wip_orchestrate_active_drift() {
 # names no backend tool, so the ADR-0007 seam stays intact. It's the verb the
 # /wip:status fallback offer calls when Solo is unreachable (ADR-0014).
 _wip_orchestrate_cmd_backend() {
-  local name=""
+  local name="" check=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --check)
+        check=1
+        shift
+        ;;
       -*) wip_die 2 usage "orchestrate backend: unknown flag: $1" ;;
       *)
         [[ -z "$name" ]] || wip_die 2 usage "orchestrate backend: unexpected arg: $1"
@@ -86,6 +90,12 @@ _wip_orchestrate_cmd_backend() {
         ;;
     esac
   done
+
+  # OQ3/D3: `--check` gates the CONFIGURED backend; pairing it with a switch
+  # target is ambiguous — reject as a usage error (mirrors `setup agents`'
+  # --migrate/--check mutual exclusion).
+  [[ "$check" == "0" || -z "$name" ]] ||
+    wip_die 2 usage "orchestrate backend: --check takes no backend name (it gates the configured backend); got: $name"
 
   local root mj
   root="$(wip_find_root)" || wip_die 4 no-manifest "no .wip.yaml found from $PWD upward"
@@ -128,6 +138,14 @@ _wip_orchestrate_cmd_backend() {
 
   local current
   current="$(jq -r '.features.orchestration.backend // ""' <<<"$mj")"
+
+  # --check (plugin path): read-only commit-time drift gate on the generated
+  # active.md pointer (D3/D5). Consumes the shared oracle, emits the D3 JSON,
+  # exits 0 (in sync) / 4 (drift or unknown-backend). NEVER writes, in any
+  # branch. Dispatched before both the show and switch paths.
+  if [[ "$check" == "1" ]]; then
+    _wip_orchestrate_backend_check "$backends_dir" "$current" "$source"
+  fi
 
   # No name → report current + sync state, do not mutate. The drift check is the
   # shared oracle (D2): in-sync → true; drift or no-source (missing <backend>.md)
@@ -182,6 +200,61 @@ _wip_orchestrate_cmd_backend() {
       {ok:true, verb:"orchestrate backend", backend:$b, available:$avail,
        active_regenerated:$regen, manifest_updated:$manifest_updated}'
   fi
+}
+
+# _wip_orchestrate_backend_check <backends_dir> <backend> <source> — the
+# read-only `orchestrate backend --check` drift gate for the plugin
+# (`source != vendored`) path (step-04 D3/D5). Consumes the shared oracle
+# (_wip_orchestrate_active_drift) and emits the D3 JSON contract, then EXITS with
+# the plumbing exit-code contract (matching `setup agents --check` + `doctor`,
+# NOT the contrib script's exit 1):
+#
+#   in sync              → exit 0, {ok:true, verb, backend, source,
+#                          active_in_sync:true, drift:[]}
+#   drift / missing ptr  → exit 4, kind `backend-drift`,
+#                          paths:["roles/backends/active.md"] (D5: a missing
+#                          active.md is drift, never a silent "in sync")
+#   missing <backend>.md → exit 4, kind `unknown-backend` (D5: a manifest backend
+#                          naming a binding with no roles/backends/<backend>.md is
+#                          a config error, surfaced not swallowed)
+#
+# Writes NOTHING in every branch (the oracle and this gate are pure reads).
+_wip_orchestrate_backend_check() {
+  local backends_dir="$1" backend="$2" source="$3"
+  local status
+  status="$(_wip_orchestrate_active_drift "$backends_dir" "$backend")"
+  case "$status" in
+    no-source)
+      # D5: the configured backend names a binding that has no source file to
+      # compare against. A config error (exit 4, `unknown-backend`) — never a
+      # false "in sync". wip_die emits the {ok:false,error:{…}} envelope + exits.
+      wip_die 4 unknown-backend \
+        "orchestrate backend --check: configured backend '$backend' has no roles/backends/$backend.md" \
+        "roles/backends/$backend.md"
+      ;;
+    in-sync)
+      if [[ "${WIP_JSON:-1}" == "1" ]]; then
+        jq -nc --arg b "$backend" --arg src "$source" '
+          {ok:true, verb:"orchestrate backend", backend:$b, source:$src,
+           active_in_sync:true, drift:[]}'
+      fi
+      exit 0
+      ;;
+    *)
+      # drift — active.md missing or byte-differs from <backend>.md. Custom JSON
+      # (D3 uses a `paths` array, which wip_die's singular `path` cannot emit),
+      # mirroring `setup agents --check`'s drift envelope. Exit 4, `backend-drift`.
+      if [[ "${WIP_JSON:-1}" == "1" ]]; then
+        jq -nc --arg b "$backend" --arg src "$source" '
+          {ok:false, verb:"orchestrate backend", backend:$b, source:$src,
+           error:{code:4, kind:"backend-drift",
+                  message:"roles/backends/active.md differs from roles/backends/\($b).md — run `make active` (or `orchestrate backend \($b)`) to regenerate",
+                  paths:["roles/backends/active.md"]}}'
+      fi
+      printf 'wip-plumbing: orchestrate backend --check: active.md drift on: roles/backends/active.md\n' >&2
+      exit 4
+      ;;
+  esac
 }
 
 # _wip_orchestrate_backend_vendored <root> <mj> <name> — the vendored
