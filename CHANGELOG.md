@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.18] - 2026-07-05
+
+### Added
+
+- Feat(setup): config-echo writer + `setup solo` (ADR-0021 step-02)
+
+### Documentation
+
+- Docs(adr): ADR-0021 — guided setup porcelain for backend features
+- Docs(cli): document setup solo/forge/issue-tracker (ADR-0021 step-05)
+
+### Fixed
+
+- Fix(setup): validate solo tier policy inputs
+
+### Other
+
+- Step 6 · Task 1: config layer in _wip_forge_detect + both call sites
+- Step 7 · Task 1: setup forge [gh|glab] optional pin + tests
+- Step 7 · Task 2: features echo forge backend in wip_features_json + tests
+- Step 8 · Task 1: spec docs for setup forge [gh|glab] + features.forge.backend
+- Step 8 · Task 2: ADR-0022 forge backend config primary selector (amends 0018 §3 / 0021 §2)
+- Step 8 · Task 3: closeout mixed-env forge-backend repro (fake gh/glab on PATH)
+- Honor forge backend pin in ship stand-down
+- Integrate wip-orchestration-robustness Steps 1–4 (BDS-57/58/56/18) (#25)
+- Make the sync backward-guard hold on the default MCP path (BDS-29) (#26)
+- Step 2 · BDS-59 spike: forge ↔ tracker ↔ wip state-alignment notes (#27)
+
 ## [0.0.17] - 2026-07-03
 
 ### Fixed
