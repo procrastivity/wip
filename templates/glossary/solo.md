@@ -12,7 +12,7 @@ tools. Swapping backends swaps this partial; the Roles and capability terms are 
 | Abstract term (orchestration.md) | Solo binding |
 |------|------|
 | **Agent process** → **Process** | A Solo-managed runtime instance (agent or terminal). Agent processes play Roles. |
-| **Tier** → `agent_tool_id` | Solo resolves a requested Tier (`small`/`medium`/`large`) to an `agent_tool_id` at spawn. A `.wip.yaml` `agent_tier_policy` may force a Tier (e.g. Opus-only). |
+| **Runtime selection** → `agent_tool_id` | Solo resolves a requested **Role** to an `agent_tool_id` at spawn via the `features.solo.agent_tools` map (Role → tool name) + `mcp__solo__list_agent_tools`. A `default` entry is the fallback for any Role; setting only `default` pins every Role to one tool (e.g. Opus-only). |
 | **Task ledger** → **Todo** | The live execution surface (ownership, blockers, comments, locks, status). Tagged `<slug>/step-NN`. A *mirror* of the Roadmap, not a replacement. |
 
 | Solo-specific term | Definition |
