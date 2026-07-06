@@ -53,7 +53,7 @@ plumbing — is specified in [`wip-plugin.md`](./wip-plugin.md) (step-11).
 | `setup agents --status` | Read-only two-axis vendored-drift report (per file: `clean` / `upstream-advanced` / `upstream-behind` / `locally-modified` / `both-diverged` / `unstamped` / `missing`); JSON envelope + human table, **always exit 0** (reporting, not gating). | ADR-0023 |
 | `setup agents --sync [--force] [--dry-run]` | Refresh drifted vendored files per state: auto-sync `upstream-advanced`, refuse `locally-modified`/`both-diverged` without `--force` (backs up `<file>.orig` with it), **skip `upstream-behind`** (never regress a forward-port). | ADR-0023 |
 | `setup lds` | Write the LDS install scaffold to `engineering/` (manifest + nine layer dirs + maintenance copies); flip `features.lds.{enabled, root: engineering}`. | step-15 follow-up |
-| `setup solo` | Flip `features.solo.enabled`; optional `--force-tier`/`--fallback-tool` write `features.solo.agent_tier_policy`. Config-echo (no files, no sentinel). | ADR-0021 |
+| `setup solo` | Flip `features.solo.enabled`; optional `--default-tool <name>` / repeatable `--role-tool <role>=<name>` write `features.solo.agent_tools`. Config-echo (no files, no sentinel). | ADR-0021, ADR-0025 |
 | `setup forge [gh\|glab]` | Flip `features.forge.enabled`; optional backend pin writes `features.forge.{enabled, backend?}` — the pin is now the **primary** forge selector, gh/glab probe demoted to fallback. Config-echo. | ADR-0021, ADR-0022 |
 | `setup issue-tracker` | Flip `features.issue-tracker.{enabled, backend: <linear\|github>}` (backend required). Config-echo. | ADR-0021 |
 | `graduate` | Promote a single planning artifact to its LDS canon slot (`<eng-docs>/<layer>/<file>`). The LDS seam per ADR-0006. | step-15 |
@@ -127,7 +127,7 @@ Mandatory first call. Pure read of `.wip.yaml` + sentinel existence checks (ADR-
   "wip_yaml": ".wip.yaml",
   "current_initiative": "distillation",
   "features": [
-    { "name": "solo",      "enabled": true,  "active": true,  "sentinel": null, "detail": { "force_tier": "large" } },
+    { "name": "solo",      "enabled": true,  "active": true,  "sentinel": null, "detail": { "agent_tools": { "default": "Claude" } } },
     { "name": "lds",       "enabled": false, "active": false, "sentinel": "engineering/.lds-manifest.yaml" },
     { "name": "changelog", "enabled": true,  "active": false, "sentinel": "CHANGELOG.md", "drift": "declared-but-missing" }
   ],
@@ -591,8 +591,8 @@ only its `.wip.yaml` feature stanza (config-echo, `active == enabled`) and emits
 the same JSON envelope, with the feature key as the ledger unit — a real write
 reports it under `wrote`, an idempotent re-run under `skipped_idempotent`. They
 honor `--dry-run` and take verb-specific args: `setup solo` accepts optional
-`--force-tier <tier>` / `--fallback-tool <name>` (writing
-`features.solo.agent_tier_policy`, never defaulted — ADR-0007); bare
+`--default-tool <name>` / repeatable `--role-tool <role>=<name>` (writing the
+`features.solo.agent_tools` Role→tool map, never defaulted — ADR-0007/0025); bare
 `setup forge` is a pure enable flip, while `setup forge <gh|glab>` also writes
 `features.forge.backend` and rejects an unknown value (exit 2) — the pin is the
 primary forge selector, the gh/glab probe its fallback (ADR-0022, amending
@@ -652,17 +652,17 @@ already-flipped verb is a manifest no-op).
 | `setup release` | `features.changelog.enabled: true` | `CHANGELOG.md` |
 | `setup agents` | `features.orchestration.{enabled, backend: solo, source: plugin}` | (none — orchestration has no sentinel; `detect` treats `enabled=true` as `active`) |
 | `setup lds` | `features.lds.{enabled, root: engineering}` | `engineering/.lds-manifest.yaml` |
-| `setup solo` | `features.solo.{enabled}` (+ `agent_tier_policy` when `--force-tier`/`--fallback-tool`) | (none — config-echo) |
+| `setup solo` | `features.solo.{enabled}` (+ `agent_tools` when `--default-tool`/`--role-tool`) | (none — config-echo) |
 | `setup forge` | `features.forge.{enabled, backend?}` | (none — config-echo) |
 | `setup issue-tracker` | `features.issue-tracker.{enabled, backend}` | (none — config-echo) |
 
 `setup agents` deliberately does NOT auto-create the `features.solo`
 block (per ADR-0007, that block carries the consumer's backend-specific
-`agent_tier_policy`; a default would be presumptuous). Stderr emits a
-hint to configure `features.solo.agent_tier_policy` after the verb. The
+`agent_tools` map; a default would be presumptuous). Stderr emits a
+hint to configure `features.solo.agent_tools` after the verb. The
 dedicated **`setup solo`** verb (ADR-0021) is the guided path for that block:
 it writes the bare `features.solo.enabled: true` and adds the
-`agent_tier_policy` only when `--force-tier`/`--fallback-tool` are passed —
+`agent_tools` map only when `--default-tool`/`--role-tool` are passed —
 guided, still never defaulted.
 
 **stdout (success):**

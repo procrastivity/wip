@@ -35,11 +35,11 @@ assert_eq "true" "$(jq -r '.features[]|select(.name=="changelog").active' <<<"$o
 assert_eq "false" "$(jq -r '.features[]|select(.name=="lds").active' <<<"$out")" "lds inactive (sentinel missing)"
 assert_eq "declared-but-missing" "$(jq -r '.features[]|select(.name=="lds").drift' <<<"$out")" "lds drift"
 assert_eq "1" "$(jq -r '[.initiatives[]]|length' <<<"$out")" "one initiative"
-# Original fixture has no agent_tier_policy -> no detail key (backward-compatible).
-assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail // "null"' <<<"$out")" "solo detail absent when no policy"
+# Original fixture has no agent_tools -> no detail key (backward-compatible).
+assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail // "null"' <<<"$out")" "solo detail absent when no agent_tools"
 
-# --- detail echo: agent_tier_policy surfaced under the solo feature (pure config read) ---
-# Case A: both force_tier + fallback_tool present -> both echoed under solo detail.
+# --- detail echo: agent_tools surfaced under the solo feature (pure config read) ---
+# Case A: a full agent_tools map -> echoed under solo detail.agent_tools.
 tmpA="$(mktemp -d)"
 cat >"$tmpA/.wip.yaml" <<'YAML'
 version: 1
@@ -47,9 +47,9 @@ current_initiative: demo
 features:
   solo:
     enabled: true
-    agent_tier_policy:
-      force_tier: large
-      fallback_tool: Claude
+    agent_tools:
+      default: Claude
+      builder: Pi
 initiatives:
   - slug: demo
     status: in-flight
@@ -59,10 +59,10 @@ YAML
 
 outA="$(WIP_ROOT="$tmpA" bin/wip-plumbing detect)"
 rm -rf "$tmpA"
-assert_eq "large" "$(jq -r '.features[]|select(.name=="solo").detail.force_tier' <<<"$outA")" "solo detail force_tier"
-assert_eq "Claude" "$(jq -r '.features[]|select(.name=="solo").detail.fallback_tool' <<<"$outA")" "solo detail fallback_tool"
+assert_eq "Claude" "$(jq -r '.features[]|select(.name=="solo").detail.agent_tools.default' <<<"$outA")" "solo detail agent_tools.default"
+assert_eq "Pi" "$(jq -r '.features[]|select(.name=="solo").detail.agent_tools.builder' <<<"$outA")" "solo detail agent_tools.builder"
 
-# Case B: fallback_tool absent -> force_tier echoed, fallback_tool gracefully omitted (no error).
+# Case B: only `default` present -> echoed, with no spurious keys (no error).
 tmpB="$(mktemp -d)"
 cat >"$tmpB/.wip.yaml" <<'YAML'
 version: 1
@@ -70,8 +70,8 @@ current_initiative: demo
 features:
   solo:
     enabled: true
-    agent_tier_policy:
-      force_tier: large
+    agent_tools:
+      default: Claude
 initiatives:
   - slug: demo
     status: in-flight
@@ -81,8 +81,8 @@ YAML
 
 outB="$(WIP_ROOT="$tmpB" bin/wip-plumbing detect)"
 rm -rf "$tmpB"
-assert_eq "large" "$(jq -r '.features[]|select(.name=="solo").detail.force_tier' <<<"$outB")" "solo detail force_tier (no fallback)"
-assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail.fallback_tool // "null"' <<<"$outB")" "solo detail fallback_tool omitted"
+assert_eq "Claude" "$(jq -r '.features[]|select(.name=="solo").detail.agent_tools.default' <<<"$outB")" "solo detail agent_tools.default (only default)"
+assert_eq "null" "$(jq -r '.features[]|select(.name=="solo")|.detail.agent_tools.builder // "null"' <<<"$outB")" "solo detail no spurious builder key"
 
 # --- detail echo: forge backend surfaced under the forge feature (pure config read, D6) ---
 # Case C: pinned forge backend -> backend echoed under forge detail.

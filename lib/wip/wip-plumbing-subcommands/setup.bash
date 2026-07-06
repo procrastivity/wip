@@ -95,7 +95,8 @@ wip_plumbing_cmd_setup() {
   local force=0 sentinel_only=0 source_mode="vendored" check=0 migrate=0 source_set=0 status=0 sync=0
   # Config-echo verbs (ADR-0021): solo/forge/issue-tracker write only a .wip.yaml
   # feature stanza — no template files, no sentinel. Their verb-specific args.
-  local force_tier="" fallback_tool="" tier_set=0 tracker_backend="" tracker_backend_set=0
+  local agent_tools_set=0 tracker_backend="" tracker_backend_set=0
+  local -a agent_tools_kv=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force)
@@ -160,42 +161,38 @@ wip_plumbing_cmd_setup() {
         source_set=1
         shift
         ;;
-      --force-tier)
+      --default-tool)
         [[ "$sub" == "solo" ]] ||
-          wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
-        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --force-tier requires an argument"
-        force_tier="$2"
-        case "$force_tier" in
-          small | medium | large) ;;
-          *) wip_die 2 usage "setup solo: --force-tier must be small, medium, or large (got: $force_tier)" ;;
-        esac
-        tier_set=1
+          wip_die 2 usage "setup $sub: --default-tool is only valid for \`setup solo\`"
+        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --default-tool requires an argument"
+        [[ -n "$2" ]] || wip_die 2 usage "setup solo: --default-tool needs a non-empty tool name"
+        agent_tools_kv+=("default=$2")
+        agent_tools_set=1
         shift 2
         ;;
-      --force-tier=*)
+      --default-tool=*)
         [[ "$sub" == "solo" ]] ||
-          wip_die 2 usage "setup $sub: --force-tier is only valid for \`setup solo\`"
-        force_tier="${1#--force-tier=}"
-        case "$force_tier" in
-          small | medium | large) ;;
-          *) wip_die 2 usage "setup solo: --force-tier must be small, medium, or large (got: $force_tier)" ;;
-        esac
-        tier_set=1
+          wip_die 2 usage "setup $sub: --default-tool is only valid for \`setup solo\`"
+        [[ -n "${1#--default-tool=}" ]] || wip_die 2 usage "setup solo: --default-tool needs a non-empty tool name"
+        agent_tools_kv+=("default=${1#--default-tool=}")
+        agent_tools_set=1
         shift
         ;;
-      --fallback-tool)
+      --role-tool)
         [[ "$sub" == "solo" ]] ||
-          wip_die 2 usage "setup $sub: --fallback-tool is only valid for \`setup solo\`"
-        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --fallback-tool requires an argument"
-        fallback_tool="$2"
-        tier_set=1
+          wip_die 2 usage "setup $sub: --role-tool is only valid for \`setup solo\`"
+        [[ $# -ge 2 ]] || wip_die 2 usage "setup solo: --role-tool requires a <role>=<tool> argument"
+        _wip_setup_role_tool_kv "$2"
+        agent_tools_kv+=("$_WIP_ROLE_TOOL_KV")
+        agent_tools_set=1
         shift 2
         ;;
-      --fallback-tool=*)
+      --role-tool=*)
         [[ "$sub" == "solo" ]] ||
-          wip_die 2 usage "setup $sub: --fallback-tool is only valid for \`setup solo\`"
-        fallback_tool="${1#--fallback-tool=}"
-        tier_set=1
+          wip_die 2 usage "setup $sub: --role-tool is only valid for \`setup solo\`"
+        _wip_setup_role_tool_kv "${1#--role-tool=}"
+        agent_tools_kv+=("$_WIP_ROLE_TOOL_KV")
+        agent_tools_set=1
         shift
         ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
@@ -264,7 +261,7 @@ wip_plumbing_cmd_setup() {
     solo | forge | issue-tracker)
       _wip_setup_config_verb "$root" "$sub" \
         "$tracker_backend" "$tracker_backend_set" \
-        "$tier_set" "$force_tier" "$fallback_tool"
+        "$agent_tools_set" ${agent_tools_kv[@]+"${agent_tools_kv[@]}"}
       return 0
       ;;
   esac
@@ -1780,20 +1777,47 @@ _wip_setup_arr_json() {
   printf '%s' "$out"
 }
 
-# _wip_setup_config_verb <root> <verb> <backend> <backend-set> <tier-set>
-#                        <force-tier> <fallback-tool>
+# _wip_setup_config_verb <root> <verb> <backend> <backend-set> <agent-tools-set>
+#                        [<role>=<tool>...]
 #
 # The config-echo setup path (ADR-0021): solo / forge / issue-tracker are pure
 # .wip.yaml feature writers. Validate the verb's args, flip the feature stanza
-# idempotently (wip_setup_set_feature_flag, plus the nested agent_tier_policy
-# for `setup solo` when tier flags are given), then emit the standard setup JSON
+# idempotently (wip_setup_set_feature_flag, plus the nested agent_tools map
+# for `setup solo` when tool flags are given), then emit the standard setup JSON
 # envelope + the per-verb hint. No template files, no sentinel. Honors
 # WIP_DRY_RUN via the shared setters. The feature key is the ledger unit: an
 # actual write reports it under `wrote`, an idempotent re-run under
 # `skipped_idempotent`.
+# _wip_setup_role_tool_kv <role>=<tool> — validate a `--role-tool` argument and
+# set _WIP_ROLE_TOOL_KV to the "role=tool" pair the subblock writer consumes. The
+# role must be one of the four Roles, optionally with an `-escalated` suffix (the
+# escalation target — ADR-0025); `default` is rejected (use --default-tool). Dies
+# (exit 2) on a bad shape.
+_wip_setup_role_tool_kv() {
+  local arg="$1" role tool
+  [[ "$arg" == *=* ]] ||
+    wip_die 2 usage "setup solo: --role-tool must be <role>=<tool> (got: $arg)"
+  role="${arg%%=*}"
+  tool="${arg#*=}"
+  [[ -n "$role" && -n "$tool" ]] ||
+    wip_die 2 usage "setup solo: --role-tool needs a non-empty role and tool (got: $arg)"
+  case "$role" in
+    default)
+      wip_die 2 usage "setup solo: use --default-tool for the default entry, not --role-tool default=..."
+      ;;
+    orchestrator | coordinator | researcher | builder | \
+      orchestrator-escalated | coordinator-escalated | researcher-escalated | builder-escalated) ;;
+    *)
+      wip_die 2 usage "setup solo: --role-tool role must be one of orchestrator|coordinator|researcher|builder (optionally -escalated) (got: $role)"
+      ;;
+  esac
+  _WIP_ROLE_TOOL_KV="$role=$tool"
+}
+
 _wip_setup_config_verb() {
-  local root="$1" verb="$2" backend="$3" backend_set="$4"
-  local tier_set="$5" force_tier="$6" fallback_tool="$7"
+  local root="$1" verb="$2" backend="$3" backend_set="$4" agent_tools_set="$5"
+  shift 5
+  local -a agent_tools_kv=("$@")
   local manifest="$root/.wip.yaml"
 
   local feature status sub_status="noop"
@@ -1802,18 +1826,13 @@ _wip_setup_config_verb() {
       feature="solo"
       status="$(wip_setup_set_feature_flag "$manifest" "solo" "enabled=true")" ||
         wip_die 1 internal "setup solo: manifest update failed"
-      # Optional agent_tier_policy (ADR-0021 §3): NEVER defaulted — written only
-      # when --force-tier / --fallback-tool are supplied. Merged into any
-      # existing policy so a bare re-run preserves it.
-      if [[ "$tier_set" == "1" ]]; then
-        local -a tier_kv=()
-        [[ -n "$force_tier" ]] && tier_kv+=("force_tier=$force_tier")
-        [[ -n "$fallback_tool" ]] && tier_kv+=("fallback_tool=$fallback_tool")
-        if [[ ${#tier_kv[@]} -gt 0 ]]; then
-          sub_status="$(wip_setup_set_feature_subblock "$manifest" "solo" "agent_tier_policy" \
-            "${tier_kv[@]}")" ||
-            wip_die 1 internal "setup solo: agent_tier_policy update failed"
-        fi
+      # Optional agent_tools map (ADR-0021 §3, ADR-0025): NEVER defaulted —
+      # written only when --default-tool / --role-tool are supplied. Merged into
+      # any existing map so a bare re-run preserves it.
+      if [[ "$agent_tools_set" == "1" && ${#agent_tools_kv[@]} -gt 0 ]]; then
+        sub_status="$(wip_setup_set_feature_subblock "$manifest" "solo" "agent_tools" \
+          "${agent_tools_kv[@]}")" ||
+          wip_die 1 internal "setup solo: agent_tools update failed"
       fi
       ;;
     forge)
@@ -1905,7 +1924,7 @@ _wip_setup_hint() {
       fi
       printf 'wip-plumbing: setup agents: hint: on a repo that ran the OLD plugin-tree `setup agents` (leftover root `.claude-plugin/`, `agents/`, `commands/`)? run `setup agents --migrate` to clean the legacy footprint safely (`--dry-run` previews; `wip-plumbing doctor` flags it)\n' >&2
       printf 'wip-plumbing: setup agents: hint: has the plugin moved on since you vendored? run `setup agents --status` to see per-file drift (upstream-advanced vs locally-modified), then `setup agents --sync` to refresh (`--force` overwrites local edits; upstream-behind is left alone)\n' >&2
-      printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tier_policy in .wip.yaml if Solo is your backend\n' >&2
+      printf 'wip-plumbing: setup agents: hint: configure features.solo.agent_tools in .wip.yaml if Solo is your backend\n' >&2
       ;;
     lds)
       printf 'wip-plumbing: setup lds: hint: run `wip-plumbing doctor` to verify the LDS sentinel\n' >&2
@@ -1913,7 +1932,7 @@ _wip_setup_hint() {
       ;;
     solo)
       printf 'wip-plumbing: setup solo: hint: verify liveness with `wip-plumbing status --probe-solo`\n' >&2
-      printf 'wip-plumbing: setup solo: hint: pin a tier policy with `--force-tier <tier>` / `--fallback-tool <name>` (writes features.solo.agent_tier_policy)\n' >&2
+      printf 'wip-plumbing: setup solo: hint: map roles to tools with `--default-tool <name>` / `--role-tool <role>=<name>` (writes features.solo.agent_tools; ADR-0025)\n' >&2
       printf 'wip-plumbing: setup solo: hint: this wires the control plane (features.solo); `setup agents` picks the orchestration backend (features.orchestration.backend)\n' >&2
       ;;
     forge)
