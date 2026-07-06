@@ -10,7 +10,7 @@ backend-agnostic; **this is the only file that names Task-backend
 primitives.** It names no MCP server — there is no external control plane.
 
 It supplies the same surface as any backend (identity, substrate
-bindings, tier resolver, tag glossary, anti-patterns) bound to its own
+bindings, role resolver, tag glossary, anti-patterns) bound to its own
 primitives — and nothing else moves (ADR-0007, ADR-0013).
 
 Active when `.wip.yaml` has `features.orchestration.backend: task`.
@@ -72,7 +72,7 @@ record). Paths below are the canonical defaults.
 | **Shared note** (rolling context) | A markdown file: `.wip/initiatives/<slug>/orchestration/step-NN-context.md` | Bootstrapped from the [`shared.md`](../shared.md) Shared-Note Template at build kickoff. Rolling context only; status lives in the ledger file. |
 | **Idle timer** (pause/resume) | **N/A** | Spawns are synchronous; "wait for X to finish" *is* awaiting the Task call's return. There is nothing to pause/resume and no timer to arm. |
 | **Service readiness** wait | A `Bash` wait | When a Builder needs a service up, it waits inside its own turn with an ordinary `Bash` poll (e.g. curl-until-ready); there is no backend wait primitive. |
-| **Shared state** | The ledger + shared-note files | No separate key/value store. Cross-call values (a chosen tier, a pin) live in the shared-note file's front matter when needed; most are unnecessary because the parent threads them into each spawn prompt directly. |
+| **Shared state** | The ledger + shared-note files | No separate key/value store. Cross-call values (a chosen model, a pin) live in the shared-note file's front matter when needed; most are unnecessary because the parent threads them into each spawn prompt directly. |
 
 Use the **ledger file** as the primary durable coordination surface; use
 the **shared-note file** for rolling context, not as a status store.
@@ -120,21 +120,41 @@ subagent returns — so the operator-engagement guard of
 before close/inject) **cannot apply** under this backend. There is no
 between-call window in which a human takes over the worker.
 
-## Tier resolver
+## Role resolver
 
-Tiers (`small` / `medium` / `large` — see [`tier-policy.md`](../tier-policy.md))
-carry **no runtime selection** here. A native subagent runs on the
-session's model; there is no tool inventory to resolve a Tier against, so
-the Solo-style command-first classifier and its fallback ladder are
-**N/A**. [`tier-policy.md`](../tier-policy.md) already permits a backend to
-own tier resolution end-to-end and skip the ladder — this backend does.
+A native subagent runs on the **session's model** by default. There is no
+tool inventory to resolve against, so the Solo-style config-map-plus-
+fallback-ladder is **N/A** — model selection here is a single optional
+config lookup, and [`tier-policy.md`](../tier-policy.md) already permits a
+backend to own selection end-to-end and skip the ladder.
 
-A Tier is therefore an advisory request the parent honors as best the
-runtime allows. The default is to spawn every Role at the session's model.
-An optional `tier → model` map (small→Haiku, medium→Sonnet, large→Opus via
-the Task tool's per-call `model` override) is **deferred** (a roadmap
-backlog item), not part of v1: when absent, Tier is recorded for audit and
-otherwise has no effect on selection.
+`features.task.models` (`.wip.yaml`) maps a **Role** (or a `<role>-escalated`
+target) to a model, applied via the Task tool's per-call `model` override:
+
+```yaml
+features:
+  task:
+    models:
+      default: sonnet         # fallback model for any Role
+      researcher: opus        # workplan production
+      builder: sonnet
+      builder-escalated: opus # stronger model on escalation
+```
+
+Resolution: look up `models[<role>]`; if the Role has no explicit entry,
+fall through to `models.default`; if neither is set, spawn on the
+**session's model** (no `model` override passed to the Task tool). Role is
+the only selection signal (ADR-0025) — the caller decides which Role key to
+request, including a `-escalated` target on repeated same-shape failure or
+load-bearing work; the escalation policy lives in
+[`tier-policy.md`](../tier-policy.md).
+
+This graduates ADR-0013's deferred `tier → model` map to a `role → model`
+map. When `features.task.models` is absent the backend behaves exactly as
+before: every Role runs on the session's model, and the Role is recorded for
+audit with no effect on selection. Unlike the Solo backend there is no
+`detect`/`setup` plumbing for this map — the Task-backend parent reads
+`features.task.models` from `.wip.yaml` directly.
 
 ## Tag glossary
 
