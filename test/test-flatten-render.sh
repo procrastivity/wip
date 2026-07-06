@@ -110,10 +110,10 @@ for role in "${ROLES[@]}"; do
     # All four sources inlined, in the fixed emit order (D5).
     assert_grep '^# Shared Role Behavior$' "$out" "$role/$backend inlines shared.md"
     assert_grep "^# $heading\$" "$out" "$role/$backend inlines $role.md body"
-    assert_grep '^# Tier Policy$' "$out" "$role/$backend inlines tier-policy.md"
+    assert_grep '^# Role Policy$' "$out" "$role/$backend inlines tier-policy.md"
     assert_grep "$backend_sentinel" "$out" "$role/$backend inlines backends/$backend.md"
     assert_order "$role/$backend inlines sources in fixed order" "$out" \
-      '^# Shared Role Behavior$' "^# $heading\$" '^# Tier Policy$' "$backend_sentinel"
+      '^# Shared Role Behavior$' "^# $heading\$" '^# Role Policy$' "$backend_sentinel"
 
     # ADR-0020 D5: the renderer prepends a static inlining disclaimer after the
     # verbatim framing and before the first inlined source body (shared.md).

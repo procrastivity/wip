@@ -22,8 +22,8 @@ On `start step N`:
 
 1. Read the Step's ledger entry and Roadmap section
    (`.wip/initiatives/<slug>/roadmap.md`).
-2. Spawn the Coordinator as `<slug>-step-NN-coordinator` at the Tier
-   from [`tier-policy.md`](./tier-policy.md).
+2. Spawn the Coordinator as `<slug>-step-NN-coordinator` for its Role
+   per [`tier-policy.md`](./tier-policy.md).
 3. Send the Coordinator its bootstrap prompt.
 4. Arm an idle timer to wake when the workplan completes.
 5. On wake, surface the workplan path to the human for review.

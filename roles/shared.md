@@ -9,8 +9,8 @@ primitive) lives in the active orchestration backend's binding under
 [`backends/`](./backends/).
 
 On activation, confirm your role via the active backend; see
-[`backends/`](./backends/) for how. Tier selection for any spawn is
-governed by [`tier-policy.md`](./tier-policy.md).
+[`backends/`](./backends/) for how. Role → runtime selection for any
+spawn is governed by [`tier-policy.md`](./tier-policy.md).
 
 ## Role Invariants
 
@@ -34,7 +34,7 @@ initiatives never collide.
 | Builder process | `<slug>-step-NN-builder-MM` (retries add `-r1`/`-r2`) | `distillation-step-12-builder-03` |
 | Step shared note | `<slug>-step-NN-context` | `distillation-step-12-context` |
 | Step ledger entry | `Step N · Task M — <one-line>` | `Step 12 · Task 3 — Backend grep test` |
-| Escalation ledger entry | `[ESCALATION step-NN/builder-MM] <summary>` | `[ESCALATION step-12/builder-03] Tier resolver ambiguous` |
+| Escalation ledger entry | `[ESCALATION step-NN/builder-MM] <summary>` | `[ESCALATION step-12/builder-03] Runtime resolution ambiguous` |
 
 ## Ledger Tags
 
@@ -176,9 +176,11 @@ the ledger can't.
 (append one outcome paragraph per task completion)
 ```
 
-## Tier Selection
+## Role Selection
 
-When spawning, request a **tier** (`small` / `medium` / `large`), never
-a runtime tool id. The active backend resolves the tier to whatever
-runtime it has available. See [`tier-policy.md`](./tier-policy.md) for
-the per-Role defaults and the escalation guardrails.
+When spawning, request by **Role** (`Orchestrator` / `Coordinator` /
+`Researcher` / `Builder`), never a runtime tool id. Role is the only
+selection signal — there is no separate capability/tier hint (ADR-0025).
+The active backend resolves the Role to whatever runtime its config
+assigns. See [`tier-policy.md`](./tier-policy.md) for the per-Role
+assignments, escalation targets, and the escalation guardrails.

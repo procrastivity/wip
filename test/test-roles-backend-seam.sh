@@ -5,6 +5,10 @@
 # names. backends/solo.md must contain them. Plugin agents must be thin
 # pointers (@-file references that resolve) and must NOT name Solo tools
 # either.
+#
+# The shared contract is role-centric (ADR-0025): a spawn requests by
+# Role, not by a small/medium/large tier. tier-policy.md is retained as
+# the stable @-include path but now holds the per-Role runtime policy.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 _WIP_TEST_NAME="roles-backend-seam"
@@ -70,11 +74,17 @@ assert_not_grep 'mcp__solo__' "roles/backends/task.md" "backends/task.md names n
 assert_grep 'subagent_type' "roles/backends/task.md" "backends/task.md names subagent_type"
 assert_grep 'Task tool' "roles/backends/task.md" "backends/task.md names the Task tool"
 
-# --- tier-policy.md sanity ----------------------------------------------
-# Each Role name appears in a Tier-defaults context.
+# --- role-policy sanity (roles/tier-policy.md) --------------------------
+# Each Role name appears in a per-Role assignment context.
 for role in Orchestrator Coordinator Researcher Builder; do
   assert_grep "$role" "roles/tier-policy.md" "tier-policy.md mentions $role"
 done
+
+# --- role-centric request contract (ADR-0025) ---------------------------
+# The shared contract requests by ROLE, not by a small/medium/large tier:
+# the §Role Selection section replaced §Tier Selection in shared.md.
+assert_grep '## Role Selection' "roles/shared.md" "shared.md requests by Role (§Role Selection)"
+assert_not_grep '## Tier Selection' "roles/shared.md" "shared.md no longer has a §Tier Selection"
 
 # --- roles/README.md no longer marks roles/ as not-yet-authored --------
 assert_not_grep '🚧 Not yet authored' "roles/README.md" "roles/README.md status flipped from 🚧"

@@ -18,13 +18,15 @@ second orchestration style (e.g. native harness / `claude` subagents) can bind t
 Roles without rewriting them:
 
 - **Behavior files** (`orchestrator.md`, `coordinator.md`, `researcher.md`, `builder.md`,
-  `shared.md`) are backend-agnostic. They reference **"spawn a `<tier>` agent"** and **"the
+  `shared.md`) are backend-agnostic. They reference **"spawn a `<Role>` agent"** and **"the
   task ledger"** — never `mcp__solo__*`, `agent_tool_id`, or `whoami`.
-- **`tier-policy.md`** owns the abstract Tier semantics (`small`/`medium`/`large`) and the
-  per-Role Tier defaults. No runtime tool ids.
+- **`tier-policy.md`** owns the abstract per-Role runtime policy: each Role's default
+  assignment + optional escalation target (role is the only selection signal — ADR-0025
+  retired the `small`/`medium`/`large` tier axis). No runtime tool ids. (The filename is
+  retained as the stable `@`-include path; the rename is a deferred cross-cutting cleanup.)
 - **`backends/solo.md`** is the **one** place that names Solo MCP tools (`spawn_process`,
-  todos, scratchpads, timers, `whoami`) and the Solo Tier resolver (`list_agent_tools()`
-  token classification). A future backend adds `backends/<name>.md`; nothing else moves.
+  todos, scratchpads, timers, `whoami`) and the Solo runtime resolver. A future backend
+  adds `backends/<name>.md`; nothing else moves.
 
 Acceptance shape: adding a hypothetical `backends/native.md` must require touching **zero**
 behavior or `tier-policy.md` files.
@@ -46,7 +48,7 @@ roles/
   researcher.md       # behavior (backend-agnostic)
   builder.md          # behavior (backend-agnostic)
   shared.md           # shared behavior (backend-agnostic; was shared-static.md)
-  tier-policy.md      # abstract Tier semantics + per-Role defaults
+  tier-policy.md      # abstract per-Role runtime policy (assignment + escalation target)
   backends/
-    solo.md           # the ONLY doc naming Solo MCP tools + the Solo Tier resolver
+    solo.md           # the ONLY doc naming Solo MCP tools + the Solo runtime resolver
 ```

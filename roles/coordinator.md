@@ -19,8 +19,8 @@ On activation, confirm your role via the active backend; see
 
 ## Phase 1: Workplan Production (Researcher-first, default)
 
-1. Spawn the Researcher as `<slug>-step-NN-researcher` at the Tier
-   from [`tier-policy.md`](./tier-policy.md).
+1. Spawn the Researcher as `<slug>-step-NN-researcher` for its Role
+   per [`tier-policy.md`](./tier-policy.md).
 2. Apply the operator-engagement guard to the Researcher.
 3. Send the Researcher the workplan request only if it is not held or
    operator-engaged.
@@ -103,8 +103,9 @@ and a Builder a human is using is never closed or injected into.
 ## Retry / Escalation Policy
 
 - Up to **2** retries for fixable failures with clear error context.
-- Same failure shape twice on the same Tier → escalate (or escalate
-  the Tier — see [`tier-policy.md`](./tier-policy.md)).
+- Same failure shape twice on the same assignment → escalate (or
+  switch to the Role's escalation target — see
+  [`tier-policy.md`](./tier-policy.md)).
 - Ambiguity / spec conflict / scope question → escalate immediately.
 
 ## Step Boundary
