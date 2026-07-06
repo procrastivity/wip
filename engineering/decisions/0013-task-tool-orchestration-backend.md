@@ -95,3 +95,18 @@ The **authoring side is unchanged**: `roles/`, the four thin-pointer agents, the
 decided above and continue to govern the `source: plugin` path (including this repo).
 This note records consumer context only; it does not amend the Decision or
 Consequences.
+
+## Amendment — Duo backend planned; `tier → model` becomes `role → model` (ADR-0025)
+
+Amended 2026-07-05 (`role-centric-runtime-selection` initiative, Round 1 step-01; ADR-0025).
+
+Two **Deferred** bullets above graduate:
+
+- **"a Duo backend"** flips **deferred → planned** — owned by Round 4 of the
+  `role-centric-runtime-selection` initiative. It delegates runtime selection to Duo via
+  `role → preset` (identity-by-default) and hard-errors at preflight when Duo is unreachable
+  (ADR-0025 §4). The backend-seam promise holds: one glossary partial + one
+  `roles/backends/duo.md` + one selector row, no role edits.
+- **"a `tier → model` map for the Task backend"** becomes the **`role → model`** map
+  (`features.task.models`), owned by Round 3 — since ADR-0025 retires the tier axis in favor
+  of role. The Task backend + `active.md` indirection decisions are otherwise preserved.

@@ -34,7 +34,7 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
      override at the top of the resolver's fallback ladder. Once set, the
      pin governs the Coordinator→Builder spawns for the rest of the run
      and **bypasses the resolver's interactive fallback prompt**, so an
-     operator can pre-select the tool when tier classification would
+     operator can pre-select the tool when Role-to-runtime resolution would
      otherwise be non-confident. The command body does **not** persist
      the pin or name any backend tool — the live Role flow records it
      (see `roles/backends/active.md` and `roles/tier-policy.md`).
@@ -73,7 +73,8 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
      `roles/orchestrator.md`:
        - Confirm your identity via the backend.
        - **State the concrete spawn action** — the Coordinator process name and
-         Tier for the active step — and confirm with the user before spawning
+         Role/runtime assignment for the active step — and confirm with the user
+         before spawning
          (the Orchestrator never spawns silently on an ambiguous start).
        - On confirmation, spawn the Coordinator (which spawns its Researcher)
          for the active step via the backend, and run the Orchestrator's
@@ -89,6 +90,6 @@ Spawning Claude agents is a plugin/MCP concern, so there is **no**
   only in the active backend binding `roles/backends/active.md` (regenerated
   from `roles/backends/<backend>.md` by `wip-plumbing orchestrate backend`),
   keeping the backend seam intact (ADR-0007).
-- Tier, process naming, and `agent_tool_id` resolution are **Role** decisions,
-  not prep output: `orchestrate prep` emits the facts about the work, the Roles
-  decide how to staff it.
+- Role/runtime assignment and process naming are **Role** decisions, not prep
+  output: `orchestrate prep` emits the facts about the work, the Roles decide
+  how to staff it through the active backend.

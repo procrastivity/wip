@@ -916,7 +916,7 @@ cfg="$tmp/cfg"
 mkdir -p "$cfg"
 WIP_ROOT="$cfg" bin/wip-plumbing init >/dev/null
 
-# setup solo (bare) → solo:{enabled:true}, no agent_tier_policy (never defaulted).
+# setup solo (bare) → solo:{enabled:true}, no agent_tools (never defaulted).
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo 2>/dev/null)"
 mapfile -t F < <(jq -r '.ok, .verb, .feature, (.wrote | join(",")), (.skipped_idempotent | length), .manifest_updated, .sentinel' <<<"$out")
 assert_eq "true" "${F[0]}" "[solo] ok"
@@ -927,7 +927,7 @@ assert_eq "0" "${F[4]}" "[solo] nothing skipped on first write"
 assert_eq ".wip.yaml" "${F[5]}" "[solo] manifest_updated"
 assert_eq "null" "${F[6]}" "[solo] no sentinel"
 assert_eq "true" "$(yq -r '.features.solo.enabled' "$cfg/.wip.yaml")" "[solo] enabled:true written"
-assert_eq "null" "$(yq -r '.features.solo.agent_tier_policy' "$cfg/.wip.yaml")" "[solo] no tier policy defaulted"
+assert_eq "null" "$(yq -r '.features.solo.agent_tools' "$cfg/.wip.yaml")" "[solo] no agent_tools defaulted"
 
 # setup solo (re-run) → idempotent: skipped_idempotent, manifest_updated null.
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo 2>/dev/null)"
@@ -936,18 +936,30 @@ assert_eq "0" "${F[0]}" "[solo] re-run wrote nothing"
 assert_eq "features.solo" "${F[1]}" "[solo] re-run skipped_idempotent lists the feature"
 assert_eq "null" "${F[2]}" "[solo] re-run manifest noop"
 
-# setup solo --force-tier / --fallback-tool → nested agent_tier_policy written.
-out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier large --fallback-tool Claude 2>/dev/null)"
-assert_eq "features.solo" "$(jq -r '.wrote | join(",")' <<<"$out")" "[solo] tier flags write the feature"
-assert_eq "large" "$(yq -r '.features.solo.agent_tier_policy.force_tier' "$cfg/.wip.yaml")" "[solo] force_tier written"
-assert_eq "Claude" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] fallback_tool written"
-# A bare re-run PRESERVES the existing tier policy (merge, not clobber).
+# setup solo --default-tool / --role-tool → nested agent_tools map written (ADR-0025).
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --default-tool Claude --role-tool builder=Pi --role-tool builder-escalated=Claude 2>/dev/null)"
+assert_eq "features.solo" "$(jq -r '.wrote | join(",")' <<<"$out")" "[solo] tool flags write the feature"
+assert_eq "Claude" "$(yq -r '.features.solo.agent_tools.default' "$cfg/.wip.yaml")" "[solo] default-tool written"
+assert_eq "Pi" "$(yq -r '.features.solo.agent_tools.builder' "$cfg/.wip.yaml")" "[solo] role-tool builder written"
+assert_eq "Claude" "$(yq -r '.features.solo.agent_tools.builder-escalated' "$cfg/.wip.yaml")" "[solo] role-tool builder-escalated written"
+# A bare re-run PRESERVES the existing map (merge, not clobber).
 WIP_ROOT="$cfg" bin/wip-plumbing setup solo >/dev/null 2>&1
-assert_eq "large" "$(yq -r '.features.solo.agent_tier_policy.force_tier' "$cfg/.wip.yaml")" "[solo] bare re-run preserves tier policy"
-# Policy values are string fields, even when a tool name happens to be numeric.
-WIP_ROOT="$cfg" bin/wip-plumbing setup solo --fallback-tool 456 >/dev/null 2>&1
-assert_eq "!!str" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool | tag' "$cfg/.wip.yaml")" "[solo] fallback_tool remains a string"
-assert_eq "456" "$(yq -r '.features.solo.agent_tier_policy.fallback_tool' "$cfg/.wip.yaml")" "[solo] numeric-looking fallback_tool preserved"
+assert_eq "Claude" "$(yq -r '.features.solo.agent_tools.default' "$cfg/.wip.yaml")" "[solo] bare re-run preserves agent_tools"
+# Tool names are string fields, even when a name happens to be numeric.
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo --default-tool 456 >/dev/null 2>&1
+assert_eq "!!str" "$(yq -r '.features.solo.agent_tools.default | tag' "$cfg/.wip.yaml")" "[solo] default-tool remains a string"
+assert_eq "456" "$(yq -r '.features.solo.agent_tools.default' "$cfg/.wip.yaml")" "[solo] numeric-looking default-tool preserved"
+# An unknown --role-tool role is rejected (exit 2); `default` must use --default-tool.
+set +e
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo --role-tool bogus=X >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "[solo] unknown --role-tool role exits 2"
+set +e
+WIP_ROOT="$cfg" bin/wip-plumbing setup solo --role-tool default=X >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "2" "$rc" "[solo] --role-tool default is rejected (use --default-tool)"
 
 # setup forge (bare) → forge:{enabled:true}, NO backend (regression guard, D3).
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge 2>/dev/null)"
@@ -1008,12 +1020,12 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "[tracker] unknown backend exit 2"
 
-# Tier flags are solo-only; a stray positional is rejected.
+# agent-tool flags are solo-only; a stray positional is rejected.
 set +e
-WIP_ROOT="$cfg" bin/wip-plumbing setup forge --force-tier large >/dev/null 2>&1
+WIP_ROOT="$cfg" bin/wip-plumbing setup forge --default-tool Claude >/dev/null 2>&1
 rc=$?
 set -e
-assert_eq "2" "$rc" "[forge] --force-tier rejected (solo-only)"
+assert_eq "2" "$rc" "[forge] --default-tool rejected (solo-only)"
 # forge backend is optional, but an unknown positional is rejected (D4); writes nothing.
 set +e
 out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup forge bogus 2>/dev/null)"
@@ -1023,11 +1035,11 @@ assert_eq "2" "$rc" "[forge] unknown backend exit 2"
 assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[forge] unknown backend usage"
 assert_eq "glab" "$(yq -r '.features.forge.backend' "$cfg/.wip.yaml")" "[forge] bogus backend wrote nothing (pin intact)"
 set +e
-out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --force-tier banana 2>/dev/null)"
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup solo --role-tool builder 2>/dev/null)"
 rc=$?
 set -e
-assert_eq "2" "$rc" "[solo] invalid --force-tier rejected"
-assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[solo] invalid --force-tier usage"
+assert_eq "2" "$rc" "[solo] malformed --role-tool (no =) rejected"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[solo] malformed --role-tool usage"
 set +e
 WIP_ROOT="$cfg" bin/wip-plumbing setup solo extra >/dev/null 2>&1
 rc=$?

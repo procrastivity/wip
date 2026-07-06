@@ -33,7 +33,7 @@ concrete runtime (see the backend partial).
 
 | Term | Definition |
 |------|------------|
-| **Tier** | Capability level requested when spawning an agent (`small`/`medium`/`large`) — a *semantic* request, never a runtime tool id. The backend resolves a Tier to whatever runtime it offers. A `.wip.yaml` policy may force a Tier (e.g. Opus-only). |
+| **Runtime selection** | The request when spawning is a **Role** (Orchestrator / Coordinator / Researcher / Builder), never a runtime tool id — role is the only selection signal (ADR-0025). The backend resolves a Role to whatever runtime its `features.<backend>` config assigns, with an optional per-Role escalation target for repeated-failure / load-bearing work. A `.wip.yaml` policy may pin one runtime for every Role (e.g. Opus-only). |
 | **Task ledger** | The live execution surface (ownership, blockers, comments, locks, status), scoped `<slug>/step-NN`. A *mirror* of the Roadmap, not a replacement. The backend provides the concrete store. |
 | **Agent process** | A backend-managed runtime instance that plays a Role. |
 | **Operator hold** | A flag an operator places on a spawned agent to take it over directly. While held, no Role closes it or injects into it; timer-delivered turns must check the hold and back off/re-arm before acting. Cleared only by the operator. The backend provides the concrete hold + engagement signal. |

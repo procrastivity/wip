@@ -50,6 +50,9 @@ commands:
                                    plugin: vendor nothing, use the wip plugin)
                    setup lds      [--force] [--sentinel-only]
                                   (LDS scaffold under engineering/)
+                   setup solo     [--default-tool <name>] [--role-tool <role>=<name>...]
+                   setup forge    [gh|glab]
+                   setup issue-tracker <linear|github>
   graduate  promote a single planning artifact to its LDS canon slot
             usage: graduate <artifact-path> [--to <slot>] [--force]
                    (slot is <eng-docs>-relative; auto-numbers
@@ -163,8 +166,8 @@ _wip_feature_records() {
 # wip_features_json <root> <manifest-json> — JSON array of resolved feature
 # objects: {name, enabled, active, sentinel, sentinel_exists?, drift?, detail?}.
 # detail is a pure config echo (no resolution): for `solo` it surfaces the
-# agent_tier_policy block (force_tier + fallback_tool) — the spec'd detail field
-# (engineering/specs/wip-plumbing-cli.md). Permissive: absent keys are omitted.
+# agent_tools map (Role → tool name, incl. `default`) — the spec'd detail field
+# (engineering/specs/wip-plumbing-cli.md). Permissive: an absent map is omitted.
 wip_features_json() {
   local root="$1" mj="$2"
   local arr="[]" name enabled sentinel exists active drift detail obj
@@ -175,10 +178,9 @@ wip_features_json() {
     detail="null"
     if [[ "$name" == "solo" ]]; then
       detail="$(printf '%s' "$mj" | jq -c '
-        (.features.solo.agent_tier_policy // {})
-        | { force_tier: .force_tier, fallback_tool: .fallback_tool }
+        (.features.solo.agent_tools // {})
         | with_entries(select(.value != null))
-        | if length == 0 then null else . end')"
+        | if length == 0 then null else { agent_tools: . } end')"
     elif [[ "$name" == "issue-tracker" ]]; then
       # Config echo of the named provider backend (ADR-0019 §B), parallel to
       # orchestration's backend. No resolution — "declared", not "answering".

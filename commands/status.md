@@ -18,7 +18,7 @@ backed entirely by deterministic plumbing.
      WIP="$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing"
    elif [[ -n "${WIP_PLUMBING_BIN:-}" && -x "${WIP_PLUMBING_BIN}" ]]; then
      WIP="$WIP_PLUMBING_BIN"
-   elif WIP="$(ls -d "$HOME"/.claude/plugins/cache/*/wip/*/bin/wip-plumbing 2>/dev/null | sort -V | tail -1)" && [[ -n "$WIP" && -x "$WIP" ]]; then
+   elif WIP="$(ls -d "$HOME"/.claude/plugins/cache/*/wip/*/bin/wip-plumbing 2>/dev/null | sort | tail -1)" && [[ -n "$WIP" && -x "$WIP" ]]; then
      : # bundled copy from the installed plugin cache (CLAUDE_PLUGIN_ROOT not exported to this shell)
    elif command -v wip-plumbing >/dev/null 2>&1; then
      WIP="wip-plumbing"
@@ -74,6 +74,6 @@ backed entirely by deterministic plumbing.
   "active_step": { "id": "step-12", "title": "Roles set", "shipped": false },
   "dirty_wip_files": [],
   "solo_available": true, "solo_reachable": false,
-  "deferred": [ { "id": "duo-backend", "title": "Duo backend" } ],
+  "deferred": [ { "id": "doctor-probe-duo", "title": "doctor --probe-duo mirror" } ],
   "signals": ["solo-unreachable"] }
 ```

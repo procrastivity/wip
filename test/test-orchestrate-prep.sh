@@ -104,6 +104,42 @@ set -e
 assert_eq "3" "$rc" "unknown initiative exit 3"
 assert_eq "unknown-initiative" "$(jq -r '.error.kind' <<<"$out7")" "unknown-initiative kind"
 
+# 8b. Duo backend reachability gate (ADR-0025 §4): backend=duo hard-errors at
+# preflight when Duo is unreachable, and proceeds when reachable. WIP_DUO_PROBE_CMD
+# is the test seam (no real `duo` dependency). Restore the enabled + active_step
+# state mutated by tests 5-7.
+WIP_ROOT="$tmp" yq -i '.features.orchestration.enabled = true' "$tmp/.wip.yaml"
+WIP_ROOT="$tmp" yq -i '.features.orchestration.backend = "duo"' "$tmp/.wip.yaml"
+WIP_ROOT="$tmp" yq -i '(.initiatives[] | select(.slug == "demo") | .active_step) = "step-02"' "$tmp/.wip.yaml"
+
+# Reachable: probe returns a resolved project id -> normal brief, exit 0.
+# (jq -n emits valid JSON that survives the `bash -c "$probe"` re-parse.)
+export WIP_DUO_PROBE_CMD='jq -n "{project_id:15}"'
+out_duo_ok="$(run)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_duo_ok")" "duo reachable -> ok brief"
+assert_eq "duo" "$(jq -r '.orchestration.backend' <<<"$out_duo_ok")" "duo reachable -> backend duo"
+
+# Unreachable: probe returns no project id -> exit 3 backend-unreachable.
+export WIP_DUO_PROBE_CMD='jq -n "{}"'
+set +e
+out_duo_down="$(run 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "3" "$rc" "duo unreachable -> exit 3"
+assert_eq "backend-unreachable" "$(jq -r '.error.kind' <<<"$out_duo_down")" "duo unreachable kind"
+
+# Probe command itself fails (Duo not installed / not answering) -> exit 3 too.
+export WIP_DUO_PROBE_CMD='false'
+set +e
+run >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "3" "$rc" "duo probe failure -> exit 3"
+
+unset WIP_DUO_PROBE_CMD
+# Reset backend to solo for the remaining shared-fixture cases.
+WIP_ROOT="$tmp" yq -i '.features.orchestration.backend = "solo"' "$tmp/.wip.yaml"
+
 # 9. bad subcommand / args -> exit 2.
 set +e
 WIP_ROOT="$tmp" bin/wip-plumbing orchestrate >/dev/null 2>&1

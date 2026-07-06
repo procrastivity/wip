@@ -211,11 +211,11 @@ wip_setup_set_feature_flag() {
 # Idempotently merge each key=value into the nested object
 # features.<feature>.<subkey>, creating it (and its parents) if absent and
 # preserving sibling keys not named here. Values are written as strings, because
-# the current nested setup surface is agent_tier_policy and both force_tier /
-# fallback_tool are string policy fields. One level deeper than
-# wip_setup_set_feature_flag — used for features.solo.agent_tier_policy
-# (ADR-0021 §3), whose {force_tier, fallback_tool} are a nested block, not
-# flat feature keys. Bracket-indexed via strenv so a hyphenated <feature>
+# the nested setup surface is features.solo.agent_tools, a Role→tool-name map
+# whose values are all strings. One level deeper than
+# wip_setup_set_feature_flag — used for features.solo.agent_tools
+# (ADR-0021 §3, ADR-0025), a nested block, not flat feature keys. Bracket-indexed
+# via strenv so a hyphenated <feature>
 # (e.g. issue-tracker) resolves correctly. Honors $WIP_DRY_RUN (no write).
 # Echoes "updated" or "noop"; returns 1 on a jq/yq error.
 wip_setup_set_feature_subblock() {

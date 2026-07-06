@@ -5,6 +5,10 @@
 # names. backends/solo.md must contain them. Plugin agents must be thin
 # pointers (@-file references that resolve) and must NOT name Solo tools
 # either.
+#
+# The shared contract is role-centric (ADR-0025): a spawn requests by
+# Role, not by a small/medium/large tier. tier-policy.md is retained as
+# the stable @-include path but now holds the per-Role runtime policy.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 _WIP_TEST_NAME="roles-backend-seam"
@@ -17,11 +21,12 @@ for f in shared orchestrator coordinator researcher builder tier-policy; do
 done
 assert_file "roles/backends/solo.md" "roles/backends/solo.md present"
 
-# backends/ holds the authored bindings (solo.md, task.md) plus the generated
-# active.md pointer — no other (unauthored) backend files. ADR-0007 / ADR-0013.
+# backends/ holds the authored bindings (solo.md, task.md, duo.md) plus the
+# generated active.md pointer — no other (unauthored) backend files.
+# ADR-0007 / ADR-0013 / ADR-0025.
 extra_backends="$(find roles/backends -mindepth 1 -type f \
-  ! -name solo.md ! -name task.md ! -name active.md 2>/dev/null | wc -l | tr -d ' ')"
-assert_eq "0" "$extra_backends" "roles/backends/ contains only solo.md, task.md, active.md"
+  ! -name solo.md ! -name task.md ! -name duo.md ! -name active.md 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "0" "$extra_backends" "roles/backends/ contains only solo.md, task.md, duo.md, active.md"
 
 # active.md is GENERATED: byte-identical to the configured backend's binding
 # (the indirection seam — ADR-0013). Default backend is solo.
@@ -70,11 +75,26 @@ assert_not_grep 'mcp__solo__' "roles/backends/task.md" "backends/task.md names n
 assert_grep 'subagent_type' "roles/backends/task.md" "backends/task.md names subagent_type"
 assert_grep 'Task tool' "roles/backends/task.md" "backends/task.md names the Task tool"
 
-# --- tier-policy.md sanity ----------------------------------------------
-# Each Role name appears in a Tier-defaults context.
+# --- backends/duo.md is a third backend that delegates to Duo (ADR-0025) -
+# Duo is a spawner LAYERED ON Solo, so duo.md legitimately names Solo substrate
+# tools (identity/ledger are Solo's) — the no-Solo-token proof used for task.md
+# does NOT apply. The proof duo.md is a genuinely different binding is that it
+# delegates runtime selection to Duo, naming Duo's launch + preset surface.
+assert_file "roles/backends/duo.md" "roles/backends/duo.md present"
+assert_grep 'mcp__duo__launch_agent' "roles/backends/duo.md" "backends/duo.md delegates via mcp__duo__launch_agent"
+assert_grep 'preset' "roles/backends/duo.md" "backends/duo.md names the preset vocabulary"
+
+# --- role-policy sanity (roles/tier-policy.md) --------------------------
+# Each Role name appears in a per-Role assignment context.
 for role in Orchestrator Coordinator Researcher Builder; do
   assert_grep "$role" "roles/tier-policy.md" "tier-policy.md mentions $role"
 done
+
+# --- role-centric request contract (ADR-0025) ---------------------------
+# The shared contract requests by ROLE, not by a small/medium/large tier:
+# the §Role Selection section replaced §Tier Selection in shared.md.
+assert_grep '## Role Selection' "roles/shared.md" "shared.md requests by Role (§Role Selection)"
+assert_not_grep '## Tier Selection' "roles/shared.md" "shared.md no longer has a §Tier Selection"
 
 # --- roles/README.md no longer marks roles/ as not-yet-authored --------
 assert_not_grep '🚧 Not yet authored' "roles/README.md" "roles/README.md status flipped from 🚧"

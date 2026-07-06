@@ -13,7 +13,7 @@ partial; the Roles and capability terms are unchanged.
 | Abstract term (orchestration.md) | Task binding |
 |------|------|
 | **Agent process** → **subagent** | A native subagent invoked via the Task tool (`subagent_type: wip-<role>`). Synchronous: the spawn call blocks and returns the subagent's final result. No persistent process. |
-| **Tier** → (advisory) | A native subagent runs on the session's model; there is no tool inventory to resolve a Tier against, so a Tier is an advisory request, recorded for audit. An optional `tier → model` map is deferred. |
+| **Runtime selection** → model | A native subagent runs on the session's model by default; `features.task.models` optionally maps a **Role** (+ `<role>-escalated`) to a model applied via the Task tool's per-call `model` override. A `default` entry is the fallback; when the map is absent every Role runs on the session's model. |
 | **Task ledger** → **ledger file** | The live execution surface, a markdown file under `.wip/initiatives/<slug>/orchestration/`. Tagged `<slug>/step-NN`. A *mirror* of the Roadmap, not a replacement. The Coordinator is its sole writer. |
 
 | Task-specific term | Definition |
