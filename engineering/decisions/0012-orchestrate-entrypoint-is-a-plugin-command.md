@@ -85,3 +85,16 @@ gates, one honest verb owns the contract.
   about the Roles or the backend binding moves.
 - Tests: `test/test-orchestrate-prep.sh` (the plumbing verb's JSON shape + exit-code gate,
   network/MCP-free) and an `/wip:orchestrate` case in `test/test-plugin-manifest.sh`.
+
+## Amendment — the prep gate gains backend-reachability (ADR-0025)
+
+Amended 2026-07-05 (`role-centric-runtime-selection` initiative, Round 1 step-01; ADR-0025).
+
+`wip-plumbing orchestrate prep`'s readiness gate gains a **backend-reachability** check for
+the active backend. This is the seam through which the **Duo backend** hard-errors at
+preflight when `features.orchestration.backend: duo` but Duo is not installed/reachable —
+never a silent fall-back to Solo (ADR-0025 §4). The entrypoint decision is otherwise
+preserved: `/wip:orchestrate` stays a plugin command, `orchestrate prep` stays a
+deterministic, LLM-free verb that emits a backend *name* but no backend tool. The
+Solo-liveness precedent for a warn-and-offer probe is ADR-0014; the Duo probe differs in
+that a Duo run hard-errors rather than offering a fallback.

@@ -52,3 +52,16 @@ enabled`, not `features.solo.enabled`.
   is retired. `agent_tier_policy` stays under the backend, since Tier→`agent_tool_id` is
   backend-specific.
 - Cost is paid in docs + manifest schema now; no second backend is built (deferred).
+
+## Amendment — the request axis is role, not tier (ADR-0025)
+
+Amended 2026-07-05 (`role-centric-runtime-selection` initiative, Round 1 step-01; ADR-0025).
+
+The capability layer's request-axis vocabulary changes from **Tier semantics**
+(`small`/`medium`/`large`) to **role** (Orchestrator / Coordinator / Researcher / Builder):
+each backend now maps `role → its own runtime` rather than resolving a tier. Duo retired its
+own token-classification tier model for explicit presets with no compat layer, so a tier axis
+no longer has a home downstream (see [`../notes/duo-tiers-to-presets.md`](../notes/duo-tiers-to-presets.md)).
+Everything else here stands: the two-layer split (capability vs backend binding), the
+`features.orchestration.{enabled,backend}` gate, and `agent_tier_policy` living under the
+backend. See ADR-0025 for the role model, the per-role escalation target, and the Duo backend.
