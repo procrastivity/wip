@@ -74,5 +74,5 @@ judgment lives here that the CLI doesn't also have).
     { "rank": 1, "source": "roadmap", "id": "step-12",
       "title": "Roles set", "reason": "first unshipped step in active round" }
   ],
-  "deferred": [ { "id": "duo-backend", "title": "Duo backend" } ] }
+  "deferred": [ { "id": "doctor-probe-duo", "title": "doctor --probe-duo mirror" } ] }
 ```

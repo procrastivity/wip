@@ -9,6 +9,7 @@ glossary by concatenating `core.md` with one partial per feature enabled in `.wi
 | `orchestration.md` | `features.orchestration.enabled` | Roles + abstract substrate (backend-agnostic) |
 | `solo.md` | `features.orchestration.backend: solo` | Solo backend binding for orchestration |
 | `task.md` | `features.orchestration.backend: task` | Task-tool / native-subagent backend binding for orchestration |
+| `duo.md` | `features.orchestration.backend: duo` | Duo backend binding (a spawner layered on Solo; delegates runtime selection to Duo presets) |
 | `lds.md` | `features.lds.enabled` | LDS terms + the LDS graduation mechanism *(future)* |
 | `diataxis.md` | `features.diataxis.enabled` | Diátaxis terms *(future)* |
 

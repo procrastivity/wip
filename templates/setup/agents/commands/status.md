@@ -59,6 +59,6 @@ backed entirely by deterministic plumbing.
   "active_step": { "id": "step-12", "title": "Roles set", "shipped": false },
   "dirty_wip_files": [],
   "solo_available": true, "solo_reachable": false,
-  "deferred": [ { "id": "duo-backend", "title": "Duo backend" } ],
+  "deferred": [ { "id": "doctor-probe-duo", "title": "doctor --probe-duo mirror" } ],
   "signals": ["solo-unreachable"] }
 ```

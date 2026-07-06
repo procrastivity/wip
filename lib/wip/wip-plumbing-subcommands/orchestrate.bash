@@ -453,6 +453,35 @@ _wip_orchestrate_cmd_prep() {
       "orchestrate prep: features.orchestration.enabled is not true — run \`wip-plumbing setup agents\` or enable it in .wip.yaml"
   fi
 
+  # Gate 1b: a backend that delegates runtime selection to an external control
+  # plane must be REACHABLE at preflight, or the run hard-errors — no silent
+  # fall-back (ADR-0025 §4; ADR-0012 amendment). Only the `duo` backend requires
+  # this today: Solo/Task resolve in-process, so they need no reachability gate
+  # here (Solo's unreachable path is a warn+offer in `status`, ADR-0014 — not a
+  # hard error). The probe is a bash CLI call, never MCP (the deterministic core
+  # cannot reach MCP, ADR-0012); `WIP_DUO_PROBE_CMD` is the test seam.
+  if [[ "$backend" == "duo" ]]; then
+    local duo_probe="${WIP_DUO_PROBE_CMD:-}"
+    if [[ -z "$duo_probe" ]] && command -v duo >/dev/null 2>&1; then
+      duo_probe="duo whoami --json"
+    fi
+    local duo_reachable="false" duo_out
+    if [[ -n "$duo_probe" ]]; then
+      duo_out="$(bash -c "$duo_probe" 2>/dev/null || true)"
+      # `duo whoami --json` resolves a project when Duo↔Solo is live; require a
+      # project id. (Do not trust exit code — `duo doctor` exits 0 with failing
+      # checks; a resolved project is the clean positive-liveness signal.)
+      if [[ -n "$duo_out" ]] &&
+        [[ -n "$(jq -r '.project_id // empty' <<<"$duo_out" 2>/dev/null)" ]]; then
+        duo_reachable="true"
+      fi
+    fi
+    if [[ "$duo_reachable" != "true" ]]; then
+      wip_die 3 backend-unreachable \
+        "orchestrate prep: features.orchestration.backend is 'duo' but Duo is not installed or reachable — install/start Duo (the \`duo\` CLI) or switch the backend with \`orchestrate backend <name>\`. No silent fall-back (ADR-0025)."
+    fi
+  fi
+
   # Resolve the initiative (default current; --initiative overrides). Mirrors
   # status' resolution so the two agree on "which initiative".
   if [[ -z "$slug" ]]; then
