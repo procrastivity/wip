@@ -25,7 +25,7 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
      WIP="$CLAUDE_PLUGIN_ROOT/bin/wip-plumbing"
    elif [[ -n "${WIP_PLUMBING_BIN:-}" && -x "${WIP_PLUMBING_BIN}" ]]; then
      WIP="$WIP_PLUMBING_BIN"
-   elif WIP="$(ls -d "$HOME"/.claude/plugins/cache/*/wip/*/bin/wip-plumbing 2>/dev/null | sort -V | tail -1)" && [[ -n "$WIP" && -x "$WIP" ]]; then
+   elif WIP="$(ls -d "$HOME"/.claude/plugins/cache/*/wip/*/bin/wip-plumbing 2>/dev/null | sort | tail -1)" && [[ -n "$WIP" && -x "$WIP" ]]; then
      : # bundled copy from the installed plugin cache (CLAUDE_PLUGIN_ROOT not exported to this shell)
    elif command -v wip-plumbing >/dev/null 2>&1; then
      WIP="wip-plumbing"
@@ -59,9 +59,9 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
      fallback ladder — so it governs the Coordinator→Builder spawns for
      the rest of the run and **bypasses the resolver's interactive
      fallback prompt** (the operator pre-selects the tool instead of
-     being asked when tier classification is non-confident). The command
+     being asked when Role-to-runtime resolution is non-confident). The command
      body does **not** persist the pin or name any backend tool — the
-     live Role flow records it (see `roles/backends/solo.md` and
+     live Role flow records it (see `roles/backends/active.md` and
      `roles/tier-policy.md`).
 
 3. **Resolve the initiative.** If the user passed `--initiative <slug>`, use it.
@@ -99,8 +99,8 @@ The activation is deterministic plumbing (`wip-plumbing workplan init …
          clarifying questions inline.
        - **Orchestrate** — hand off to **`/wip:orchestrate`**, the ergonomic
          wrapper for this branch: it preps the active step and has you become
-         the Orchestrator (`roles/orchestrator.md` + `roles/backends/solo.md`)
-         to spawn a Coordinator for the active step via Solo. (Run it now, or
+         the Orchestrator (`roles/orchestrator.md` + `roles/backends/active.md`)
+         to spawn a Coordinator for the active step via the active backend. (Run it now, or
          invoke `/wip:orchestrate` directly later.) If `--agent <name|id>`
          was parsed, pass it through to `/wip:orchestrate` so the session
          spawn pin is set for the run.

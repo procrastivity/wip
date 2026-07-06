@@ -50,6 +50,9 @@ commands:
                                    plugin: vendor nothing, use the wip plugin)
                    setup lds      [--force] [--sentinel-only]
                                   (LDS scaffold under engineering/)
+                   setup solo     [--default-tool <name>] [--role-tool <role>=<name>...]
+                   setup forge    [gh|glab]
+                   setup issue-tracker <linear|github>
   graduate  promote a single planning artifact to its LDS canon slot
             usage: graduate <artifact-path> [--to <slot>] [--force]
                    (slot is <eng-docs>-relative; auto-numbers
