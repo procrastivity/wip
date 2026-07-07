@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.19] - 2026-07-07
+
+### Fixed
+
+- Fix(commands): resolve wip-plumbing from plugin cache when CLAUDE_PLUGIN_ROOT is unset (#28)
+
+### Other
+
+- Role-centric runtime selection + Duo orchestration backend (#29)
+
 ## [0.0.18] - 2026-07-05
 
 ### Added
