@@ -106,20 +106,71 @@ _wip_tracker_bind_plan() {
 }
 
 # _wip_tracker_transport_read_cmd <backend> — the live read shell-out for a
-# backend, or "" when none (the agent/MCP path). WIP_LINEAR_READ_CMD overrides
-# (test seam). No default CLI: the bare-CLI adapter is deferred to BDS-23.
+# backend, or "" when none (the agent/MCP path). Resolution precedence
+# (ADR-0026 §Decision 2), highest to lowest:
+#   1. WIP_TRACKER_READ_CMD — generic, any-backend test/process seam.
+#   2. the per-backend adapter fn `_wip_tracker_<backend>_read_cmd` (loaded from
+#      lib/wip/tracker-backends/ by the loader below), which honors its own
+#      WIP_<BACKEND>_READ_CMD before emitting its default CLI string.
+#   3. the inline linear arm — WIP_LINEAR_READ_CMD, else "" (the MCP path;
+#      Linear's own bare-CLI wrapper stays deferred to BDS-23).
+# A non-linear backend with no adapter loaded falls through to rung 3's default
+# (""). Linear stays inline deliberately (ADR-0026): minimal churn, unchanged
+# empty-by-default MCP behavior.
 _wip_tracker_transport_read_cmd() {
-  case "$1" in
+  local backend="$1"
+  if [[ -n "${WIP_TRACKER_READ_CMD:-}" ]]; then
+    printf '%s' "$WIP_TRACKER_READ_CMD"
+    return 0
+  fi
+  local fn="_wip_tracker_${backend//-/_}_read_cmd"
+  if declare -F "$fn" >/dev/null 2>&1; then
+    "$fn"
+    return 0
+  fi
+  case "$backend" in
     linear) printf '%s' "${WIP_LINEAR_READ_CMD:-}" ;;
     *) ;;
   esac
 }
 
 # _wip_tracker_transport_write_cmd <backend> — the live write shell-out for a
-# backend, or "" when none. WIP_LINEAR_WRITE_CMD overrides (test seam).
+# backend, or "" when none. Same precedence as the read dispatcher above:
+# WIP_TRACKER_WRITE_CMD → `_wip_tracker_<backend>_write_cmd` → inline linear
+# (WIP_LINEAR_WRITE_CMD, else "").
 _wip_tracker_transport_write_cmd() {
-  case "$1" in
+  local backend="$1"
+  if [[ -n "${WIP_TRACKER_WRITE_CMD:-}" ]]; then
+    printf '%s' "$WIP_TRACKER_WRITE_CMD"
+    return 0
+  fi
+  local fn="_wip_tracker_${backend//-/_}_write_cmd"
+  if declare -F "$fn" >/dev/null 2>&1; then
+    "$fn"
+    return 0
+  fi
+  case "$backend" in
     linear) printf '%s' "${WIP_LINEAR_WRITE_CMD:-}" ;;
     *) ;;
   esac
 }
+
+# --- Per-backend adapter loader (ADR-0026 §Decision 2) -----------------------
+# Each lib/wip/tracker-backends/<name>.bash defines
+# `_wip_tracker_<name>_{read,write}_cmd`, dispatched by the two functions above.
+# Glob-sourced from this lib so adapters auto-load wherever the transport lib is
+# sourced (the bin AND the direct-source tests) — no bin/wip-plumbing edit. The
+# dir may be absent or contain no *.bash (e.g. in this substrate, before any
+# backend adapter ships); the -d guard and the no-match -e check tolerate both.
+# The load path is exercised for real by the backend lanes' own tests
+# (test-tracker-github.sh / test-tracker-gitlab.sh).
+_wip_tracker_backends_dir="${BASH_SOURCE[0]%/*}/tracker-backends"
+if [[ -d "$_wip_tracker_backends_dir" ]]; then
+  for _wip_tb in "$_wip_tracker_backends_dir"/*.bash; do
+    [[ -e "$_wip_tb" ]] || continue # tolerate the no-match glob
+    # shellcheck disable=SC1090
+    source "$_wip_tb"
+  done
+  unset _wip_tb
+fi
+unset _wip_tracker_backends_dir

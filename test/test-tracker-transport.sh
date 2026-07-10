@@ -33,7 +33,34 @@ assert_eq "" "$(_wip_tracker_transport_read_cmd linear)" "read cmd empty by defa
 assert_eq "" "$(_wip_tracker_transport_write_cmd linear)" "write cmd empty by default"
 assert_eq "rd" "$(WIP_LINEAR_READ_CMD=rd _wip_tracker_transport_read_cmd linear)" "WIP_LINEAR_READ_CMD overrides"
 assert_eq "wr" "$(WIP_LINEAR_WRITE_CMD=wr _wip_tracker_transport_write_cmd linear)" "WIP_LINEAR_WRITE_CMD overrides"
-assert_eq "" "$(WIP_LINEAR_READ_CMD=rd _wip_tracker_transport_read_cmd github)" "non-linear backend -> no cmd"
+# A backend with no adapter loaded resolves to "" (the WIP_LINEAR_* seam does not
+# leak to it). `bogus` never gets an adapter, so this stays valid after the github
+# /gitlab adapters ship in their own lanes — the assertion no longer pins `github`.
+assert_eq "" "$(WIP_LINEAR_READ_CMD=rd _wip_tracker_transport_read_cmd bogus)" "adapter-less backend -> no cmd"
+
+# --- dispatcher precedence (ADR-0026 §Decision 2) ---------------------------
+# Rung 1: generic WIP_TRACKER_{READ,WRITE}_CMD wins for ANY backend, over the
+# inline linear seam and over any adapter fn.
+assert_eq "GEN" "$(WIP_TRACKER_READ_CMD=GEN _wip_tracker_transport_read_cmd linear)" "WIP_TRACKER_READ_CMD wins (linear)"
+assert_eq "GEN" "$(WIP_TRACKER_READ_CMD=GEN _wip_tracker_transport_read_cmd bogus)" "WIP_TRACKER_READ_CMD wins (any backend)"
+assert_eq "GENW" "$(WIP_TRACKER_WRITE_CMD=GENW _wip_tracker_transport_write_cmd linear)" "WIP_TRACKER_WRITE_CMD wins (linear)"
+assert_eq "GEN" "$(WIP_TRACKER_READ_CMD=GEN WIP_LINEAR_READ_CMD=rd _wip_tracker_transport_read_cmd linear)" "generic seam beats WIP_LINEAR_READ_CMD"
+
+# Rung 2: a loaded adapter fn is dispatched by backend name, and the generic seam
+# still overrides it. A faux adapter proves dispatch without a real backend file
+# (the github/gitlab adapters ship in their own lanes).
+# shellcheck disable=SC2317  # invoked indirectly by the dispatcher (declare -F "$fn")
+_wip_tracker_faux_read_cmd() { printf 'FAUX-READ'; }
+# shellcheck disable=SC2317  # invoked indirectly by the dispatcher (declare -F "$fn")
+_wip_tracker_faux_write_cmd() { printf 'FAUX-WRITE'; }
+assert_eq "FAUX-READ" "$(_wip_tracker_transport_read_cmd faux)" "adapter fn dispatched by backend name (read)"
+assert_eq "FAUX-WRITE" "$(_wip_tracker_transport_write_cmd faux)" "adapter fn dispatched by backend name (write)"
+assert_eq "GEN" "$(WIP_TRACKER_READ_CMD=GEN _wip_tracker_transport_read_cmd faux)" "generic seam beats the adapter fn"
+unset -f _wip_tracker_faux_read_cmd _wip_tracker_faux_write_cmd
+
+# The adapter directory is committed as the extension point; the loader tolerates
+# it containing no *.bash yet (this substrate ships no adapter).
+assert_eq "true" "$([[ -d lib/wip/tracker-backends ]] && echo true || echo false)" "tracker-backends dir committed"
 
 # --- bind plan via the verb -------------------------------------------------
 tmp="$(wip_mktemp)"
