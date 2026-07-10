@@ -3,12 +3,14 @@
 # shellcheck shell=bash
 
 wip_plumbing_cmd_doctor() {
-  local fix=0 probe_solo=0 probe_linear=0
+  local fix=0 probe_solo=0 probe_tracker=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --fix) fix=1 ;;
       --probe-solo) probe_solo=1 ;;
-      --probe-linear) probe_linear=1 ;;
+      # `--probe-tracker` is the canonical, backend-neutral flag (ADR-0026);
+      # `--probe-linear` is the retained deprecated alias.
+      --probe-tracker | --probe-linear) probe_tracker=1 ;;
       *) wip_die 2 usage "doctor: unknown arg: $1" ;;
     esac
     shift
@@ -181,21 +183,23 @@ wip_plumbing_cmd_doctor() {
     fi
   fi
 
-  # 2e. Tracker live drift (opt-in `--probe-linear`). A READ-ONLY live probe of
-  #     the issue tracker, mirroring `--probe-solo`/`--probe-forge`: for each
-  #     mapped node, compare the tracker's reported state to wip's expected
-  #     (cached → provider) state. A concrete mismatch is drift; the tracker not
-  #     answering (empty read / no transport wired) is non-actionable — a down
-  #     tracker never fails doctor. WIP_LINEAR_READ_CMD is the transport seam
-  #     (test/CLI), invoked as `<cmd> <issue>`; without it the MCP path is
-  #     agent-side, so plumbing records an informational unavailable note.
-  if [[ "$probe_linear" == "1" ]] && [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+  # 2e. Tracker live drift (opt-in `--probe-tracker`, alias `--probe-linear`). A
+  #     READ-ONLY live probe of the issue tracker, mirroring
+  #     `--probe-solo`/`--probe-forge`: for each mapped node, compare the tracker's
+  #     reported state to wip's expected (cached → provider) state. A concrete
+  #     mismatch is drift; the tracker not answering (empty read / no transport
+  #     wired) is non-actionable — a down tracker never fails doctor. The read
+  #     transport is resolved by the backend dispatcher (ADR-0026): a github/gitlab
+  #     backend's adapter, or the WIP_TRACKER_READ_CMD / WIP_LINEAR_READ_CMD seams,
+  #     invoked as `<cmd> <issue>`; without one (Linear's agent-side MCP path)
+  #     plumbing records an informational unavailable note.
+  if [[ "$probe_tracker" == "1" ]] && [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
     local lbackend lread_cmd lslug lbind b lnode lissue lexpected lactual
     lbackend="$(jq -r '.features["issue-tracker"].backend // ""' <<<"$mj")"
     lread_cmd="$(_wip_tracker_transport_read_cmd "$lbackend")"
     if [[ -z "$lread_cmd" ]]; then
       obj="$(jq -nc '{kind:"tracker-probe", status:"ok", probe:"unavailable",
-        message:"linear probe requested but no read transport is wired (MCP path is agent-side, not a plumbing shell-out; CLI transport is BDS-23)"}')"
+        message:"tracker probe requested but no read transport is wired (Linear MCP path is agent-side, not a plumbing shell-out; a github/gitlab adapter or the WIP_TRACKER_READ_CMD seam supplies one)"}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
     else
       while IFS= read -r lslug; do

@@ -52,7 +52,7 @@ commands:
                                   (LDS scaffold under engineering/)
                    setup solo     [--default-tool <name>] [--role-tool <role>=<name>...]
                    setup forge    [gh|glab]
-                   setup issue-tracker <linear|github>
+                   setup issue-tracker <linear|github|gitlab>
   graduate  promote a single planning artifact to its LDS canon slot
             usage: graduate <artifact-path> [--to <slot>] [--force]
                    (slot is <eng-docs>-relative; auto-numbers
