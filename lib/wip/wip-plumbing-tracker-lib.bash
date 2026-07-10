@@ -5,15 +5,17 @@
 # shellcheck shell=bash
 
 # _wip_tracker_id_valid <id> — return 0 iff <id> is a whole, well-formed tracker
-# issue id (e.g. BDS-56): an uppercase key (letter then uppercase-alnum), a dash,
-# then digits. Anchored — no surrounding text. This MIRRORS the id sub-pattern in
+# issue id. Two shapes, per ADR-0026: a Linear-style key (uppercase letter then
+# uppercase-alnum, a dash, then digits — e.g. BDS-56), OR a github/gitlab issue
+# ref — bare `#123`, or a qualified `owner/repo#123` / nested `grp/sub/proj#45`.
+# Anchored — no surrounding text. This MIRRORS the id sub-pattern in
 # `_wip_roadmap_extract_tracker` (wip-plumbing-roadmap-lib.bash), which extracts
-# the same shape from a bracketed `[tracker: ID]` marker; both must stay in step.
+# the same union from a bracketed `[tracker: ID]` marker; both must stay in step.
 # (Deliberately mirrored, not factored into a shared constant: test-roadmap-parse
 # sources roadmap-lib in isolation, so a constant it depended on from here would
 # be undefined there.) Used to validate an intake `tracker_anchor` at capture.
 _wip_tracker_id_valid() {
-  [[ "$1" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]
+  [[ "$1" =~ ^([A-Z][A-Z0-9]*-[0-9]+|([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)?#[0-9]+)$ ]]
 }
 
 # _wip_tracker_map_from_roadmap <roadmap-doc> — echo {node-id: tracker-id} for
