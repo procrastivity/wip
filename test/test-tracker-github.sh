@@ -133,7 +133,7 @@ assert_write todo "issue edit 7 --remove-label wip:in-progress --remove-label wi
 assert_write in-progress "issue edit 7 --add-label wip:in-progress --remove-label wip:in-review"
 assert_write in-review "issue edit 7 --add-label wip:in-review --remove-label wip:in-progress"
 assert_write "done" "issue close 7 --reason completed"
-assert_write canceled "issue close 7 --reason not-planned"
+assert_write canceled "issue close 7 --reason not planned"
 
 # D1: `canceled` carries NO wip:canceled label — NOT_PLANNED is the native carrier,
 # and the read never consults such a label. github needs only TWO labels to pre-exist.

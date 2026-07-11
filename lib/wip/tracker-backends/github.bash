@@ -37,7 +37,7 @@ _wip_tracker_github_read_cmd() {
 # `gh issue edit` per label transition (add+remove composed into a single call);
 # `done`/`canceled` are pure closes, split on `--reason`.
 #
-# `canceled` is a bare `close --reason not-planned` with NO `wip:canceled` label:
+# `canceled` is a bare `close --reason "not planned"` with NO `wip:canceled` label:
 # GitHub's native NOT_PLANNED stateReason is the carrier the read already keys on,
 # so the label would be written but never read — and would make every cancel depend
 # on a third label existing in the repo. github therefore needs only TWO pre-existing
@@ -52,5 +52,5 @@ _wip_tracker_github_write_cmd() {
     return 0
   fi
   # shellcheck disable=SC2016  # deliberate: emitted verbatim, expanded by the caller
-  printf '%s' '_wip_gh_write() { local n="${1##*#}" r="${1%%#*}" t="$2"; [ "$r" = "$1" ] && r=""; case "$t" in todo) gh issue edit "$n" ${r:+--repo "$r"} --remove-label wip:in-progress --remove-label wip:in-review ;; in-progress) gh issue edit "$n" ${r:+--repo "$r"} --add-label wip:in-progress --remove-label wip:in-review ;; in-review) gh issue edit "$n" ${r:+--repo "$r"} --add-label wip:in-review --remove-label wip:in-progress ;; "done") gh issue close "$n" ${r:+--repo "$r"} --reason completed ;; canceled) gh issue close "$n" ${r:+--repo "$r"} --reason not-planned ;; *) return 2 ;; esac; }; _wip_gh_write'
+  printf '%s' '_wip_gh_write() { local n="${1##*#}" r="${1%%#*}" t="$2"; [ "$r" = "$1" ] && r=""; case "$t" in todo) gh issue edit "$n" ${r:+--repo "$r"} --remove-label wip:in-progress --remove-label wip:in-review ;; in-progress) gh issue edit "$n" ${r:+--repo "$r"} --add-label wip:in-progress --remove-label wip:in-review ;; in-review) gh issue edit "$n" ${r:+--repo "$r"} --add-label wip:in-review --remove-label wip:in-progress ;; "done") gh issue close "$n" ${r:+--repo "$r"} --reason completed ;; canceled) gh issue close "$n" ${r:+--repo "$r"} --reason "not planned" ;; *) return 2 ;; esac; }; _wip_gh_write'
 }
