@@ -996,9 +996,11 @@ assert_eq "issue-tracker" "${F[0]}" "[tracker] hyphenated feature key"
 assert_eq "features.issue-tracker" "${F[1]}" "[tracker] wrote the feature"
 assert_eq "true" "$(yq -r '.features["issue-tracker"].enabled' "$cfg/.wip.yaml")" "[tracker] enabled:true"
 assert_eq "linear" "$(yq -r '.features["issue-tracker"].backend' "$cfg/.wip.yaml")" "[tracker] backend:linear"
-# Switch backend → idempotent update to github.
+# Switch backend → idempotent update to github, then gitlab (ADR-0026).
 WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker github >/dev/null 2>&1
 assert_eq "github" "$(yq -r '.features["issue-tracker"].backend' "$cfg/.wip.yaml")" "[tracker] backend switches to github"
+WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker gitlab >/dev/null 2>&1
+assert_eq "gitlab" "$(yq -r '.features["issue-tracker"].backend' "$cfg/.wip.yaml")" "[tracker] backend switches to gitlab"
 
 # detect + doctor stay drift-free with all three declared (config-echo, no sentinel).
 assert_eq "true" "$(WIP_ROOT="$cfg" bin/wip-plumbing detect 2>/dev/null | jq -r '[.features[] | select(.name=="solo" or .name=="forge" or .name=="issue-tracker") | .active] | all')" \
@@ -1015,10 +1017,11 @@ set -e
 assert_eq "2" "$rc" "[tracker] missing backend exit 2"
 assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[tracker] missing backend usage"
 set +e
-out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker gitlab 2>/dev/null)"
+out="$(WIP_ROOT="$cfg" bin/wip-plumbing setup issue-tracker jira 2>/dev/null)"
 rc=$?
 set -e
-assert_eq "2" "$rc" "[tracker] unknown backend exit 2"
+assert_eq "2" "$rc" "[tracker] unknown backend (jira) exit 2"
+assert_eq "usage" "$(jq -r '.error.kind' <<<"$out")" "[tracker] unknown backend usage"
 
 # agent-tool flags are solo-only; a stray positional is rejected.
 set +e

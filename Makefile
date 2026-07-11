@@ -6,7 +6,8 @@ SRC := bin/wip \
        uninstall.sh \
        $(wildcard lib/wip/*.bash) \
        $(wildcard lib/wip/wip-plumbing-subcommands/*.bash) \
-       $(wildcard lib/wip/wip-subcommands/*.bash)
+       $(wildcard lib/wip/wip-subcommands/*.bash) \
+       $(wildcard lib/wip/tracker-backends/*.bash)
 TESTS := $(wildcard test/test-*.sh)
 
 .PHONY: fmt lint test check deps-check hooks glossary active agents-commands install install-local uninstall uninstall-local

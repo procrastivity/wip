@@ -55,7 +55,10 @@ wip_plumbing_cmd_sync() {
   if [[ ${#services[@]} -gt 0 ]]; then
     local want=0 s
     for s in "${services[@]}"; do
-      if [[ "$s" == "$backend" ]] || [[ "$s" == "linear" && "$backend" == "linear" ]]; then
+      # A requested service reconciles iff it names the configured backend
+      # (github/gitlab/linear). The old `s == linear && backend == linear`
+      # special-case was subsumed by this generic match (ADR-0026) and removed.
+      if [[ "$s" == "$backend" ]]; then
         want=1
       fi
     done

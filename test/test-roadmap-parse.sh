@@ -283,4 +283,36 @@ assert_eq "null" "$(jq -r '.rounds[2].tracker' <<<"$rt")" "round-3 has no tracke
 # No lane errors introduced by the tracker keys.
 assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$rt")" "round-tracker fixture: no lane errors"
 
+# --- ADR-0026: widened [tracker: ID] id union (github/gitlab refs) -----------
+# _wip_roadmap_extract_tracker accepts a Linear key OR a github/gitlab ref
+# (`#N`, `owner/repo#N`, nested `grp/sub/proj#N`), and BASH_REMATCH[1] returns
+# the WHOLE id regardless of which union branch matched.
+assert_eq "BDS-22" "$(_wip_roadmap_extract_tracker 'step [tracker: BDS-22]')" "extract: linear key (regression)"
+assert_eq "#123" "$(_wip_roadmap_extract_tracker 'step [tracker: #123]')" "extract: bare #N"
+assert_eq "octocat/hello#123" "$(_wip_roadmap_extract_tracker 'step [tracker: octocat/hello#123]')" "extract: owner/repo#N"
+assert_eq "grp/sub/proj#45" "$(_wip_roadmap_extract_tracker 'step [tracker: grp/sub/proj#45]')" "extract: nested group#N"
+assert_eq "" "$(_wip_roadmap_extract_tracker 'no marker here')" "extract: no marker -> empty"
+assert_eq "#1" "$(_wip_roadmap_extract_tracker 'x [tracker: #1] [tracker: BDS-2]')" "extract: first match wins"
+
+# The round-heading and lane-heading strips widen too: a `#N`/`owner/repo#N`
+# key on a `## Round` heading is harvested and stripped from the title; the same
+# on a `### Lane` heading is stripped (clean name) but NOT harvested (ADR-0024).
+cat >"$tmp/gh-tracker.md" <<'MD'
+# Roadmap — github tracker fixture
+
+## Round 1 — Foundations [tracker: octocat/hello#5]
+
+- **step-01 — Groundwork** — body. [tracker: #42]
+
+### Lane A [tracker: #9]
+- **step-02 — Track A** — parallel work.
+MD
+gt="$(wip_roadmap_parse "$tmp/gh-tracker.md")"
+assert_eq "octocat/hello#5" "$(jq -r '.rounds[0].tracker' <<<"$gt")" "round tracker: owner/repo#N harvested"
+assert_eq "Foundations" "$(jq -r '.rounds[0].title' <<<"$gt")" "round title clean (owner/repo#N stripped)"
+assert_eq "#42" "$(jq -r '.rounds[0].steps[0].tracker' <<<"$gt")" "step tracker: bare #N harvested"
+assert_eq '["A"]' "$(jq -c '.rounds[0].lanes' <<<"$gt")" "lane name clean (#N key stripped, not harvested)"
+assert_eq "0" "$(jq '[.. | objects | select(has("tracker")) | .tracker | select(. == "#9")] | length' <<<"$gt")" "lane tracker #9 harvested nowhere"
+assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$gt")" "gh-tracker fixture: no lane errors"
+
 test_summary

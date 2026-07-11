@@ -197,7 +197,7 @@ wip_plumbing_cmd_setup() {
         ;;
       -*) wip_die 2 usage "setup $sub: unknown flag: $1" ;;
       *)
-        # `setup issue-tracker <backend>` (linear|github) and `setup forge
+        # `setup issue-tracker <backend>` (linear|github|gitlab) and `setup forge
         # [gh|glab]` each take one positional backend; every other verb rejects
         # positionals.
         if [[ ("$sub" == "issue-tracker" || "$sub" == "forge") && "$tracker_backend_set" == "0" ]]; then
@@ -1859,10 +1859,10 @@ _wip_setup_config_verb() {
     issue-tracker)
       feature="issue-tracker"
       [[ "$backend_set" == "1" && -n "$backend" ]] ||
-        wip_die 2 usage "setup issue-tracker: missing backend (linear|github)"
+        wip_die 2 usage "setup issue-tracker: missing backend (linear|github|gitlab)"
       case "$backend" in
-        linear | github) ;;
-        *) wip_die 2 usage "setup issue-tracker: unknown backend: $backend (expected linear|github)" ;;
+        linear | github | gitlab) ;;
+        *) wip_die 2 usage "setup issue-tracker: unknown backend: $backend (expected linear|github|gitlab)" ;;
       esac
       status="$(wip_setup_set_feature_flag "$manifest" "issue-tracker" \
         "enabled=true" "backend=$backend")" ||

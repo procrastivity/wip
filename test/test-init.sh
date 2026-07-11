@@ -128,12 +128,26 @@ WIP_ROOT="$tmp/h" bin/wip-plumbing init anchored --title Anchored --tracker-anch
 assert_eq "BDS-56" "$(yq -r '.initiatives[] | select(.slug=="anchored") | .tracker_anchor' "$tmp/h/.wip.yaml")" "tracker_anchor persisted"
 assert_eq "null" "$(yq -o=json '.initiatives[] | select(.slug=="anchored") | .tracker_map' "$tmp/h/.wip.yaml")" "anchor is NOT inside tracker_map"
 
+# 13b. ADR-0026: the anchor validator accepts github/gitlab issue refs, not just
+#      Linear keys. Bare `#N`, qualified `owner/repo#N`, and nested
+#      `grp/sub/proj#N` all persist and round-trip (the `#` is YAML-quoted by the
+#      writer so it is not read back as a comment).
+gh_i=0
+for good in "#123" "octocat/hello#123" "grp/sub/proj#45"; do
+  slug="anch-$gh_i"
+  WIP_ROOT="$tmp/h" bin/wip-plumbing init "$slug" --title A --tracker-anchor "$good" >/dev/null
+  assert_eq "$good" "$(yq -r ".initiatives[] | select(.slug==\"$slug\") | .tracker_anchor" "$tmp/h/.wip.yaml")" "anchor '$good' persisted"
+  gh_i=$((gh_i + 1))
+done
+
 # 14. no --tracker-anchor -> field absent (back-compat).
 WIP_ROOT="$tmp/h" bin/wip-plumbing init plain --title Plain >/dev/null
 assert_eq "false" "$(yq -o=json '.initiatives[] | select(.slug=="plain") | has("tracker_anchor")' "$tmp/h/.wip.yaml")" "no anchor -> no field"
 
-# 15. malformed anchor shape exits 2 (validated against [A-Z][A-Z0-9]*-[0-9]+).
-for bad in "bds-56" "BDS56" "BDS-" "not-an-id"; do
+# 15. malformed anchor shape exits 2 (validated against the ADR-0026 union:
+#     a Linear key OR a `#N` / `owner/repo#N` ref). A bare `#` with no digits,
+#     an `owner/repo` with no `#N`, and a lowercase key all still reject.
+for bad in "bds-56" "BDS56" "BDS-" "not-an-id" "#" "owner/repo" "#abc"; do
   set +e
   WIP_ROOT="$tmp/h" bin/wip-plumbing init "bad-$RANDOM" --tracker-anchor "$bad" >/dev/null 2>&1
   rc=$?

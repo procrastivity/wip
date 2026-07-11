@@ -63,7 +63,7 @@ wip_roadmap_parse() {
       # it must be stripped here. Order-independent vs the ✅ shipped marker.
       local rtrk
       rtrk="$(_wip_roadmap_extract_tracker "$rest")"
-      if [[ "$rest" =~ (\[tracker:[[:space:]]*[A-Z][A-Z0-9]*-[0-9]+[[:space:]]*\]) ]]; then
+      if [[ "$rest" =~ (\[tracker:[[:space:]]*([A-Z][A-Z0-9]*-[0-9]+|([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)?#[0-9]+)[[:space:]]*\]) ]]; then
         rest="${rest/"${BASH_REMATCH[1]}"/}"
       fi
       local shipped="false" shipped_date="" title="$rest"
@@ -128,7 +128,7 @@ wip_roadmap_parse() {
           # the name) and never harvest a mapping for it, so an author can't wire a
           # lane auto-transition by mistake. (A lane-level epic maps to its enclosing
           # round or an out-of-band parent link, not an auto-transitioned wip node.)
-          if [[ "$lane_name" =~ (\[tracker:[[:space:]]*[A-Z][A-Z0-9]*-[0-9]+[[:space:]]*\]) ]]; then
+          if [[ "$lane_name" =~ (\[tracker:[[:space:]]*([A-Z][A-Z0-9]*-[0-9]+|([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)?#[0-9]+)[[:space:]]*\]) ]]; then
             lane_name="${lane_name/"${BASH_REMATCH[1]}"/}"
           fi
           # Trim trailing whitespace from the lane name.
@@ -253,13 +253,18 @@ _wip_roadmap_extract_shipped() {
 }
 
 # _wip_roadmap_extract_tracker <text> — echo the issue id from a
-# `[tracker: <ID>]` marker in <text>, or empty. <ID> is an uppercase tracker key
-# (letters, then `-`, then digits — e.g. BDS-22). First match wins. The bracketed
-# form keeps it unambiguous against prose and survives the shipped-marker strip
+# `[tracker: <ID>]` marker in <text>, or empty. <ID> is the ADR-0026 union: a
+# Linear key (letters, then `-`, then digits — e.g. BDS-22) OR a github/gitlab
+# ref (`#123`, `owner/repo#123`, nested `grp/sub/proj#45`). First match wins.
+# The union is the outermost group, so `BASH_REMATCH[1]` is the whole id
+# regardless of which branch matched (inner groups capture the optional
+# owner/repo prefix and are unused). MIRRORS `_wip_tracker_id_valid`
+# (wip-plumbing-tracker-lib.bash); both must stay in step. The bracketed form
+# keeps it unambiguous against prose and survives the shipped-marker strip
 # (ADR-0019 §C: the roadmap node body authors the key).
 _wip_roadmap_extract_tracker() {
   local text="$1"
-  if [[ "$text" =~ \[tracker:\ *([A-Z][A-Z0-9]*-[0-9]+)\ *\] ]]; then
+  if [[ "$text" =~ \[tracker:\ *([A-Z][A-Z0-9]*-[0-9]+|([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)?#[0-9]+)\ *\] ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
   fi
 }

@@ -84,6 +84,17 @@ assert_eq "In Review" "$(jq -r '.expected' <<<"$d")" "drift expected = wip cache
 assert_eq "Todo" "$(jq -r '.actual' <<<"$d")" "drift actual = tracker state"
 assert_eq "BDS-90" "$(jq -r '.issue' <<<"$d")" "drift names the issue"
 
+# --- canonical --probe-tracker flag routes to the same probe (ADR-0026) -----
+# The deprecated --probe-linear alias is exercised above via the helpers; here we
+# assert the canonical flag drives the identical probe (drift -> exit 4).
+set +e
+env STUB_STATE="Todo" WIP_LINEAR_READ_CMD="$t2/read.sh" WIP_ROOT="$t2" "$WIP" doctor --probe-tracker >/dev/null 2>&1
+rc_tracker=$?
+set -e
+assert_eq "4" "$rc_tracker" "--probe-tracker drives the same probe (drift -> exit 4)"
+dt="$(env STUB_STATE="Todo" WIP_LINEAR_READ_CMD="$t2/read.sh" WIP_ROOT="$t2" "$WIP" doctor --probe-tracker 2>/dev/null | jq -c '.checks[] | select(.kind=="tracker-probe")' || true)"
+assert_eq "tracker-state-drift" "$(jq -r '.status' <<<"$dt")" "--probe-tracker: same tracker-state-drift status"
+
 # --- tracker silent (empty read) -> non-actionable, exit 0 ------------------
 t3="$(wip_mktemp)"
 mkfx "$t3"
