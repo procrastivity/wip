@@ -46,6 +46,9 @@ n_round() {
 
 # ── Case A: every step shipped, heading unmarked → one entry + exit 4 ────────
 # Regression pin #5 (first half): doctor flags an all-shipped/unmarked round.
+# Round 2 is open on purpose: it keeps the INITIATIVE un-closeable, so the
+# initiative-level check (§2l, initiative-shipped-not-closed) stays quiet and the
+# round marker remains the only drift these assertions have to account for.
 tmpA="$(wip_mktemp)"
 mkfix "$tmpA"
 cat >"$tmpA/.wip/initiatives/demo/roadmap.md" <<'MD'
@@ -55,6 +58,10 @@ cat >"$tmpA/.wip/initiatives/demo/roadmap.md" <<'MD'
 
 - **step-01 — First** ✅ shipped 2026-05-01 — done.
 - **step-02 — Second** ✅ shipped 2026-05-02 — done.
+
+## Round 2 — Two
+
+- **step-03 — Third** — current.
 MD
 archive "$tmpA" step-01
 archive "$tmpA" step-02
@@ -90,6 +97,10 @@ cat >"$tmpA/.wip/initiatives/demo/roadmap.md" <<'MD'
 
 - **step-01 — First** ✅ shipped 2026-05-01 — done.
 - **step-02 — Second** ✅ shipped 2026-05-02 — done.
+
+## Round 2 — Two
+
+- **step-03 — Third** — current.
 MD
 run_doctor "$tmpA"
 assert_eq "0" "$RC" "marker landed: exit 0"
@@ -158,7 +169,10 @@ assert_eq "0" "$(n_round '.slug=="attic"')" "scope: attic (archived) is skipped"
 # `all(.shipped)` over an EMPTY array is vacuously true in jq, so without the
 # `length > 0` guard an empty/placeholder round would be flagged as "fully
 # shipped but unmarked". Round 1 is closed out cleanly; Round 2 is an empty
-# placeholder — total drift must be zero.
+# placeholder — total drift must be zero. Round 3 carries an open step so the
+# INITIATIVE is not closeable either, keeping §2l (initiative-shipped-not-closed)
+# out of the drift count; the empty round 2 sitting between them is what this case
+# actually pins.
 tmpE="$(wip_mktemp)"
 mkfix "$tmpE"
 cat >"$tmpE/.wip/initiatives/demo/roadmap.md" <<'MD'
@@ -169,6 +183,10 @@ cat >"$tmpE/.wip/initiatives/demo/roadmap.md" <<'MD'
 - **step-01 — First** ✅ shipped 2026-05-01 — done.
 
 ## Round 2 — Two
+
+## Round 3 — Three
+
+- **step-02 — Second** — current.
 MD
 archive "$tmpE" step-01
 run_doctor "$tmpE"

@@ -134,6 +134,62 @@ wip_plumbing_cmd_doctor() {
       | select(.shipped == false)' <<<"$rdoc")
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
 
+  # 2k. Stale `current_initiative` pointer — the top-level pointer names an
+  #     initiative whose `status` is `shipped`/`archived`. Unlike every other check
+  #     in this file this is a ONE-SHOT read of a single scalar, not a loop over
+  #     `.initiatives[]?`: there is exactly one pointer. It is also the one check
+  #     with NO shipped/archived skip-guard — a shipped initiative being pointed at
+  #     is the entire subject of the check, not noise to skip past.
+  #     `closeout` cannot fix this by being re-run on the initiative the pointer
+  #     already names (that initiative is shipped; closeout would repoint only if
+  #     the pointer were aimed at something it is closing). The fix is a manual
+  #     repoint, or running `closeout` on whatever IS in flight so the pointer
+  #     resolves naturally. Actionable drift, not an informational note.
+  local ci_slug ci_status
+  ci_slug="$(printf '%s' "$mj" | jq -r '.current_initiative // ""')"
+  if [[ -n "$ci_slug" && "$ci_slug" != "null" ]]; then
+    ci_status="$(jq -r --arg s "$ci_slug" '
+      [.initiatives[]? | select(.slug == $s)] | (.[0].status // "")' <<<"$mj")"
+    if [[ "$ci_status" == "shipped" || "$ci_status" == "archived" ]]; then
+      obj="$(jq -nc --arg slug "$ci_slug" --arg istatus "$ci_status" \
+        --arg fix "run wip-plumbing closeout <the in-flight initiative>, or point current_initiative at an in-flight initiative by hand" \
+        '{kind:"current-initiative", slug:$slug, status:"current-initiative-shipped",
+          initiative_status:$istatus, fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    fi
+  fi
+
+  # 2l. An initiative whose every non-empty round is shipped but whose manifest
+  #     `status` is still `in-flight` — the initiative-level closeout `closeout`
+  #     (ADR-0016, step-04) now writes. This check INVERTS the §2b/§2j skip-guard:
+  #     it considers ONLY `status: in-flight`. `shipped`/`archived` are already
+  #     closed out (the whole point); `proposed` with a fully-written-out roadmap is
+  #     a degenerate edge case not worth flagging; `paused` is intentionally
+  #     not-progressing, not a closeout omission.
+  #     The predicate is the SAME one `closeout`'s own refuse-unless-all-shipped
+  #     guard uses — `length > 0 and all(.shipped)` over the non-empty rounds — so
+  #     this check predicts exactly when `closeout <slug>` would succeed. `length > 0`
+  #     is load-bearing for the same reason it is there: jq's `all` is vacuously true
+  #     over an empty array, so a roadmap with zero rounds (or only empty ones) must
+  #     not read as "fully shipped". Healthy initiatives add no entry.
+  local crec cslug cstatus crpath cdoc call_shipped
+  while IFS= read -r crec; do
+    [[ -n "$crec" ]] || continue
+    cslug="$(jq -r '.slug // ""' <<<"$crec")"
+    [[ -n "$cslug" ]] || continue
+    cstatus="$(jq -r '.status // ""' <<<"$crec")"
+    [[ "$cstatus" == "in-flight" ]] || continue
+    crpath="$(jq -r '.roadmap // empty' <<<"$crec")"
+    [[ -n "$crpath" ]] || crpath=".wip/initiatives/$cslug/roadmap.md"
+    cdoc="$(wip_roadmap_parse "$root/$crpath")"
+    call_shipped="$(jq -r '
+      [.rounds[] | select((.steps | length) > 0)] | length > 0 and all(.shipped)' <<<"$cdoc")"
+    [[ "$call_shipped" == "true" ]] || continue
+    obj="$(jq -nc --arg slug "$cslug" --arg fix "run wip-plumbing closeout $cslug" \
+      '{kind:"closeout-initiative", slug:$slug, status:"initiative-shipped-not-closed", fix:$fix}')"
+    checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+  done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
   # 2d. Tracker mapping mirror drift (ADR-0019 §C). The roadmap's `[tracker: ID]`
   #     keys are the source of truth; `.wip.yaml`'s initiative `tracker_map` is a
   #     writer-generated mirror. Disagreement is drift, fixable with
