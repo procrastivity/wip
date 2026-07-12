@@ -35,6 +35,15 @@ trap cleanup EXIT
 # The roadmap carries a real step-01 and step-02 so `ship`'s step-in-roadmap
 # guard passes and the call reaches both writers; step-01 doubles as a valid
 # "different existing step" target for the `skipped` rows.
+#
+# The trailing unshipped step-03 keeps Round 1 INCOMPLETE in every case here, so
+# ship's round-level seam (step-03) always reports `round_marked_shipped:
+# skipped` and never writes the `## Round 1` heading. That is deliberate: this
+# suite owns the TWO seams named above and the `changed` OR over them (row D4 —
+# noop+skipped → false — is only meaningful while no third seam is firing).
+# Without it, shipping step-02 would complete the round and the round marker
+# would fire as a legitimate third `updated`. The round seam's own composition is
+# owned by test-ship-round-end-to-end.sh.
 setup_e2e() {
   # `${2-...}` (no colon) so an explicitly-passed empty `active` (omit the key)
   # is honored rather than falling back to the default pointer.
@@ -64,6 +73,7 @@ setup_e2e() {
     printf '\n'
     printf '%s\n' '- **step-01 — Auth bootstrap** ✅ shipped 2026-05-01 — done.'
     printf '%s\n' "$step02"
+    printf '%s\n' '- **step-03 — Rotation** — later.'
   } >"$tmp/.wip/initiatives/demo/roadmap.md"
 
   manifest="$tmp/.wip.yaml"

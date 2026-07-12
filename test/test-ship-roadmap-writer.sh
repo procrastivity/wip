@@ -115,12 +115,20 @@ assert_eq "1" "$(step02_line | grep -o '✅' | wc -l | tr -d ' ')" "missing-date
 # ---------------------------------------------------------------------------
 # 5. Already-shipped no-op: correct marker already present → `noop` AND the
 #    roadmap file is byte-identical before/after (proves the no-write path).
+#
+#    The trailing unshipped step-03 keeps the ROUND incomplete on purpose: with
+#    step-02 as the round's only step, shipping it would complete the round and
+#    ship's round-level seam (step-03) would legitimately write the `## Round 1`
+#    marker — a real write that would defeat this case's ability to prove the
+#    STEP-level writer took its no-write path. The round seam is owned by
+#    test-ship-round-end-to-end.sh; this suite stays roadmap-bullet-scoped.
 # ---------------------------------------------------------------------------
 setup_roadmap '# Roadmap
 
 ## Round 1 — Build
 
-- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.'
+- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.
+- **step-03 — Rotation** — later.'
 before="$(mktemp)"
 TMP_DIRS+=("$before")
 cp "$roadmap" "$before"
