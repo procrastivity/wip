@@ -3,8 +3,11 @@
 # deterministic state-writer — no gating (drift detection is doctor's job).
 # Also writes the `## Round N` heading's marker when the step it just shipped was
 # that round's LAST unshipped step (step-03) — a third writer seam, reported as
-# `round_marked_shipped` and folded into the same `changed` OR. The step-level v1
-# contract is locked in ADR-0016
+# `round_marked_shipped` and folded into the same `changed` OR. When the shipped
+# step's bullet names a tracker, two further seams retire the backlog entries
+# that tracker owns — in `.wip/backlog.md` and in the roadmap's own `## Backlog`
+# section (step-06) — reported as `backlog_retired` and folded into the same OR.
+# The step-level v1 contract is locked in ADR-0016
 # (engineering/decisions/0016-closeout-write-contract.md).
 # shellcheck shell=bash
 
@@ -136,11 +139,51 @@ wip_plumbing_cmd_ship() {
     fi
   fi
 
+  # Backlog retirement (step-06, workplan Chunk 3). A shipped step whose bullet
+  # carries a `[tracker: BDS-NN]` marker is the same work some backlog entry is
+  # still asking for — in BOTH backlogs: the repo-level `.wip/backlog.md` and the
+  # initiative roadmap's own `## Backlog` section. Left in place, `next` keeps
+  # nominating work that already shipped (the defect this ladder exists to close).
+  # So ship retires them incrementally, per step; `closeout` is the comprehensive
+  # backstop (workplan D1) — both write, neither is optional.
+  #
+  # `.tracker` is already on every parsed step record
+  # (wip-plumbing-roadmap-lib.bash) — ship simply never read it until now. A step
+  # with no tracker has nothing to match on, so BOTH seams report `skipped`
+  # without touching either file. Matching is by tracker id and ONLY by tracker
+  # id: never by position, never "retire whatever is in the backlog when a step
+  # ships".
+  #
+  # Status words are the retirement writers' own (`retired` / `noop`), not the
+  # marker writers' (`updated` / `noop` / `skipped`) — a `noop` here means "no
+  # backlog entry carries this tracker", which is the COMMON case, not an error.
+  # $WIP_DRY_RUN is honored inside the front-ends (exported above).
+  local step_tracker backlog_repo="skipped" backlog_roadmap="skipped"
+  step_tracker="$(jq -r '.tracker // empty' <<<"$step_record")"
+  if [[ -n "$step_tracker" ]]; then
+    local backlog_reason="shipped as $slug/$step_id"
+    # Repo backlog: guarded on the file existing — a repo need not have one.
+    if [[ -f "$root/.wip/backlog.md" ]]; then
+      backlog_repo="$(_wip_backlog_retire_entry \
+        "$root/.wip/backlog.md" "$step_tracker" "$shipped_date" "$backlog_reason")" ||
+        wip_die 1 internal "ship: repo backlog retirement failed"
+    else
+      backlog_repo="noop"
+    fi
+    # Roadmap backlog: the initiative's own file, always present (the
+    # step-in-roadmap guard above already read it).
+    backlog_roadmap="$(_wip_roadmap_backlog_retire_entry \
+      "$root/$roadmap_path" "$step_tracker" "$shipped_date" "$backlog_reason")" ||
+      wip_die 1 internal "ship: roadmap backlog retirement failed"
+  fi
+
   # `changed` is true iff ANY writer seam reported `updated` — one aggregation
-  # rule, the round seam included.
+  # rule, the round seam included. The retirement seams fold in the same way, on
+  # their own affirmative word (`retired`).
   local changed=false
   if [[ "$marked_shipped" == "updated" || "$active_step_cleared" == "updated" ||
-    "$round_marked_shipped" == "updated" ]]; then
+    "$round_marked_shipped" == "updated" || "$backlog_repo" == "retired" ||
+    "$backlog_roadmap" == "retired" ]]; then
     changed=true
   fi
 
@@ -184,11 +227,14 @@ wip_plumbing_cmd_ship() {
     --arg slug "$slug" --arg step "$step_id" --arg date "$shipped_date" \
     --arg ms "$marked_shipped" --arg asc "$active_step_cleared" \
     --argjson round "$round" --arg rms "$round_marked_shipped" \
+    --arg brepo "$backlog_repo" --arg broadmap "$backlog_roadmap" \
     --arg transition "$transition" --argjson intent "$intent" \
     --argjson changed "$changed" --arg dry "$dry_run" '
     { ok: true, slug: $slug, step: $step, shipped_date: $date,
       marked_shipped: $ms, active_step_cleared: $asc,
-      round: $round, round_marked_shipped: $rms, changed: $changed,
+      round: $round, round_marked_shipped: $rms,
+      backlog_retired: { repo: $brepo, roadmap: $broadmap },
+      changed: $changed,
       transition: $transition }
     + (if $intent != null then { intent: $intent } else {} end)
     + (if $dry == "1" then { dry_run: true } else {} end)
