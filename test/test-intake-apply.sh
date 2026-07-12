@@ -286,4 +286,82 @@ rc=$?
 set -e
 assert_eq "2" "$rc" "malformed front-matter anchor exit 2"
 
+# 15. step-02 pin 4: `intake apply --kind amendment --insert-after` against an
+#     anchor that resolves only inside an HTML comment span must emit the JSON
+#     error envelope on *stdout*, not exit silently. The dispatched `roadmap
+#     amend` runs inside a command substitution here, so its wip_die envelope is
+#     captured by the subshell — intake must forward it to the real caller.
+cat >>"$tmp/.wip/initiatives/auth/roadmap.md" <<'MD'
+
+<!--
+- **step-09 — Ghost** — commented-out scaffold, no reader ever sees this.
+-->
+MD
+cat >"$tmp/amend-shadowed.md" <<'MD'
+---
+target: auth
+insert-after: step-09
+---
+# Step
+
+### step-10 — Ten
+
+Must never land inside the comment.
+MD
+set +e
+out="$(run "$tmp/amend-shadowed.md" --kind amendment 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 4: comment-shadowed anchor exits 4"
+assert_eq "false" "$(jq -r '.ok' <<<"$out")" "step-02 pin 4: envelope ok=false on stdout"
+assert_eq "4" "$(jq -r '.error.code' <<<"$out")" "step-02 pin 4: envelope error.code"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out")" "step-02 pin 4: envelope error.kind"
+assert_eq "true" "$(jq -r '(.error.message // "") != ""' <<<"$out")" "step-02 pin 4: envelope error.message non-empty"
+assert_not_grep "step-10 — Ten" "$tmp/.wip/initiatives/auth/roadmap.md" "step-02 pin 4: nothing written into the comment"
+
+# 15b. the same forwarding for an anchor that is absent outright (not shadowed):
+#      still an envelope on stdout, with the not-found kind.
+cat >"$tmp/amend-missing.md" <<'MD'
+---
+target: auth
+insert-after: step-99
+---
+# Step
+
+### step-11 — Eleven
+
+Anchor does not exist at all.
+MD
+set +e
+out="$(run "$tmp/amend-missing.md" --kind amendment 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 4b: unresolvable anchor exits 4"
+assert_eq "false" "$(jq -r '.ok' <<<"$out")" "step-02 pin 4b: envelope ok=false on stdout"
+assert_eq "step-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out")" "step-02 pin 4b: envelope error.kind"
+
+# 16. twin check: the same swallowed-envelope shape existed in every
+#     `_wip_intake_apply_*` dispatcher. A failing `init` dispatch (malformed
+#     tracker anchor, cf. case 14) and a failing `workplan init` dispatch must
+#     both forward their envelope to stdout too, not just a bare exit code.
+set +e
+out="$(run "$tmp/anchor-bad.md" --kind brief 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "2" "$rc" "step-02 pin 4c: brief twin exits 2"
+assert_eq "false" "$(jq -r '.ok' <<<"$out")" "step-02 pin 4c: brief twin forwards envelope on stdout"
+assert_eq "2" "$(jq -r '.error.code' <<<"$out")" "step-02 pin 4c: brief twin envelope error.code"
+
+# Re-applying case 4's seed reaches the `workplan init` dispatch (intake's own
+# validate gate passes — auth/step-02 is a real step) and fails there with
+# file-exists. A target like auth/step-99 would NOT exercise this: intake's
+# validate gate rejects it before the dispatcher ever runs.
+set +e
+out="$(run "$tmp/wps.md" --kind workplan-seed 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 4d: workplan-seed twin exits 4"
+assert_eq "false" "$(jq -r '.ok' <<<"$out")" "step-02 pin 4d: workplan-seed twin forwards envelope on stdout"
+assert_eq "file-exists" "$(jq -r '.error.kind' <<<"$out")" "step-02 pin 4d: workplan-seed twin envelope error.kind"
+
 test_summary
