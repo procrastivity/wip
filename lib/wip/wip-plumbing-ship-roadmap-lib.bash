@@ -53,9 +53,15 @@ _wip_ship_mark_roadmap_shipped() {
   local prefix="${BASH_REMATCH[1]}" # - **step-NN — Title**
   local srest="${BASH_REMATCH[5]}"  # post-`**` remainder
 
-  # Read the bullet's current shipped-state from `srest` only.
-  local shipped="false" cur_date="" _dummy=""
-  _wip_roadmap_extract_shipped "$srest" shipped cur_date _dummy
+  # Read the bullet's current shipped-state from `srest` only, with the `head`
+  # anchor: a real marker sits immediately after the closing `**`. This also
+  # hands back `tail` — `srest` with any existing marker run peeled off — which
+  # is exactly the clean descriptive remainder the rebuild below re-attaches. We
+  # take it from the parser rather than re-deriving it here so the marker's
+  # spelling lives in exactly one place (the SHIPPED-MARKER SPELLING block in
+  # wip-plumbing-roadmap-lib.bash) and reader and writer cannot drift apart.
+  local shipped="false" cur_date="" tail=""
+  _wip_roadmap_extract_shipped "$srest" shipped cur_date tail head
 
   # noop iff already shipped with the exact target date; every other case
   # (absent marker, or present-but-wrong/missing date) is an update.
@@ -65,23 +71,6 @@ _wip_ship_mark_roadmap_shipped() {
   fi
 
   if [[ "$status" == "updated" && "${WIP_DRY_RUN:-0}" != "1" ]]; then
-    # Strip any existing `✅ …` marker run from `srest`, leaving the clean
-    # descriptive tail. Glob on the literal ✅ (mirroring extract_shipped's
-    # `*"✅"*` style) rather than regex-matching the multibyte char, to stay
-    # locale-robust; the ASCII `shipped <date>` run is then peeled off in turn.
-    local tail="$srest"
-    if [[ "$tail" == *"✅"* ]]; then
-      tail="${tail#*✅}"                       # drop up to and including the ✅
-      tail="${tail#"${tail%%[![:space:]]*}"}" # ltrim
-      if [[ "$tail" == shipped* ]]; then
-        tail="${tail#shipped}"
-        tail="${tail#"${tail%%[![:space:]]*}"}" # ltrim
-      fi
-      [[ "$tail" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(.*)$ ]] && tail="${BASH_REMATCH[1]}"
-    fi
-    # ltrim the clean tail; it is re-attached below with one leading space.
-    tail="${tail#"${tail%%[![:space:]]*}"}"
-
     # Reconstruct the first line: prefix, then the marker immediately after the
     # closing `**`, then the clean tail (when any).
     local rebuilt="${prefix} ✅ shipped ${date}"

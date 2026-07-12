@@ -160,7 +160,10 @@ wip_roadmap_parse() {
           local stitle="${BASH_REMATCH[3]}"
           local srest="${BASH_REMATCH[5]}"
           local sshipped="false" sdate="" sdummy="$srest"
-          _wip_roadmap_extract_shipped "$srest" sshipped sdate sdummy
+          # `head` anchor: in a bullet the marker sits immediately after the
+          # title's closing `**`. A marker merely QUOTED in the body leaves the
+          # step unshipped.
+          _wip_roadmap_extract_shipped "$srest" sshipped sdate sdummy head
           local strk
           strk="$(_wip_roadmap_extract_tracker "$srest")"
           doc="$(jq -c \
@@ -252,31 +255,126 @@ wip_roadmap_parse() {
   printf '%s' "$doc"
 }
 
-# _wip_roadmap_extract_shipped <rest> <shipped_var> <date_var> <title_var>
-# Inspects <rest> for "✅" + optional " shipped YYYY-MM-DD"; writes results
-# into the named variables. <title_var> is trimmed of the trailing ✅… run.
+# ---------------------------------------------------------------------------
+# SHIPPED-MARKER SPELLING — the single extension point.
+#
+# `_WIP_ROADMAP_SHIPPED_MARKERS` is the ONE place that decides WHICH tokens
+# spell a shipped marker, and `_WIP_ROADMAP_SHIPPED_KEYWORD` the optional word
+# that may follow one before the date. Everything downstream — this file's
+# parser and the ship writer in wip-plumbing-ship-roadmap-lib.bash — asks
+# `_wip_roadmap_extract_shipped` and never re-spells the marker itself, so the
+# canonical spelling can be re-decided by editing this block alone, without
+# reopening the structural grammar (which is position, and is settled here).
+# Add an accepted spelling by appending a token; first match wins.
+# ---------------------------------------------------------------------------
+_WIP_ROADMAP_SHIPPED_MARKERS=("✅")
+_WIP_ROADMAP_SHIPPED_KEYWORD="shipped"
+
+# _wip_roadmap_shipped_run <text> <date_var> <rest_var>
+# Parse a marker RUN anchored at the HEAD of <text>: an accepted marker token,
+# then an optional `shipped` keyword, then an optional ISO date. On a match write
+# the date (or "") to <date_var>, the text following the run to <rest_var>, and
+# return 0; return 1 when <text> does not open with a marker token. Glob-matched,
+# not regex-matched: the marker glyph is multibyte and `==` globbing stays
+# locale-robust where `=~` need not.
+_wip_roadmap_shipped_run() {
+  local _run_text="$1"
+  # shellcheck disable=SC2178
+  local -n _run_date="$2"
+  # shellcheck disable=SC2178
+  local -n _run_rest="$3"
+
+  local _run_token="" _run_m
+  for _run_m in "${_WIP_ROADMAP_SHIPPED_MARKERS[@]}"; do
+    if [[ "$_run_text" == "$_run_m"* ]]; then
+      _run_token="$_run_m"
+      break
+    fi
+  done
+  [[ -n "$_run_token" ]] || return 1
+
+  local _run_tail="${_run_text#"$_run_token"}"
+  _run_tail="${_run_tail#"${_run_tail%%[![:space:]]*}"}" # ltrim
+  if [[ "$_run_tail" == "$_WIP_ROADMAP_SHIPPED_KEYWORD"* ]]; then
+    _run_tail="${_run_tail#"$_WIP_ROADMAP_SHIPPED_KEYWORD"}"
+    _run_tail="${_run_tail#"${_run_tail%%[![:space:]]*}"}" # ltrim
+  fi
+  _run_date=""
+  if [[ "$_run_tail" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})(.*)$ ]]; then
+    _run_date="${BASH_REMATCH[1]}"
+    _run_tail="${BASH_REMATCH[2]}"
+  fi
+  _run_rest="$_run_tail"
+  return 0
+}
+
+# _wip_roadmap_extract_shipped <text> <shipped_var> <date_var> <rest_var> [anchor]
+#
+# POSITIONAL shipped-marker parser. A marker counts only where the grammar puts
+# it — never "the glyph appears somewhere in the text". The old substring test
+# marked a step shipped merely because its body QUOTED the marker (discussing
+# marker grammar, or naming it in a code span) and then scavenged `shipped
+# <date>` from that prose, which is how an unstarted step got reported shipped
+# and raised phantom `shipped-not-archived` drift in `doctor`.
+#
+#   anchor=head — bullet form. <text> is the post-`**` remainder (`srest`) of a
+#     `- **step-NN — Title**` bullet, so a real marker is the FIRST thing in it,
+#     sitting immediately after the title's closing `**`:
+#       - **step-02 — B** ✅ shipped 2026-06-27 (small) — body mentioning ✅.
+#     <rest_var> receives the clean descriptive tail with the marker run removed
+#     (ltrimmed) — the ship writer reuses it verbatim when rebuilding the bullet.
+#
+#   anchor=tail (default) — heading form. <text> is a `## Round N — …` /
+#     `### step-NN — …` title, whose marker terminates the line. The trailing run
+#     must be a PURE marker run (marker, optional keyword, optional date, then
+#     nothing) — a glyph mid-prose is not a marker. <rest_var> receives the title
+#     with that run stripped (rtrimmed).
+#
+# This function owns WHERE a marker may appear; WHICH spellings count is decided
+# only in the SHIPPED-MARKER SPELLING block above.
 _wip_roadmap_extract_shipped() {
-  local rest="$1"
+  local _es_text="$1" _es_anchor="${5:-tail}"
   # shellcheck disable=SC2178
   local -n _shipped="$2"
   # shellcheck disable=SC2178
   local -n _date="$3"
   # shellcheck disable=SC2178
-  local -n _title="$4"
-  if [[ "$rest" == *"✅"* ]]; then
-    _shipped="true"
-    if [[ "$rest" =~ shipped\ ([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
-      _date="${BASH_REMATCH[1]}"
+  local -n _rest="$4"
+
+  local _es_date="" _es_rest=""
+  _shipped="false"
+  _date=""
+
+  if [[ "$_es_anchor" == "head" ]]; then
+    local _es_head="${_es_text#"${_es_text%%[![:space:]]*}"}" # ltrim
+    if _wip_roadmap_shipped_run "$_es_head" _es_date _es_rest; then
+      _shipped="true"
+      _date="$_es_date"
+      _rest="${_es_rest#"${_es_rest%%[![:space:]]*}"}" # ltrim the clean tail
+    else
+      _rest="$_es_head"
     fi
-    # Strip the trailing "✅..." run from the title.
-    _title="${rest%%✅*}"
-    _title="${_title%"${_title##*[![:space:]]}"}"
-  else
-    _shipped="false"
-    _date=""
-    _title="$rest"
-    _title="${_title%"${_title##*[![:space:]]}"}"
+    return 0
   fi
+
+  # tail: a marker run, when present, must END the text. Scan from the LAST
+  # occurrence of each accepted token so a marker quoted earlier in the title
+  # does not shadow the real trailing one.
+  local _es_m _es_prefix _es_suffix
+  for _es_m in "${_WIP_ROADMAP_SHIPPED_MARKERS[@]}"; do
+    [[ "$_es_text" == *"$_es_m"* ]] || continue
+    _es_prefix="${_es_text%"$_es_m"*}"
+    _es_suffix="${_es_m}${_es_text##*"$_es_m"}"
+    if _wip_roadmap_shipped_run "$_es_suffix" _es_date _es_rest &&
+      [[ -z "${_es_rest//[[:space:]]/}" ]]; then
+      _shipped="true"
+      _date="$_es_date"
+      _rest="${_es_prefix%"${_es_prefix##*[![:space:]]}"}" # rtrim
+      return 0
+    fi
+  done
+  _rest="${_es_text%"${_es_text##*[![:space:]]}"}" # rtrim
+  return 0
 }
 
 # _wip_roadmap_extract_tracker <text> — echo the issue id from a
