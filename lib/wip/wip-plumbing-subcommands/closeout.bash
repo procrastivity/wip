@@ -19,12 +19,17 @@
 # Error codes: missing <slug> / unknown flag -> exit 2 (usage); unknown
 # initiative -> exit 3 (unknown-initiative, mirroring ship); not every round
 # shipped -> exit 4 (not-all-shipped); a `--next` value that names no initiative
-# -> exit 4 (unknown-initiative); a `--next` value that is not in flight -> exit 4
-# (next-not-in-flight). The two `--next` refusals share exit 4 — the "state
-# precondition failed" family — because writing `current_initiative` to a
+# -> exit 4 (unknown-next-initiative); a `--next` value that is not in flight ->
+# exit 4 (next-not-in-flight). The two `--next` refusals share exit 4 — the
+# "state precondition failed" family — because writing `current_initiative` to a
 # dangling or already-shipped slug is precisely the drift this whole verb exists
 # to eliminate; the verb that fixes the drift must not be able to introduce its
 # mirror image through its own flag.
+#
+# The `--next`-unknown word is deliberately NOT `unknown-initiative`: that word is
+# reserved for the PRIMARY slug's lookup, which exits 3 in true parity with
+# `wip_plumbing_cmd_ship`. One word, one exit code — a caller can branch on the
+# status word alone.
 wip_plumbing_cmd_closeout() {
   local slug="" next="" pr="" dry_run="${WIP_DRY_RUN:-0}"
   while [[ $# -gt 0 ]]; do
@@ -90,7 +95,7 @@ wip_plumbing_cmd_closeout() {
       [.initiatives[]? | select(.slug == $s)] | (.[0].status // "")
     ' <<<"$mj")"
     if [[ "$(jq -r --arg s "$next" '[.initiatives[]? | select(.slug == $s)] | length' <<<"$mj")" == "0" ]]; then
-      wip_die 4 unknown-initiative "closeout: --next names no initiative in the manifest: $next"
+      wip_die 4 unknown-next-initiative "closeout: --next names no initiative in the manifest: $next"
     fi
     # The initiative being closed is, by the end of this run, itself shipped —
     # pointing `current_initiative` at it is the same drift as pointing at any

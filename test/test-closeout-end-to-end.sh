@@ -341,7 +341,9 @@ out="$(run demo --next nope 2>/dev/null)"
 rc=$?
 set -e
 assert_eq "4" "$rc" "J1: unknown --next exits 4"
-assert_eq "unknown-initiative" "$(jq -r '.error.kind' <<<"$out")" "J1: kind unknown-initiative"
+# NOT `unknown-initiative`: that word belongs exclusively to the PRIMARY slug's
+# lookup, which exits 3 in true ship parity (case M). One word, one exit code.
+assert_eq "unknown-next-initiative" "$(jq -r '.error.kind' <<<"$out")" "J1: kind unknown-next-initiative"
 assert_cmp "$before" "$manifest" "J1: .wip.yaml untouched — refused before any writer"
 
 # J2 — --next names an initiative that is itself already shipped.
