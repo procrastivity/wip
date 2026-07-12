@@ -278,11 +278,7 @@ _WIP_ROADMAP_SHIPPED_KEYWORD="shipped"
 # not regex-matched: the marker glyph is multibyte and `==` globbing stays
 # locale-robust where `=~` need not.
 _wip_roadmap_shipped_run() {
-  local _run_text="$1"
-  # shellcheck disable=SC2178
-  local -n _run_date="$2"
-  # shellcheck disable=SC2178
-  local -n _run_rest="$3"
+  local _run_text="$1" _run_date_var="$2" _run_rest_var="$3"
 
   local _run_token="" _run_m
   for _run_m in "${_WIP_ROADMAP_SHIPPED_MARKERS[@]}"; do
@@ -299,12 +295,13 @@ _wip_roadmap_shipped_run() {
     _run_tail="${_run_tail#"$_WIP_ROADMAP_SHIPPED_KEYWORD"}"
     _run_tail="${_run_tail#"${_run_tail%%[![:space:]]*}"}" # ltrim
   fi
-  _run_date=""
+  local _run_date=""
   if [[ "$_run_tail" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})(.*)$ ]]; then
     _run_date="${BASH_REMATCH[1]}"
     _run_tail="${BASH_REMATCH[2]}"
   fi
-  _run_rest="$_run_tail"
+  printf -v "$_run_date_var" '%s' "$_run_date"
+  printf -v "$_run_rest_var" '%s' "$_run_tail"
   return 0
 }
 
@@ -333,26 +330,20 @@ _wip_roadmap_shipped_run() {
 # This function owns WHERE a marker may appear; WHICH spellings count is decided
 # only in the SHIPPED-MARKER SPELLING block above.
 _wip_roadmap_extract_shipped() {
-  local _es_text="$1" _es_anchor="${5:-tail}"
-  # shellcheck disable=SC2178
-  local -n _shipped="$2"
-  # shellcheck disable=SC2178
-  local -n _date="$3"
-  # shellcheck disable=SC2178
-  local -n _rest="$4"
+  local _es_text="$1" _es_anchor="${5:-tail}" _es_shipped_var="$2" _es_date_var="$3" _es_rest_var="$4"
 
   local _es_date="" _es_rest=""
-  _shipped="false"
-  _date=""
+  printf -v "$_es_shipped_var" '%s' "false"
+  printf -v "$_es_date_var" '%s' ""
 
   if [[ "$_es_anchor" == "head" ]]; then
     local _es_head="${_es_text#"${_es_text%%[![:space:]]*}"}" # ltrim
     if _wip_roadmap_shipped_run "$_es_head" _es_date _es_rest; then
-      _shipped="true"
-      _date="$_es_date"
-      _rest="${_es_rest#"${_es_rest%%[![:space:]]*}"}" # ltrim the clean tail
+      printf -v "$_es_shipped_var" '%s' "true"
+      printf -v "$_es_date_var" '%s' "$_es_date"
+      printf -v "$_es_rest_var" '%s' "${_es_rest#"${_es_rest%%[![:space:]]*}"}" # ltrim the clean tail
     else
-      _rest="$_es_head"
+      printf -v "$_es_rest_var" '%s' "$_es_head"
     fi
     return 0
   fi
@@ -367,13 +358,13 @@ _wip_roadmap_extract_shipped() {
     _es_suffix="${_es_m}${_es_text##*"$_es_m"}"
     if _wip_roadmap_shipped_run "$_es_suffix" _es_date _es_rest &&
       [[ -z "${_es_rest//[[:space:]]/}" ]]; then
-      _shipped="true"
-      _date="$_es_date"
-      _rest="${_es_prefix%"${_es_prefix##*[![:space:]]}"}" # rtrim
+      printf -v "$_es_shipped_var" '%s' "true"
+      printf -v "$_es_date_var" '%s' "$_es_date"
+      printf -v "$_es_rest_var" '%s' "${_es_prefix%"${_es_prefix##*[![:space:]]}"}" # rtrim
       return 0
     fi
   done
-  _rest="${_es_text%"${_es_text##*[![:space:]]}"}" # rtrim
+  printf -v "$_es_rest_var" '%s' "${_es_text%"${_es_text##*[![:space:]]}"}" # rtrim
   return 0
 }
 
