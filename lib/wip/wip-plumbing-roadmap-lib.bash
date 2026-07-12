@@ -140,10 +140,18 @@ wip_roadmap_parse() {
             end' <<<"$doc")"
           current_lane="$lane_name"
           lane_saw_step=0
-        elif [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ ([^*]+)\*\*(.*)$ ]]; then
+        # The title runs up to its CLOSING `**`, not up to the first `*`: a title
+        # may legitimately contain a literal `*` or an inline code span such as
+        # `/wip:*`. `(([^*]|\*[^*])+)` is the bash-ERE way to say "any run that
+        # does not cross a `**`" — a lone `*` is consumed only when the next char
+        # is not another `*` — which keeps the load-bearing title/`srest` split
+        # intact (shipped-state and tracker are read from `srest` ONLY). The ship
+        # writer's first-line split mirrors this exactly; the two are one grammar
+        # surface and must be changed together.
+        elif [[ "$line" =~ ^-\ \*\*step-([0-9]+(\.[0-9]+)?)\ —\ (([^*]|\*[^*])+)\*\*(.*)$ ]]; then
           local sid="step-${BASH_REMATCH[1]}"
           local stitle="${BASH_REMATCH[3]}"
-          local srest="${BASH_REMATCH[4]}"
+          local srest="${BASH_REMATCH[5]}"
           local sshipped="false" sdate="" sdummy="$srest"
           _wip_roadmap_extract_shipped "$srest" sshipped sdate sdummy
           local strk

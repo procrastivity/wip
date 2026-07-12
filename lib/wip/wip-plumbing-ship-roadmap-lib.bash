@@ -43,12 +43,15 @@ _wip_ship_mark_roadmap_shipped() {
   # Split the first line on the parser's own bullet grammar so the bold title
   # (everything up to the closing `**`) is isolated from `srest` (the post-`**`
   # remainder). Reading shipped-state against `srest` ONLY is load-bearing.
+  # The title capture matches up to the CLOSING `**` — mirroring the parser in
+  # wip-plumbing-roadmap-lib.bash, so the writer accepts exactly the titles the
+  # reader accepts, including ones carrying a literal `*` or an inline code span.
   local first="${lines[start]}"
-  if [[ ! "$first" =~ ^(-\ \*\*step-[0-9]+(\.[0-9]+)?\ —\ [^*]+\*\*)(.*)$ ]]; then
+  if [[ ! "$first" =~ ^(-\ \*\*step-[0-9]+(\.[0-9]+)?\ —\ (([^*]|\*[^*])+)\*\*)(.*)$ ]]; then
     return 1
   fi
   local prefix="${BASH_REMATCH[1]}" # - **step-NN — Title**
-  local srest="${BASH_REMATCH[3]}"  # post-`**` remainder
+  local srest="${BASH_REMATCH[5]}"  # post-`**` remainder
 
   # Read the bullet's current shipped-state from `srest` only.
   local shipped="false" cur_date="" _dummy=""
