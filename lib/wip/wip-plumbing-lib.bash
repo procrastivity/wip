@@ -42,6 +42,8 @@ commands:
   glossary  assemble / check the effective glossary for this project
             usage: glossary assemble [--output <path>]
                    glossary check
+  gitignore  make the manifest's gitignore.always_commit policy real in .gitignore
+            usage: gitignore sync [--dry-run]
   setup     install-time scaffold writers (one per capability)
             usage: setup deps     [--force]   (flake.nix + flake.lock)
                    setup direnv   [--force]   (.envrc; requires flake.nix)
