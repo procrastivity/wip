@@ -1,7 +1,9 @@
 # closeout — close out a whole INITIATIVE: flip its manifest `status` to
 # `shipped` (with a synthesized trailing comment), clear any stale `active_step`,
-# and resolve the top-level `current_initiative` pointer. The initiative-level
-# rung of the closeout ladder; ADR-0016, workplan step-04.
+# resolve the top-level `current_initiative` pointer, and retire the backlog
+# entries the initiative's shipped steps have made redundant. The
+# initiative-level rung of the closeout ladder; ADR-0016, workplans step-04 and
+# step-06.
 #
 # Unlike `ship` — a pure un-gated state-writer — this verb IS gated: it REFUSES
 # unless every non-empty round of the initiative's roadmap carries the round-level
@@ -9,9 +11,12 @@
 # verb and lives HERE, before any writer seam runs (mirroring where ship's
 # step-existence guard sits), not in the manifest-writer lib.
 #
-# closeout only ever WRITES `.wip.yaml`. The roadmap is read (never written) —
-# `wip_roadmap_parse` supplies the guard's input and the comment's round/step
-# counts.
+# WRITES: `.wip.yaml` (the three manifest seams), and — since step-06 — the repo
+# backlog `.wip/backlog.md` plus the initiative roadmap's own `## Backlog`
+# section, both only ever by SPLICING OUT a retired entry and appending its
+# `- _(pruned …)_` marker. The roadmap's ROUNDS are still read-only here:
+# `wip_roadmap_parse` supplies the all-shipped guard's input, the comment's
+# round/step counts, and the tracker ids to retire.
 # shellcheck shell=bash
 
 # wip_plumbing_cmd_closeout <slug> [--next <slug>] [--pr <ref>] [--dry-run]
@@ -171,6 +176,59 @@ wip_plumbing_cmd_closeout() {
   comment="Round $n_rounds closed $closed_date ($round_clause; $step_clause)"
   [[ -n "$pr" ]] && comment="$comment; PR $pr"
 
+  # --- Backlog retirement (the comprehensive backstop) ---------------------
+  # Every non-null tracker on every step of EVERY round — not just the active
+  # step's, and not just the last round's. closeout has no single "node being
+  # shipped" the way `ship` does (it clears `active_step` unconditionally, so it
+  # does not even carry one), and it is initiative-scoped by definition: the
+  # thing being closed is the whole roadmap.
+  #
+  # Retiring the lot is sound precisely BECAUSE the all-shipped guard above
+  # already refused unless every non-empty round is shipped — so by the time
+  # this runs, every one of these trackers names genuinely shipped work.
+  #
+  # This is a deliberate backstop over `ship`'s per-step retirement, not a
+  # duplicate of it: it catches entries `ship` could not have — a backlog item
+  # filed AFTER its step already shipped, or a step shipped under a binary
+  # predating this rung. Both front-ends are `noop`-on-no-match, so the overlap
+  # with `ship` costs a parse and writes nothing (workplan step-06, D1/Chunk 4).
+  #
+  # Deduped in ROADMAP ORDER (not sorted): the ledger's status arrays are
+  # positional, so their order has to be the one a reader can reconstruct from
+  # the roadmap by eye.
+  local -a trackers=()
+  local trk
+  while IFS= read -r trk; do
+    [[ -n "$trk" ]] && trackers+=("$trk")
+  done < <(jq -r '
+    [.rounds[].steps[].tracker | select(. != null)]
+    | reduce .[] as $t ([]; if index([$t]) then . else . + [$t] end)
+    | .[]
+  ' <<<"$doc")
+
+  local backlog_changed=false
+  local -a repo_retired=() roadmap_retired=()
+  local st
+  for trk in ${trackers[@]+"${trackers[@]}"}; do
+    # A missing `.wip/backlog.md` is a `noop` inside the front-end, not an
+    # error — a repo need not keep one — so no existence guard here.
+    st="$(_wip_backlog_retire_entry "$root/.wip/backlog.md" "$trk" \
+      "$closed_date" "shipped with initiative $slug")"
+    repo_retired+=("$st")
+    if [[ "$st" == "retired" ]]; then backlog_changed=true; fi
+
+    st="$(_wip_roadmap_backlog_retire_entry "$root/$roadmap_path" "$trk" \
+      "$closed_date" "shipped with initiative $slug")"
+    roadmap_retired+=("$st")
+    if [[ "$st" == "retired" ]]; then backlog_changed=true; fi
+  done
+
+  local repo_retired_json roadmap_retired_json
+  repo_retired_json="$(printf '%s\n' ${repo_retired[@]+"${repo_retired[@]}"} |
+    jq -Rsc 'split("\n") | map(select(length > 0))')"
+  roadmap_retired_json="$(printf '%s\n' ${roadmap_retired[@]+"${roadmap_retired[@]}"} |
+    jq -Rsc 'split("\n") | map(select(length > 0))')"
+
   # --- The three writer seams ---------------------------------------------
   local manifest="$root/.wip.yaml"
   local status_set active_step_cleared current_action
@@ -219,10 +277,14 @@ wip_plumbing_cmd_closeout() {
   esac
 
   # `changed` is true iff ANY writer seam reported `updated` — one aggregation
-  # rule over all three, the same idiom `ship` uses.
+  # rule over all of them, the same idiom `ship` uses. The backlog seams speak a
+  # different vocabulary (`retired`/`noop`, since "no entry carries that tracker"
+  # is the common case, not a failure), so their contribution is folded in as the
+  # pre-computed `backlog_changed` — true iff at least one entry was actually
+  # retired.
   local changed=false
   if [[ "$status_set" == "updated" || "$active_step_cleared" == "updated" ||
-    "$current_action" == "updated" ]]; then
+    "$current_action" == "updated" || "$backlog_changed" == "true" ]]; then
     changed=true
   fi
 
@@ -238,6 +300,7 @@ wip_plumbing_cmd_closeout() {
     --arg ss "$status_set" --arg asc "$active_step_cleared" \
     --arg ca "$current_action" --arg cv "$current_value" \
     --argjson cands "$candidates_json" \
+    --argjson repo "$repo_retired_json" --argjson rmap "$roadmap_retired_json" \
     --argjson changed "$changed" --arg comment "$comment" --arg dry "$dry_run" '
     { ok: true, slug: $slug, closed_date: $date,
       status_set: $ss, active_step_cleared: $asc,
@@ -245,6 +308,7 @@ wip_plumbing_cmd_closeout() {
         { action: $ca, value: (if $cv == "" then null else $cv end) }
         + (if $ca == "ambiguous" then { candidates: $cands } else {} end)
       ),
+      backlog_retired: { repo: $repo, roadmap: $rmap },
       changed: $changed, comment: $comment }
     + (if $dry == "1" then { dry_run: true } else {} end)
   '
