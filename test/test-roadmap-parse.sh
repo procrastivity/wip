@@ -257,7 +257,7 @@ cat >"$tmp/special-titles.md" <<'MD'
 MD
 sp="$(wip_roadmap_parse "$tmp/special-titles.md")"
 assert_eq "Use * wildcard" "$(jq -r '.rounds[0].steps[] | select(.id == "step-01") | .title' <<<"$sp")" "step-01 pin: literal-star title parses"
-assert_eq 'Run `/wip:*` safely' "$(jq -r '.rounds[0].steps[] | select(.id == "step-02") | .title' <<<"$sp")" "step-01 pin: inline-code title parses"
+assert_eq "Run \`/wip:*\` safely" "$(jq -r '.rounds[0].steps[] | select(.id == "step-02") | .title' <<<"$sp")" "step-01 pin: inline-code title parses"
 assert_eq "false" "$(jq -r '.rounds[0].steps[] | select(.id == "step-03") | .shipped' <<<"$sp")" "step-01 pin: quoted shipped marker stays unshipped"
 assert_eq "null" "$(jq -r '.rounds[0].steps[] | select(.id == "step-03") | .shipped_date' <<<"$sp")" "step-01 pin: quoted shipped marker has no scavenged date"
 assert_eq "1" "$(jq '[.step_errors[] | select(.kind == "malformed-step-bullet")] | length' <<<"$sp")" "step-01 pin: malformed bullet reports"
