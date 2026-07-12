@@ -151,7 +151,23 @@ out2="$(run demo step-02)"
 assert_eq "noop" "$(jq -r '.marked_shipped' <<<"$out2")" "self-gotcha: re-run is noop"
 
 # ---------------------------------------------------------------------------
-# 7. --dry-run: reports `updated` and `dry_run: true`, but the roadmap file is
+# 7. Step-01 closeout-write-ladder writer parity pin: a title containing a
+#    literal `*` must use the same closing-`**` split as the parser, so `ship`
+#    inserts the marker immediately after the title-closing `**` instead of
+#    failing to resolve/rewrite the bullet.
+# ---------------------------------------------------------------------------
+setup_roadmap '# Roadmap
+
+## Round 1 — Build
+
+- **step-02 — Use * wildcard** (small) — current.'
+out="$(run demo step-02)"
+assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "special-title: marked_shipped updated"
+assert_eq '- **step-02 — Use * wildcard** ✅ shipped 2026-06-27 (small) — current.' \
+  "$(step02_line)" "special-title: marker inserted after closing **"
+
+# ---------------------------------------------------------------------------
+# 8. --dry-run: reports `updated` and `dry_run: true`, but the roadmap file is
 #    unchanged (no write).
 # ---------------------------------------------------------------------------
 setup_roadmap '# Roadmap
