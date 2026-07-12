@@ -24,21 +24,28 @@
 #             steps:[{id, title, shipped, shipped_date, lane}]}],
 #    backlog:[{id, title}],
 #    deferred:[{id, title}],
-#    lane_errors:[{kind, round?, lane?, step?}]}
+#    lane_errors:[{kind, round?, lane?, step?}],
+#    step_errors:[{kind, round?, line, raw}]}
 # `lane` is null for a main-lane step; `lanes` lists a round's declared lanes in
 # order (incl. empty lanes); `lane_errors` is empty when the lane structure is
-# well-formed (ADR-0010). Missing path => empty doc (same shape, all arrays empty).
+# well-formed (ADR-0010). `step_errors` is empty when every step bullet parses:
+# a line inside a round that opens like a step bullet but fails the bullet
+# grammar lands there (kind:"malformed-step-bullet") instead of being silently
+# skipped — a dropped step is invisible to status/next/ship, so the parse
+# surface has to say so out loud.
+# Missing path => empty doc (same shape, all arrays empty).
 wip_roadmap_parse() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
-    jq -nc '{rounds:[], backlog:[], deferred:[], lane_errors:[]}'
+    jq -nc '{rounds:[], backlog:[], deferred:[], lane_errors:[], step_errors:[]}'
     return 0
   fi
 
-  local mode="outside" line current_lane="" lane_saw_step=0 in_comment=0
-  local doc='{"rounds":[],"backlog":[],"deferred":[],"lane_errors":[]}'
+  local mode="outside" line current_lane="" lane_saw_step=0 in_comment=0 lineno=0
+  local doc='{"rounds":[],"backlog":[],"deferred":[],"lane_errors":[],"step_errors":[]}'
 
   while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
     # Skip HTML comment blocks (`<!-- … -->`) so commented examples (e.g. the
     # `### Lane` block in templates/roadmap.md.tmpl) and the wip-amend markers
     # never parse as content.
@@ -183,6 +190,18 @@ wip_roadmap_parse() {
               tracker: (if $trk == "" then null else $trk end)
             }]' <<<"$doc")"
           [[ -n "$current_lane" ]] && lane_saw_step=1
+        elif [[ "$line" =~ ^-[[:space:]]+\*\*step- ]]; then
+          # Opens like a step bullet but matched neither arm above: report it
+          # rather than dropping it. Scoped to `round` mode on purpose — a
+          # backlog/deferred bullet that merely starts similarly is not a
+          # malformed step. `round` is null for a bullet before any `## Round`.
+          doc="$(jq -c --argjson ln "$lineno" --arg raw "$line" '
+            .step_errors += [{
+              kind: "malformed-step-bullet",
+              round: (.rounds[-1].n),
+              line: $ln,
+              raw: $raw
+            }]' <<<"$doc")"
         fi
         ;;
       backlog)
