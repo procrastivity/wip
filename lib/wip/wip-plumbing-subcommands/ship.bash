@@ -61,6 +61,13 @@ wip_plumbing_cmd_ship() {
   doc="$(wip_roadmap_parse "$root/$roadmap_path")"
   step_record="$(wip_roadmap_step "$doc" "$step_id")"
   if [[ -z "$step_record" || "$step_record" == "null" ]]; then
+    local shadow_lines=() shadow_rc=0
+    # shellcheck disable=SC2034 # passed by name to _wip_amend_find_step_block_start
+    mapfile -t shadow_lines <"$root/$roadmap_path"
+    _wip_amend_find_step_block_start "$step_id" shadow_lines >/dev/null || shadow_rc=$?
+    if [[ "$shadow_rc" == "2" ]]; then
+      wip_die 4 step-shadowed-in-comment "ship: step-id only found inside a comment span: $step_id" "$roadmap_path"
+    fi
     wip_die 4 step-not-in-roadmap "ship: step not in roadmap: $step_id" "$roadmap_path"
   fi
 
@@ -69,9 +76,13 @@ wip_plumbing_cmd_ship() {
   shipped_date="$(wip_scaffold_now)"
 
   # Call both writer seams; each prints a status word and returns 0 (1 on error).
-  local marked_shipped active_step_cleared
-  marked_shipped="$(_wip_ship_mark_roadmap_shipped "$root/$roadmap_path" "$step_id" "$shipped_date")" ||
+  local marked_shipped active_step_cleared mark_rc=0
+  marked_shipped="$(_wip_ship_mark_roadmap_shipped "$root/$roadmap_path" "$step_id" "$shipped_date")" || mark_rc=$?
+  if [[ "$mark_rc" == "2" ]]; then
+    wip_die 4 step-shadowed-in-comment "ship: step-id only found inside a comment span: $step_id" "$roadmap_path"
+  elif [[ "$mark_rc" != "0" ]]; then
     wip_die 1 internal "ship: roadmap marker writer failed"
+  fi
   active_step_cleared="$(_wip_ship_clear_active_step "$root/.wip.yaml" "$slug" "$step_id")" ||
     wip_die 1 internal "ship: active_step clear failed"
 

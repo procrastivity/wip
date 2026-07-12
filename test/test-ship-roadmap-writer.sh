@@ -183,4 +183,28 @@ assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "dry-run: marked_ship
 assert_eq "true" "$(jq -r '.dry_run' <<<"$out")" "dry-run: dry_run true in ledger"
 assert_cmp "$before_dry" "$roadmap" "dry-run: roadmap unchanged (no write)"
 
+# ---------------------------------------------------------------------------
+# 9. Step-02 regression pin 3: a step-id that exists only inside an HTML
+#    comment span reports a specific shadowed-anchor error instead of updating
+#    an inert scaffold bullet or returning a successful marked_shipped ledger.
+# ---------------------------------------------------------------------------
+setup_roadmap '# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.'
+set +e
+out_shadow="$(run demo step-02 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "comment-shadowed: exit 4"
+assert_eq "false" "$(jq -r '.ok' <<<"$out_shadow")" "comment-shadowed: envelope present"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_shadow")" "comment-shadowed: error kind"
+assert_eq "null" "$(jq -r '.marked_shipped // null' <<<"$out_shadow")" "comment-shadowed: no marked_shipped updated ledger"
+assert_not_grep "✅ shipped 2026-06-27" "$roadmap" "comment-shadowed: roadmap unchanged"
+
 test_summary

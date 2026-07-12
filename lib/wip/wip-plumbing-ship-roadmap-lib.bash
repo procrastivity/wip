@@ -6,7 +6,8 @@
 # _wip_ship_mark_roadmap_shipped <roadmap-path> <step-id> <date>
 #
 # Insert/normalize <step-id>'s `✅ shipped <date>` bullet marker in the roadmap.
-# Prints a status word to stdout and returns 0, or returns 1 on internal error:
+# Prints a status word to stdout and returns 0, returns 1 on internal error,
+# or returns 2 when the step-id is only found inside an HTML comment span:
 #   updated — the marker was inserted, or a present-but-wrong/missing date was
 #             corrected to <date>.
 #   noop    — the bullet already carries the exact `✅ shipped <date>`; no write
@@ -38,8 +39,9 @@ _wip_ship_mark_roadmap_shipped() {
 
   # Locate the bullet block [start, end): start is the bullet's first line,
   # [start+1, end) are its wrapped continuation lines (preserved verbatim).
-  local start end
-  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  local start end rc=0
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || rc=$?
+  [[ "$rc" == "0" ]] || return "$rc"
   end="$(_wip_amend_find_step_block_end "$start" lines)"
 
   # Split the first line on the parser's own bullet grammar so the bold title

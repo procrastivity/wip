@@ -162,20 +162,55 @@ wip_amend_has_marker() {
 }
 
 # Find the start (0-indexed) of the bullet block for <step-id> in <lines
-# array name>. Returns the index via stdout; empty when not found.
+# array name>. Returns the index via stdout when found in real content.
+# Exit contract: 0 = found, 1 = absent, 2 = only found inside an HTML comment span.
 _wip_amend_find_step_block_start() {
   local sid="$1" arr_name="$2"
   local sid_re
   sid_re="$(_wip_amend_sid_pattern "$sid")"
-  local i n L
+  local i n L in_comment=0 found_comment=0
+  local first_match=-1 tracker_match=-1 tracker_count=0
   eval 'n=${#'"$arr_name"'[@]}'
   for ((i = 0; i < n; i++)); do
     eval 'L=${'"$arr_name"'[$i]}'
+
+    # Mirror wip_roadmap_parse's HTML comment skip exactly: a line starting
+    # `<!--` (with optional leading whitespace) is skipped as comment content;
+    # a multi-line skip stays open until a later line contains `-->`.
+    if [[ "$in_comment" == "1" ]]; then
+      if [[ "$L" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
+        found_comment=1
+      fi
+      [[ "$L" == *"-->"* ]] && in_comment=0
+      continue
+    fi
+    if [[ "$L" =~ ^[[:space:]]*\<!-- ]]; then
+      if [[ "$L" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
+        found_comment=1
+      fi
+      [[ "$L" == *"-->"* ]] || in_comment=1
+      continue
+    fi
+
     if [[ "$L" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
-      printf '%d\n' "$i"
-      return 0
+      if ((first_match < 0)); then
+        first_match=$i
+      fi
+      if [[ "$L" =~ \[tracker:[^]]+\] ]]; then
+        tracker_match=$i
+        tracker_count=$((tracker_count + 1))
+      fi
     fi
   done
+  if ((first_match >= 0)); then
+    if ((tracker_count == 1)); then
+      printf '%d\n' "$tracker_match"
+    else
+      printf '%d\n' "$first_match"
+    fi
+    return 0
+  fi
+  [[ "$found_comment" == "1" ]] && return 2
   return 1
 }
 
@@ -205,8 +240,9 @@ wip_amend_apply_insert_after() {
   local path="$1" step_id="$2" bullet="$3" marker="$4"
   local lines=()
   mapfile -t lines <"$path"
-  local start end
-  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  local start end rc=0
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || rc=$?
+  [[ "$rc" == "0" ]] || return "$rc"
   end="$(_wip_amend_find_step_block_end "$start" lines)"
   local out=() i n=${#lines[@]}
   for ((i = 0; i < end; i++)); do out+=("${lines[i]}"); done
@@ -224,8 +260,9 @@ wip_amend_apply_replace() {
   local path="$1" step_id="$2" bullet="$3" marker="$4"
   local lines=()
   mapfile -t lines <"$path"
-  local start end
-  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || return 1
+  local start end rc=0
+  start="$(_wip_amend_find_step_block_start "$step_id" lines)" || rc=$?
+  [[ "$rc" == "0" ]] || return "$rc"
   end="$(_wip_amend_find_step_block_end "$start" lines)"
   # Strip any wip-amend marker line that immediately follows the replaced
   # block (it belonged to the previous insert/replace).

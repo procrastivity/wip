@@ -292,12 +292,22 @@ _wip_roadmap_amend_idempotent_or_apply() {
 
   case "$kind" in
     insert-after)
-      wip_amend_apply_insert_after "$roadmap_abs" "$value" "$payload" "$marker" ||
+      local ia_rc=0
+      wip_amend_apply_insert_after "$roadmap_abs" "$value" "$payload" "$marker" || ia_rc=$?
+      if [[ "$ia_rc" == "2" ]]; then
+        wip_die 4 step-shadowed-in-comment "roadmap amend: target step only found inside a comment span: $value" "$roadmap_path"
+      elif [[ "$ia_rc" != "0" ]]; then
         wip_die 4 step-not-in-roadmap "roadmap amend: target step not found: $value" "$roadmap_path"
+      fi
       ;;
     replace)
-      wip_amend_apply_replace "$roadmap_abs" "$value" "$payload" "$marker" ||
+      local repl_rc=0
+      wip_amend_apply_replace "$roadmap_abs" "$value" "$payload" "$marker" || repl_rc=$?
+      if [[ "$repl_rc" == "2" ]]; then
+        wip_die 4 step-shadowed-in-comment "roadmap amend: target step only found inside a comment span: $value" "$roadmap_path"
+      elif [[ "$repl_rc" != "0" ]]; then
         wip_die 4 step-not-in-roadmap "roadmap amend: target step not found: $value" "$roadmap_path"
+      fi
       ;;
     append-round)
       wip_amend_apply_append_round "$roadmap_abs" "$payload" "$marker"

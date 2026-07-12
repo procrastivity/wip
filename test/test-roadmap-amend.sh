@@ -475,4 +475,92 @@ set -e
 assert_eq "4" "$rc" "malformed lane refuses amend exit 4"
 assert_eq "lane-malformed" "$(jq -r '.error.kind' <<<"$out_m")" "lane-malformed error kind"
 
+# Step-02 regression pin 1: a step-id only inside an HTML comment span reports
+# step-shadowed-in-comment rather than writing into the inert scaffold.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.
+MD
+set +e
+out_shadow="$(run demo --from "$tmp/insert.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 1 insert-after comment-only exit 4"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_shadow")" "step-02 pin 1 shadowed kind"
+assert_not_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "step-02 pin 1 did not write into comment"
+
+# Step-02 regression pin 2: the same id inside a comment and real content
+# resolves to the real bullet, not the scaffold copy.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-02 — Real target** — current.
+MD
+out_real="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_real")" "step-02 pin 2 comment+real insert ok"
+real_line=$(grep -n "step-02 — Real target" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+insert_line=$(grep -n "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+if [[ "$insert_line" -gt "$real_line" ]]; then
+  _WIP_PASS=$((_WIP_PASS + 1))
+  echo "  ok   step-02 pin 2 inserted after real bullet"
+else
+  _WIP_FAIL=$((_WIP_FAIL + 1))
+  echo "  FAIL step-02 pin 2 inserted before real bullet" >&2
+fi
+
+# Step-02 regression pin 1 (replace path): replace also reports the shadowed
+# error instead of targeting comment-only content.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.
+MD
+set +e
+out_repl_shadow="$(run demo --from "$tmp/replace.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 1 replace comment-only exit 4"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_repl_shadow")" "step-02 pin 1 replace shadowed kind"
+assert_not_grep "Second (updated)" "$tmp/.wip/initiatives/demo/roadmap.md" "step-02 pin 1 replace did not write into comment"
+
+# Step-02 regression pin 5: when duplicate real step ids exist, exactly one
+# tracker-tagged bullet wins over an earlier untagged first match.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+## Round 1 — Build
+- **step-02 — Untagged duplicate** — should not win.
+- **step-02 — Tracker-tagged duplicate** — should win. [tracker: BDS-63]
+MD
+out_tie="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_tie")" "step-02 pin 5 tracker tie-break insert ok"
+tagged_line=$(grep -n "Tracker-tagged duplicate" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+insert_line=$(grep -n "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+if [[ "$insert_line" -eq $((tagged_line + 1)) ]]; then
+  _WIP_PASS=$((_WIP_PASS + 1))
+  echo "  ok   step-02 pin 5 inserted after tracker-tagged duplicate"
+else
+  _WIP_FAIL=$((_WIP_FAIL + 1))
+  echo "  FAIL step-02 pin 5 did not target tracker-tagged duplicate" >&2
+fi
+
 test_summary
