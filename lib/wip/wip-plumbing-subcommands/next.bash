@@ -2,6 +2,30 @@
 # Sources: manifest active_step → roadmap order → roadmap backlog → repo backlog.
 # shellcheck shell=bash
 
+# _wip_next_tracker_closed <root> <tracker-id> — return 0 (true) only when the
+# tracker's cached state says the issue is CLOSED. Same closed vocabulary as
+# doctor's backlog-tracker-closed check: done / canceled / cancelled,
+# case-insensitively.
+#
+# Decision 4 (fail open) is the whole point of this helper: a tracker with NO
+# `issue:<ID>` cache entry is UNKNOWN, and unknown means keep showing it. Having
+# a tracker at all is never itself a reason to drop a candidate — nothing
+# populates the `issue:*` keyspace yet, so a "any tracker ⇒ filter" reading would
+# silently empty both backlog sources.
+_wip_next_tracker_closed() {
+  local root="$1" tracker="$2" entry state
+  [[ -n "$tracker" && "$tracker" != "null" ]] || return 1
+
+  entry="$(_wip_tracker_cache_get "$root" "issue:$tracker")"
+  [[ -n "$entry" && "$entry" != "null" ]] || return 1
+
+  state="$(jq -r '.state // ""' <<<"$entry" | tr '[:upper:]' '[:lower:]')"
+  case "$state" in
+    done | canceled | cancelled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 wip_plumbing_cmd_next() {
   local slug=""
   while [[ $# -gt 0 ]]; do
@@ -178,13 +202,18 @@ wip_plumbing_cmd_next() {
     done
   fi
 
-  # 5. Roadmap backlog entries.
+  # 5. Roadmap backlog entries. A closed tracker is skipped BEFORE the append, so
+  #    `rank` stays contiguous by construction (no renumbering pass).
   local backlog_count
   backlog_count="$(jq -r '.backlog | length' <<<"$doc")"
   local j
   for ((j = 0; j < backlog_count; j++)); do
-    local b
+    local b btracker
     b="$(jq -c --argjson j "$j" '.backlog[$j]' <<<"$doc")"
+    btracker="$(jq -r '.tracker // ""' <<<"$b")"
+    if _wip_next_tracker_closed "$root" "$btracker"; then
+      continue
+    fi
     candidates="$(jq -c \
       --argjson rank "$rank" --argjson b "$b" '
       . + [{rank:$rank, source:"backlog", id:$b.id, title:$b.title,
@@ -192,41 +221,31 @@ wip_plumbing_cmd_next() {
     rank=$((rank + 1))
   done
 
-  # 6. Repo backlog (.wip/backlog.md) if present — parse via the same grammar.
+  # 6. Repo backlog (.wip/backlog.md) if present. Its entries are multi-paragraph
+  #    prose blocks with the tracker on a trailing line — a DIFFERENT grammar from
+  #    the roadmap's one-line `## Backlog` bullets, so it gets its own parser.
+  #    `wip_roadmap_parse` never matched this file at all (its backlog mode arms on
+  #    a `## Backlog` H2, which the real file does not have), so the path that
+  #    actually ran here was a bare-slugify fallback that read no tracker of either
+  #    form — which is exactly why a shipped item kept being re-nominated.
   local repo_backlog="$root/.wip/backlog.md"
   if [[ -f "$repo_backlog" ]]; then
-    local repo_doc
-    repo_doc="$(wip_roadmap_parse "$repo_backlog")"
-    local rb_count
-    rb_count="$(jq -r '.backlog | length' <<<"$repo_doc")"
-    # If .wip/backlog.md has no ## Backlog header, parse entries from any
-    # bullet directly under H1. Fall back to a permissive scan.
-    if [[ "$rb_count" == "0" ]]; then
-      while IFS= read -r line; do
-        if [[ "$line" =~ ^-\ \*\*([^*]+)\*\* ]]; then
-          local t="${BASH_REMATCH[1]}"
-          local rid
-          rid="$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]' |
-            sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//')"
-          candidates="$(jq -c \
-            --argjson rank "$rank" --arg id "$rid" --arg title "$t" '
-            . + [{rank:$rank, source:"backlog", id:$id, title:$title,
-                  reason:"repo backlog"}]' <<<"$candidates")"
-          rank=$((rank + 1))
-        fi
-      done <"$repo_backlog"
-    else
-      local k
-      for ((k = 0; k < rb_count; k++)); do
-        local b
-        b="$(jq -c --argjson k "$k" '.backlog[$k]' <<<"$repo_doc")"
-        candidates="$(jq -c \
-          --argjson rank "$rank" --argjson b "$b" '
-          . + [{rank:$rank, source:"backlog", id:$b.id, title:$b.title,
-                reason:"repo backlog"}]' <<<"$candidates")"
-        rank=$((rank + 1))
-      done
-    fi
+    local repo_entries rb_count k
+    repo_entries="$(_wip_repo_backlog_parse "$repo_backlog")"
+    rb_count="$(jq -r 'length' <<<"$repo_entries")"
+    for ((k = 0; k < rb_count; k++)); do
+      local b btracker
+      b="$(jq -c --argjson k "$k" '.[$k]' <<<"$repo_entries")"
+      btracker="$(jq -r '.tracker // ""' <<<"$b")"
+      if _wip_next_tracker_closed "$root" "$btracker"; then
+        continue
+      fi
+      candidates="$(jq -c \
+        --argjson rank "$rank" --argjson b "$b" '
+        . + [{rank:$rank, source:"backlog", id:$b.id, title:$b.title,
+              reason:"repo backlog"}]' <<<"$candidates")"
+      rank=$((rank + 1))
+    done
   fi
 
   # Deferred items (## Deferred in the roadmap) — a clearly NOT-actionable
