@@ -2,6 +2,34 @@
 # --fix is advisory in v1 (warns; writes nothing). Pure read otherwise.
 # shellcheck shell=bash
 
+# _wip_doctor_tracker_closed <root> <tracker-id> — return 0 iff the tracker cache
+# KNOWS this issue to be closed. Used by §2o.
+#
+# The cache keyspace is `issue:<TRACKER-ID>` (workplan step-06 D3) — deliberately
+# NOT the bare `<slug>/<node-id>` keyspace every other cache entry uses, which
+# holds wip's own lifecycle labels for wip nodes, not a tracker's native status
+# for an arbitrary issue. A github/gitlab id can itself contain a `/`
+# (`owner/repo#123`, ADR-0026), so "has a slash" cannot tell the two apart; the
+# prefix can.
+#
+# ABSENT ⇒ NOT CLOSED (return 1). This is the fail-open rule (D4), not an
+# oversight: with no entry we have no data, and the whole check family — §2f,
+# `--probe-tracker` — treats "can't tell" as non-actionable. Guessing closed here
+# would make doctor demand the pruning of a live backlog item, which is the exact
+# plausible-wrong implementation this reads the cache to avoid. Nothing populates
+# `issue:*` entries yet (out of scope for step-06), so today this returns 1 for
+# every tracker in the live repo, and §2o is correctly silent.
+_wip_doctor_tracker_closed() {
+  local entry state
+  entry="$(_wip_tracker_cache_get "$1" "issue:$2")"
+  [[ -n "$entry" && "$entry" != "null" ]] || return 1
+  state="$(jq -r '.state // ""' <<<"$entry" | tr '[:upper:]' '[:lower:]')"
+  case "$state" in
+    done | canceled | cancelled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 wip_plumbing_cmd_doctor() {
   local fix=0 probe_solo=0 probe_tracker=0
   while [[ $# -gt 0 ]]; do
@@ -431,6 +459,68 @@ wip_plumbing_cmd_doctor() {
           message:"initiative has no tracker_anchor (durable source-issue link); suggestion, never auto-set",
           fix:$fix}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+  fi
+
+  # 2o. Backlog entries whose tracker issue is already CLOSED (step-06, D3-D5) —
+  #     the read half of "retire shipped backlog items instead of re-nominating
+  #     them". `ship`/`closeout`/`backlog retire` prune an entry when they ship the
+  #     step that carries its tracker; this catches the entry nobody pruned, whose
+  #     issue the tracker itself reports done/canceled. ACTIONABLE drift (status is
+  #     not "ok"), so it counts toward drift_count and trips exit 4 — unlike §2f/§2h
+  #     there is a deterministic fix: prune the entry.
+  #     Gated on `_wip_tracker_enabled` like §2f/§2h, and DEFAULT-ON, not behind a
+  #     `--probe-*` flag: those flags exist to gate live shell-outs, and this makes
+  #     none. It reads `.wip/tracker-cache.json` off disk and nothing else. Cache
+  #     staleness is accepted (D3) — the cache has no TTL anywhere in wip.
+  #     Two sweeps, ONE kind (`backlog`), separated by `source` — the two files are
+  #     different grammars (see wip-plumbing-repo-backlog-lib.bash's header) but the
+  #     same defect, and a reader fixing them does the same thing to each:
+  #       source:"repo"    — `.wip/backlog.md`, multi-paragraph, parsed by the
+  #                          step-06 lib (wip_roadmap_parse sees nothing in it).
+  #       source:"roadmap" — an initiative roadmap's own `## Backlog` one-liners,
+  #                          already `.tracker`-tagged by the roadmap parser today.
+  #     Same in-flight/proposed scope guard as every other per-initiative check.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local bk_entry bk_trk bk_id bk_title
+    local brec bslug bstatus brpath bdoc
+
+    while IFS= read -r bk_entry; do
+      [[ -n "$bk_entry" ]] || continue
+      bk_trk="$(jq -r '.tracker // ""' <<<"$bk_entry")"
+      [[ -n "$bk_trk" ]] || continue
+      _wip_doctor_tracker_closed "$root" "$bk_trk" || continue
+      bk_id="$(jq -r '.id' <<<"$bk_entry")"
+      bk_title="$(jq -r '.title' <<<"$bk_entry")"
+      obj="$(jq -nc --arg id "$bk_id" --arg title "$bk_title" --arg trk "$bk_trk" \
+        --arg fix "prune $bk_id (tracker $bk_trk)" \
+        '{kind:"backlog", source:"repo", id:$id, tracker:$trk, title:$title,
+          status:"backlog-tracker-closed", fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(_wip_repo_backlog_parse "$root/.wip/backlog.md" | jq -c '.[]')
+
+    while IFS= read -r brec; do
+      [[ -n "$brec" ]] || continue
+      bslug="$(jq -r '.slug // ""' <<<"$brec")"
+      [[ -n "$bslug" ]] || continue
+      bstatus="$(jq -r '.status // ""' <<<"$brec")"
+      [[ "$bstatus" == "shipped" || "$bstatus" == "archived" ]] && continue
+      brpath="$(jq -r '.roadmap // empty' <<<"$brec")"
+      [[ -n "$brpath" ]] || brpath=".wip/initiatives/$bslug/roadmap.md"
+      bdoc="$(wip_roadmap_parse "$root/$brpath")"
+      while IFS= read -r bk_entry; do
+        [[ -n "$bk_entry" ]] || continue
+        bk_trk="$(jq -r '.tracker // ""' <<<"$bk_entry")"
+        [[ -n "$bk_trk" ]] || continue
+        _wip_doctor_tracker_closed "$root" "$bk_trk" || continue
+        bk_id="$(jq -r '.id' <<<"$bk_entry")"
+        bk_title="$(jq -r '.title' <<<"$bk_entry")"
+        obj="$(jq -nc --arg slug "$bslug" --arg id "$bk_id" --arg title "$bk_title" \
+          --arg trk "$bk_trk" --arg fix "prune $bk_id (tracker $bk_trk)" \
+          '{kind:"backlog", source:"roadmap", slug:$slug, id:$id, tracker:$trk, title:$title,
+            status:"backlog-tracker-closed", fix:$fix}')"
+        checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+      done < <(jq -c '.backlog[]?' <<<"$bdoc")
     done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
