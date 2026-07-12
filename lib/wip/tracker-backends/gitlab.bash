@@ -37,8 +37,7 @@ _wip_tracker_gitlab_read_cmd() {
     return 0
   fi
   local script
-  script=$(
-    cat <<'SH'
+  IFS= read -r -d '' script <<'SH' || true
 n=${1##*#}
 p=${1%%#*}
 r=()
@@ -51,7 +50,6 @@ glab issue view "$n" "${r[@]}" --output json | jq -r '
     elif ($l | index("wip:in-progress")) then "in-progress"
     else "todo" end'
 SH
-  )
   printf 'bash -c %q _' "$script"
 }
 
@@ -71,8 +69,7 @@ _wip_tracker_gitlab_write_cmd() {
     return 0
   fi
   local script
-  script=$(
-    cat <<'SH'
+  IFS= read -r -d '' script <<'SH' || true
 n=${1##*#}
 p=${1%%#*}
 r=()
@@ -100,6 +97,5 @@ case "$2" in
     ;;
 esac
 SH
-  )
   printf 'bash -c %q _' "$script"
 }

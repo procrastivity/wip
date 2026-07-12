@@ -31,8 +31,10 @@ _wip_ship_mark_roadmap_shipped() {
 
   [[ -f "$roadmap" ]] || return 1
 
-  local lines=()
-  mapfile -t lines <"$roadmap"
+  local lines=() line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines+=("$line")
+  done <"$roadmap"
 
   # Locate the bullet block [start, end): start is the bullet's first line,
   # [start+1, end) are its wrapped continuation lines (preserved verbatim).

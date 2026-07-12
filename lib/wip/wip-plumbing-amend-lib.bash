@@ -165,13 +165,13 @@ wip_amend_has_marker() {
 # array name>. Returns the index via stdout; empty when not found.
 _wip_amend_find_step_block_start() {
   local sid="$1" arr_name="$2"
-  # shellcheck disable=SC2178
-  local -n _A="$arr_name"
   local sid_re
   sid_re="$(_wip_amend_sid_pattern "$sid")"
-  local i n=${#_A[@]}
+  local i n L
+  eval 'n=${#'"$arr_name"'[@]}'
   for ((i = 0; i < n; i++)); do
-    if [[ "${_A[i]}" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
+    eval 'L=${'"$arr_name"'[$i]}'
+    if [[ "$L" =~ ^-[[:space:]]\*\*${sid_re}[[:space:]]— ]]; then
       printf '%d\n' "$i"
       return 0
     fi
@@ -185,11 +185,10 @@ _wip_amend_find_step_block_start() {
 # Continuation lines must begin with whitespace.
 _wip_amend_find_step_block_end() {
   local start="$1" arr_name="$2"
-  # shellcheck disable=SC2178
-  local -n _A="$arr_name"
-  local i=$((start + 1)) n=${#_A[@]}
+  local i=$((start + 1)) n L
+  eval 'n=${#'"$arr_name"'[@]}'
   while ((i < n)); do
-    local L="${_A[i]}"
+    eval 'L=${'"$arr_name"'[$i]}'
     if [[ "$L" =~ ^[[:space:]] ]]; then
       i=$((i + 1))
       continue

@@ -46,7 +46,7 @@ out_star="$(run demo step-03)"
 assert_eq "true" "$(jq -r '.ok' <<<"$out_star")" "special-title workplan ok"
 assert_eq "step-03" "$(jq -r '.step' <<<"$out_star")" "special-title step echo"
 assert_file "$tmp/.wip/initiatives/demo/workplans/step-03-use-wildcard.md" "special-title workplan written"
-assert_grep "step-03 · Use * wildcard" "$tmp/.wip/initiatives/demo/workplans/step-03-use-wildcard.md" "special-title h1 rendered"
+assert_grep "step-03 · Use \\* wildcard" "$tmp/.wip/initiatives/demo/workplans/step-03-use-wildcard.md" "special-title h1 rendered"
 
 # 2. --slug override.
 out2="$(run demo step-02.5 --slug mfa)"
