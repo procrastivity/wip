@@ -99,6 +99,41 @@ wip_plumbing_cmd_doctor() {
     done < <(jq -c '.[]' <<<"$steps")
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
 
+  # 2j. Round-level closeout drift — the round heading's `✅ shipped` marker must
+  #     agree with its steps: every step in the round shipped ∧ heading unmarked is
+  #     drift the round-marker writer (`ship`, when the round's last step lands)
+  #     would otherwise have written. Pairs with that writer the same way §2b pairs
+  #     with the step-level one. Pure-disk, and the same scope guard as §2b: a
+  #     `status: shipped`/`archived` initiative is closed out at the initiative
+  #     level, so auditing its historical round hygiene would be noise.
+  #     The `length > 0` guard is load-bearing, not defensive: jq's `all` is
+  #     vacuously true on an empty array, so without it an empty/placeholder round
+  #     would read as "fully shipped" and false-positive. Lane steps need no special
+  #     handling — the parser lands them in `.rounds[].steps[]` like any other step.
+  #     Healthy rounds add no entry — keep checks[] quiet.
+  local rrec rslug rstatus rrpath rdoc round_json rn rlast
+  while IFS= read -r rrec; do
+    [[ -n "$rrec" ]] || continue
+    rslug="$(jq -r '.slug // ""' <<<"$rrec")"
+    [[ -n "$rslug" ]] || continue
+    rstatus="$(jq -r '.status // ""' <<<"$rrec")"
+    [[ "$rstatus" == "shipped" || "$rstatus" == "archived" ]] && continue
+    rrpath="$(jq -r '.roadmap // empty' <<<"$rrec")"
+    [[ -n "$rrpath" ]] || rrpath=".wip/initiatives/$rslug/roadmap.md"
+    rdoc="$(wip_roadmap_parse "$root/$rrpath")"
+    while IFS= read -r round_json; do
+      [[ -n "$round_json" ]] || continue
+      rn="$(jq -r '.n' <<<"$round_json")"
+      rlast="$(jq -r '.steps[-1].id' <<<"$round_json")"
+      obj="$(jq -nc --arg slug "$rslug" --argjson round "$rn" \
+        --arg fix "run wip ship $rslug $rlast (or re-run it) to write the round marker" \
+        '{kind:"closeout-round", slug:$slug, round:$round, status:"round-not-marked-shipped", fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(jq -c '.rounds[]
+      | select(.steps | length > 0 and all(.shipped))
+      | select(.shipped == false)' <<<"$rdoc")
+  done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+
   # 2d. Tracker mapping mirror drift (ADR-0019 §C). The roadmap's `[tracker: ID]`
   #     keys are the source of truth; `.wip.yaml`'s initiative `tracker_map` is a
   #     writer-generated mirror. Disagreement is drift, fixable with
