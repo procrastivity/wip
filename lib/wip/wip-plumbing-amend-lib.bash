@@ -233,6 +233,49 @@ _wip_amend_find_step_block_end() {
   printf '%d\n' "$i"
 }
 
+# Find the line (0-indexed) of round <round-n>'s `## Round <n> — …` heading in
+# <lines array name>. Mirrors _wip_amend_find_step_block_start's comment-tracking
+# state machine, scoped to round headings instead of step bullets: a heading that
+# lives only inside an HTML comment span is inert scaffolding (an `init` template
+# example, a hand-authored sample), never a write anchor.
+# Exit contract: 0 = found, 1 = absent, 2 = only found inside an HTML comment span.
+_wip_amend_find_round_heading_line() {
+  local round_n="$1" arr_name="$2"
+  local i n L in_comment=0 found_comment=0 first_match=-1
+  eval 'n=${#'"$arr_name"'[@]}'
+  for ((i = 0; i < n; i++)); do
+    eval 'L=${'"$arr_name"'[$i]}'
+
+    # Mirror wip_roadmap_parse's HTML comment skip exactly: a line starting
+    # `<!--` (with optional leading whitespace) is skipped as comment content;
+    # a multi-line skip stays open until a later line contains `-->`.
+    if [[ "$in_comment" == "1" ]]; then
+      if [[ "$L" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
+        found_comment=1
+      fi
+      [[ "$L" == *"-->"* ]] && in_comment=0
+      continue
+    fi
+    if [[ "$L" =~ ^[[:space:]]*\<!-- ]]; then
+      if [[ "$L" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
+        found_comment=1
+      fi
+      [[ "$L" == *"-->"* ]] || in_comment=1
+      continue
+    fi
+
+    if [[ "$L" =~ ^\#\#\ Round\ ${round_n}\ — ]] && ((first_match < 0)); then
+      first_match=$i
+    fi
+  done
+  if ((first_match >= 0)); then
+    printf '%d\n' "$first_match"
+    return 0
+  fi
+  [[ "$found_comment" == "1" ]] && return 2
+  return 1
+}
+
 # wip_amend_apply_insert_after <roadmap-path> <step-id> <bullet> <marker>
 # Insert <bullet>\n<marker>\n immediately after <step-id>'s block.
 # Returns 1 if the target step bullet is absent.
@@ -323,15 +366,13 @@ wip_amend_apply_append_lane() {
   local lines=()
   mapfile -t lines <"$path"
   local n=${#lines[@]} i
-  # Locate the round heading.
-  local start=-1
-  for ((i = 0; i < n; i++)); do
-    if [[ "${lines[i]}" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
-      start=$i
-      break
-    fi
-  done
-  ((start >= 0)) || return 1
+  # Locate the round heading (comment-span-aware: a heading that only lives
+  # inside an HTML comment span is inert scaffolding, not an anchor). Both
+  # "absent" (1) and "comment-shadowed" (2) mean there is no round to append a
+  # lane to, which is this function's `return 1` contract.
+  local start find_rc=0
+  start="$(_wip_amend_find_round_heading_line "$round_n" lines)" || find_rc=$?
+  ((find_rc == 0)) || return 1
   # End of the round = the next H2 (`## `) heading after start, else EOF.
   local end=$n
   for ((i = start + 1; i < n; i++)); do
@@ -403,15 +444,13 @@ wip_amend_apply_insert_step_in_lane() {
   local lines=()
   mapfile -t lines <"$path"
   local n=${#lines[@]} i
-  # Locate the round heading.
-  local start=-1
-  for ((i = 0; i < n; i++)); do
-    if [[ "${lines[i]}" =~ ^\#\#\ Round\ ${round_n}\ — ]]; then
-      start=$i
-      break
-    fi
-  done
-  ((start >= 0)) || return 2
+  # Locate the round heading (comment-span-aware: a heading that only lives
+  # inside an HTML comment span is inert scaffolding, not an anchor). Both
+  # "absent" (1) and "comment-shadowed" (2) mean there is no such round, which
+  # is this function's `return 2` (round-not-found) contract.
+  local start find_rc=0
+  start="$(_wip_amend_find_round_heading_line "$round_n" lines)" || find_rc=$?
+  ((find_rc == 0)) || return 2
   # End of the round = the next H2 (`## `) heading after start, else EOF.
   local end=$n
   for ((i = start + 1; i < n; i++)); do
