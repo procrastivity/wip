@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.20] - 2026-07-12
+
+### Other
+
+- Tracker-backend-seam: ADR-0026 adapter design (BDS-74, step-01) (#30)
+- Tracker-backends Round 1: github + gitlab issue-tracker backends (BDS-75, BDS-76) (#31)
+
 ## [0.0.19] - 2026-07-07
 
 ### Fixed
