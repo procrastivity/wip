@@ -12,8 +12,12 @@ prtend/
 workflow-portable-stub/
 xcind/
 
-.wip.yaml
-.wip/
+# --- wip: gitignore.always_commit exceptions (generated; do not hand-edit) ---
+!.wip/
+.wip/*
+!.wip/GLOSSARY.md
+!.wip/backlog.md
+# --- end wip: gitignore.always_commit exceptions ---
 
 # Environment / tooling noise
 .direnv/

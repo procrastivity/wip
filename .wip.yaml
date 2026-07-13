@@ -1,0 +1,198 @@
+# .wip.yaml — the wip manifest.
+#
+# Lives at REPO ROOT as a hidden dotfile, paired with the .wip/ directory.
+# ALWAYS COMMITTED, even when .wip/ content is gitignored — it is the single
+# deterministic entry point `wip-plumbing` reads to answer "what's installed,
+# where, and what's next." No `find` walks at steady state.
+#
+# This file is both the canonical schema (via comments) and a real, populated
+# instance for the `wip` distillation repo itself — so it doubles as a worked
+# example. See .wip/GLOSSARY.md for every term used here.
+
+version: 1
+# --- gitignore policy -------------------------------------------------------
+# Default: .wip/ content is ignored; only .wip.yaml (root) + the always-committed
+# tooling files inside .wip/ are tracked. Per-initiative override allowed.
+gitignore:
+  commit: false # false = ephemeral (default); true = track all of .wip/
+  always_commit: # tracked even when commit=false
+    - .wip/GLOSSARY.md
+    - .wip/backlog.md
+# --- wip porcelain provider -------------------------------------------------
+# Used ONLY by the standalone `wip` porcelain (not by /wip:* under Claude Code,
+# which uses Claude Code's own model). Points at any OpenAI-compatible endpoint.
+# Omit this block to run plumbing-only (no judgment commands from a plain shell).
+provider:
+  kind: openai-compatible
+  base_url_env: WIP_LLM_BASE_URL # read from env, never inline secrets
+  api_key_env: WIP_LLM_API_KEY
+  model_env: WIP_LLM_MODEL
+# --- features ---------------------------------------------------------------
+# A feature is ACTIVE iff: enabled here AND its sentinel file exists on disk.
+# `wip doctor` reports drift (declared-but-missing / present-but-undeclared).
+# Per-feature `version` + `installed_files` enable doctor + a future uninstall.
+features:
+  wip:
+    enabled: true
+    root: .wip
+  orchestration: # the Roles capability (orchestrator/coordinator/researcher/builder)
+    enabled: true # roles ship WITH the wip plugin; backend-agnostic (ADR-0007)
+    backend: solo # which orchestration backend binds the roles (see solo: below)
+    source: plugin # plugin | vendored
+  lds:
+    enabled: false # this repo is the distribution source, not an install
+    # When enabled, scalar single root for v1 (monorepo plural deferred):
+    # root: engineering         # OR docs (old-style). sentinel: {root}/.lds-manifest.yaml
+  diataxis:
+    enabled: true # we ship user docs under docs/ (Diátaxis). sentinel: docs/README.md
+    root: docs
+    # MUST stay distinct from any lds root (no two features share a root).
+  changelog:
+    enabled: true # sentinel: CHANGELOG.md (+ cliff.toml). tool: git-cliff
+  direnv:
+    enabled: true # sentinel: .envrc (pinned nix-direnv shim)
+  prtend:
+    enabled: false
+  solo: # Solo backend config (binding for orchestration.backend: solo)
+    enabled: true # sentinel: Solo project registration
+    agent_tools: # Role→agent-tool is backend-specific, so it lives here (ADR-0025)
+      # Each entry maps a Role (or a <role>-escalated target) to a Solo tool NAME
+      # (never an id — ids are operational and shift as the tool inventory changes;
+      # the resolver matches the name against mcp__solo__list_agent_tools()). A Role
+      # with no explicit entry falls through to `default`. Setting only `default`
+      # pins every Role to one tool (this project: Opus-only). This folds the retired
+      # agent_tier_policy.{force_tier, fallback_tool} into one map.
+      default: Claude # fallback for every Role → Claude runtime (id 3) (D6 dogfood)
+      # Per-role overrides + escalation targets go here, e.g.:
+      #   builder: Pi                # a cheaper local runtime for routine build
+      #   builder-escalated: Claude  # stronger runtime on repeated failure / load-bearing
+  forge: {"enabled": true, "backend": "gh"}
+  issue-tracker: {"enabled": true, "backend": "linear"}
+# --- initiative registry ----------------------------------------------------
+# One entry per directory under .wip/initiatives/. `status` drives `wip status`/`wip next`.
+# Everything is namespaced by `slug` (todo tags <slug>/step-NN, process names
+# <slug>-step-NN-coordinator) so concurrent initiatives never collide.
+current_initiative: tracker-backends # in-flight: Round 2 (label provisioning → live smoke)
+initiatives:
+  - slug: distillation
+    title: Workflow Distillation
+    status: shipped # proposed | in-flight | shipped | archived | paused (Round 5 closed 2026-06-19; all 5 rounds shipped)
+    intake: ad-hoc # ad-hoc | spec-generator
+    brief: .wip/initiatives/distillation/BRIEF.md
+    roadmap: .wip/initiatives/distillation/roadmap.md
+    active_step: step-22 # step-22 shipped 2026-06-19 (Round 5 complete, 3 of 3)
+  - slug: orchestration-backends
+    title: Orchestration Backends
+    status: shipped # Round 1 closed 2026-06-26 (its only round; all 3 steps shipped); remainder is Deferred not-now
+    intake: ad-hoc
+    brief: .wip/initiatives/orchestration-backends/BRIEF.md
+    roadmap: .wip/initiatives/orchestration-backends/roadmap.md
+    # active_step intentionally unset: Round 1 closed 2026-06-26 (all steps
+    # shipped). Cleared on closeout per the closeout-write design (clear-on-finish,
+    # mirror of set-on-start); status/next now infer the between-rounds state.
+  - slug: closeout-write-completion
+    title: Closeout writes — deterministic step-shipped state
+    status: shipped # Round 1 closed 2026-06-27 (its only round; all 6 steps shipped)
+    intake: ad-hoc
+    brief: .wip/initiatives/closeout-write-completion/BRIEF.md
+    roadmap: .wip/initiatives/closeout-write-completion/roadmap.md
+    # active_step intentionally unset: Round 1 closed 2026-06-27 (all 6 steps
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: surface-latent-state
+    title: Surface latent roadmap & orchestration state the tooling drops
+    status: shipped # all 3 rounds shipped 2026-06-27; PR #19 merged 2026-06-28 (BDS-14/15/16/17)
+    intake: ad-hoc
+    brief: .wip/initiatives/surface-latent-state/BRIEF.md
+    roadmap: .wip/initiatives/surface-latent-state/roadmap.md
+    # active_step intentionally unset: all rounds closed 2026-06-27 (6 of 6 steps
+    # shipped). Cleared on step-06 closeout (clear-on-finish).
+  - slug: test-suite-speedup
+    title: Speed up & de-duplicate the test suite
+    status: shipped # all 3 rounds shipped 2026-06-28 (7 steps); PR #20 merged. CI green on Linux.
+    intake: ad-hoc
+    brief: .wip/initiatives/test-suite-speedup/BRIEF.md
+    roadmap: .wip/initiatives/test-suite-speedup/roadmap.md
+    # active_step intentionally unset: all rounds closed 2026-06-28 (step-07 ship cleared it).
+  - slug: forge-surface
+    title: Teach wip about the forge (push / PR / merge surface)
+    status: shipped # both rounds shipped 2026-06-28 (4 steps); BDS-22, PR #21 merged 2026-06-29
+    intake: ad-hoc
+    brief: .wip/initiatives/forge-surface/BRIEF.md
+    roadmap: .wip/initiatives/forge-surface/roadmap.md
+    # active_step intentionally unset: all rounds closed 2026-06-28 (4 of 4
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: step-lifecycle
+    title: Refine the wip ⇄ Linear step-lifecycle workflow
+    status: shipped # all 5 rounds shipped 2026-06-28 (9 steps); BDS-20 lifecycle workflow
+    intake: ad-hoc
+    brief: .wip/initiatives/step-lifecycle/BRIEF.md
+    roadmap: .wip/initiatives/step-lifecycle/roadmap.md
+    # active_step intentionally unset: all 5 rounds closed 2026-06-28 (9 of 9
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: flatten-vendored-orchestration-agents
+    title: Flatten vendored orchestration agents (drop the plugin-shaped tree)
+    status: shipped # both rounds shipped 2026-06-29..07-01 (8 steps); ADR-0020 flattened vendored install + `setup agents --migrate`
+    intake: ad-hoc
+    brief: .wip/initiatives/flatten-vendored-orchestration-agents/BRIEF.md
+    roadmap: .wip/initiatives/flatten-vendored-orchestration-agents/roadmap.md
+    # active_step intentionally unset: both rounds closed through 2026-07-01 (8 of 8
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: setup-backends
+    title: Guided `setup` porcelain for the Solo / forge / issue-tracker backends — BRIEF (single source of truth)
+    status: shipped # Round 1 (PR #23) + Round 2 forge-backend pin (PR #24, BDS-60 / ADR-0022) shipped through 2026-07-03; 8 steps
+    intake: ad-hoc
+    brief: .wip/initiatives/setup-backends/BRIEF.md
+    roadmap: .wip/initiatives/setup-backends/roadmap.md
+    # active_step intentionally unset: both rounds closed through 2026-07-03 (8 of 8
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: wip-orchestration-robustness
+    title: 'wip orchestration robustness: drift, linkage, teardown & vendoring gaps'
+    status: shipped # Round 1 closed 2026-07-04 (its only round; all 4 steps shipped — BDS-57/58/56/18); PR #25 (c9f2bd5) integrated
+    intake: ad-hoc
+    brief: .wip/initiatives/wip-orchestration-robustness/BRIEF.md
+    roadmap: .wip/initiatives/wip-orchestration-robustness/roadmap.md
+    # active_step intentionally unset: Round 1 closed 2026-07-04 (all 4 steps
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: lifecycle-state-reconciliation
+    title: Lifecycle state reconciliation — keep wip ⇄ tracker ⇄ forge monotonic
+    status: shipped # Round 1 closed 2026-07-04 (its only round; 2 steps shipped — BDS-29 PR #26, BDS-59 PR #27)
+    intake: ad-hoc
+    brief: .wip/initiatives/lifecycle-state-reconciliation/BRIEF.md
+    roadmap: .wip/initiatives/lifecycle-state-reconciliation/roadmap.md
+    tracker_map: {"step-01": "BDS-29", "step-02": "BDS-59"}
+    # active_step intentionally unset: Round 1 closed 2026-07-04 (2 of 2 steps
+    # shipped). Cleared on step-02 ship (clear-on-finish, mirror of set-on-start).
+  - slug: role-centric-runtime-selection
+    title: Role-centric runtime selection + Duo orchestration backend
+    status: in-flight
+    intake: ad-hoc
+    brief: .wip/initiatives/role-centric-runtime-selection/BRIEF.md
+    roadmap: .wip/initiatives/role-centric-runtime-selection/roadmap.md
+    active_step: step-06
+  - slug: tracker-backend-seam
+    title: Tracker backend adapter seam (id union, dispatcher, --probe-tracker)
+    status: shipped # Round 1 closed 2026-07-11 (its only round; all 4 steps shipped — BDS-74 / ADR-0026); PR #30 merged
+    intake: ad-hoc
+    brief: .wip/initiatives/tracker-backend-seam/BRIEF.md
+    roadmap: .wip/initiatives/tracker-backend-seam/roadmap.md
+    tracker_anchor: BDS-74
+    # active_step intentionally unset: Round 1 closed 2026-07-11 (4 of 4 steps
+    # shipped). Cleared on closeout (clear-on-finish, mirror of set-on-start).
+  - slug: tracker-backends
+    title: 'Tracker backends: github + gitlab (concurrent lanes)'
+    status: in-flight
+    intake: ad-hoc
+    brief: .wip/initiatives/tracker-backends/BRIEF.md
+    roadmap: .wip/initiatives/tracker-backends/roadmap.md
+    tracker_map: {"step-01": "BDS-75", "step-02": "BDS-76", "step-03": "BDS-80", "step-04": "BDS-81"}
+  - slug: closeout-write-ladder
+    title: Closeout write ladder
+    status: shipped # Round 2 closed 2026-07-12 (2 rounds shipped; 6 steps shipped); PR #33
+    intake: ad-hoc
+    brief: .wip/initiatives/closeout-write-ladder/BRIEF.md
+    roadmap: .wip/initiatives/closeout-write-ladder/roadmap.md
+    tracker_map: {"step-01": "BDS-91", "step-02": "BDS-63", "step-03": "BDS-93", "step-04": "BDS-92", "step-05": "BDS-64", "step-06": "BDS-94"}
+# --- integrations (optional) ------------------------------------------------
+# integrations:
+#   github:
+#     pr_body_source: .wip/${initiative}/roadmap.md
