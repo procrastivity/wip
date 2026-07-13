@@ -2,6 +2,34 @@
 # --fix is advisory in v1 (warns; writes nothing). Pure read otherwise.
 # shellcheck shell=bash
 
+# _wip_doctor_tracker_closed <root> <tracker-id> — return 0 iff the tracker cache
+# KNOWS this issue to be closed. Used by §2o.
+#
+# The cache keyspace is `issue:<TRACKER-ID>` (workplan step-06 D3) — deliberately
+# NOT the bare `<slug>/<node-id>` keyspace every other cache entry uses, which
+# holds wip's own lifecycle labels for wip nodes, not a tracker's native status
+# for an arbitrary issue. A github/gitlab id can itself contain a `/`
+# (`owner/repo#123`, ADR-0026), so "has a slash" cannot tell the two apart; the
+# prefix can.
+#
+# ABSENT ⇒ NOT CLOSED (return 1). This is the fail-open rule (D4), not an
+# oversight: with no entry we have no data, and the whole check family — §2f,
+# `--probe-tracker` — treats "can't tell" as non-actionable. Guessing closed here
+# would make doctor demand the pruning of a live backlog item, which is the exact
+# plausible-wrong implementation this reads the cache to avoid. Nothing populates
+# `issue:*` entries yet (out of scope for step-06), so today this returns 1 for
+# every tracker in the live repo, and §2o is correctly silent.
+_wip_doctor_tracker_closed() {
+  local entry state
+  entry="$(_wip_tracker_cache_get "$1" "issue:$2")"
+  [[ -n "$entry" && "$entry" != "null" ]] || return 1
+  state="$(jq -r '.state // ""' <<<"$entry" | tr '[:upper:]' '[:lower:]')"
+  case "$state" in
+    done | canceled | cancelled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 wip_plumbing_cmd_doctor() {
   local fix=0 probe_solo=0 probe_tracker=0
   while [[ $# -gt 0 ]]; do
@@ -190,6 +218,69 @@ wip_plumbing_cmd_doctor() {
     checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
   done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
 
+  # 2m/2n. `gitignore.always_commit` policy drift (step-05). The manifest DECLARES
+  #     which files under an otherwise-ignored `.wip/` stay tracked; `.gitignore`
+  #     and the git index are what make (or fail to make) that declaration true.
+  #     Two directions, deliberately TWO `kind`s rather than one merged check —
+  #     they have different fixes, different iteration shapes, and keeping them
+  #     apart is what makes each independently pin-able (a check that fires in only
+  #     one direction, or one over-eager predicate answering for both, is otherwise
+  #     invisible from the outside):
+  #       §2m `gitignore-declared-but-ignored`   — declared, yet still ignored.
+  #       §2n `gitignore-tracked-but-undeclared` — tracked under `.wip/`, yet not
+  #                                                declared.
+  #     Both are ACTIONABLE drift, not the informational status:"ok" pattern §2f/§2h
+  #     use, for the same reason §2k/§2l are: each has a deterministic fix
+  #     (`gitignore sync` for §2m; a manifest edit or `git rm --cached` for §2n).
+  #     Unlike `--probe-solo`/`--probe-tracker` these are NOT behind an opt-in flag:
+  #     `check-ignore`/`ls-files` are local, offline and fast — there is no live
+  #     service to be down, so nothing to make opt-in.
+  #     Both share ONE availability guard (`rev-parse --is-inside-work-tree`): with
+  #     no git, or a root that is not a worktree, neither direction is knowable, so
+  #     emit a SINGLE combined informational note (kind:"gitignore" — the family
+  #     name; the two drift kinds are its specializations) and skip both loops. A
+  #     missing git never fails doctor, and never false-positives either.
+  local gi_declared gi_path gi_tracked gi_fix
+  gi_declared="$(printf '%s' "$mj" | jq -c '.gitignore.always_commit // []')"
+  if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    obj="$(jq -nc '{kind:"gitignore", status:"ok", probe:"unavailable",
+      message:"gitignore always_commit checks skipped: git is unavailable, or the wip root is not a git worktree"}')"
+    checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+  else
+    # §2m — every declared path that git still ignores. `check-ignore -q` exits 0
+    #       when a path IS matched by an ignore rule (drift) and 1 when it is not
+    #       (healthy). Path existence on disk is irrelevant: this is pattern
+    #       matching, so a declared-but-not-yet-created file is checked too.
+    #       Note (`--no-index` is deliberately NOT passed): check-ignore consults the
+    #       index, so an ALREADY-TRACKED declared path reports not-ignored whatever
+    #       `.gitignore` says. That is the right answer, not a blind spot — an ignore
+    #       rule never untracks an indexed file, so a tracked declared file already
+    #       keeps the policy's promise ("stays tracked"). §2m is about the declared
+    #       file that is ignored AND therefore un-addable, which is the live repo's
+    #       state today.
+    while IFS= read -r gi_path; do
+      [[ -n "$gi_path" ]] || continue
+      git -C "$root" check-ignore -q -- "$gi_path" || continue
+      obj="$(jq -nc --arg path "$gi_path" --arg fix "run wip-plumbing gitignore sync" \
+        '{kind:"gitignore-declared", path:$path, status:"gitignore-declared-but-ignored", fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(jq -r '.[]' <<<"$gi_declared")
+
+    # §2n — every path git TRACKS under `.wip/` that the manifest never declared.
+    #       Reads the INDEX (`ls-files`), not the worktree: ignore rules never
+    #       retroactively untrack an already-indexed file, which is exactly how a
+    #       stray file gets tracked under a blanket-ignored directory and stays
+    #       that way unnoticed. Exact string match against the declared list.
+    while IFS= read -r gi_tracked; do
+      [[ -n "$gi_tracked" ]] || continue
+      jq -e --arg p "$gi_tracked" 'index($p) != null' <<<"$gi_declared" >/dev/null && continue
+      gi_fix="either add $gi_tracked to gitignore.always_commit in .wip.yaml, or git rm --cached $gi_tracked if it was tracked in error"
+      obj="$(jq -nc --arg path "$gi_tracked" --arg fix "$gi_fix" \
+        '{kind:"gitignore-tracked", path:$path, status:"gitignore-tracked-but-undeclared", fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(git -C "$root" ls-files -- .wip/ 2>/dev/null || true)
+  fi
+
   # 2d. Tracker mapping mirror drift (ADR-0019 §C). The roadmap's `[tracker: ID]`
   #     keys are the source of truth; `.wip.yaml`'s initiative `tracker_map` is a
   #     writer-generated mirror. Disagreement is drift, fixable with
@@ -368,6 +459,68 @@ wip_plumbing_cmd_doctor() {
           message:"initiative has no tracker_anchor (durable source-issue link); suggestion, never auto-set",
           fix:$fix}')"
       checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
+  fi
+
+  # 2o. Backlog entries whose tracker issue is already CLOSED (step-06, D3-D5) —
+  #     the read half of "retire shipped backlog items instead of re-nominating
+  #     them". `ship`/`closeout`/`backlog retire` prune an entry when they ship the
+  #     step that carries its tracker; this catches the entry nobody pruned, whose
+  #     issue the tracker itself reports done/canceled. ACTIONABLE drift (status is
+  #     not "ok"), so it counts toward drift_count and trips exit 4 — unlike §2f/§2h
+  #     there is a deterministic fix: prune the entry.
+  #     Gated on `_wip_tracker_enabled` like §2f/§2h, and DEFAULT-ON, not behind a
+  #     `--probe-*` flag: those flags exist to gate live shell-outs, and this makes
+  #     none. It reads `.wip/tracker-cache.json` off disk and nothing else. Cache
+  #     staleness is accepted (D3) — the cache has no TTL anywhere in wip.
+  #     Two sweeps, ONE kind (`backlog`), separated by `source` — the two files are
+  #     different grammars (see wip-plumbing-repo-backlog-lib.bash's header) but the
+  #     same defect, and a reader fixing them does the same thing to each:
+  #       source:"repo"    — `.wip/backlog.md`, multi-paragraph, parsed by the
+  #                          step-06 lib (wip_roadmap_parse sees nothing in it).
+  #       source:"roadmap" — an initiative roadmap's own `## Backlog` one-liners,
+  #                          already `.tracker`-tagged by the roadmap parser today.
+  #     Same in-flight/proposed scope guard as every other per-initiative check.
+  if [[ "$(_wip_tracker_enabled "$mj")" == "true" ]]; then
+    local bk_entry bk_trk bk_id bk_title
+    local brec bslug bstatus brpath bdoc
+
+    while IFS= read -r bk_entry; do
+      [[ -n "$bk_entry" ]] || continue
+      bk_trk="$(jq -r '.tracker // ""' <<<"$bk_entry")"
+      [[ -n "$bk_trk" ]] || continue
+      _wip_doctor_tracker_closed "$root" "$bk_trk" || continue
+      bk_id="$(jq -r '.id' <<<"$bk_entry")"
+      bk_title="$(jq -r '.title' <<<"$bk_entry")"
+      obj="$(jq -nc --arg id "$bk_id" --arg title "$bk_title" --arg trk "$bk_trk" \
+        --arg fix "prune $bk_id (tracker $bk_trk)" \
+        '{kind:"backlog", source:"repo", id:$id, tracker:$trk, title:$title,
+          status:"backlog-tracker-closed", fix:$fix}')"
+      checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+    done < <(_wip_repo_backlog_parse "$root/.wip/backlog.md" | jq -c '.[]')
+
+    while IFS= read -r brec; do
+      [[ -n "$brec" ]] || continue
+      bslug="$(jq -r '.slug // ""' <<<"$brec")"
+      [[ -n "$bslug" ]] || continue
+      bstatus="$(jq -r '.status // ""' <<<"$brec")"
+      [[ "$bstatus" == "shipped" || "$bstatus" == "archived" ]] && continue
+      brpath="$(jq -r '.roadmap // empty' <<<"$brec")"
+      [[ -n "$brpath" ]] || brpath=".wip/initiatives/$bslug/roadmap.md"
+      bdoc="$(wip_roadmap_parse "$root/$brpath")"
+      while IFS= read -r bk_entry; do
+        [[ -n "$bk_entry" ]] || continue
+        bk_trk="$(jq -r '.tracker // ""' <<<"$bk_entry")"
+        [[ -n "$bk_trk" ]] || continue
+        _wip_doctor_tracker_closed "$root" "$bk_trk" || continue
+        bk_id="$(jq -r '.id' <<<"$bk_entry")"
+        bk_title="$(jq -r '.title' <<<"$bk_entry")"
+        obj="$(jq -nc --arg slug "$bslug" --arg id "$bk_id" --arg title "$bk_title" \
+          --arg trk "$bk_trk" --arg fix "prune $bk_id (tracker $bk_trk)" \
+          '{kind:"backlog", source:"roadmap", slug:$slug, id:$id, tracker:$trk, title:$title,
+            status:"backlog-tracker-closed", fix:$fix}')"
+        checks="$(jq -nc --argjson a "$checks" --argjson o "$obj" '$a + [$o]')"
+      done < <(jq -c '.backlog[]?' <<<"$bdoc")
     done < <(printf '%s' "$mj" | jq -c '.initiatives[]?')
   fi
 
