@@ -475,4 +475,183 @@ set -e
 assert_eq "4" "$rc" "malformed lane refuses amend exit 4"
 assert_eq "lane-malformed" "$(jq -r '.error.kind' <<<"$out_m")" "lane-malformed error kind"
 
+# Step-02 regression pin 1: a step-id only inside an HTML comment span reports
+# step-shadowed-in-comment rather than writing into the inert scaffold.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.
+MD
+set +e
+out_shadow="$(run demo --from "$tmp/insert.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 1 insert-after comment-only exit 4"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_shadow")" "step-02 pin 1 shadowed kind"
+assert_not_grep "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" "step-02 pin 1 did not write into comment"
+
+# Step-02 regression pin 2: the same id inside a comment and real content
+# resolves to the real bullet, not the scaffold copy.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-02 — Real target** — current.
+MD
+out_real="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_real")" "step-02 pin 2 comment+real insert ok"
+real_line=$(grep -n "step-02 — Real target" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+insert_line=$(grep -n "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+if [[ "$insert_line" -gt "$real_line" ]]; then
+  _WIP_PASS=$((_WIP_PASS + 1))
+  echo "  ok   step-02 pin 2 inserted after real bullet"
+else
+  _WIP_FAIL=$((_WIP_FAIL + 1))
+  echo "  FAIL step-02 pin 2 inserted before real bullet" >&2
+fi
+
+# Step-02 regression pin 1 (replace path): replace also reports the shadowed
+# error instead of targeting comment-only content.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.
+MD
+set +e
+out_repl_shadow="$(run demo --from "$tmp/replace.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-02 pin 1 replace comment-only exit 4"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_repl_shadow")" "step-02 pin 1 replace shadowed kind"
+assert_not_grep "Second (updated)" "$tmp/.wip/initiatives/demo/roadmap.md" "step-02 pin 1 replace did not write into comment"
+
+# Step-02 regression pin 5: when duplicate real step ids exist, exactly one
+# tracker-tagged bullet wins over an earlier untagged first match.
+cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap
+
+## Round 1 — Build
+- **step-02 — Untagged duplicate** — should not win.
+- **step-02 — Tracker-tagged duplicate** — should win. [tracker: BDS-63]
+MD
+out_tie="$(run demo --from "$tmp/insert.md")"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_tie")" "step-02 pin 5 tracker tie-break insert ok"
+tagged_line=$(grep -n "Tracker-tagged duplicate" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+insert_line=$(grep -n "step-03 — Third" "$tmp/.wip/initiatives/demo/roadmap.md" | cut -d: -f1)
+if [[ "$insert_line" -eq $((tagged_line + 1)) ]]; then
+  _WIP_PASS=$((_WIP_PASS + 1))
+  echo "  ok   step-02 pin 5 inserted after tracker-tagged duplicate"
+else
+  _WIP_FAIL=$((_WIP_FAIL + 1))
+  echo "  FAIL step-02 pin 5 did not target tracker-tagged duplicate" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Step-03 · Chunk 1 — comment-span-aware round-heading anchor.
+# `_wip_amend_find_round_heading_line` is the new anchor primitive; the two
+# lane-targeting apply verbs were retrofitted onto it (they previously located
+# a round heading with a comment-blind `^## Round N — ` scan and would happily
+# write inside an inert `<!-- … -->` scaffold).
+# ---------------------------------------------------------------------------
+
+# A roadmap whose ONLY `## Round 2` heading (and its Lane A) live inside an
+# HTML comment span — the shape `init`'s scaffold and hand-authored examples
+# take. Round 1 is the real content.
+make_shadow_roadmap() {
+  cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
+# Roadmap — demo
+
+<!--
+## Round 2 — Commented example
+- **step-12 — Commented prereq** — inert.
+### Lane A
+- **step-13 — Commented A** — inert.
+-->
+
+## Round 1 — Real
+- **step-01 — Real** — work.
+MD
+}
+
+# Unit: the finder's exit contract (0 found / 1 absent / 2 comment-shadowed).
+# shellcheck source=lib/wip/wip-plumbing-amend-lib.bash
+source lib/wip/wip-plumbing-amend-lib.bash
+make_shadow_roadmap
+declare -a shadow_lines=()
+mapfile -t shadow_lines <"$tmp/.wip/initiatives/demo/roadmap.md"
+rc=0
+idx="$(_wip_amend_find_round_heading_line 1 shadow_lines)" || rc=$?
+assert_eq "0" "$rc" "find-round-heading: real round exit 0"
+assert_eq "## Round 1 — Real" "${shadow_lines[idx]}" "find-round-heading: indexes the real heading"
+rc=0
+_wip_amend_find_round_heading_line 2 shadow_lines >/dev/null || rc=$?
+assert_eq "2" "$rc" "find-round-heading: comment-shadowed round exit 2"
+rc=0
+_wip_amend_find_round_heading_line 9 shadow_lines >/dev/null || rc=$?
+assert_eq "1" "$rc" "find-round-heading: absent round exit 1"
+
+# Step-03 regression pin A: append-lane into a round that exists only inside an
+# HTML comment span reports round-not-in-roadmap instead of writing a lane
+# block into the inert scaffold.
+make_shadow_roadmap
+cp "$tmp/.wip/initiatives/demo/roadmap.md" "$tmp/shadow-before.md"
+cat >"$tmp/lane-shadow.md" <<'MD'
+---
+target: demo
+append-lane: C
+target-round: 2
+---
+# Add Lane C
+### step-20 — track C
+Body.
+MD
+set +e
+out_ls="$(run demo --from "$tmp/lane-shadow.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-03 pin A append-lane comment-shadowed round exit 4"
+assert_eq "round-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out_ls")" "step-03 pin A round-not-in-roadmap kind"
+assert_cmp "$tmp/shadow-before.md" "$tmp/.wip/initiatives/demo/roadmap.md" \
+  "step-03 pin A did not write into the comment span"
+
+# Step-03 regression pin B: insert-step-in-lane into a lane whose round exists
+# only inside an HTML comment span reports round-not-in-roadmap instead of
+# appending a bullet inside the inert scaffold.
+make_shadow_roadmap
+cat >"$tmp/isil-shadow.md" <<'MD'
+---
+target: demo
+insert-step-in-lane: A
+target-round: 2
+---
+# Track A
+### step-21 — Track A spine
+Spine work.
+MD
+set +e
+out_is="$(run demo --from "$tmp/isil-shadow.md" 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "step-03 pin B insert-step-in-lane comment-shadowed round exit 4"
+assert_eq "round-not-in-roadmap" "$(jq -r '.error.kind' <<<"$out_is")" "step-03 pin B round-not-in-roadmap kind"
+assert_cmp "$tmp/shadow-before.md" "$tmp/.wip/initiatives/demo/roadmap.md" \
+  "step-03 pin B did not write into the comment span"
+
 test_summary

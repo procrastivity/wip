@@ -115,12 +115,20 @@ assert_eq "1" "$(step02_line | grep -o '✅' | wc -l | tr -d ' ')" "missing-date
 # ---------------------------------------------------------------------------
 # 5. Already-shipped no-op: correct marker already present → `noop` AND the
 #    roadmap file is byte-identical before/after (proves the no-write path).
+#
+#    The trailing unshipped step-03 keeps the ROUND incomplete on purpose: with
+#    step-02 as the round's only step, shipping it would complete the round and
+#    ship's round-level seam (step-03) would legitimately write the `## Round 1`
+#    marker — a real write that would defeat this case's ability to prove the
+#    STEP-level writer took its no-write path. The round seam is owned by
+#    test-ship-round-end-to-end.sh; this suite stays roadmap-bullet-scoped.
 # ---------------------------------------------------------------------------
 setup_roadmap '# Roadmap
 
 ## Round 1 — Build
 
-- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.'
+- **step-02 — Refresh tokens** ✅ shipped 2026-06-27 (small) — current.
+- **step-03 — Rotation** — later.'
 before="$(mktemp)"
 TMP_DIRS+=("$before")
 cp "$roadmap" "$before"
@@ -151,7 +159,23 @@ out2="$(run demo step-02)"
 assert_eq "noop" "$(jq -r '.marked_shipped' <<<"$out2")" "self-gotcha: re-run is noop"
 
 # ---------------------------------------------------------------------------
-# 7. --dry-run: reports `updated` and `dry_run: true`, but the roadmap file is
+# 7. Step-01 closeout-write-ladder writer parity pin: a title containing a
+#    literal `*` must use the same closing-`**` split as the parser, so `ship`
+#    inserts the marker immediately after the title-closing `**` instead of
+#    failing to resolve/rewrite the bullet.
+# ---------------------------------------------------------------------------
+setup_roadmap '# Roadmap
+
+## Round 1 — Build
+
+- **step-02 — Use * wildcard** (small) — current.'
+out="$(run demo step-02)"
+assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "special-title: marked_shipped updated"
+assert_eq '- **step-02 — Use * wildcard** ✅ shipped 2026-06-27 (small) — current.' \
+  "$(step02_line)" "special-title: marker inserted after closing **"
+
+# ---------------------------------------------------------------------------
+# 8. --dry-run: reports `updated` and `dry_run: true`, but the roadmap file is
 #    unchanged (no write).
 # ---------------------------------------------------------------------------
 setup_roadmap '# Roadmap
@@ -166,5 +190,29 @@ out="$(run demo step-02 --dry-run)"
 assert_eq "updated" "$(jq -r '.marked_shipped' <<<"$out")" "dry-run: marked_shipped updated"
 assert_eq "true" "$(jq -r '.dry_run' <<<"$out")" "dry-run: dry_run true in ledger"
 assert_cmp "$before_dry" "$roadmap" "dry-run: roadmap unchanged (no write)"
+
+# ---------------------------------------------------------------------------
+# 9. Step-02 regression pin 3: a step-id that exists only inside an HTML
+#    comment span reports a specific shadowed-anchor error instead of updating
+#    an inert scaffold bullet or returning a successful marked_shipped ledger.
+# ---------------------------------------------------------------------------
+setup_roadmap '# Roadmap
+
+<!--
+## Round 0 — Example
+- **step-02 — Commented example** — inert.
+-->
+
+## Round 1 — Build
+- **step-01 — Real** — work.'
+set +e
+out_shadow="$(run demo step-02 2>/dev/null)"
+rc=$?
+set -e
+assert_eq "4" "$rc" "comment-shadowed: exit 4"
+assert_eq "false" "$(jq -r '.ok' <<<"$out_shadow")" "comment-shadowed: envelope present"
+assert_eq "step-shadowed-in-comment" "$(jq -r '.error.kind' <<<"$out_shadow")" "comment-shadowed: error kind"
+assert_eq "null" "$(jq -r '.marked_shipped // null' <<<"$out_shadow")" "comment-shadowed: no marked_shipped updated ledger"
+assert_not_grep "✅ shipped 2026-06-27" "$roadmap" "comment-shadowed: roadmap unchanged"
 
 test_summary

@@ -28,6 +28,7 @@ cat >"$tmp/.wip/initiatives/demo/roadmap.md" <<'MD'
 - **step-01 — Auth bootstrap** ✅ shipped 2026-05-01 — done.
 - **step-02 — Refresh tokens** — current.
 - **step-02.5 — MFA prompt** — slot.
+- **step-03 — Use * wildcard** — special-title regression.
 MD
 
 run() { WIP_ROOT="$tmp" bin/wip-plumbing workplan init "$@"; }
@@ -38,6 +39,14 @@ assert_eq "true" "$(jq -r '.ok' <<<"$out")" "ok"
 assert_eq "step-02" "$(jq -r '.step' <<<"$out")" "step echo"
 assert_file "$tmp/.wip/initiatives/demo/workplans/step-02-refresh-tokens.md" "workplan written"
 assert_grep "step-02 · Refresh tokens" "$tmp/.wip/initiatives/demo/workplans/step-02-refresh-tokens.md" "workplan h1 rendered"
+
+# Step-01 closeout-write-ladder pin: workplan init resolves a `*`-titled step
+# instead of failing `step-not-in-roadmap` after roadmap parse preserves it.
+out_star="$(run demo step-03)"
+assert_eq "true" "$(jq -r '.ok' <<<"$out_star")" "special-title workplan ok"
+assert_eq "step-03" "$(jq -r '.step' <<<"$out_star")" "special-title step echo"
+assert_file "$tmp/.wip/initiatives/demo/workplans/step-03-use-wildcard.md" "special-title workplan written"
+assert_grep "step-03 · Use \\* wildcard" "$tmp/.wip/initiatives/demo/workplans/step-03-use-wildcard.md" "special-title h1 rendered"
 
 # 2. --slug override.
 out2="$(run demo step-02.5 --slug mfa)"

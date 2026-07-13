@@ -215,7 +215,11 @@ _wip_intake_apply_brief() {
   set -e
 
   if [[ "$rc" != "0" ]]; then
-    # init already emitted its error envelope on stdout.
+    # init's wip_die envelope went to the command substitution above, not to the
+    # real caller — forward it, or the failure surfaces as a silent nonzero exit.
+    if [[ -n "$ledger" ]]; then
+      printf '%s\n' "$ledger"
+    fi
     exit "$rc"
   fi
 
@@ -244,7 +248,15 @@ _wip_intake_apply_amendment() {
   ledger="$(wip_plumbing_cmd_roadmap amend "$slug" --from "$file")"
   rc=$?
   set -e
-  [[ "$rc" == "0" ]] || exit "$rc"
+  if [[ "$rc" != "0" ]]; then
+    # roadmap amend's wip_die envelope went to the command substitution above,
+    # not to the real caller — forward it, or the failure surfaces as a silent
+    # nonzero exit.
+    if [[ -n "$ledger" ]]; then
+      printf '%s\n' "$ledger"
+    fi
+    exit "$rc"
+  fi
 
   jq -nc \
     --arg kind "amendment" --arg slug "$slug" --argjson result "$ledger" '
@@ -274,7 +286,15 @@ _wip_intake_apply_workplan_seed() {
   ledger="$(wip_plumbing_cmd_workplan init "$slug" "$step_id" --from "$file")"
   rc=$?
   set -e
-  [[ "$rc" == "0" ]] || exit "$rc"
+  if [[ "$rc" != "0" ]]; then
+    # workplan init's wip_die envelope went to the command substitution above,
+    # not to the real caller — forward it, or the failure surfaces as a silent
+    # nonzero exit.
+    if [[ -n "$ledger" ]]; then
+      printf '%s\n' "$ledger"
+    fi
+    exit "$rc"
+  fi
 
   jq -nc \
     --arg kind "workplan-seed" --arg target "$target" --argjson result "$ledger" '

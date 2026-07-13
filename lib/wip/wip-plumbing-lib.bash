@@ -34,6 +34,8 @@ commands:
   orchestrate  deterministic prep + backend selection for orchestration
             usage: orchestrate prep [--initiative <slug>]
                    orchestrate backend [<name>]
+  closeout  close out a whole initiative once every round has shipped
+            usage: closeout <slug> [--next <slug>] [--pr <ref>] [--dry-run]
   template  show / list the canonical templates that ship with wip
             usage: template show <id>          (e.g. intake/preamble)
                    template list [--no-json]

@@ -59,6 +59,8 @@ assert_eq "step-03" "$(jq -r '.rounds[1].steps[0].id' <<<"$doc")" "step-03 id"
 assert_eq "step-03.5" "$(jq -r '.rounds[1].steps[1].id' <<<"$doc")" "step-03.5 id (decimal)"
 assert_eq "false" "$(jq -r '.rounds[1].steps[1].shipped' <<<"$doc")" "step-03.5 not shipped"
 assert_eq "step-04" "$(jq -r '.rounds[1].steps[2].id' <<<"$doc")" "step-04 id"
+assert_eq "array" "$(jq -r '.step_errors | type' <<<"$doc")" "step_errors is array"
+assert_eq "0" "$(jq -r '.step_errors | length' <<<"$doc")" "linear: no step errors"
 
 assert_eq "2" "$(jq -r '.backlog | length' <<<"$doc")" "2 backlog entries"
 assert_eq "in-place-fixes" "$(jq -r '.backlog[0].id' <<<"$doc")" "backlog id slugified"
@@ -104,6 +106,8 @@ assert_eq "array" "$(jq -r '.deferred | type' <<<"$empty")" "missing file deferr
 assert_eq "0" "$(jq -r '.deferred | length' <<<"$empty")" "missing file deferred=[]"
 assert_eq "array" "$(jq -r '.lane_errors | type' <<<"$empty")" "missing file lane_errors is array"
 assert_eq "0" "$(jq -r '.lane_errors | length' <<<"$empty")" "missing file lane_errors=[]"
+assert_eq "array" "$(jq -r '.step_errors | type' <<<"$empty")" "missing file step_errors is array"
+assert_eq "0" "$(jq -r '.step_errors | length' <<<"$empty")" "missing file step_errors=[]"
 
 # Linear roadmap: every step lane is null, lane_errors empty (ADR-0010 regression).
 assert_eq "true" "$(jq -c '[.rounds[].steps[].lane] | all(. == null)' <<<"$doc")" "linear: all lanes null"
@@ -235,6 +239,30 @@ assert_eq "true" "$(jq -r '.rounds[0].steps[0].shipped' <<<"$bb")" "bold-body: s
 assert_eq "2026-06-16" "$(jq -r '.rounds[0].steps[0].shipped_date' <<<"$bb")" "bold-body: shipped_date parsed"
 assert_eq "Vertical spine" "$(jq -r '.rounds[0].steps[1].title' <<<"$bb")" "bold-body: unshipped step title clean despite body bold"
 assert_eq "false" "$(jq -r '.rounds[0].steps[1].shipped' <<<"$bb")" "bold-body: unshipped step not shipped"
+
+# --- Step-01 closeout-write-ladder pins: special-title grammar + marker position
+# These are roadmap-mandated regression pins. Each fails on the pre-fix grammar:
+# literal `*` and code-span `*` titles vanished; malformed step-looking bullets
+# were skipped without a step_errors signal; and body prose quoting the marker was
+# misread as a real shipped suffix.
+cat >"$tmp/special-titles.md" <<'MD'
+# Roadmap — special title fixture
+
+## Round 1 — Special grammar
+
+- **step-01 — Use * wildcard** — title carries a literal star.
+- **step-02 — Run `/wip:*` safely** — title carries an inline code span.
+- **step-03 — Marker prose** — document the `✅ shipped 2026-06-27` token in prose, not as state.
+- **step-04 — Missing closer — malformed bullet should report.
+MD
+sp="$(wip_roadmap_parse "$tmp/special-titles.md")"
+assert_eq "Use * wildcard" "$(jq -r '.rounds[0].steps[] | select(.id == "step-01") | .title' <<<"$sp")" "step-01 pin: literal-star title parses"
+assert_eq "Run \`/wip:*\` safely" "$(jq -r '.rounds[0].steps[] | select(.id == "step-02") | .title' <<<"$sp")" "step-01 pin: inline-code title parses"
+assert_eq "false" "$(jq -r '.rounds[0].steps[] | select(.id == "step-03") | .shipped' <<<"$sp")" "step-01 pin: quoted shipped marker stays unshipped"
+assert_eq "null" "$(jq -r '.rounds[0].steps[] | select(.id == "step-03") | .shipped_date' <<<"$sp")" "step-01 pin: quoted shipped marker has no scavenged date"
+assert_eq "1" "$(jq '[.step_errors[] | select(.kind == "malformed-step-bullet")] | length' <<<"$sp")" "step-01 pin: malformed bullet reports"
+assert_eq '- **step-04 — Missing closer — malformed bullet should report.' \
+  "$(jq -r '.step_errors[0].raw' <<<"$sp")" "step-01 pin: malformed bullet raw line preserved"
 
 # --- Round-level tracker key + lane exclusion (ADR-0024 / D1–D3) --------------
 # A `## Round N — title [tracker: ID]` heading yields rounds[].tracker; the key

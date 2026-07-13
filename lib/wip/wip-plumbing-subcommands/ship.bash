@@ -1,8 +1,11 @@
 # ship — close out a single roadmap step: write its `✅ shipped <date>` bullet
 # marker and clear `active_step` when it points at that step. A pure
 # deterministic state-writer — no gating (drift detection is doctor's job).
-# Operates step-level ONLY; round-level closeout is out of scope. v1 contract is
-# locked in ADR-0016 (engineering/decisions/0016-closeout-write-contract.md).
+# Also writes the `## Round N` heading's marker when the step it just shipped was
+# that round's LAST unshipped step (step-03) — a third writer seam, reported as
+# `round_marked_shipped` and folded into the same `changed` OR. The step-level v1
+# contract is locked in ADR-0016
+# (engineering/decisions/0016-closeout-write-contract.md).
 # shellcheck shell=bash
 
 # wip_plumbing_cmd_ship <slug> <step-id> [--dry-run]
@@ -61,6 +64,13 @@ wip_plumbing_cmd_ship() {
   doc="$(wip_roadmap_parse "$root/$roadmap_path")"
   step_record="$(wip_roadmap_step "$doc" "$step_id")"
   if [[ -z "$step_record" || "$step_record" == "null" ]]; then
+    local shadow_lines=() shadow_rc=0
+    # shellcheck disable=SC2034 # passed by name to _wip_amend_find_step_block_start
+    mapfile -t shadow_lines <"$root/$roadmap_path"
+    _wip_amend_find_step_block_start "$step_id" shadow_lines >/dev/null || shadow_rc=$?
+    if [[ "$shadow_rc" == "2" ]]; then
+      wip_die 4 step-shadowed-in-comment "ship: step-id only found inside a comment span: $step_id" "$roadmap_path"
+    fi
     wip_die 4 step-not-in-roadmap "ship: step not in roadmap: $step_id" "$roadmap_path"
   fi
 
@@ -69,15 +79,68 @@ wip_plumbing_cmd_ship() {
   shipped_date="$(wip_scaffold_now)"
 
   # Call both writer seams; each prints a status word and returns 0 (1 on error).
-  local marked_shipped active_step_cleared
-  marked_shipped="$(_wip_ship_mark_roadmap_shipped "$root/$roadmap_path" "$step_id" "$shipped_date")" ||
+  local marked_shipped active_step_cleared mark_rc=0
+  marked_shipped="$(_wip_ship_mark_roadmap_shipped "$root/$roadmap_path" "$step_id" "$shipped_date")" || mark_rc=$?
+  if [[ "$mark_rc" == "2" ]]; then
+    wip_die 4 step-shadowed-in-comment "ship: step-id only found inside a comment span: $step_id" "$roadmap_path"
+  elif [[ "$mark_rc" != "0" ]]; then
     wip_die 1 internal "ship: roadmap marker writer failed"
+  fi
   active_step_cleared="$(_wip_ship_clear_active_step "$root/.wip.yaml" "$slug" "$step_id")" ||
     wip_die 1 internal "ship: active_step clear failed"
 
-  # `changed` is true iff either writer reported `updated`.
+  # Round-level closeout: when the step just shipped was its round's LAST
+  # unshipped step, the same invocation writes the round heading's marker too.
+  # The roadmap is re-read from disk (never a mutated in-memory `doc`) so the
+  # round's post-write state comes from the file the step-level writer just wrote
+  # — the same idiom every other decision in this verb uses.
+  #
+  # The trigger is "every step in the round is now shipped", computed over the
+  # round's `.steps[]`. It is deliberately NOT `wip_roadmap_active_round`'s
+  # `.shipped`, which is the round HEADING's own marker state
+  # (wip-plumbing-roadmap-lib.bash:76) — i.e. precisely the thing this writer
+  # sets. Keying off that would invert the trigger: it would fire only on rounds
+  # already marked and never on the round that just completed.
+  #
+  # `$step_id` counts as shipped regardless of what the file says, so the trigger
+  # is identical under --dry-run, where the step-level marker was computed but
+  # deliberately not written to disk.
+  local round="null" round_marked_shipped="skipped" round_record round_doc
+  round_doc="$(wip_roadmap_parse "$root/$roadmap_path")"
+  round_record="$(wip_roadmap_active_round "$round_doc" "$step_id")"
+  if [[ -n "$round_record" && "$round_record" != "null" ]]; then
+    round="$(jq -r '.n' <<<"$round_record")"
+    local round_complete
+    round_complete="$(jq -r --arg sid "$step_id" --argjson n "$round" '
+      [ .rounds[] | select(.n == $n) ] | (.[0] // null)
+      | if . == null then false
+        else (.steps | length > 0 and all(.shipped or .id == $sid))
+        end
+    ' <<<"$round_doc")"
+    if [[ "$round_complete" == "true" ]]; then
+      local round_rc=0
+      round_marked_shipped="$(_wip_ship_mark_round_shipped "$root/$roadmap_path" "$round" "$shipped_date")" ||
+        round_rc=$?
+      # Mirrors the step-level shadowed-comment handling above. Defensive: reader
+      # and writer share one comment state machine, so a round that is IN the
+      # parse cannot have its heading live only inside a comment span — a fully
+      # shadowed round takes its steps down with it and fails the
+      # step-in-roadmap guard first. This stays wired so the two never drift
+      # apart silently.
+      if [[ "$round_rc" == "2" ]]; then
+        wip_die 4 round-shadowed-in-comment \
+          "ship: round heading only found inside a comment span: round $round" "$roadmap_path"
+      elif [[ "$round_rc" != "0" ]]; then
+        wip_die 1 internal "ship: round marker writer failed"
+      fi
+    fi
+  fi
+
+  # `changed` is true iff ANY writer seam reported `updated` — one aggregation
+  # rule, the round seam included.
   local changed=false
-  if [[ "$marked_shipped" == "updated" || "$active_step_cleared" == "updated" ]]; then
+  if [[ "$marked_shipped" == "updated" || "$active_step_cleared" == "updated" ||
+    "$round_marked_shipped" == "updated" ]]; then
     changed=true
   fi
 
@@ -120,10 +183,12 @@ wip_plumbing_cmd_ship() {
   jq -nc \
     --arg slug "$slug" --arg step "$step_id" --arg date "$shipped_date" \
     --arg ms "$marked_shipped" --arg asc "$active_step_cleared" \
+    --argjson round "$round" --arg rms "$round_marked_shipped" \
     --arg transition "$transition" --argjson intent "$intent" \
     --argjson changed "$changed" --arg dry "$dry_run" '
     { ok: true, slug: $slug, step: $step, shipped_date: $date,
-      marked_shipped: $ms, active_step_cleared: $asc, changed: $changed,
+      marked_shipped: $ms, active_step_cleared: $asc,
+      round: $round, round_marked_shipped: $rms, changed: $changed,
       transition: $transition }
     + (if $intent != null then { intent: $intent } else {} end)
     + (if $dry == "1" then { dry_run: true } else {} end)
