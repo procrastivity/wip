@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.0.21] - 2026-07-13
+
+### Internal
+
+- Chore: fix .gitignore and wip files
+
+### Other
+
+- Closeout-write-ladder: trustworthy roadmap grammar, then the missing closeout writers (#32)
+
 ## [0.0.20] - 2026-07-12
 
 ### Other
