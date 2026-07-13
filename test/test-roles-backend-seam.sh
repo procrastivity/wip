@@ -83,6 +83,10 @@ assert_grep 'Task tool' "roles/backends/task.md" "backends/task.md names the Tas
 assert_file "roles/backends/duo.md" "roles/backends/duo.md present"
 assert_grep 'mcp__duo__launch_agent' "roles/backends/duo.md" "backends/duo.md delegates via mcp__duo__launch_agent"
 assert_grep 'preset' "roles/backends/duo.md" "backends/duo.md names the preset vocabulary"
+# launch_agent is the ONLY launch surface (BDS-99). Duo resolves by random pick and
+# launch_agent re-resolves, so a resolved result never predicts a launch — naming
+# resolve_preset here only invites resolve-then-spawn past Duo.
+assert_not_grep 'resolve_preset' "roles/backends/duo.md" "backends/duo.md names no dry-run resolve surface"
 
 # --- role-policy sanity (roles/tier-policy.md) --------------------------
 # Each Role name appears in a per-Role assignment context.

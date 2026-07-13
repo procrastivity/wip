@@ -13,7 +13,7 @@ backend-agnostic; **this is the only file that names Duo tools.**
 Active when `.wip.yaml` has `features.orchestration.backend: duo`.
 
 Authoritative Duo facts (presets, providers, `extra_args`, the exact MCP + CLI
-surface, `resolve_preset` selection) live in
+surface, preset selection) live in
 [`engineering/notes/duo-tiers-to-presets.md`](../../engineering/notes/duo-tiers-to-presets.md);
 the decision to add this backend is ADR-0025.
 
@@ -89,20 +89,24 @@ clear Duo error (see the reference note §2.4).
 
 ### Launch
 
-- **Dry run:** `mcp__duo__resolve_preset(preset, avoid_provider?)` returns the
-  resolved `{agent_tool_id, extra_args, provider, preset_used, fell_back_to_default,
-  …}` **without** spawning — use it to preview or to chain an `avoid_provider`
-  decision.
-- **Spawn:** `mcp__duo__launch_agent(preset, name?, avoid_provider?, extra_args?)`
-  resolves and launches in one call, returning `{process_id, name, preset,
-  agent_tool_id, extra_args[], provider|null}`. `provider` is always reported
-  (possibly `null`) so a caller can chain "launch the reviewer on a different
-  provider than the builder" via `avoid_provider`.
+There is exactly **one** way to start an agent under this backend:
+
+`mcp__duo__launch_agent(preset, name?, avoid_provider?, extra_args?)` resolves and
+launches in one call, returning `{process_id, name, preset, agent_tool_id,
+extra_args[], provider|null}`.
 
 Any caller-supplied `extra_args` are appended **after** the preset's own
 `extra_args` (preset-first, caller-second). Provider load-spreading and the
 random pick among a preset's enabled definitions are **Duo's** to make — wip does
 not second-guess them.
+
+**Spreading a second launch onto a different provider.** `launch_agent` always
+reports the `provider` it actually used (possibly `null`), so chaining needs
+nothing but the launch itself: launch the first agent, read `provider` off its
+result, and pass that value as `avoid_provider` on the second launch (e.g. put the
+Researcher on a different provider than the Builder). `avoid_provider` is a **soft**
+preference — if it cannot be honored Duo relents and launches anyway, reporting
+`relented_on_avoid_provider`, rather than failing.
 
 ### What wip does NOT do under this backend
 
@@ -114,6 +118,13 @@ not second-guess them.
 - No `--agent`/`fallback_tool` ladder: preset resolution is Duo's, and when Duo
   cannot resolve a preset it returns a structured error naming the preset and the
   disabled providers — surface it; do not silently substitute a tool.
+- No resolve-then-spawn. Duo exposes a resolve call, but it is **not** a preflight
+  for a launch: resolution picks **at random** among a preset's enabled definitions
+  and `launch_agent` re-resolves independently, so a resolved result does not
+  predict what the launch will pick — and there is no way to feed one back into
+  `launch_agent` anyway. Naming a preset and launching it is the whole contract. An
+  operator who wants to inspect resolution uses the Duo CLI (`duo agent resolve
+  <preset>`), outside the agent's surface.
 
 ## Preflight: Duo must be reachable (hard error)
 
@@ -142,10 +153,10 @@ on every launch:
 - `mcp__duo__list_providers()` → `{providers: [{provider, enabled}]}`.
 - `mcp__duo__set_provider_enabled(provider, enabled)` → toggles it.
 
-The binding may pass `avoid_provider` on a launch as a **soft** preference (Duo
-relents rather than hard-failing on it). Concurrent Builders can thus be spread
-across providers, or a rate-limited provider disabled, entirely inside this
-backend.
+These two toggles are the operator's escape hatch, not part of the launch path.
+Spreading concurrent Builders across providers is done with `avoid_provider` on the
+launch itself (§Launch) — a soft preference; disabling a rate-limited provider
+outright is done here. Both stay entirely inside this backend.
 
 ## Tag glossary
 
@@ -159,7 +170,13 @@ the same vocabulary (`roadmap`, `step-NN`, `task`, `needs-human`, `escalation`,
 `agent_tool_id`, or spawning via `mcp__solo__spawn_process(agent_tool_id=N)`,
 under the Duo backend.
 
-✅ **Right**: name a **preset** and let Duo resolve + launch.
+❌ **Also wrong**: asking Duo to resolve a preset, taking the `agent_tool_id` off
+the result, and handing it to `mcp__solo__spawn_process(...)`. This is the same
+mistake wearing a Duo-shaped hat: the resolved tool is a random pick that
+`launch_agent` would not have reproduced, and spawning it yourself still bypasses
+Duo's provider state and load-spreading.
+
+✅ **Right**: name a **preset** and let Duo resolve + launch — in one call.
 
 ```
 mcp__duo__launch_agent(preset="builder", name="<slug>-step-NN-builder-01")
