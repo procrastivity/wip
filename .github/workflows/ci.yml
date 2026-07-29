@@ -1,0 +1,61 @@
+# CI for the go branch. main's existing CI (bash line) is untouched and
+# unaffected by this workflow.
+#
+# No release/publish job here on purpose: release-engineering is a deferred
+# Backlog entry (HANDOFF H7), bootstrapped once there's something worth
+# releasing. Nothing in this workflow (or cliff.toml) makes wiring git-cliff
+# into a future release job any harder — that's H4's constraint, discharged.
+name: CI
+
+on:
+  push:
+    branches: [go]
+  pull_request:
+    branches: [go]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix develop --command make lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix develop --command make test
+
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix build
+
+  # Build-only, not executed — no native darwin runner; cross-compilation
+  # means the linux runner is sufficient (HANDOFF §8/resolved open call).
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { os: darwin, arch: arm64 }
+          - { os: linux, arch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: build ${{ matrix.target.os }}/${{ matrix.target.arch }}
+        run: |
+          nix develop --command env \
+            CGO_ENABLED=0 GOOS=${{ matrix.target.os }} GOARCH=${{ matrix.target.arch }} \
+            go build -o dist/wip-${{ matrix.target.os }}-${{ matrix.target.arch }} ./cmd/wip
