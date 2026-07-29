@@ -58,11 +58,35 @@ These are not part of the D-entry; they are what the spikes surfaced that
 `schema` must decide. Three come from the spike that lost. Full detail in
 `rubric.md` §"Findings that bind regardless of which shape won".
 
-1. **The envelope is missing `actor` and `causation`.** Both spikes found both,
-   independently. §10's own "system-driven events first-class" cannot be met
-   without an actor; D57's cascade currently emits two events with nothing
-   recording that they were one command. Decide before the first event ships —
-   both are un-retrofittable in spirit even though §10 does not name them.
+1. **The envelope gains `actor`, `causation` and `correlation`.** ~~Missing.~~
+   **Resolved and implemented** — both spikes found the gap independently, and
+   it was ratified after the fork closed. §10's own "system-driven events
+   first-class" cannot be met without an actor; D57's cascade was emitting two
+   events with nothing recording that they were one command. This is not a D46
+   question and does not belong in the D61 entry; it is an amendment to the
+   envelope `schema`'s Brief owns, and it is carried here because `schema`
+   inherits the code that already implements it.
+
+   - **`actor`** — one NOT NULL column, prefixed token: `human`,
+     `role:<name>`, `system:<source>`. New roles arrive in Phase 2 with no
+     migration.
+   - **`causation`** — the event that entailed this one.
+   - **`correlation`** — the origin event of the chain.
+   - Origins **self-reference** (`a:a:a`) rather than carrying null, so
+     "began its own chain" and "nobody filled this in" are never the same
+     value. A chain where a causes b, b causes c, and c causes d and e reads
+     `a:a:a`, `b:a:a`, `c:b:a`, `d:c:a`, `e:c:a`.
+   - A cause never points forward: both fields always name an event already in
+     the log. That is why the *first-emitted* event of a command is the origin.
+   - In a D57 cascade, ancestors wip auto-started carry `system:wip`; the node
+     the caller named carries the caller's actor. **Flagged, not settled:** this
+     makes the human's own action the derived event and wip's automatic one the
+     origin. See `scenario.md` §"Amendment" for the tradeoff; re-examine with
+     Stage in scope, where cascades get deeper.
+
+   **This obsoletes the eight-column envelope in `schema`'s Brief §A** — it
+   becomes eleven. `workplans/schema.md` needs that amendment applied in
+   `wip-reboot`; this session does not edit that repo.
 2. **Make the event taxonomy a table** (from the losing spike), so the type
    column is a foreign key, unknown types are rejected rather than logged, and
    D56 is data. This is "checked in schema" satisfied literally.

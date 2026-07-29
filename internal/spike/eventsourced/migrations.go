@@ -35,16 +35,34 @@ var migrations = []migration{
 		stmts: []string{
 			// The log. `id` is the event's own ULID and doubles as the
 			// total-order key — there is no sequence column (D44, D51).
+			// The envelope. Actor, causation and correlation belong to v1 and
+			// not to a later migration on purpose: MODEL §10 says later phases
+			// add event *types* but never change these columns, so an envelope
+			// field arriving as an increment would be exactly the retrofit the
+			// contract exists to prevent.
+			//
+			// causation and correlation are NOT NULL and self-referential for
+			// an origin event (the a:a:a form) rather than nullable: "this
+			// event began its own chain" and "nobody filled this in" should not
+			// be the same value.
 			`CREATE TABLE events (
 				id          TEXT PRIMARY KEY,
 				type        TEXT NOT NULL,
 				occurred_at TEXT NOT NULL,
+				actor       TEXT NOT NULL,
+				causation   TEXT NOT NULL REFERENCES events(id),
+				correlation TEXT NOT NULL REFERENCES events(id),
 				repo        TEXT,
 				clone       TEXT,
 				worktree    TEXT,
 				subject     TEXT NOT NULL,
 				payload     TEXT NOT NULL
 			) WITHOUT ROWID`,
+
+			// Chains are walked in both directions: "what did this event
+			// cause" and "everything in this command".
+			`CREATE INDEX events_causation ON events(causation)`,
+			`CREATE INDEX events_correlation ON events(correlation)`,
 
 			// Append-only, enforced by the substrate rather than by Go
 			// discipline: no code path in or out of this package can rewrite

@@ -22,7 +22,7 @@ func TestV2MigrationOverV1Database(t *testing.T) {
 	if v1.Version() != 1 {
 		t.Fatalf("opened at v%d, want v1", v1.Version())
 	}
-	if err := v1.Label(ctx, "whatever", "x"); !errors.Is(err, ErrNeedsV2) {
+	if err := v1.Label(ctx, scenario.ActorHuman, "whatever", "x"); !errors.Is(err, ErrNeedsV2) {
 		t.Fatalf("Label at v1: got %v, want ErrNeedsV2", err)
 	}
 	if _, err := v1.InProgressLabeled(ctx); !errors.Is(err, ErrNeedsV2) {
@@ -90,10 +90,10 @@ func TestV2MigrationOverV1Database(t *testing.T) {
 	}
 
 	// The new verb works on a node that predates the event type entirely.
-	if err := v2.Label(ctx, step2, "hot"); err != nil {
+	if err := v2.Label(ctx, scenario.ActorHuman, step2, "hot"); err != nil {
 		t.Fatalf("Label(step2): %v", err)
 	}
-	if err := v2.Label(ctx, matter, "q3"); err != nil {
+	if err := v2.Label(ctx, scenario.ActorHuman, matter, "q3"); err != nil {
 		t.Fatalf("Label(matter): %v", err)
 	}
 	labeled, err = v2.InProgressLabeled(ctx)

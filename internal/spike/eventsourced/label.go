@@ -53,7 +53,7 @@ var ErrNeedsV2 = errors.New("eventsourced: labels require schema v2")
 // one event per call — the same rule as every other verb, through the same
 // commit path, which is the point: adding a verb did not require adding a way
 // to write.
-func (s *Store) Label(ctx context.Context, nodeID, label string) error {
+func (s *Store) Label(ctx context.Context, actor scenario.Actor, nodeID, label string) error {
 	if s.version < 2 {
 		return ErrNeedsV2
 	}
@@ -65,6 +65,7 @@ func (s *Store) Label(ctx context.Context, nodeID, label string) error {
 		return []draft{{
 			typ:     labeledType(node.Kind),
 			subject: node.ID,
+			actor:   actor,
 			payload: labelPayload{Label: label},
 		}}, nil
 	})

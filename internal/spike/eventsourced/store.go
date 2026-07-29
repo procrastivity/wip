@@ -139,6 +139,19 @@ type draft struct {
 	typ     string
 	subject string
 	payload any
+
+	// actor is who performed this particular event. It is per-draft, not
+	// per-command, because D57's cascade is precisely the case where one
+	// command produces an event nobody asked for: the caller started a Step,
+	// and wip started its Matter on its own initiative.
+	actor scenario.Actor
+
+	// cause is the index, within this command's drafts, of the draft that
+	// entailed this one. Ignored for the first draft, which is the chain
+	// origin. A linear cascade points at its predecessor (a:a:a, b:a:a,
+	// c:b:a); same-command siblings with no causal relation to each other
+	// point at the origin (a:a:a, b:a:a, c:a:a).
+	cause int
 }
 
 // errNoEvent is the defensive floor under invariant 1 from the other side: a
@@ -169,10 +182,24 @@ func (s *Store) commit(ctx context.Context, decide func(context.Context, *sql.Tx
 	if len(drafts) == 0 {
 		return errNoEvent
 	}
-	for _, d := range drafts {
+	// Causation and correlation are assigned here, never by a verb — the same
+	// reason ids and tier dimensions are. A verb knows what entailed what; it
+	// does not know the ids, because they do not exist until stamp runs.
+	ids := make([]string, len(drafts))
+	for i, d := range drafts {
 		ev, err := s.stamp(d)
 		if err != nil {
 			return err
+		}
+		ids[i] = ev.ID
+		if i == 0 {
+			// The origin of the chain: a:a:a.
+			ev.Causation, ev.Correlation = ev.ID, ev.ID
+		} else {
+			if d.cause < 0 || d.cause >= i {
+				return fmt.Errorf("eventsourced: draft %d names cause %d, which is not an earlier event in this command", i, d.cause)
+			}
+			ev.Causation, ev.Correlation = ids[d.cause], ids[0]
 		}
 		if err := appendEvent(ctx, tx, ev); err != nil {
 			return err
@@ -195,10 +222,14 @@ func (s *Store) stamp(d draft) (scenario.Event, error) {
 	if err != nil {
 		return scenario.Event{}, fmt.Errorf("eventsourced: marshal payload for %s: %w", d.typ, err)
 	}
+	if d.actor == "" {
+		return scenario.Event{}, fmt.Errorf("eventsourced: %s has no actor", d.typ)
+	}
 	ev := scenario.Event{
 		ID:         s.nextID(),
 		Type:       d.typ,
 		OccurredAt: time.Now().UTC(),
+		Actor:      d.actor,
 		Subject:    d.subject,
 		Payload:    raw,
 	}
@@ -218,9 +249,11 @@ func (s *Store) stamp(d draft) (scenario.Event, error) {
 // appendEvent is the single INSERT into the log.
 func appendEvent(ctx context.Context, tx *sql.Tx, ev scenario.Event) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO events (id, type, occurred_at, repo, clone, worktree, subject, payload)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO events (id, type, occurred_at, actor, causation, correlation,
+		                     repo, clone, worktree, subject, payload)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.ID, ev.Type, ev.OccurredAt.Format(time.RFC3339Nano),
+		string(ev.Actor), ev.Causation, ev.Correlation,
 		nullable(ev.Repo), nullable(ev.Clone), nullable(ev.Worktree),
 		ev.Subject, string(ev.Payload))
 	if err != nil {
@@ -262,7 +295,7 @@ type transitionPayload struct {
 // ---------------------------------------------------------------------------
 
 // CreateMatter births a Matter in Planned and returns its ULID.
-func (s *Store) CreateMatter(ctx context.Context, title string) (string, error) {
+func (s *Store) CreateMatter(ctx context.Context, actor scenario.Actor, title string) (string, error) {
 	if title == "" {
 		return "", errors.New("eventsourced: a Matter needs a title")
 	}
@@ -272,6 +305,7 @@ func (s *Store) CreateMatter(ctx context.Context, title string) (string, error) 
 		return []draft{{
 			typ:     scenario.TypeMatterCreated,
 			subject: id,
+			actor:   actor,
 			payload: birthPayload{Title: title, Locator: "matter"},
 		}}, nil
 	})
@@ -284,7 +318,7 @@ func (s *Store) CreateMatter(ctx context.Context, title string) (string, error) 
 // AddStep births a Step under a Matter in Planned and returns its ULID. The
 // locator is assigned here, sequentially within the Matter, and recorded in
 // the event payload so a rebuild does not have to re-derive it.
-func (s *Store) AddStep(ctx context.Context, matterID, title string) (string, error) {
+func (s *Store) AddStep(ctx context.Context, actor scenario.Actor, matterID, title string) (string, error) {
 	if title == "" {
 		return "", errors.New("eventsourced: a Step needs a title")
 	}
@@ -306,6 +340,7 @@ func (s *Store) AddStep(ctx context.Context, matterID, title string) (string, er
 		return []draft{{
 			typ:     scenario.TypeStepCreated,
 			subject: id,
+			actor:   actor,
 			payload: birthPayload{
 				Title:   title,
 				Locator: fmt.Sprintf("step-%02d", siblings+1),
@@ -321,7 +356,7 @@ func (s *Store) AddStep(ctx context.Context, matterID, title string) (string, er
 
 // Start moves a node to In Progress, auto-starting Planned ancestors
 // ancestor-first (D57). One command, several verbs, one event each.
-func (s *Store) Start(ctx context.Context, nodeID string) error {
+func (s *Store) Start(ctx context.Context, actor scenario.Actor, nodeID string) error {
 	return s.commit(ctx, func(ctx context.Context, tx *sql.Tx) ([]draft, error) {
 		node, err := loadNode(ctx, tx, nodeID)
 		if err != nil {
@@ -349,9 +384,24 @@ func (s *Store) Start(ctx context.Context, nodeID string) error {
 			if n.Lifecycle != scenario.Planned {
 				continue
 			}
+			// Everything the cascade starts on its own initiative is wip's
+			// doing; only the node the caller actually named is theirs. Each
+			// generation is entailed by the one above it, so a deeper tree
+			// (Matter -> Stage -> Step, once Stage exists) yields a:a:a,
+			// b:a:a, c:b:a rather than a flat fan from the origin.
+			act := scenario.ActorSystemWip
+			if n.ID == nodeID {
+				act = actor
+			}
+			cause := len(drafts) - 1
+			if cause < 0 {
+				cause = 0
+			}
 			drafts = append(drafts, draft{
 				typ:     startedType(n.Kind),
 				subject: n.ID,
+				actor:   act,
+				cause:   cause,
 				payload: transitionPayload{From: scenario.Planned, To: scenario.InProgress},
 			})
 		}
@@ -361,7 +411,7 @@ func (s *Store) Start(ctx context.Context, nodeID string) error {
 
 // Finish moves a node to Done. Ancestors are not auto-finished — MODEL has no
 // such rule; only start cascades.
-func (s *Store) Finish(ctx context.Context, nodeID string) error {
+func (s *Store) Finish(ctx context.Context, actor scenario.Actor, nodeID string) error {
 	return s.commit(ctx, func(ctx context.Context, tx *sql.Tx) ([]draft, error) {
 		node, err := loadNode(ctx, tx, nodeID)
 		if err != nil {
@@ -374,6 +424,7 @@ func (s *Store) Finish(ctx context.Context, nodeID string) error {
 		return []draft{{
 			typ:     finishedType(node.Kind),
 			subject: node.ID,
+			actor:   actor,
 			payload: transitionPayload{From: scenario.InProgress, To: scenario.Done},
 		}}, nil
 	})
@@ -441,7 +492,8 @@ type rowQuerier interface {
 
 func readEvents(ctx context.Context, q rowQuerier) ([]scenario.Event, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, type, occurred_at, repo, clone, worktree, subject, payload
+		`SELECT id, type, occurred_at, actor, causation, correlation,
+		        repo, clone, worktree, subject, payload
 		 FROM events ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("eventsourced: read log: %w", err)
@@ -452,10 +504,11 @@ func readEvents(ctx context.Context, q rowQuerier) ([]scenario.Event, error) {
 	for rows.Next() {
 		var (
 			ev                    scenario.Event
-			at, payload           string
+			at, actor, payload    string
 			repo, clone, worktree sql.NullString
 		)
-		if err := rows.Scan(&ev.ID, &ev.Type, &at, &repo, &clone, &worktree, &ev.Subject, &payload); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.Type, &at, &actor, &ev.Causation, &ev.Correlation,
+			&repo, &clone, &worktree, &ev.Subject, &payload); err != nil {
 			return nil, fmt.Errorf("eventsourced: scan event: %w", err)
 		}
 		ts, err := time.Parse(time.RFC3339Nano, at)
@@ -463,6 +516,7 @@ func readEvents(ctx context.Context, q rowQuerier) ([]scenario.Event, error) {
 			return nil, fmt.Errorf("eventsourced: event %s has an unreadable timestamp %q: %w", ev.ID, at, err)
 		}
 		ev.OccurredAt = ts.UTC()
+		ev.Actor = scenario.Actor(actor)
 		ev.Repo, ev.Clone, ev.Worktree = repo.String, clone.String, worktree.String
 		ev.Payload = json.RawMessage(payload)
 		out = append(out, ev)

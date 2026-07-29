@@ -72,26 +72,26 @@ func populate(t *testing.T, s *Store) (matter, step1, step2 string) {
 	t.Helper()
 	ctx := context.Background()
 
-	matter, err := s.CreateMatter(ctx, "first matter")
+	matter, err := s.CreateMatter(ctx, scenario.ActorHuman, "first matter")
 	if err != nil {
 		t.Fatalf("CreateMatter: %v", err)
 	}
-	if _, err := s.CreateMatter(ctx, "second matter"); err != nil {
+	if _, err := s.CreateMatter(ctx, scenario.ActorHuman, "second matter"); err != nil {
 		t.Fatalf("CreateMatter (second): %v", err)
 	}
-	if step1, err = s.AddStep(ctx, matter, "step one"); err != nil {
+	if step1, err = s.AddStep(ctx, scenario.ActorHuman, matter, "step one"); err != nil {
 		t.Fatalf("AddStep: %v", err)
 	}
-	if step2, err = s.AddStep(ctx, matter, "step two"); err != nil {
+	if step2, err = s.AddStep(ctx, scenario.ActorHuman, matter, "step two"); err != nil {
 		t.Fatalf("AddStep (second): %v", err)
 	}
-	if err := s.Start(ctx, step1); err != nil {
+	if err := s.Start(ctx, scenario.ActorHuman, step1); err != nil {
 		t.Fatalf("Start(step1): %v", err)
 	}
-	if err := s.Start(ctx, step2); err != nil {
+	if err := s.Start(ctx, scenario.ActorHuman, step2); err != nil {
 		t.Fatalf("Start(step2): %v", err)
 	}
-	if err := s.Finish(ctx, step1); err != nil {
+	if err := s.Finish(ctx, scenario.ActorHuman, step1); err != nil {
 		t.Fatalf("Finish(step1): %v", err)
 	}
 	return matter, step1, step2
@@ -114,10 +114,10 @@ func openTemp(t *testing.T, version int) (*Store, string) {
 func TestRebuildEqualsMaintainedProjection(t *testing.T) {
 	st, _ := openTemp(t, LatestVersion)
 	matter, _, step2 := populate(t, st)
-	if err := st.Label(context.Background(), step2, "hot"); err != nil {
+	if err := st.Label(context.Background(), scenario.ActorHuman, step2, "hot"); err != nil {
 		t.Fatalf("Label: %v", err)
 	}
-	if err := st.Label(context.Background(), matter, "q3"); err != nil {
+	if err := st.Label(context.Background(), scenario.ActorHuman, matter, "q3"); err != nil {
 		t.Fatalf("Label(matter): %v", err)
 	}
 
@@ -188,18 +188,18 @@ func TestRefusedVerbWritesNothing(t *testing.T) {
 		run  func() error
 	}{
 		{"AddStep under an unknown Matter", func() error {
-			_, err := st.AddStep(ctx, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "orphan")
+			_, err := st.AddStep(ctx, scenario.ActorHuman, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "orphan")
 			return err
 		}},
 		{"AddStep under a Step", func() error {
-			_, err := st.AddStep(ctx, step1, "nested")
+			_, err := st.AddStep(ctx, scenario.ActorHuman, step1, "nested")
 			return err
 		}},
-		{"Start an already-started node", func() error { return st.Start(ctx, matter) }},
-		{"Start a finished node", func() error { return st.Start(ctx, step1) }},
-		{"Finish an unknown node", func() error { return st.Finish(ctx, "01JQZZZZZZZZZZZZZZZZZZZZZZ") }},
-		{"Finish an already-finished node", func() error { return st.Finish(ctx, step1) }},
-		{"Label an unknown node", func() error { return st.Label(ctx, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "x") }},
+		{"Start an already-started node", func() error { return st.Start(ctx, scenario.ActorHuman, matter) }},
+		{"Start a finished node", func() error { return st.Start(ctx, scenario.ActorHuman, step1) }},
+		{"Finish an unknown node", func() error { return st.Finish(ctx, scenario.ActorHuman, "01JQZZZZZZZZZZZZZZZZZZZZZZ") }},
+		{"Finish an already-finished node", func() error { return st.Finish(ctx, scenario.ActorHuman, step1) }},
+		{"Label an unknown node", func() error { return st.Label(ctx, scenario.ActorHuman, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "x") }},
 	}
 	for _, c := range cases {
 		if err := c.run(); err == nil {
@@ -225,15 +225,15 @@ func TestStartCascadeIsExactlyTwoEvents(t *testing.T) {
 	st, _ := openTemp(t, LatestVersion)
 	ctx := context.Background()
 
-	matter, err := st.CreateMatter(ctx, "m")
+	matter, err := st.CreateMatter(ctx, scenario.ActorHuman, "m")
 	if err != nil {
 		t.Fatalf("CreateMatter: %v", err)
 	}
-	step, err := st.AddStep(ctx, matter, "s")
+	step, err := st.AddStep(ctx, scenario.ActorHuman, matter, "s")
 	if err != nil {
 		t.Fatalf("AddStep: %v", err)
 	}
-	if err := st.Start(ctx, step); err != nil {
+	if err := st.Start(ctx, scenario.ActorHuman, step); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -254,5 +254,78 @@ func TestStartCascadeIsExactlyTwoEvents(t *testing.T) {
 		if evs[i].Type != w.typ || evs[i].Subject != w.subject {
 			t.Fatalf("event %d: got %s/%s, want %s/%s", i, evs[i].Type, evs[i].Subject, w.typ, w.subject)
 		}
+	}
+}
+
+// The envelope's three identity fields, after the post-decision amendment:
+// every event says who acted, what entailed it, and which chain it belongs to,
+// and the substrate refuses a chain that points nowhere.
+func TestCausationChainAndActor(t *testing.T) {
+	st, _ := openTemp(t, LatestVersion)
+	ctx := context.Background()
+
+	matter, err := st.CreateMatter(ctx, scenario.ActorHuman, "m")
+	if err != nil {
+		t.Fatalf("CreateMatter: %v", err)
+	}
+	step, err := st.AddStep(ctx, scenario.ActorHuman, matter, "s")
+	if err != nil {
+		t.Fatalf("AddStep: %v", err)
+	}
+	if err := st.Start(ctx, scenario.ActorHuman, step); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := st.Finish(ctx, scenario.ActorRoleBuilder, step); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	evs, err := st.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	// Three one-event commands, each its own origin, plus the cascade.
+	for _, i := range []int{0, 1, 4} {
+		if !evs[i].IsOrigin() {
+			t.Fatalf("event %d (%s) should be its own origin", i, evs[i].Type)
+		}
+	}
+	// The cascade: matter.started is the origin and is wip's own doing;
+	// step.started is what the human asked for and is entailed by it.
+	origin, caused := evs[2], evs[3]
+	if !origin.IsOrigin() || origin.Actor != scenario.ActorSystemWip {
+		t.Fatalf("cascade origin: %s actor=%s origin=%v", origin.Type, origin.Actor, origin.IsOrigin())
+	}
+	if caused.Causation != origin.ID || caused.Correlation != origin.ID {
+		t.Fatalf("caused event: causation=%s correlation=%s, want both %s",
+			caused.Causation, caused.Correlation, origin.ID)
+	}
+	if caused.Actor != scenario.ActorHuman {
+		t.Fatalf("caused event actor: got %s, want %s", caused.Actor, scenario.ActorHuman)
+	}
+	// A whole command is recoverable from one of its events.
+	var chain int
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE correlation = ?`, origin.ID).Scan(&chain); err != nil {
+		t.Fatalf("correlation query: %v", err)
+	}
+	if chain != 2 {
+		t.Fatalf("correlation group: got %d events, want 2", chain)
+	}
+	// Roles are not decoration: the finish was performed by one.
+	if evs[4].Actor != scenario.ActorRoleBuilder {
+		t.Fatalf("finish actor: got %s, want %s", evs[4].Actor, scenario.ActorRoleBuilder)
+	}
+
+	// The chain is enforced by the substrate, not by Go: an event whose
+	// causation names nothing is refused.
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO events (id, type, occurred_at, actor, causation, correlation,
+		                     repo, clone, worktree, subject, payload)
+		 VALUES ('01ZZZZZZZZZZZZZZZZZZZZZZZZ', 'matter.started', '2026-07-29T00:00:00Z',
+		         'human', '01YYYYYYYYYYYYYYYYYYYYYYYY', '01YYYYYYYYYYYYYYYYYYYYYYYY',
+		         ?, NULL, NULL, ?, '{}')`,
+		scenario.FixedEnv.Repo, matter); err == nil {
+		t.Fatal("an event whose causation names no event should be refused")
 	}
 }

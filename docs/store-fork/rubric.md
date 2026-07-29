@@ -239,6 +239,14 @@ spike that lost.
    a narrator reading the log sees two unrelated starts). Neither is a fork
    question. Both are on the "cannot be retrofitted" list in spirit, and
    `schema` should decide them before the first event ships.
+
+   **Since resolved.** Ratified after this comparison was written and
+   implemented in the harness and the winning spike: three columns — `actor`,
+   `causation`, `correlation` — with origins self-referencing rather than
+   carrying null. Semantics and the one flagged consequence are in
+   `scenario.md` §"Amendment"; the decision record carries what `schema`
+   inherits. Everything scored above predates the change and was scored
+   against the eight-column envelope.
 2. **Make the event taxonomy a table, not a Go constant** (from Spike B): the
    type column becomes a foreign key so an unknown type is rejected rather than
    silently logged, D56 becomes data instead of code, and adding event types in

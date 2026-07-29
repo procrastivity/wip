@@ -306,3 +306,40 @@ dispatch, render, cursor, prose, and the CLI, per the pinned scope. Concurrency
 beyond `SetMaxOpenConns(1)`. Event-type registry, payload versioning, snapshot
 support, and `Rebuild` at scale. `backup()` is a checkpoint-and-copy, not
 `VACUUM INTO`.
+
+---
+
+## Amendment — the envelope gained three fields after this report was written
+
+§4 and §5 above record that MODEL §10's envelope could not say **who** acted or
+**why**, and that both spikes found this independently. Both gaps were ratified
+and closed after the fork did; this report is left as written, and the code now
+differs from it in three places.
+
+**`actor`, `causation`, `correlation`**, all NOT NULL, in the **v1** baseline
+rather than as a later migration — an envelope field arriving as an increment
+would be exactly the retrofit MODEL §10's "later phases add types; the envelope
+never changes" exists to prevent. Origins self-reference (`a:a:a`) rather than
+carrying null. Semantics: `docs/store-fork/scenario.md` §"Amendment".
+
+What it cost this shape, since axis 3 is about exactly this kind of question:
+
+| | |
+|---|---|
+| production files touched | 3 (`store.go`, `migrations.go`, `label.go`) |
+| schema | 3 columns + 2 indexes in the v1 baseline; `causation`/`correlation` are self-referential FKs into `events(id)`, so a chain pointing nowhere is refused by SQLite, not by Go |
+| write path | `draft` gained `actor` and `cause`; `commit` assigns causation and correlation from the drafts' own ids, so a verb still never sees an id — the §5.1 finding ("stamp, don't construct") held under the change |
+| verbs | one parameter each |
+
+The §5.1 claim is the one worth re-reading now that it has been tested by a
+change: the envelope grew by three fields and no verb had to learn anything
+about ids, because verbs declare *what entailed what* by index and the write
+path does the rest.
+
+**The one thing this amendment made uglier**, recorded rather than smoothed:
+under D57's cascade the auto-started ancestor is now both the chain origin and
+a `system:wip` event, so the human's own action reads as derived from wip's
+automatic one. Every individual fact is true and no causation pointer points
+forward, which was the constraint. It still narrates oddly, and it will narrate
+more oddly once Stage makes cascades three deep. Flagged for `schema`, not
+fixed here.

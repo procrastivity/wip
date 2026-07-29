@@ -59,6 +59,55 @@ were compared against.
 Six event types: `matter.created`, `step.created`, `matter.started`,
 `step.started`, `matter.finished`, `step.finished`.
 
+### Amendment — three fields added after the decision
+
+*This section is a post-decision amendment. The eight-column envelope above is
+what both spikes were built against and what `rubric.md` compared; it is left
+standing rather than rewritten, so the comparison stays legible. The winning
+spike and the harness now carry three more fields, ratified by the user after
+both spikes independently reported the envelope unable to say who acted or
+why.*
+
+| Field | Rule |
+|---|---|
+| `actor` | who performed the verb — never empty. One column, prefixed token: `human`, `role:<name>`, `system:<source>` |
+| `causation` | ULID of the event that entailed this one; **its own ULID** if it began the chain |
+| `correlation` | ULID of the chain's origin event; **its own ULID** if it began the chain |
+
+Origins self-reference rather than carrying null, so "this began its own chain"
+and "nobody filled this in" are never the same value. Writing them as
+`id:causation:correlation`, a chain where a causes b, b causes c, and c causes
+both d and e reads:
+
+```
+a:a:a   b:a:a   c:b:a   d:c:a   e:c:a
+```
+
+Two rules follow, and the conformance body enforces both:
+
+- **A cause never points forward.** Causation and correlation always name an
+  event already in the log. This is why, in D57's cascade, the *first-emitted*
+  event is the origin.
+- **Same-command siblings point at the origin; a chain points at its
+  predecessor.** A linear cascade (Matter → Stage → Step, once Stage exists)
+  gives `a:a:a, b:a:a, c:b:a`; unrelated events from one command give
+  `a:a:a, b:a:a, c:a:a`.
+
+**Actor within a cascade.** The node the caller actually named carries the
+caller's actor; ancestors that D57 auto-started carry `system:wip`, because wip
+started them on its own initiative and the caller never asked. So
+`wip start step-01` on a Planned Matter writes `matter.started` as
+`system:wip` (the origin) and `step.started` as `human` (entailed by it).
+
+*One consequence, flagged for `schema` rather than smoothed over:* this makes
+the human's own action the **derived** event and wip's automatic one the
+origin. Each fact is individually true — wip did start the Matter, and the
+Matter's start is what made the Step's start legal — but a narrator reading
+the chain top-down sees the system act first and the human follow. The
+alternative (attributing the whole command to the caller) reads better and
+claims the human started a Matter they never mentioned. Neither is free;
+`schema` should re-examine it with Stage in scope, where cascades get deeper.
+
 `step-NN` is a locator and is stored as a mutable attribute of the node. It
 may appear inside a payload as a fact about the write; it may never be what an
 event references.

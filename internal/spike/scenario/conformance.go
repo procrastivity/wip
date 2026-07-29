@@ -37,21 +37,21 @@ func RunConformance(t *testing.T, open OpenFunc) {
 	defer func() { _ = st.Close() }()
 
 	// (a) create a Matter.
-	matterID, err := st.CreateMatter(ctx, "first matter")
+	matterID, err := st.CreateMatter(ctx, ActorHuman, "first matter")
 	if err != nil {
 		t.Fatalf("CreateMatter: %v", err)
 	}
-	second, err := st.CreateMatter(ctx, "second matter")
+	second, err := st.CreateMatter(ctx, ActorHuman, "second matter")
 	if err != nil {
 		t.Fatalf("CreateMatter (second): %v", err)
 	}
 
 	// (b) add Steps under it.
-	step1, err := st.AddStep(ctx, matterID, "step one")
+	step1, err := st.AddStep(ctx, ActorHuman, matterID, "step one")
 	if err != nil {
 		t.Fatalf("AddStep: %v", err)
 	}
-	step2, err := st.AddStep(ctx, matterID, "step two")
+	step2, err := st.AddStep(ctx, ActorHuman, matterID, "step two")
 	if err != nil {
 		t.Fatalf("AddStep (second): %v", err)
 	}
@@ -61,14 +61,14 @@ func RunConformance(t *testing.T, open OpenFunc) {
 
 	// A Step under an unknown Matter is refused, and refusal writes nothing.
 	before := events(t, st)
-	if _, err := st.AddStep(ctx, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "orphan"); err == nil {
+	if _, err := st.AddStep(ctx, ActorHuman, "01JQZZZZZZZZZZZZZZZZZZZZZZ", "orphan"); err == nil {
 		t.Fatal("AddStep under an unknown Matter: want error, got nil")
 	}
 	assertPrefix(t, before, events(t, st), "refused AddStep must write no event")
 
 	// (c) start work: D57 — one command, two verbs, two events, ancestor first.
 	before = events(t, st)
-	if err := st.Start(ctx, step1); err != nil {
+	if err := st.Start(ctx, ActorHuman, step1); err != nil {
 		t.Fatalf("Start(step1): %v", err)
 	}
 	added := suffix(t, before, events(t, st))
@@ -78,6 +78,24 @@ func RunConformance(t *testing.T, open OpenFunc) {
 		t.Fatalf("auto-start subjects: got %s,%s want %s,%s",
 			added[0].Subject, added[1].Subject, matterID, step1)
 	}
+	// The chain, in the a:a:a / b:a:a form. The ancestor's start is the origin
+	// because it is emitted first — so causation never points forward in the
+	// log — and it is wip's own doing, not the caller's: D57 auto-started it.
+	if !added[0].IsOrigin() {
+		t.Fatalf("cascade origin: %s/%s/%s is not the a:a:a form",
+			added[0].ID, added[0].Causation, added[0].Correlation)
+	}
+	if added[0].Actor != ActorSystemWip {
+		t.Fatalf("cascade origin actor: got %q, want %q (wip auto-started the ancestor, the caller did not ask)",
+			added[0].Actor, ActorSystemWip)
+	}
+	if added[1].Causation != added[0].ID || added[1].Correlation != added[0].ID {
+		t.Fatalf("caused event: got %s/%s, want causation and correlation %s",
+			added[1].Causation, added[1].Correlation, added[0].ID)
+	}
+	if added[1].Actor != ActorHuman {
+		t.Fatalf("caused event actor: got %q, want %q", added[1].Actor, ActorHuman)
+	}
 
 	// The founding question, answered: the Matter and the started Step, and
 	// nothing else — not the sibling Step, not the untouched second Matter.
@@ -86,7 +104,7 @@ func RunConformance(t *testing.T, open OpenFunc) {
 	// Starting an already-started node is refused; a second event for one
 	// transition would break invariant 1's "exactly one".
 	before = events(t, st)
-	if err := st.Start(ctx, step1); err == nil {
+	if err := st.Start(ctx, ActorHuman, step1); err == nil {
 		t.Fatal("Start on an already-started node: want error, got nil")
 	}
 	assertPrefix(t, before, events(t, st), "refused Start must write no event")
@@ -94,7 +112,7 @@ func RunConformance(t *testing.T, open OpenFunc) {
 	// A second Step under an already-started Matter starts alone — the cascade
 	// is over Planned ancestors only.
 	before = events(t, st)
-	if err := st.Start(ctx, step2); err != nil {
+	if err := st.Start(ctx, ActorHuman, step2); err != nil {
 		t.Fatalf("Start(step2): %v", err)
 	}
 	assertTypes(t, suffix(t, before, events(t, st)),
@@ -103,11 +121,21 @@ func RunConformance(t *testing.T, open OpenFunc) {
 
 	// Done leaves the query.
 	before = events(t, st)
-	if err := st.Finish(ctx, step1); err != nil {
+	if err := st.Finish(ctx, ActorRoleBuilder, step1); err != nil {
 		t.Fatalf("Finish(step1): %v", err)
 	}
-	assertTypes(t, suffix(t, before, events(t, st)),
-		[]string{TypeStepFinished}, "finishing a Step")
+	finished := suffix(t, before, events(t, st))
+	assertTypes(t, finished, []string{TypeStepFinished}, "finishing a Step")
+	// A one-event command is always its own origin — and a role, not a human,
+	// performed this one: system-driven events are first-class or outer-loop
+	// roles are invisible to Session (MODEL §10).
+	if !finished[0].IsOrigin() {
+		t.Fatalf("single-event command: %s/%s/%s is not the a:a:a form",
+			finished[0].ID, finished[0].Causation, finished[0].Correlation)
+	}
+	if finished[0].Actor != ActorRoleBuilder {
+		t.Fatalf("finish actor: got %q, want %q", finished[0].Actor, ActorRoleBuilder)
+	}
 	assertInProgress(t, st, "after finishing step-01", matterID, step2)
 
 	// Durability: close, reopen, ask again. Same answers, same log.
@@ -163,6 +191,31 @@ func assertEnvelope(t *testing.T, evs []Event) {
 	t.Helper()
 	if len(evs) == 0 {
 		t.Fatal("event log is empty")
+	}
+	seen := make(map[string]bool, len(evs))
+	for i, e := range evs {
+		// Actor, causation and correlation: never empty, never pointing at an
+		// event that does not exist, and never pointing *forward* — a cause
+		// always precedes its effect in the log, which is the whole reason the
+		// first-emitted event of a command is the origin.
+		if e.Actor == "" {
+			t.Fatalf("event %d (%s): actor is empty", i, e.Type)
+		}
+		if e.Causation > e.ID || e.Correlation > e.ID {
+			t.Fatalf("event %d (%s): causation %q / correlation %q points forward of %q",
+				i, e.Type, e.Causation, e.Correlation, e.ID)
+		}
+		if e.Causation != e.ID && !seen[e.Causation] {
+			t.Fatalf("event %d (%s): causation %q names no earlier event", i, e.Type, e.Causation)
+		}
+		if e.Correlation != e.ID && !seen[e.Correlation] {
+			t.Fatalf("event %d (%s): correlation %q names no earlier event", i, e.Type, e.Correlation)
+		}
+		if (e.Causation == e.ID) != (e.Correlation == e.ID) {
+			t.Fatalf("event %d (%s): half an origin — id %q, causation %q, correlation %q",
+				i, e.Type, e.ID, e.Causation, e.Correlation)
+		}
+		seen[e.ID] = true
 	}
 	for i, e := range evs {
 		if len(e.ID) != 26 {

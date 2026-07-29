@@ -13,6 +13,18 @@ was edited.
 It was last live, buildable, and part of `./...` at commit **`10ace2f`**
 (`feat(store-fork): spike B — tables + audit-log`).
 
+**It no longer compiles against the current harness, on purpose.** After the
+fork closed, the envelope gained `actor`, `causation` and `correlation` and
+every verb gained an actor parameter (see `docs/store-fork/scenario.md`
+§"Amendment"). Only the winning spike was carried forward; retrofitting a
+shape the register has already rejected would be work spent on evidence
+nobody will run. To get a tree where it builds and passes:
+
+```sh
+git worktree add /tmp/spike-b 10ace2f && cd /tmp/spike-b
+go test ./internal/spike/tables/
+```
+
 ## Why the underscore
 
 The Go tool ignores any directory whose name begins with `_`, so this subtree
@@ -25,8 +37,8 @@ go test ./internal/spike/_archive/tables/
 ```
 
 That is the point of archiving rather than tagging: the losing spike stays
-readable *and* runnable, so a future re-opening of D46 gets working evidence
-rather than a diff.
+readable here and runnable at the commit above, so a future re-opening of D46
+gets working evidence rather than a diff.
 
 ## What it is worth reading for
 
