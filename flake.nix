@@ -17,7 +17,7 @@
           pname = "wip";
           inherit version;
           src = ./.;
-          vendorHash = null;
+          vendorHash = "sha256-komX1AmHt2NoF1x6xsNa2RFkfVzOXfYEMPhT0zwMxjw=";
 
           env.CGO_ENABLED = 0;
 
@@ -32,6 +32,10 @@
           postInstall = ''
             mkdir -p $out/share/wip
             cp -r assets $out/share/wip/assets
+            # assets.go only exists so `assets/` can embed itself as the
+            # binary's last-resort fallback; it is source, not a shipped
+            # asset, and must not appear in the installed share tree.
+            rm -f $out/share/wip/assets/assets.go
           '';
 
           meta = {

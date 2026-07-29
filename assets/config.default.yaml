@@ -1,0 +1,4 @@
+# wip tool config — shipped default (D54: tool config only, resolved
+# user-override -> shipped-default, same mechanism as any other asset).
+# No keys are owned by chassis itself; later Matters add their own tool
+# config here as they earn it.
