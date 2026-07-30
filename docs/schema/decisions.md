@@ -6,8 +6,8 @@ findings `store-fork` handed over, and the places the implementation diverged
 from the Brief text. Step-11 folds the divergences back into the Brief; this is
 the working record it reads.
 
-Status: **in progress.** Steps 01–02 are built and the v1 baseline applies;
-steps 03–11 are not done yet. See "Where this stands" at the bottom.
+Status: **in progress.** Steps 01–06 are complete and tested; steps 07–11 remain.
+See "Where this stands" at the bottom.
 
 ## D46's outcome, consumed (step-01)
 
@@ -44,10 +44,27 @@ Consequences taken as settled, not re-opened:
    later phase is already shipping. `events-traces` still audits the *produced*
    streams for fidelity, which membership enforcement does not cover.
 3. **Column-level constraints on the log.** Adopted from the losing spike and
-   extended: identity lengths, the actor's prefixed-token form, a fixed-width
-   RFC3339 `occurred_at`, `json_type(payload) = 'object'`, plus triggers for
-   append-only, strictly-ascending ids, never-points-forward causation, and the
-   D56 dimension rule.
+   extended: identity lengths **and Crockford alphabet**, the actor's
+   prefixed-token form, a fixed-width RFC3339 `occurred_at`,
+   `json_type(payload) = 'object'`, plus triggers for append-only,
+   strictly-ascending ids, never-points-forward causation, and the D56 dimension
+   rule.
+
+   The alphabet check was added while writing step-02's tests. Length alone is
+   not identity-hood: `occurred_at` is *derived* from the id rather than read
+   from a second clock (finding 5 below), so a 26-character id outside
+   Crockford's alphabet would be an event no reader could date. It went into the
+   v1 baseline rather than a v2 migration because v1 had not shipped —
+   `schema_v1.go`'s "nothing in here may be edited once shipped" is the actual
+   rule, and nothing had.
+
+   Two things about the log are still *not* enforced by the substrate, stated
+   rather than implied. Nothing ties `occurred_at` to its own id — a base32
+   decode is not expressible in a CHECK, so it is the one envelope invariant
+   resting on Go discipline while its neighbours all rest on the substrate; a
+   test covers it. And `correlation` is not required to name a chain *origin*:
+   the foreign key plus the never-forward trigger admit a correlation naming a
+   mid-chain event.
 4. **A high-water mark at open.** Kept, and simplified to one query:
    `MAX(events.id)` dominates every identity in the store, because an entity's
    ULID is minted inside the command that births it and no command commits
@@ -141,6 +158,22 @@ sentences are now wrong and should be amended.
   accumulate one segment per `content.appended`, and a read concatenates them in
   identity order. Segments rather than a rewritten row is what makes an append
   an insert, keeps rebuild trivial, and avoids a read-modify-write on prose.
+
+  Two consequences step-04 forced. `ContentWritten.Bytes` carries no
+  `omitempty`: under it an empty byte slice and an absent one encode
+  identically, so a zero-length content object came back off the wire looking
+  like a *spilled* payload with no reference. The schema permits zero length
+  (`byte_len >= 0`), so the payload has to be able to say it. And
+  `insertContent` verifies in-store bytes against the payload's own `byte_len`
+  and `sha256` — a row the store cannot read back is a row it should not have
+  written, and checking at projection time leaves the read-side verification
+  saying something about the *sidecar file*, the one fact the log does not carry.
+
+  Note for whoever builds a verb that rewrites a Brief: **no P1 event tombstones
+  content.** The `tombstone_event IS NULL` half of `content_create_once` is
+  correct but unreachable through any command, which is consistent — a
+  create-once kind genuinely cannot be rewritten in P1 — but it is a fact about
+  P1's event set and not a property of the index.
 - **The spill threshold is 1 MiB**, documented in `content.go`: comfortably
   above any Brief, Workplan or findings list, comfortably below the ingested-log
   case PLAN 1.2 names. Spilled bytes are the one projection fact not recoverable
@@ -157,8 +190,30 @@ sentences are now wrong and should be amended.
   takes the parent whose children moved; `step.replaced` takes the Step being
   replaced; `cursor.moved` takes the Worktree the cursor belongs to.
 - **Amendment registers `step.*` only.** The Brief's "stage equivalents where
-  earned" stays unearned: the projection rules are already kind-agnostic, so the
-  equivalents would be four `INSERT`s in a migration and no Go change.
+  earned" stays unearned — but **not** because the rules are kind-agnostic, which
+  is what this file claimed before step-03 tested them. It is true of
+  `step.removed` (`tombstoneNode` never asks the scale) and of `step.inserted`
+  (`insertNode` takes one). It is false of `step.replaced`, which *births* a row
+  and now refuses a non-Step subject, and false of `step.reordered`, which
+  filters `kind = 'step'`. A `stage.replaced` would need Go work and, more to the
+  point, a decision about what becomes of what the Stage grouped — and no P1
+  event says that. So the equivalents are not four `INSERT`s in a migration.
+
+- **An edge is in force only while both its ends are** — a new
+  `edges_in_force` view, and the second view in the schema after
+  `archived_matters`, for the same reason: it is a predicate over rows and not a
+  state anything writes. `BlockedBy`, `LiveEdges` and the cycle check's
+  `liveEdgeGraph` all read it, so "what blocks this" and "what loops does this
+  store have" cannot answer differently.
+
+  The Brief does not decide this and step-06 surfaced it: a live edge could name
+  a tombstoned node, so `wip status` would report a blocker that can never
+  complete and `doctor` would report loops no repair can break. An edge is a
+  relation between two nodes and a relation to a removed node is not a relation;
+  removing the blocker is precisely how D44's amendment clears an obstruction, so
+  the obstruction going with it is the rule rather than an exception to it. The
+  edge *row* is untouched and stays tombstone-free — out of force is not removed,
+  and its own `dependency.removed` would still be a legitimate event.
 - **The projection is total over the P1 taxonomy.** `schema` owns a rule for
   every registered type, so an emitter in a later Matter needs no projection
   work of its own; `render.performed` is the one member that deliberately
@@ -184,13 +239,87 @@ sentences are now wrong and should be amended.
   holding a fixed `Env`. This is what lets `wip init` create the Repo its own
   event's `repo` dimension names, with no special case in `stamp`.
 
+## Bugs the tests found, and what they were
+
+Recorded because each one is a fact about the shape rather than a typo, and
+because "the implementation was written before any of it ran" is the context
+step-11 should read them in. Every fix was verified by mutation: the guard is
+removed, the owning test fails, the guard is restored.
+
+- **`applyReplace` never read its subject's `kind`** and hardcoded `'step'` in
+  its INSERT, so `step.replaced` against a Stage succeeded — tombstoning the
+  Stage, birthing a Step in its place, and leaving every Step it grouped
+  parented to a tombstone.
+- **`matterOf` did not filter on liveness**, so a node could be born under a
+  *tombstoned* parent: a row `Children` never reaches but `MatterNodes` still
+  lists.
+- **`applyTransition` did not filter on liveness** either, so a `*.canceled`
+  against a removed node wrote a state change no reader can reach — making the
+  Brief's "removed while still Planned" a fact that does not stay put.
+- **`tombstoneEdge` tombstoned whatever row the payload's edge id named**,
+  checking neither the subject nor the blocker, so one node's
+  `dependency.removed` could quietly retire another node's edge and the log would
+  read as though it had been theirs.
+- **`Cycles` reported one loop per tangle, not every loop.** It was one
+  depth-first sweep recording back edges; every loop contains a back edge, but
+  two loops can share one, and only the loop on the current path was reported,
+  after which the `done` set pruned the rest. `doctor` would have reported one
+  loop out of two, the user repairs it, the next run reports the next. Each loop
+  is now enumerated from its own smallest node over a walk that never steps below
+  it — a loop has exactly one smallest node, so it is found exactly once and
+  arrives already canonically rotated, which retired `cycleFrom` and `cycleKey`.
+
+  **The five cases the workplan names all pass against the broken version.** That
+  is the most useful thing this Matter learned about its own seal condition: the
+  five are necessary and nowhere near sufficient. What caught it was a
+  multi-loop case and an independent oracle (120 fixed-seed random graphs against
+  a naive enumerator, plus a transitive closure computed by relaxation rather than
+  by a walk) — it fails ~13 of 120 trials against the old code and none against
+  the new.
+
+## Known gaps, deliberately not closed here
+
+Each of these is real, verified, and belongs to somebody else — recorded so the
+next Matter finds them rather than rediscovering them.
+
+- **Two Matters of one Repo may share a slug.** `nodes_locator` is
+  `(matter, locator)` and a Matter is its own matter, so the constraint on a
+  Matter's *own* locator is vacuous. Needs a new index and a decision about the
+  scope → the addressing Matter.
+- **`backlog.planned` and `batch.joined` accept any node where a Matter is
+  meant** (`REFERENCES nodes(id)` with no kind check). Left to the verb layer,
+  consistent with `guards` owning the cycle and gate-order preconditions.
+- **`clone.attached` never checks `payload.repo == event.repo`**, though
+  `insertRepo` checks the analogous thing for itself.
+- **A tombstone can be undone by raw SQL.** `UPDATE edges SET tombstone_event =
+  NULL, last_event = <newer>` succeeds; the `advance` trigger only catches the
+  careless form. "A tombstone is final" wants a trigger, which is a migration.
+- **`content.created` / `cursor.moved` / `dependency.added` accept a tombstoned
+  node as their target.** D44 guarantees *prior* references stay valid; new ones
+  pointing at a corpse look like `doctor`'s business. (`dependency.added` is
+  mitigated: `edges_in_force` keeps such an edge out of every read.)
+- **`backlog.declined` overwrites `detail` with the decline reason**, destroying a
+  `deferred` entry's rationale in the projection. The log keeps both, and there is
+  no second free-text column.
+- **`SegmentBytes` and `Content` are on `*Store`** and read `s.db` directly while
+  `ContentSegments` is on `View`, so a decide function can list segments inside
+  its own transaction but not read their bytes. Nothing in P1 needs it; a verb
+  appending to findings after reading them will hit it.
+- **A nested `Commit` inside a decide function deadlocks** rather than erroring
+  (`SetMaxOpenConns(1)`). A guard on `Tx` would be cheap.
+
 ## Where this stands
 
-Built and passing: the v1 baseline (all tables, indexes, triggers, the archive
-view), the taxonomy as data, the write path (`Commit`/`stamp`/`appendEvent`),
-the projection rules for the whole P1 taxonomy, `Rebuild`, the migration
-framework with backup-before-migrate, the read surface, the static cycle check,
-content storage with spill, and Repo-tier config.
+Built and passing: the v1 baseline (all tables, indexes, triggers, both views),
+the taxonomy as data, the write path (`Commit`/`stamp`/`appendEvent`), the
+projection rules for the whole P1 taxonomy, `Rebuild`, the migration framework
+with backup-before-migrate, the read surface, the static cycle check, content
+storage with spill, and Repo-tier config.
 
-Not done: the test bodies for steps 02–10 (only a baseline open test exists),
-and step-11's reconciliation of the Brief.
+Tested: **steps 02–06.** The envelope, every entity table and its projection
+rule, `Rebuild`'s column-for-column fidelity, content and spill, edges and
+tombstones, and the static cycle check — which discharges half the seal
+condition.
+
+Not done: **steps 07–10's tests** (gate state, invariant 2's query plan,
+migrations, round-trip) and **step-11's reconciliation** of the Brief.
