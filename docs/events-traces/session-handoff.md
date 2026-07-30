@@ -9,10 +9,10 @@ Step-by-step spec); this file is *how*, not *what*.
 - `evidence/traces/trace-01-smallest.md` — committed, complete.
 - `evidence/traces/trace-02-stages-and-steps.md` — committed, complete.
 - `evidence/traces/trace-03-session-two-matters.md` — committed, complete.
+- `evidence/traces/trace-04-amendment.md` — committed, complete.
 
 ## Remaining
 
-- **step-04 — trace 4** (amendment mid-flight, Step inserted). Not started.
 - **step-05 — trace 5** (planned in one clone, worked from another). Not
   started — the hardest one (needs two clones of one Repo).
 - **step-06 — fidelity audit** against MODEL §10's list, over all five
