@@ -66,6 +66,12 @@ func (t *Tx) ContentDraft(node string, kind ContentKind, data []byte) (Draft, er
 		}
 		written.BlobRef = written.Content
 	} else {
+		// A nil slice and an empty one are the same content object — zero bytes —
+		// and the payload has to say so with a value rather than an absence, because
+		// an absent `bytes` is how a spilled payload says its bytes are elsewhere.
+		if data == nil {
+			data = []byte{}
+		}
 		written.Bytes = data
 	}
 
@@ -102,6 +108,20 @@ func insertContent(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if p.Kind.AppendOnlyKind() != (ev.Type == TypeContentAppended) {
 		return fmt.Errorf("store: kind %q does not belong on %s", p.Kind, ev.Type)
 	}
+	// A row the store cannot read back is a row it should not have written. For
+	// in-store bytes the recorded length and digest are checkable right here, and
+	// checking them leaves SegmentBytes' verification saying something about the
+	// sidecar file — the one fact the log does not carry — rather than papering
+	// over a payload that contradicted itself.
+	if p.Bytes != nil {
+		if int64(len(p.Bytes)) != p.ByteLen {
+			return fmt.Errorf("store: %s carries %d bytes and records %d", ev.Type, len(p.Bytes), p.ByteLen)
+		}
+		sum := sha256.Sum256(p.Bytes)
+		if got := hex.EncodeToString(sum[:]); got != p.SHA256 {
+			return fmt.Errorf("store: %s carries bytes hashing to %s and records %s", ev.Type, got, p.SHA256)
+		}
+	}
 
 	var bytesArg any
 	if p.Bytes != nil {
@@ -113,9 +133,31 @@ func insertContent(ctx context.Context, tx *sql.Tx, ev Event) error {
 		p.Content, ev.Subject, string(p.Kind), bytesArg, nullable(p.BlobRef),
 		p.ByteLen, p.SHA256, ev.ID, ev.ID)
 	if err != nil {
-		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+		return contentRefusal(ctx, tx, ev, p, err)
 	}
 	return nil
+}
+
+// contentRefusal attributes a refused content insert to the guard that fired.
+//
+// The one refusal an ordinary caller can provoke is a second create-once segment,
+// and SQLite reports it as `UNIQUE constraint failed: content.node, content.kind`
+// — the columns of an index whose *name* and partial predicate carry the whole
+// meaning, and which a reader of the error has no way to identify. Every other
+// refusal in this store says which rule it is; this one now does too, and the
+// index is still what enforces it.
+func contentRefusal(ctx context.Context, tx *sql.Tx, ev Event, p ContentWritten, cause error) error {
+	if !p.Kind.AppendOnlyKind() {
+		var existing string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT id FROM content WHERE node = ? AND kind = ? AND tombstone_event IS NULL`,
+			ev.Subject, string(p.Kind)).Scan(&existing); err == nil {
+			return fmt.Errorf(
+				"store: project %s: content_create_once: %s already has live %s content (%s), which is written once and never rewritten: %w",
+				ev.Type, ev.Subject, p.Kind, existing, cause)
+		}
+	}
+	return fmt.Errorf("store: project %s: %w", ev.Type, cause)
 }
 
 // ContentSegment is one stored content object.

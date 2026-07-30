@@ -29,18 +29,6 @@ import (
 // Writing a history worth rebuilding
 // ---------------------------------------------------------------------------
 
-// write puts content on a node through the one write path.
-func (h *harness) write(node string, kind ContentKind, data []byte) {
-	h.t.Helper()
-	h.commitWith(func(_ context.Context, tx *Tx) ([]Draft, error) {
-		draft, err := tx.ContentDraft(node, kind, data)
-		if err != nil {
-			return nil, err
-		}
-		return []Draft{draft}, nil
-	})
-}
-
 // depend adds a `blocked-by` edge, refusing a cycle before anything is written —
 // which is the arrangement itself: the static check runs in the decide function,
 // so a cycle is never recorded as an event at all (D28, D29).

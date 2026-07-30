@@ -45,7 +45,14 @@ type ContentWritten struct {
 	// Content is the content row's own identity. Append kinds accumulate as
 	// segments, one per event, ordered by this identity.
 	Content string `json:"content"`
-	Bytes   []byte `json:"bytes,omitempty"`
+	// Bytes carries the content itself, and is explicitly null rather than
+	// omitted when the bytes spilled. `omitempty` would be wrong here in a way
+	// that matters: an empty byte slice and an absent one encode identically
+	// under it, so a zero-length content object would come back off the wire
+	// looking like a spilled one with no reference — which the projection then
+	// refuses with the wrong reason. The schema permits zero length
+	// (`byte_len >= 0`), so the payload has to be able to say it.
+	Bytes []byte `json:"bytes"`
 	// BlobRef names the sidecar file under the store's blobs directory, set
 	// exactly when Bytes is absent.
 	BlobRef string `json:"blob_ref,omitempty"`

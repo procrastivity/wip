@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"path/filepath"
@@ -192,6 +193,65 @@ func (h *harness) node(eventType, parent, locator, title string) string {
 			Payload: NodeBirth{Title: title, Locator: locator, Parent: parent, SortKey: sortKey},
 		}, nil
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Content
+// ---------------------------------------------------------------------------
+
+// write puts content on a node through the one write path, and returns the event
+// it produced.
+//
+// The event type is deliberately not an argument: ContentDraft derives it from the
+// kind (the `schema` Brief §B), so a test that could name it would be able to
+// write a combination the store is supposed to make unexpressible.
+func (h *harness) write(node string, kind ContentKind, data []byte) Event {
+	h.t.Helper()
+	return h.commitWith(func(_ context.Context, tx *Tx) ([]Draft, error) {
+		draft, err := tx.ContentDraft(node, kind, data)
+		if err != nil {
+			return nil, err
+		}
+		return []Draft{draft}, nil
+	})[0]
+}
+
+// writeError is write expecting a refusal.
+func (h *harness) writeError(node string, kind ContentKind, data []byte) error {
+	h.t.Helper()
+	return h.commitError(func(_ context.Context, tx *Tx) ([]Draft, error) {
+		draft, err := tx.ContentDraft(node, kind, data)
+		if err != nil {
+			return nil, err
+		}
+		return []Draft{draft}, nil
+	})
+}
+
+// wantContent asserts a node's whole content of one kind is byte-identical to
+// what was written, through the data-access layer that resolves in-store bytes
+// and sidecar files uniformly.
+func (h *harness) wantContent(what, node string, kind ContentKind, want []byte) {
+	h.t.Helper()
+	got, err := h.Content(h.ctx, node, kind)
+	if err != nil {
+		h.t.Errorf("%s: read %s content: %v", what, kind, err)
+		return
+	}
+	if !bytes.Equal(got, want) {
+		h.t.Errorf("%s: %s content is %d bytes (%s), want %d bytes (%s)",
+			what, kind, len(got), abbreviate(got), len(want), abbreviate(want))
+	}
+}
+
+// abbreviate renders content for a failure message without pasting a mebibyte
+// into the test log.
+func abbreviate(data []byte) string {
+	const limit = 48
+	if len(data) <= limit {
+		return strconv.Quote(string(data))
+	}
+	return strconv.Quote(string(data[:limit])) + "..."
 }
 
 // ---------------------------------------------------------------------------
