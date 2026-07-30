@@ -24,9 +24,7 @@ func runInStdin(t *testing.T, dir string, env []string, stdin string, args ...st
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
-	if env != nil {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = hermeticEnv(t, env)
 	cmd.Stdin = bytes.NewBufferString(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

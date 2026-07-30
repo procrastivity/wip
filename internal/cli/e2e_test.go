@@ -43,12 +43,26 @@ type result struct {
 	exitCode int
 }
 
+// hermeticEnv is the process environment plus the caller's overrides, with
+// WIP_CLAUDE_SKILLS_DIR defaulted to a per-test temp dir when the caller
+// does not set it — the suite must never read this host's real skill
+// install (found live: a ~/.claude/skills/wip stamped by an older build
+// failed doctor inside tests that never mentioned skills).
+func hermeticEnv(t *testing.T, env []string) []string {
+	t.Helper()
+	out := append(os.Environ(), env...)
+	for _, e := range env {
+		if strings.HasPrefix(e, "WIP_CLAUDE_SKILLS_DIR=") {
+			return out
+		}
+	}
+	return append(out, "WIP_CLAUDE_SKILLS_DIR="+t.TempDir())
+}
+
 func run(t *testing.T, env []string, args ...string) result {
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
-	if env != nil {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = hermeticEnv(t, env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
