@@ -40,7 +40,15 @@ func DataDir() (string, error) {
 
 // DBPath returns $XDG_DATA_HOME/wip/<host>/wip.db (D35, D49) — one SQLite
 // database per user per host, holding everything durable.
+//
+// WIP_DB_PATH, when set, overrides the computed path outright — the same
+// escape-hatch pattern manifest-install's WIP_CLAUDE_SKILLS_DIR uses, so
+// tests and worked examples exercise the real store through the real verbs
+// without ever touching the one on the host that ran them.
 func DBPath() (string, error) {
+	if p := os.Getenv("WIP_DB_PATH"); p != "" {
+		return p, nil
+	}
 	dir, err := DataDir()
 	if err != nil {
 		return "", err

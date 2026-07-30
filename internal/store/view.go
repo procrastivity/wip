@@ -382,6 +382,31 @@ func (v View) RepoByRemote(ctx context.Context, remoteURL string) (Repo, bool, e
 	return r, true, nil
 }
 
+// Repos lists every Repo on this host (D34: state is host-local, so this is
+// exactly the host-wide view `status` shows outside any known Clone).
+func (v View) Repos(ctx context.Context) ([]Repo, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT id, COALESCE(remote_url, ''), COALESCE(identity_remote, ''), COALESCE(label, '')
+		 FROM repos ORDER BY birth_event`)
+	if err != nil {
+		return nil, fmt.Errorf("store: read repos: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Repo
+	for rows.Next() {
+		var r Repo
+		if err := rows.Scan(&r.ID, &r.RemoteURL, &r.IdentityRemote, &r.Label); err != nil {
+			return nil, fmt.Errorf("store: read repos: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read repos: %w", err)
+	}
+	return out, nil
+}
+
 // Clone is a Clone row. The git-common-dir is its natural key: it resolves
 // identically from a subdirectory and from a linked worktree.
 type Clone struct {
@@ -444,6 +469,72 @@ func (v View) Worktree(ctx context.Context, id string) (Worktree, error) {
 		return Worktree{}, fmt.Errorf("store: read worktree %s: %w", id, err)
 	}
 	return w, nil
+}
+
+// WorktreeByName resolves a Worktree by its natural key: the clone it belongs
+// to, plus its git worktree name (empty for the main worktree, D37's null
+// case). The false result means no Worktree row exists yet for this pair.
+func (v View) WorktreeByName(ctx context.Context, clone, name string) (Worktree, bool, error) {
+	var w Worktree
+	err := v.q.QueryRowContext(ctx,
+		`SELECT id, clone, COALESCE(name, '') FROM worktrees WHERE clone = ? AND COALESCE(name, '') = ?`,
+		clone, name).Scan(&w.ID, &w.Clone, &w.Name)
+	if err == sql.ErrNoRows {
+		return Worktree{}, false, nil
+	}
+	if err != nil {
+		return Worktree{}, false, fmt.Errorf("store: resolve worktree %s/%s: %w", clone, name, err)
+	}
+	return w, true, nil
+}
+
+// ClonesOfRepo lists a Repo's live Clones — the repo-wide view `status` shows
+// from inside any of them, and the read-only companion `relink`/`label` act
+// on (`wip clone list`).
+func (v View) ClonesOfRepo(ctx context.Context, repo string) ([]Clone, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT id, repo, git_common_dir, label FROM clones WHERE repo = ? ORDER BY birth_event`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("store: read the clones of %s: %w", repo, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Clone
+	for rows.Next() {
+		var c Clone
+		if err := rows.Scan(&c.ID, &c.Repo, &c.GitCommonDir, &c.Label); err != nil {
+			return nil, fmt.Errorf("store: read the clones of %s: %w", repo, err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read the clones of %s: %w", repo, err)
+	}
+	return out, nil
+}
+
+// WorktreesOfClone lists a Clone's live Worktrees, main worktree included
+// (its Name is empty, D37's null case).
+func (v View) WorktreesOfClone(ctx context.Context, clone string) ([]Worktree, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT id, clone, COALESCE(name, '') FROM worktrees WHERE clone = ? ORDER BY birth_event`, clone)
+	if err != nil {
+		return nil, fmt.Errorf("store: read the worktrees of %s: %w", clone, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Worktree
+	for rows.Next() {
+		var w Worktree
+		if err := rows.Scan(&w.ID, &w.Clone, &w.Name); err != nil {
+			return nil, fmt.Errorf("store: read the worktrees of %s: %w", clone, err)
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read the worktrees of %s: %w", clone, err)
+	}
+	return out, nil
 }
 
 // BatchMembers lists the Matters currently in a Batch. Membership implies

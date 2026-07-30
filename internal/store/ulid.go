@@ -112,6 +112,22 @@ func timeOfID(id string) (time.Time, error) {
 	return time.UnixMilli(int64(ms)).UTC(), nil
 }
 
+// IsIdentityShaped reports whether s has the fixed 26-character
+// Crockford-Base32 shape every identity in this store uses — the shape test
+// tier addressing dispatches on (tiers Brief, "Labels and addressing"): a
+// locator of this shape is looked up as a ULID, anything else as a label.
+func IsIdentityShaped(s string) bool {
+	if len(s) != IDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if crockfordValue(s[i]) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func crockfordValue(c byte) int {
 	for i := 0; i < len(crockford); i++ {
 		if crockford[i] == c {
