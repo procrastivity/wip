@@ -6,7 +6,7 @@ findings `store-fork` handed over, and the places the implementation diverged
 from the Brief text. Step-11 folds the divergences back into the Brief; this is
 the working record it reads.
 
-Status: **in progress.** Steps 01–06 are complete and tested; steps 07–11 remain.
+Status: **in progress.** Steps 01–08 are complete and tested; steps 09–11 remain.
 See "Where this stands" at the bottom.
 
 ## D46's outcome, consumed (step-01)
@@ -260,6 +260,15 @@ removed, the owning test fails, the guard is restored.
   checking neither the subject nor the blocker, so one node's
   `dependency.removed` could quietly retire another node's edge and the log would
   read as though it had been theirs.
+- **`closeGate` never read its subject's `kind`** and took the payload's scale as
+  given, so a `gate.closed` could record `reviewed-local` at *Step* scale against
+  a Matter. `archived_matters` asks only whether a declared gate has a row against
+  the Matter, so the mis-scaled close sealed it; and because gate state is one row
+  per `(node, gate)`, that same row took the slot the real close needed — the
+  Matter could then never be sealed by any later event. A gate binds to a scale
+  (D12) and closes against a node *at* that scale, so the rule now reads the
+  subject's kind and refuses a scale that is not it. It is `applyReplace`'s miss
+  again: a scale trusted from the payload when the row could have been asked.
 - **`Cycles` reported one loop per tangle, not every loop.** It was one
   depth-first sweep recording back edges; every loop contains a back edge, but
   two loops can share one, and only the loop on the current path was reported,
@@ -294,10 +303,25 @@ next Matter finds them rather than rediscovering them.
 - **A tombstone can be undone by raw SQL.** `UPDATE edges SET tombstone_event =
   NULL, last_event = <newer>` succeeds; the `advance` trigger only catches the
   careless form. "A tombstone is final" wants a trigger, which is a migration.
-- **`content.created` / `cursor.moved` / `dependency.added` accept a tombstoned
-  node as their target.** D44 guarantees *prior* references stay valid; new ones
-  pointing at a corpse look like `doctor`'s business. (`dependency.added` is
-  mitigated: `edges_in_force` keeps such an edge out of every read.)
+- **`content.created` / `cursor.moved` / `dependency.added` / `gate.closed`
+  accept a tombstoned node as their target.** D44 guarantees *prior* references
+  stay valid; new ones pointing at a corpse look like `doctor`'s business.
+  (`dependency.added` is mitigated: `edges_in_force` keeps such an edge out of
+  every read. `gate.closed` is mitigated too: `archived_matters` excludes
+  tombstoned Matters before it ever looks at a gate.)
+- **A `gate.closed` may run in another Repo's tier context.** Nothing compares
+  the event's `repo` dimension with the Repo of the node it closes a gate
+  against, so a command running in Repo B closes a gate on a Matter of Repo A
+  and seals it under A's declarations. Same family as `clone.attached` never
+  checking `payload.repo == event.repo`, and the same answer: the verb layer
+  resolves the tier context, and a mismatch is a caller that lied about where it
+  was.
+- **`InProgress` answers store-wide, with no Repo dimension.** Invariant 2's
+  query is one seek into `nodes_lifecycle`, which is keyed
+  `(lifecycle, birth_event)` and carries no Repo — so "what is in progress"
+  spans every Repo in the store. The founding question is asked from somewhere,
+  and `read-surface` composes the output; whether the filter belongs in the
+  query (and therefore in the index) is its call, not this Matter's.
 - **`backlog.declined` overwrites `detail` with the decline reason**, destroying a
   `deferred` entry's rationale in the projection. The log keeps both, and there is
   no second free-text column.
@@ -316,10 +340,20 @@ projection rules for the whole P1 taxonomy, `Rebuild`, the migration framework
 with backup-before-migrate, the read surface, the static cycle check, content
 storage with spill, and Repo-tier config.
 
-Tested: **steps 02–06.** The envelope, every entity table and its projection
+Tested: **steps 02–08.** The envelope, every entity table and its projection
 rule, `Rebuild`'s column-for-column fidelity, content and spill, edges and
-tombstones, and the static cycle check — which discharges half the seal
-condition.
+tombstones, the static cycle check — which discharges half the seal condition —
+gate storage at all three scales, and invariant 2.
 
-Not done: **steps 07–10's tests** (gate state, invariant 2's query plan,
-migrations, round-trip) and **step-11's reconciliation** of the Brief.
+Two notes on step-08, because the claim it makes is easy to weaken later.
+`TestInProgressIsAnIndexSeek` asserts SQLite's plan for the `inProgressSQL`
+constant itself and not for a copy of it, so the test cannot pass while the
+query the store runs drifts into a scan. And the projection's own correctness —
+which is all invariant 2 rests on, since the answer is never recomputed — is
+held by an oracle rather than by the named cases: the whole log folded in Go,
+over one fixed pseudorandom history of creations, all five moves at all three
+scales, mid-history births, removals and replacements across two Repos, compared
+to the table every eighth move and again after a `Rebuild`.
+
+Not done: **steps 09–10's tests** (migrations, round-trip) and **step-11's
+reconciliation** of the Brief.

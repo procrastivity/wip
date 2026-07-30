@@ -351,6 +351,14 @@ func (h *harness) closeGate(node, gate string, scale Scale) Event {
 	return h.commit(Draft{Type: TypeGateClosed, Subject: node, Payload: GateClosed{Gate: gate, Scale: scale}})[0]
 }
 
+// closeGateError is closeGate expecting the store to turn it down.
+func (h *harness) closeGateError(node, gate string, scale Scale) error {
+	h.t.Helper()
+	return h.commitError(func(_ context.Context, _ *Tx) ([]Draft, error) {
+		return []Draft{{Type: TypeGateClosed, Subject: node, Payload: GateClosed{Gate: gate, Scale: scale}}}, nil
+	})
+}
+
 // wantLifecycle asserts a node is in one state, through the read surface.
 func (h *harness) wantLifecycle(node string, want Lifecycle) {
 	h.t.Helper()
@@ -484,6 +492,16 @@ func (h *harness) locatorOf(node string) string {
 		return node
 	}
 	return locator
+}
+
+// locators renders a run of identities by locator, for a failure message.
+func (h *harness) locators(ids []string) []string {
+	h.t.Helper()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, h.locatorOf(id))
+	}
+	return out
 }
 
 // rawEdgeSQL is the INSERT insertEdge performs. It is shared with the tests that

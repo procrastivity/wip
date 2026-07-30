@@ -385,6 +385,28 @@ func closeGate(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if p.Gate == "" || p.Scale == "" {
 		return fmt.Errorf("store: %s must name a gate and a scale", ev.Type)
 	}
+	// A gate binds to a scale (D12) and closes against a node *at* that scale, so
+	// the payload's scale is the subject's own kind and never a second opinion
+	// about it. Nothing downstream re-checks it: `archived_matters` asks only
+	// whether a declared gate has a row against the Matter, and gate state is one
+	// row per (node, gate) — so a mis-scaled close would seal a Matter nobody
+	// reviewed, and would take the slot the real close needs.
+	//
+	// The subject's liveness is deliberately not asked: a close against a removed
+	// node is the same known gap `content.created` and `dependency.added` have,
+	// and D44 keeps its history readable either way.
+	var kind Scale
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT kind FROM nodes WHERE id = ?`, ev.Subject).Scan(&kind); {
+	case err == sql.ErrNoRows:
+		return fmt.Errorf("store: %s names no node as its subject (%s)", ev.Type, ev.Subject)
+	case err != nil:
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if p.Scale != kind {
+		return fmt.Errorf("store: %s closes %s at %s scale against a %s: a gate closes at the scale of its subject (D12)",
+			ev.Type, p.Gate, p.Scale, kind)
+	}
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO gate_state (node, gate, scale, closed_at, last_event) VALUES (?, ?, ?, ?, ?)`,
 		ev.Subject, p.Gate, string(p.Scale), ev.OccurredAt.UTC().Format(timestampLayout), ev.ID)

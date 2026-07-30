@@ -161,16 +161,6 @@ func (h *harness) wantCanonicalCycles(what string) {
 	}
 }
 
-// locators renders a run of identities by locator.
-func (h *harness) locators(ids []string) []string {
-	h.t.Helper()
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, h.locatorOf(id))
-	}
-	return out
-}
-
 // wantCheckAgreesWithAudit holds the two callers to one answer: every edge of every
 // loop the audit reports is an edge the add-time check would have refused. They
 // share liveEdgeGraph so that this is true by construction — and it is asserted
