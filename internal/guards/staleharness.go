@@ -1,0 +1,74 @@
+package guards
+
+// step-08 — carries the sole `guards/stale-artifact-step ← manifest-install`
+// edge (HANDOFF §5's documented single-Step exception), placed last so
+// steps 01-07 never wait on it. `doctor`'s fifth check compares the
+// manifest the current binary would generate against what `wip install
+// claude-code` last stamped on disk, via `internal/manifest.Drift` —
+// `manifest-install`'s own drift-detection function, exposed by that Matter
+// and called rather than reimplemented here ("one function, called by the
+// Matter that needs it," the same pattern steps 02-04 follow).
+//
+// The reported code, `advisory.stale-harness-artifact`, is provisional: it
+// is not one of vocabulary's five drafted messages (its own step-14 audit
+// confirms that list — 0444, tracked-`.wip/`, unknown-clone, cycle,
+// gate-order — is exhaustive and closed), so this Matter drafts it itself,
+// in the same structural shape chassis's envelope fixes, flagged here as a
+// gap for `manifest-install`'s Brief to reconcile.
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"github.com/procrastivity/wip/internal/buildinfo"
+	"github.com/procrastivity/wip/internal/harness/claudecode"
+	"github.com/procrastivity/wip/internal/manifest"
+)
+
+// staleHarnessCode is this Matter's own provisional draft, not a
+// vocabulary-ratified code — see the package-level note above.
+const staleHarnessCode = "advisory.stale-harness-artifact"
+
+// CheckStaleHarnessArtifact compares what the current binary would generate
+// for the claude-code harness against what the last `wip install
+// claude-code` stamped on disk, reporting every drifted, added, or removed
+// generated file (D65) — never just the first. root is the *cobra.Command
+// NewRootCommand is assembling (the same reference `wip manifest`/`wip
+// install` already capture), so the manifest this reads reflects every verb
+// actually registered. A never-installed target carries no stamp and is
+// not a finding — there is nothing to have drifted from.
+func CheckStaleHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
+	dir, err := claudecode.InstallDir()
+	if err != nil {
+		return nil, err
+	}
+	stamp, ok, err := manifest.ReadStamp(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	m, err := manifest.Build(root, build)
+	if err != nil {
+		return nil, err
+	}
+	files, err := claudecode.Generate(m)
+	if err != nil {
+		return nil, err
+	}
+	want := manifest.ChecksumFiles(files)
+
+	drifted := manifest.Drift(want, stamp)
+	findings := make([]Finding, 0, len(drifted))
+	for _, d := range drifted {
+		findings = append(findings, Finding{
+			Code: staleHarnessCode,
+			Message: fmt.Sprintf("found: %s harness artifact %s %s since last install; run `wip install %s` to refresh it",
+				claudecode.Name, d.Path, d.Reason, claudecode.Name),
+		})
+	}
+	return findings, nil
+}

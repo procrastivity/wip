@@ -8,12 +8,15 @@ import (
 	"strings"
 )
 
-// worktreeRoot runs `git rev-parse --show-toplevel` in dir, absolute-path
+// WorktreeRoot runs `git rev-parse --show-toplevel` in dir, absolute-path
 // form: the top of the working tree this location checks out to, which is
 // where `.wip/` lives (MODEL §3.1). `tiers` already shells out for
 // git-common-dir and git-dir; this is the one additional fact this package
-// needs that no existing exported helper provides.
-func worktreeRoot(ctx context.Context, dir string) (string, error) {
+// needs that no existing exported helper provides. Exported so `guards` can
+// resolve the same root from a bare `dir` for its doctor-side tracked-`.wip/`
+// check, which (unlike the render precondition) has no already-resolved
+// Current to read it off of.
+func WorktreeRoot(ctx context.Context, dir string) (string, error) {
 	return runGit(ctx, dir, "rev-parse", "--path-format=absolute", "--show-toplevel")
 }
 

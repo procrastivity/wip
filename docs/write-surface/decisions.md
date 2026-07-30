@@ -130,6 +130,10 @@ the same command later — `guards`, when built, is the Matter that wires this
 precondition into `write-surface`'s existing `DeclareGate` call site, not a
 new verb.
 
+**Resolved by `guards`:** `DeclareGate` (`internal/writesurface/gate.go`) now
+calls `guards.WouldViolate` before writing, exactly as anticipated above —
+see `docs/guards/decisions.md` for the implementation.
+
 ## `wip gate declare`/`wip gate close` stay fully general — no hardcoded gate-name block
 
 HANDOFF §1.2 and the workplan both say declaring `verified`/`reviewed`/

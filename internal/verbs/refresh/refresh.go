@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/procrastivity/wip/internal/cliflags"
+	"github.com/procrastivity/wip/internal/guards/trackedwip"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
@@ -45,9 +46,9 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 
 			var result render.Result
 			if len(args) == 1 {
-				result, err = render.Render(cmd.Context(), s, cur, store.ActorHuman, args[0], render.NoPrecondition)
+				result, err = render.Render(cmd.Context(), s, cur, store.ActorHuman, args[0], trackedwip.RenderPrecondition)
 			} else {
-				result, err = render.Refresh(cmd.Context(), s, cur, store.ActorHuman, render.NoPrecondition)
+				result, err = render.Refresh(cmd.Context(), s, cur, store.ActorHuman, trackedwip.RenderPrecondition)
 			}
 			if err != nil {
 				return err

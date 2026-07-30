@@ -76,7 +76,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(initverb.Command(streams))
 	root.AddCommand(cloneverb.Command(streams))
 	root.AddCommand(labelverb.Command(streams))
-	root.AddCommand(doctorverb.Command(streams))
+	root.AddCommand(doctorverb.Command(streams, build, root))
 	root.AddCommand(statusverb.Command(streams))
 
 	// read-surface: status's founding-question content lives inside

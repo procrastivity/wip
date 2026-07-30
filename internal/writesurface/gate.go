@@ -5,16 +5,16 @@ package writesurface
 // the only gate event in P1).
 //
 // Gate-order monotonicity (D12) is a `doctor` check owned by `guards`,
-// called at declare time per the workplan — but `guards` does not exist yet
-// (guards ← tiers, render-scratch). DeclareGate therefore does not call it:
-// there is nothing to call. This is a documented gap, not a silent omission
-// — see docs/write-surface/decisions.md — and `guards`, when built, is the
-// Matter that wires the precondition in here.
+// called here at declare time as an add-time precondition — the mirror of
+// how `depend add` calls `schema`'s cycle check (guards.md step-03: "two
+// callers, one function… ownership reversed"). `guards`'s own audit calls
+// the same `guards.Violations` over every declared binding.
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/procrastivity/wip/internal/guards"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/wiperr"
 )
@@ -31,6 +31,16 @@ func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale s
 	if gate == "" {
 		return wiperr.New("validation.missing-gate-name", "a gate declaration needs a name")
 	}
+
+	declared, err := s.GateDeclarations(ctx, repo)
+	if err != nil {
+		return err
+	}
+	if other, violates := guards.WouldViolate(declared, gate, scale); violates {
+		return wiperr.New("refusal.gate-order-violation",
+			guards.ViolationMessage(store.GateDeclaration{Gate: gate, Scale: scale}, other))
+	}
+
 	return s.DeclareGate(ctx, repo, gate, scale)
 }
 

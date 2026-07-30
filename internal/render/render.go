@@ -75,7 +75,7 @@ func ResolveCurrent(ctx context.Context, s *store.Store, actor store.Actor, dir 
 	if !found {
 		return Current{}, unknownClone()
 	}
-	root, err := worktreeRoot(ctx, dir)
+	root, err := WorktreeRoot(ctx, dir)
 	if err != nil {
 		return Current{}, err
 	}
