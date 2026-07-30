@@ -28,7 +28,10 @@ type idSource struct {
 	now      func() time.Time
 }
 
-func newIDSource() *idSource { return &idSource{now: time.Now} }
+// newIDSourceWithClock builds an idSource with an injectable clock — see
+// store.OpenWithClock's doc for why this exists. Production code always
+// passes time.Now (Open does, via openAt).
+func newIDSourceWithClock(now func() time.Time) *idSource { return &idSource{now: now} }
 
 // next returns the next monotonic identity.
 func (s *idSource) next() string {

@@ -149,12 +149,25 @@ type Store struct {
 
 // Open opens the store at path, creating and migrating it if needed.
 func Open(path string) (*Store, error) {
-	return openAt(path, register, latestVersion(register))
+	return openAt(path, register, latestVersion(register), time.Now)
 }
 
-// openAt is Open pinned to a register and a target version. It exists so a test
-// can populate a database under one version and reopen it under the next.
-func openAt(path string, reg []migration, target int) (*Store, error) {
+// OpenWithClock is Open with an injectable clock for the id source — a test
+// seam. read-surface's Session tests are the motivating case: occurred_at is
+// derived from an event's own id (ulid.go's timeOfID) and the log is
+// append-only (events_no_update, schema_v1.go), so there is no way to place
+// events at chosen, widely-spaced timestamps after the fact; controlling the
+// clock they were minted under is the only way to test an idle-gap threshold
+// without a test that really waits hours. Production code always calls Open.
+func OpenWithClock(path string, clock func() time.Time) (*Store, error) {
+	return openAt(path, register, latestVersion(register), clock)
+}
+
+// openAt is Open pinned to a register, a target version and a clock. The
+// register/target injection exists so a test can populate a database under
+// one version and reopen it under the next; the clock injection is
+// OpenWithClock's (see its doc).
+func openAt(path string, reg []migration, target int, clock func() time.Time) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store: preparing %s: %w", filepath.Dir(path), err)
 	}
@@ -189,7 +202,7 @@ func openAt(path string, reg []migration, target int) (*Store, error) {
 		db:      db,
 		path:    path,
 		blobDir: blobDirFor(path),
-		ids:     newIDSource(),
+		ids:     newIDSourceWithClock(clock),
 		version: version,
 	}
 	if err := s.loadFloor(ctx); err != nil {

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The shared test harness.
@@ -54,7 +55,7 @@ func newHarness(t *testing.T) *harness {
 func newHarnessAt(t *testing.T, path string, reg []migration, target int) *harness {
 	t.Helper()
 
-	s, err := openAt(path, reg, target)
+	s, err := openAt(path, reg, target, time.Now)
 	if err != nil {
 		t.Fatalf("open store at v%d: %v", target, err)
 	}
@@ -91,7 +92,7 @@ func (h *harness) reopen(reg []migration, target int) (*harness, error) {
 	if err := h.Close(); err != nil {
 		h.t.Fatalf("close the store before reopening it: %v", err)
 	}
-	s, err := openAt(path, reg, target)
+	s, err := openAt(path, reg, target, time.Now)
 	if err != nil {
 		return nil, err
 	}

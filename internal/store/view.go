@@ -181,6 +181,37 @@ func (v View) InProgress(ctx context.Context) ([]Node, error) {
 	return v.nodeList(ctx, inProgressSQL)
 }
 
+// plannedSQL and doneSQL are Planned's and Done's whole answer, for the same
+// reason inProgressSQL is: nodes_lifecycle indexes (lifecycle, birth_event)
+// WHERE tombstone_event IS NULL with no restriction to one lifecycle value, so
+// every lifecycle this package queries by gets the same index-seek, no-replay
+// answer invariant 2 requires — not just the one InProgress was written for.
+const plannedSQL = `SELECT ` + nodeColumns + ` FROM nodes
+	 WHERE lifecycle = 'planned' AND tombstone_event IS NULL
+	 ORDER BY birth_event`
+
+const doneSQL = `SELECT ` + nodeColumns + ` FROM nodes
+	 WHERE lifecycle = 'done' AND tombstone_event IS NULL
+	 ORDER BY birth_event`
+
+// Planned answers the founding question's "next to start" raw material
+// (MODEL §1): every node nobody has started yet, in creation order. `next to
+// start` is not this set alone — read-surface's frontier resolver narrows it
+// to the nodes whose `blocked-by` edges are satisfied — but Planned is the
+// tier-free, store-wide fact that narrowing starts from (D66).
+func (v View) Planned(ctx context.Context) ([]Node, error) {
+	return v.nodeList(ctx, plannedSQL)
+}
+
+// Done answers the founding question's "finished" third (MODEL §1): every
+// node whose work is over, in creation order. Done alone does not say
+// *sealed* — D13/D55 make sealed a predicate over lifecycle and gates, closed
+// at every enclosing scale too — so a caller distinguishing sealed from
+// merely locally complete reads gate state on top of this.
+func (v View) Done(ctx context.Context) ([]Node, error) {
+	return v.nodeList(ctx, doneSQL)
+}
+
 // NextSortKey returns a sort key that places a new child after every existing
 // sibling. Presentation-only (D51).
 func (v View) NextSortKey(ctx context.Context, parent string) (int64, error) {
