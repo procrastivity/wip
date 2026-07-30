@@ -797,8 +797,9 @@ func TestInsertContentRefusesAPayloadItCouldNotHaveProduced(t *testing.T) {
 func TestNothingReadsContentBackInFromAFile(t *testing.T) {
 	// The two functions in this package that may read a file, and why.
 	allowed := map[string]string{
-		"SegmentBytes": "resolves a spilled segment from the sidecar file the store itself wrote",
-		"backup":       "copies the database aside before a migration",
+		"SegmentBytes":    "resolves a spilled segment from the sidecar file the store itself wrote",
+		"backup":          "copies the database aside before a migration",
+		"ReapOrphanBlobs": "lists the blob sidecar directory to find files no live content row references (D68); it never reads a blob's bytes back in as content",
 	}
 
 	fset := token.NewFileSet()

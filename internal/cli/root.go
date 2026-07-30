@@ -15,9 +15,11 @@ import (
 	"github.com/procrastivity/wip/internal/selftest"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	bindverb "github.com/procrastivity/wip/internal/verbs/bind"
+	cleanverb "github.com/procrastivity/wip/internal/verbs/clean"
 	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
 	contentverb "github.com/procrastivity/wip/internal/verbs/content"
 	dependverb "github.com/procrastivity/wip/internal/verbs/depend"
+	dispatchverb "github.com/procrastivity/wip/internal/verbs/dispatch"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
 	gateverb "github.com/procrastivity/wip/internal/verbs/gate"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
@@ -27,6 +29,7 @@ import (
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
+	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
 	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
@@ -103,6 +106,11 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(gateverb.Command(streams))
 	root.AddCommand(dependverb.Command(streams))
 	root.AddCommand(bindverb.Command(streams))
+
+	// render-scratch: dispatch-open/refresh, explicit dispatch close, clean.
+	root.AddCommand(refreshverb.Command(streams))
+	root.AddCommand(dispatchverb.Command(streams))
+	root.AddCommand(cleanverb.Command(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json

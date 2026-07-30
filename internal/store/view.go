@@ -633,16 +633,20 @@ type Dispatch struct {
 	Clone       string
 	Worktree    string
 	Open        bool
+	OpenedAt    time.Time
 	CloseReason CloseReason
 }
 
 // OpenDispatch reads the open dispatch on a worktree, if there is one. A stale
 // open bracket is what `refresh` supersedes.
 func (v View) OpenDispatch(ctx context.Context, worktree string) (Dispatch, bool, error) {
-	var d Dispatch
+	var (
+		d        Dispatch
+		openedAt string
+	)
 	err := v.q.QueryRowContext(ctx,
-		`SELECT id, clone, worktree FROM dispatches WHERE worktree = ? AND state = 'open'`, worktree).
-		Scan(&d.ID, &d.Clone, &d.Worktree)
+		`SELECT id, clone, worktree, opened_at FROM dispatches WHERE worktree = ? AND state = 'open'`, worktree).
+		Scan(&d.ID, &d.Clone, &d.Worktree, &openedAt)
 	if err == sql.ErrNoRows {
 		return Dispatch{}, false, nil
 	}
@@ -650,19 +654,24 @@ func (v View) OpenDispatch(ctx context.Context, worktree string) (Dispatch, bool
 		return Dispatch{}, false, fmt.Errorf("store: read the open dispatch on %s: %w", worktree, err)
 	}
 	d.Open = true
+	d.OpenedAt, err = time.Parse(timestampLayout, openedAt)
+	if err != nil {
+		return Dispatch{}, false, fmt.Errorf("store: dispatch %s carries an unreadable opened_at %q: %w", d.ID, openedAt, err)
+	}
 	return d, true, nil
 }
 
 // Dispatch reads one dispatch by identity.
 func (v View) Dispatch(ctx context.Context, id string) (Dispatch, error) {
 	var (
-		d      Dispatch
-		state  string
-		reason sql.NullString
+		d        Dispatch
+		state    string
+		reason   sql.NullString
+		openedAt string
 	)
 	err := v.q.QueryRowContext(ctx,
-		`SELECT id, clone, worktree, state, close_reason FROM dispatches WHERE id = ?`, id).
-		Scan(&d.ID, &d.Clone, &d.Worktree, &state, &reason)
+		`SELECT id, clone, worktree, state, close_reason, opened_at FROM dispatches WHERE id = ?`, id).
+		Scan(&d.ID, &d.Clone, &d.Worktree, &state, &reason, &openedAt)
 	if err == sql.ErrNoRows {
 		return Dispatch{}, fmt.Errorf("store: no dispatch %s", id)
 	}
@@ -671,6 +680,10 @@ func (v View) Dispatch(ctx context.Context, id string) (Dispatch, error) {
 	}
 	d.Open = state == "open"
 	d.CloseReason = CloseReason(reason.String)
+	d.OpenedAt, err = time.Parse(timestampLayout, openedAt)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("store: dispatch %s carries an unreadable opened_at %q: %w", d.ID, openedAt, err)
+	}
 	return d, nil
 }
 
