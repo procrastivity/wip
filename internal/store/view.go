@@ -243,6 +243,23 @@ func (v View) LiveEdges(ctx context.Context) ([]Edge, error) {
 	return v.edgeList(ctx, `SELECT id, blocked, blocker FROM edges_in_force ORDER BY id`)
 }
 
+// EdgeBetween resolves the live edge for one `blocked-by` pair, if any —
+// `wip depend remove`'s lookup: the verb names the two nodes, and removal
+// needs the edge's own identity to tombstone (D44).
+func (v View) EdgeBetween(ctx context.Context, blocked, blocker string) (Edge, bool, error) {
+	var e Edge
+	err := v.q.QueryRowContext(ctx,
+		`SELECT id, blocked, blocker FROM edges_in_force WHERE blocked = ? AND blocker = ?`,
+		blocked, blocker).Scan(&e.ID, &e.Blocked, &e.Blocker)
+	if err == sql.ErrNoRows {
+		return Edge{}, false, nil
+	}
+	if err != nil {
+		return Edge{}, false, fmt.Errorf("store: resolve the edge %s<-%s: %w", blocked, blocker, err)
+	}
+	return e, true, nil
+}
+
 func (v View) edgeList(ctx context.Context, query string, args ...any) ([]Edge, error) {
 	rows, err := v.q.QueryContext(ctx, query, args...)
 	if err != nil {

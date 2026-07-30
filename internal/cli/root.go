@@ -14,9 +14,12 @@ import (
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
+	bindverb "github.com/procrastivity/wip/internal/verbs/bind"
 	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
 	contentverb "github.com/procrastivity/wip/internal/verbs/content"
+	dependverb "github.com/procrastivity/wip/internal/verbs/depend"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
+	gateverb "github.com/procrastivity/wip/internal/verbs/gate"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
 	labelverb "github.com/procrastivity/wip/internal/verbs/label"
@@ -87,6 +90,11 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(contentverb.WorkplanCommand(streams))
 	root.AddCommand(contentverb.BodyCommand(streams))
 	root.AddCommand(contentverb.FindingCommand(streams))
+
+	// write-surface: gates-and-dependencies.
+	root.AddCommand(gateverb.Command(streams))
+	root.AddCommand(dependverb.Command(streams))
+	root.AddCommand(bindverb.Command(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json
