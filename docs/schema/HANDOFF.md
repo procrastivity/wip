@@ -93,15 +93,72 @@ the same of step-09's "a synthetic v1→v2 migration" and step-08's query plan.
    asserts it lands, so a typo in the INSERT cannot make ten refusal tests pass for
    the wrong reason. `rebuild_test.go`'s snapshot comparison is itself tested
    against a single changed column. `cycle_test.go` has an oracle. Ask for this.
-5. Run `go test ./internal/store/ -count=2`, `gofumpt -l -w internal/store/`,
-   `golangci-lint run ./...`, then commit.
+5. Have the **Builder** run `gofumpt -l -w internal/store/` and
+   `golangci-lint run ./...` and leave them clean. You check exit codes, not
+   output. Then commit.
+
+## Keeping your own context small
+
+Steps 02–06 ran the orchestrator's context up much higher than the work needed,
+and the post-mortem is unusually clear-cut: **the expensive activities and the
+useful ones were almost disjoint.** Spend the savings on step-11, which is the one
+Step that genuinely has to hold the whole Brief and `decisions.md` in view at once.
+
+What was expensive and earned nothing:
+
+- **Reading the whole implementation up front** (~3,900 lines across 14 files),
+  to be able to review diffs credibly. It caught no bug. Every bug was caught by
+  the Builder writing a test, or by mutation afterwards.
+- **Reading test files after each Step** — `envelope_test.go` alone is 917 lines,
+  `entities_test.go` 1,742. Reading them confirmed nothing that a mutation did not
+  confirm faster.
+- **A trap worth knowing**: once you have Read a file, the harness echoes later
+  modifications to it back into your context automatically. Reading
+  `fixture_test.go` and `envelope_test.go` early meant every subsequent Builder
+  edit to them arrived as a large unsolicited excerpt, several times over. **Do not
+  read a file a Builder is going to modify.**
+
+What was cheap and caught everything:
+
+- **Mutation verification.** Break the guard, run the suite filtered to
+  `grep -E '^(---|FAIL|ok)'`, confirm the owning test fails, restore. About twenty
+  lines of output per check. This is what confirmed all five bugs, and it is what
+  proved the workplan's five cycle cases were insufficient — reverting `cycle.go`
+  to `HEAD` and watching all five still pass.
+- **`grep -n 'func (h \*harness)'`** over `fixture_test.go` instead of reading it:
+  the helper inventory in one screen.
+- **`sed -n '/func TestName/,/^}/p'`** to read *one* test when a specific claim
+  needs checking, rather than the file it lives in.
+
+So, concretely, for 07–11:
+
+- Read `doc.go`, `docs/schema/decisions.md`, and the workplan. Then stop. Let each
+  Builder read the files its own Step touches — that is what it is for.
+- Ask for a report with a **hard length cap** and a fixed shape: tests added
+  (one line each), non-test changes with the bug each fixes, findings not fixed,
+  fixture additions. Ask it to include **the exact mutation commands it ran**, so
+  re-verifying is copy-paste rather than reconstruction.
+- Filter every command. `go test ... | tail -3`, `golangci-lint ... | tail -2`.
+- **Pair the Steps.** 07+08 in one Builder and 09+10 in another is two dispatches
+  instead of four, and halves the report-and-review overhead. Both pairs are
+  natural (gate storage plus the query over it; migrations plus round-trip), and
+  05–06 already established that pairing inside one agent works. This does not
+  breach the Subagent notes — one Builder, sequential Steps.
+- If you want a diff reviewed by something other than mutation, dispatch a
+  **reader** agent for it and take its summary. Do not read the diff yourself
+  unless a mutation has already told you something is wrong.
 
 **Do not run two Step agents at once.** The workplan's Subagent notes are binding:
 *"Strict Step sequence, one Builder — nothing dispatches concurrently within this
 Matter (HANDOFF §1.5). The intra-Matter fan-out exception belongs to `store-fork`
 alone."* Pairing two Steps inside **one** agent is fine and was done for 05–06.
 
-## The shared test harness — read `fixture_test.go` first
+## The shared test harness — every Builder's first read
+
+*The inventory below is here so **you** do not have to open the file: paste the
+relevant part into a Builder's prompt and tell it to read
+`internal/store/fixture_test.go` itself. `grep -n 'func (h \*harness)'` refreshes
+it in one screen if it has grown.*
 
 Nothing in this store can be written without a tier context (D56 makes the repo
 dimension mandatory on every event but `batch.*`, and the projection tables carry
@@ -138,7 +195,8 @@ over columns — use them, don't hand-list columns.
 
 ## What remains, per Step
 
-Each Step's "Done:" clause in the workplan is the spec. Condensed:
+Each Step's "Done:" clause in the workplan is the spec. Suggested dispatch:
+**07+08 in one Builder, 09+10 in another, then 11 yourself.** Condensed:
 
 - **step-07 — gate state, tests only.** Gate state at Matter/Stage/Step scale;
   `gate.closed`'s payload round-trips; **declare no gate beyond
