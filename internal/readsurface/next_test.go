@@ -124,6 +124,49 @@ func TestNext_EverythingSealed(t *testing.T) {
 	}
 }
 
+// TestNext_NoCursorCandidates_CollapseToOutermostReady is the first-dogfood
+// finding: a ready Planned Matter must appear in the candidate list alone —
+// its own Planned interior (steps, stages) collapses into it, per drafted
+// vocabulary output 4, which lists Matters and one Stage, never a Matter
+// beside its own steps.
+func TestNext_NoCursorCandidates_CollapseToOutermostReady(t *testing.T) {
+	f := newFixture(t)
+	a := f.matter("release-engineering", "release-engineering")
+	_ = f.step(a, "step-01", "First")
+	_ = f.step(a, "step-02", "Second")
+	b := f.matter("install-target-codex", "install-target-codex")
+
+	cur := f.current()
+	view := nextFor(t, f, cur)
+	if view.Kind != NoCursor {
+		t.Fatalf("Kind = %v, want NoCursor", view.Kind)
+	}
+	if len(view.Candidates) != 2 || view.Candidates[0].ID != a || view.Candidates[1].ID != b {
+		t.Errorf("Candidates = %+v, want the two Matters only — no interior steps", view.Candidates)
+	}
+}
+
+// TestNext_NoCursorCandidates_ReadyStageOfBlockedMatterStays pins drafted
+// output 4's own example: a Stage whose blockers are met surfaces even while
+// its Matter is blocked — collapse removes interiors of *ready* ancestors
+// only, never a workable frontier inside a blocked one.
+func TestNext_NoCursorCandidates_ReadyStageOfBlockedMatterStays(t *testing.T) {
+	f := newFixture(t)
+	other := f.matter("scaffold", "scaffold")
+	m := f.matter("tiers", "tiers")
+	f.depend(m, other) // tiers blocked by scaffold, which is Planned: unmet
+	stage := f.stage(m, "identity-rules", "identity-rules")
+
+	cur := f.current()
+	view := nextFor(t, f, cur)
+	if view.Kind != NoCursor {
+		t.Fatalf("Kind = %v, want NoCursor", view.Kind)
+	}
+	if len(view.Candidates) != 2 || view.Candidates[0].ID != other || view.Candidates[1].ID != stage {
+		t.Errorf("Candidates = %+v, want [scaffold tiers/identity-rules]", view.Candidates)
+	}
+}
+
 // TestNext_InProgressNoCursor is the trace-1 finding: no cursor, an empty
 // Planned frontier, nothing blocked — but work actively In Progress (a
 // Matter started immediately with no plan, before any `wip next --set`).

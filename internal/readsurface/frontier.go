@@ -142,6 +142,40 @@ func Frontier(ctx context.Context, v store.View) (ready []store.Node, blocked []
 	return ready, blocked, nil
 }
 
+// CollapseReady narrows a ready list to its outermost nodes: any ready node
+// with an ancestor also in the list is dropped, so a ready Planned Matter
+// appears alone rather than beside its own Planned interior. This is drafted
+// vocabulary output 4's grain — Matters and one Stage, never a Matter's own
+// steps beside it — and it is presentation grain only: the dropped nodes are
+// still ready (starting one auto-starts its ancestors), and a workable
+// frontier inside a *blocked* ancestor still surfaces, because a blocked
+// ancestor is not in the ready list.
+func CollapseReady(ctx context.Context, v store.View, ready []store.Node) ([]store.Node, error) {
+	inReady := make(map[string]bool, len(ready))
+	for _, n := range ready {
+		inReady[n.ID] = true
+	}
+	var out []store.Node
+	for _, n := range ready {
+		drop := false
+		for cur := n; cur.Parent != ""; {
+			parent, err := v.Node(ctx, cur.Parent)
+			if err != nil {
+				return nil, err
+			}
+			if inReady[parent.ID] {
+				drop = true
+				break
+			}
+			cur = parent
+		}
+		if !drop {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
 // Finished is one Done node (MODEL §1's "finished" third), marked sealed vs.
 // merely locally complete (D13) — archivable vs. handoff-ready — vocabulary's
 // "sealed", never "closed". A Done node that is neither is described, never

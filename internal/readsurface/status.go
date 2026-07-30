@@ -62,6 +62,12 @@ func Content(ctx context.Context, v store.View, repo string) (RepoContent, error
 			out.Ready = append(out.Ready, n)
 		}
 	}
+	// Same grain as next's candidate list (CollapseReady): a ready Matter
+	// stands for its own Planned interior in "next to start".
+	out.Ready, err = CollapseReady(ctx, v, out.Ready)
+	if err != nil {
+		return RepoContent{}, err
+	}
 	for _, b := range blocked {
 		if b.Node.Repo == repo {
 			out.Blocked = append(out.Blocked, b)

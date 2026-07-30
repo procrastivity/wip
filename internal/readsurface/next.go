@@ -108,7 +108,10 @@ func next(ctx context.Context, v store.View, cur Current) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	readyInRepo := filterByRepo(ready, repo)
+	readyInRepo, err := CollapseReady(ctx, v, filterByRepo(ready, repo))
+	if err != nil {
+		return View{}, err
+	}
 	blockedInRepo := filterBlockedByRepo(blocked, repo)
 
 	if !set {
