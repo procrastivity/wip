@@ -211,13 +211,26 @@ func matterOf(ctx context.Context, tx *sql.Tx, scale Scale, id, parent string) (
 	if parent == "" {
 		return "", fmt.Errorf("store: a %s needs a parent", scale)
 	}
-	var matter string
-	err := tx.QueryRowContext(ctx, `SELECT matter FROM nodes WHERE id = ?`, parent).Scan(&matter)
+	var (
+		matter string
+		live   bool
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT matter, tombstone_event IS NULL FROM nodes WHERE id = ?`, parent).Scan(&matter, &live)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("store: %s names parent %s, which is not a node", id, parent)
 	}
 	if err != nil {
 		return "", fmt.Errorf("store: resolve the Matter of %s: %w", id, err)
+	}
+	// A removed node keeps its identity and its whole history (D44), but it is not a
+	// place to put anything. A live row under a tombstoned parent is the projection
+	// contradicting itself: Children never reaches it, MatterNodes still lists it,
+	// and its parent — which the immutability guard treats as part of its identity —
+	// names something no reader will resolve.
+	if !live {
+		return "", fmt.Errorf("store: %s names parent %s, which was removed; a tombstoned node is not a place to put a %s",
+			id, parent, scale)
 	}
 	return matter, nil
 }
@@ -289,18 +302,30 @@ func applyReplace(ctx context.Context, tx *sql.Tx, ev Event) error {
 	}
 
 	var (
-		repo, matter, parent string
-		sortKey              int64
+		kind, repo, matter, parent string
+		sortKey                    int64
 	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT repo, matter, COALESCE(parent, ''), sort_key FROM nodes
+		`SELECT kind, repo, matter, COALESCE(parent, ''), sort_key FROM nodes
 		 WHERE id = ? AND tombstone_event IS NULL`, ev.Subject).
-		Scan(&repo, &matter, &parent, &sortKey)
+		Scan(&kind, &repo, &matter, &parent, &sortKey)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("store: %s names %s, which is not a live node", ev.Type, ev.Subject)
 	}
 	if err != nil {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	// This rule *births* a row, and the row it births is a Step. So unlike removal —
+	// where a tombstone means the same thing at every scale, which is why
+	// tombstoneNode is kind-agnostic — this one has to know what it is replacing:
+	// a Stage arriving here would be silently converted into a Step, with everything
+	// it grouped left under a tombstoned parent. Replacing a grouping would have to
+	// say what becomes of what it groups, and no P1 event says that. So the scale is
+	// checked rather than assumed, and the "stage equivalents" the Brief leaves
+	// unearned are not four INSERTs in a migration for this type.
+	if kind != string(ScaleStep) {
+		return fmt.Errorf("store: %s names %s, which is a %s; replacement is step-scoped (a grouping cannot be replaced without saying what becomes of what it groups)",
+			ev.Type, ev.Subject, kind)
 	}
 
 	if err := tombstone(ctx, tx, "nodes", ev.Subject, ev); err != nil {

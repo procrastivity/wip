@@ -39,34 +39,6 @@ func renderDraft(subject string) Draft {
 	}
 }
 
-// rawRefusedBy is harness.rawRefuses with attribution: the guard that fired has
-// to be the guard under test, or the assertion is passing on somebody else's
-// constraint.
-func rawRefusedBy(h *harness, what, want, query string, args ...any) {
-	h.t.Helper()
-	err := h.rawExec(query, args...)
-	if err == nil {
-		h.t.Errorf("%s: the database allowed it, want a refusal", what)
-		return
-	}
-	if !strings.Contains(err.Error(), want) {
-		h.t.Errorf("%s: refused with %v, want a refusal mentioning %q", what, err, want)
-	}
-}
-
-// refusalMentions holds an API-level refusal to naming its reason, for the same
-// reason rawRefusedBy does.
-func refusalMentions(t *testing.T, what string, err error, want string) {
-	t.Helper()
-	if err == nil {
-		t.Errorf("%s: succeeded, want a refusal", what)
-		return
-	}
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("%s: refused with %v, want a refusal mentioning %q", what, err, want)
-	}
-}
-
 // rawRow is one `events` row as the database sees it: eleven values, the three
 // tier dimensions nullable. Nothing in the API can express most of these rows —
 // that is the point — so a test that holds the substrate to the contract builds
