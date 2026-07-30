@@ -13,13 +13,18 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
+	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
 	labelverb "github.com/procrastivity/wip/internal/verbs/label"
+	lifecycleverb "github.com/procrastivity/wip/internal/verbs/lifecycle"
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
+	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
+	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
+	stepverb "github.com/procrastivity/wip/internal/verbs/step"
 	uninstallverb "github.com/procrastivity/wip/internal/verbs/uninstall"
 	versionverb "github.com/procrastivity/wip/internal/verbs/version"
 )
@@ -64,6 +69,17 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(labelverb.Command(streams))
 	root.AddCommand(doctorverb.Command(streams))
 	root.AddCommand(statusverb.Command(streams))
+
+	// write-surface: birth-and-amendment.
+	root.AddCommand(matterverb.Command(streams))
+	root.AddCommand(stageverb.Command(streams))
+	root.AddCommand(stepverb.Command(streams))
+	root.AddCommand(lifecycleverb.StartCommand(streams))
+	root.AddCommand(lifecycleverb.FinishCommand(streams))
+	root.AddCommand(lifecycleverb.CancelCommand(streams))
+	root.AddCommand(lifecycleverb.PauseCommand(streams))
+	root.AddCommand(lifecycleverb.ResumeCommand(streams))
+	root.AddCommand(backlogverb.Command(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json

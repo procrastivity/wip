@@ -82,6 +82,24 @@ func (v View) NodeByLocator(ctx context.Context, matter, locator string) (Node, 
 	return n, nil
 }
 
+// MatterByLocator resolves a Matter by its own locator within a Repo. A
+// Matter is its own Matter (D2), so this is the entry point every multi-
+// segment locator (`<matter>/<stage-or-step>`) resolves its first segment
+// against — `write-surface`'s addressing convention, analogous to how
+// `tiers.ResolveClone`/`ResolveRepo` dispatch on shape for tier locators.
+func (v View) MatterByLocator(ctx context.Context, repo, locator string) (Node, error) {
+	n, err := scanNode(v.q.QueryRowContext(ctx,
+		`SELECT `+nodeColumns+` FROM nodes
+		 WHERE repo = ? AND kind = 'matter' AND locator = ? AND tombstone_event IS NULL`, repo, locator))
+	if err == sql.ErrNoRows {
+		return Node{}, fmt.Errorf("store: %s addresses no live matter in %s", locator, repo)
+	}
+	if err != nil {
+		return Node{}, fmt.Errorf("store: resolve matter %s in %s: %w", locator, repo, err)
+	}
+	return n, nil
+}
+
 // Tombstoned reports whether an identity names a node that was structurally
 // removed. It answers by identity and never by locator, which is what keeps a
 // removed node's history readable: every prior event that named it still
