@@ -43,21 +43,60 @@ type harness struct {
 // and one main Worktree, so every dimension a P1 event can require is available.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	ctx := context.Background()
+	return newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), register, latestVersion(register))
+}
 
-	s, err := Open(filepath.Join(t.TempDir(), "wip.db"))
+// newHarnessAt is newHarness pinned to a path, a migration register and a target
+// version — the three things step-09 has to control. A migration test has to
+// populate a store under one version and open the same file again under the
+// next, and openAt takes an injectable register precisely so it can do that
+// without the binary shipping a v2 to serve a test.
+func newHarnessAt(t *testing.T, path string, reg []migration, target int) *harness {
+	t.Helper()
+
+	s, err := openAt(path, reg, target)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open store at v%d: %v", target, err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	h := &harness{Store: s, t: t, ctx: ctx}
+	h := &harness{Store: s, t: t, ctx: context.Background()}
 	h.Repo = h.attachRepo(RepoAttached{Label: "fixture"})
 	h.Clone = h.attachClone(CloneAttached{Repo: h.Repo, GitCommonDir: "/tmp/fixture/.git", Label: "main"})
 	// The main worktree has no name — D37's null case, and the one the
 	// COALESCE(name,'') unique index exists for.
 	h.Worktree = h.attachWorktree(h.Repo, WorktreeAttached{Clone: h.Clone})
 	return h
+}
+
+// wrap is a harness over an already-open store, carrying this one's tier
+// context. The tier rows are already in the database; re-bootstrapping them
+// would add rows and make every "the store came back exactly as it was"
+// assertion false for a reason that has nothing to do with what is being tested.
+func (h *harness) wrap(s *Store) *harness {
+	return &harness{Store: s, t: h.t, ctx: h.ctx, Repo: h.Repo, Clone: h.Clone, Worktree: h.Worktree}
+}
+
+// reopen closes this harness's store and opens the same file again under reg and
+// target, returning a harness over the reopened store.
+//
+// It returns the open error rather than failing, because half of step-09 is
+// about the opens that are supposed to be refused: a downgrade, a migration that
+// fails partway. It is safe to call again on a harness whose last reopen failed —
+// sql.DB.Close is idempotent and the path is on the old handle either way.
+func (h *harness) reopen(reg []migration, target int) (*harness, error) {
+	h.t.Helper()
+
+	path := h.Path()
+	if err := h.Close(); err != nil {
+		h.t.Fatalf("close the store before reopening it: %v", err)
+	}
+	s, err := openAt(path, reg, target)
+	if err != nil {
+		return nil, err
+	}
+	h.t.Cleanup(func() { _ = s.Close() })
+	return h.wrap(s), nil
 }
 
 // with returns the same store under another tier context.

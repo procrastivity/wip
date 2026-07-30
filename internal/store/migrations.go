@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -145,12 +148,23 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	return nil
 }
 
+// clock is time.Now, indirected the way paths.go indirects os.Hostname: the
+// sidecar's name is part of the contract, and a test that had to race the wall
+// clock to say anything about two backups landing in the same instant would be a
+// test that sometimes lied.
+var clock = time.Now
+
 // backupPath is where backup() puts the pre-migration copy: the store's own
 // path plus the version it is leaving and the moment it left, so a directory
 // listing reads as a history rather than as a pile of `.bak` files.
 func backupPath(path string, fromVersion int, at time.Time) string {
 	return fmt.Sprintf("%s.bak-%d-%s", path, fromVersion, at.UTC().Format(time.RFC3339))
 }
+
+// backupCollisions bounds the disambiguation in backup(). The name carries a
+// timestamp to the second, so reaching this many collisions would mean a
+// pathological number of opens inside one second, each with a migration pending.
+const backupCollisions = 64
 
 // backup checkpoints the WAL and copies the database aside, returning the path
 // written.
@@ -163,7 +177,6 @@ func backup(ctx context.Context, db *sql.DB, path string, fromVersion int) (stri
 	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return "", fmt.Errorf("store: checkpoint before backup: %w", err)
 	}
-	dst := backupPath(path, fromVersion, time.Now())
 
 	src, err := os.Open(path)
 	if err != nil {
@@ -171,9 +184,25 @@ func backup(ctx context.Context, db *sql.DB, path string, fromVersion int) (stri
 	}
 	defer func() { _ = src.Close() }()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("store: create backup %s: %w", dst, err)
+	// O_EXCL always, and a name that steps aside when it is taken. Two rules
+	// pulling against each other, both load-bearing: a backup that overwrote the
+	// one already there would destroy exactly what it exists to preserve, and an
+	// open that refused because the name was taken would make "wip cannot open
+	// your store until you delete your only backup" a thing this framework says.
+	// The collision is not hypothetical — it is the retry after a migration that
+	// failed a moment ago, which is the open that most needs its own copy.
+	base := backupPath(path, fromVersion, clock())
+	dst := base
+	var out *os.File
+	for n := 2; ; n++ {
+		out, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrExist) || n > backupCollisions {
+			return "", fmt.Errorf("store: create backup %s: %w", dst, err)
+		}
+		dst = fmt.Sprintf("%s-%d", base, n)
 	}
 	if _, err := io.Copy(out, src); err != nil {
 		_ = out.Close()
@@ -200,8 +229,12 @@ func (s *Store) ensureProjectionVersion(ctx context.Context) error {
 		// A store being born: its projection is current by definition.
 		return s.setMeta(ctx, projectionVersionKey, fmt.Sprint(projectionVersion))
 	}
-	var have int
-	if _, err := fmt.Sscanf(recorded, "%d", &have); err != nil {
+	// strconv.Atoi and not a scan: a scan accepts a leading number and discards
+	// whatever follows it, so a garbled `1x` would read as 1 and the store would
+	// decide it had nothing to refold. Silently skipping a rebuild the store needs
+	// is the one wrong answer this branch can give.
+	have, err := strconv.Atoi(recorded)
+	if err != nil {
 		return fmt.Errorf("store: %s records an unreadable projection version %q", projectionVersionKey, recorded)
 	}
 	switch {

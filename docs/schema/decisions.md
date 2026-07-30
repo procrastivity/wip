@@ -6,7 +6,7 @@ findings `store-fork` handed over, and the places the implementation diverged
 from the Brief text. Step-11 folds the divergences back into the Brief; this is
 the working record it reads.
 
-Status: **in progress.** Steps 01–08 are complete and tested; steps 09–11 remain.
+Status: **in progress.** Steps 01–10 are complete and tested; step-11 remains.
 See "Where this stands" at the bottom.
 
 ## D46's outcome, consumed (step-01)
@@ -285,6 +285,24 @@ removed, the owning test fails, the guard is restored.
   a naive enumerator, plus a transitive closure computed by relaxation rather than
   by a walk) — it fails ~13 of 120 trials against the old code and none against
   the new.
+- **A backup refused to be taken because the last one had the same name.** The
+  sidecar is stamped to the second and created `O_EXCL`, so two backups inside
+  one second collided and the second open failed — leaving the store unopenable,
+  with the obvious remedy being to delete the only copy of the pre-migration
+  state. The collision is not hypothetical: it is precisely the retry after a
+  migration that failed a moment ago, which is the open that most needs its own
+  copy. `O_EXCL` is right and stays — a backup that overwrote the one already
+  there would destroy exactly what it exists to preserve — so the *name* steps
+  aside instead, taking a `-2` suffix on a collision. That is a departure from
+  the Brief's example name, in the one case the example does not cover.
+  `time.Now` is now indirected as `clock`, the way `paths.go` indirects
+  `os.Hostname`, because a test that had to race the wall clock to say this would
+  be a test that sometimes lied.
+- **`ensureProjectionVersion` read its version with a scan**, which accepts a
+  leading number and discards whatever follows: a `store_meta` value of `1x` read
+  as 1, and the store decided it had nothing to refold. Silently skipping a
+  rebuild the store needs is the one wrong answer that branch can give, and that
+  is the answer it gave. It is `strconv.Atoi` now.
 
 ## Known gaps, deliberately not closed here
 
@@ -331,6 +349,21 @@ next Matter finds them rather than rediscovering them.
   appending to findings after reading them will hit it.
 - **A nested `Commit` inside a decide function deadlocks** rather than erroring
   (`SetMaxOpenConns(1)`). A guard on `Tx` would be cheap.
+- **A migration cannot backfill a projection column.** The `*_advance` guard
+  refuses any `UPDATE` that does not move `last_event` to a strictly newer event,
+  and a migration has no event to move it to — so a numbered migration that adds
+  a column to `nodes` can add it and can never fill it in. That is the shape
+  working as designed rather than a hole: under D61 a change to what the log
+  *means* is a `projection_version` bump and a refold, not a backfill over live
+  primary data. It is recorded because the first person to write a v2 will reach
+  for the `UPDATE` first.
+- **The backup copies `wip.db` and not the blob sidecar directory.** Content over
+  the spill threshold lives in `blobs/` beside the database and is referenced by
+  a `content` row, so restoring a backup restores rows pointing at files the
+  backup does not contain. It is harmless for the case the backup exists for — a
+  migration touches no blob, so the files are still there — and it is a real hole
+  for a backup kept and restored later, after `clean` has reaped orphans. Reaping
+  and backup retention are the same owner's problem.
 
 ## Where this stands
 
@@ -340,7 +373,7 @@ projection rules for the whole P1 taxonomy, `Rebuild`, the migration framework
 with backup-before-migrate, the read surface, the static cycle check, content
 storage with spill, and Repo-tier config.
 
-Tested: **steps 02–08.** The envelope, every entity table and its projection
+Tested: **steps 02–10.** The envelope, every entity table and its projection
 rule, `Rebuild`'s column-for-column fidelity, content and spill, edges and
 tombstones, the static cycle check — which discharges half the seal condition —
 gate storage at all three scales, and invariant 2.
@@ -355,5 +388,23 @@ over one fixed pseudorandom history of creations, all five moves at all three
 scales, mid-history births, removals and replacements across two Repos, compared
 to the table every eighth move and again after a `Rebuild`.
 
-Not done: **steps 09–10's tests** (migrations, round-trip) and **step-11's
-reconciliation** of the Brief.
+Two notes on step-09, for the same reason. The migrations it exercises are
+**synthetic and live in the test file** — `openAt` takes an injectable register
+precisely so a v2 can exist for the length of a test, and shipping a real one to
+make the framework testable would be the retrofit the v1 baseline exists to
+prevent. And the assertions are comparative rather than existential, because "the
+migration applied" is true of a framework that ran one twice, ran two out of
+order, or re-ran the baseline underneath: a store that reaches v3 by migrating is
+compared object-for-object against one built at v3 directly *and* against one
+that got there in two separate opens, and the sidecar a failed migration leaves
+is restored and the restored store compared to the one from before.
+
+Step-10 is deliberately small. Four of its five obligations were already
+discharged by the Steps that built the things; what it adds is the round trip
+(close the database, open it again, and every answer the read surface gives is
+the answer it gave — including the ones resolved from a blob sidecar and the ones
+that are refusals), D56 as a table-driven assertion over `registeredTypes()`
+rather than over three samples, D51 stated as what a reorder does *not* move, and
+`ErrNoEvent` — invariant 1 from the side nothing had tested.
+
+Not done: **step-11's reconciliation** of the Brief.
