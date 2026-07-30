@@ -95,21 +95,40 @@ func reaches(graph waitsFor, from, to string) bool {
 }
 
 // Cycles returns every cycle in the live edge set, each as the sequence of node
-// identities around it in waits-for order (the first node closes the loop).
+// identities around it in waits-for order — the last node waits for the first, so
+// the first is where the loop closes.
 //
 // This is the store-wide audit `doctor` runs. It shares liveEdgeGraph and the
 // same notion of an edge with WouldCycle, so a cycle the audit finds is exactly a
 // cycle the add-time check would have refused — which matters, because a cycle
 // present in the store is by definition one that got there some other way (an
 // edge added before the check existed, a hand-edited database, a bug).
+//
+// Every distinct loop is reported, and each of them exactly once. That is what the
+// shape below is for, and it is why this is not one depth-first sweep recording
+// back edges: such a sweep finds at least one loop per tangle but not all of them,
+// because two loops can share the edge that closes them and only the one on the
+// current path is seen. An audit that reports one loop out of two sends its reader
+// round again after every repair. So each loop is enumerated from its own smallest
+// node, over a walk that never steps below that node: a loop has exactly one
+// smallest node, so it is found exactly once — and it comes back rotated to start
+// there, which is the canonical form that makes the same loop reached from two
+// entry points one answer rather than two. See step-06's report.
+//
+// The work is bounded by the number of loops, which in a personal store (D34)
+// whose edges are a plan a person wrote is a handful — and is nothing at all in the
+// case that runs every day, since a store with no cycles never leaves the first
+// hop of any walk.
 func (v View) Cycles(ctx context.Context) ([][]string, error) {
 	graph, err := v.liveEdgeGraph(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Deterministic iteration: two runs of doctor over one store report the same
-	// cycles in the same order.
+	// Deterministic iteration at both levels — the entry points here and the hops
+	// below — so two runs of doctor over one store report the same cycles in the
+	// same order. Only nodes that wait for something can be on a loop, so the keys
+	// of the graph are every entry point there is.
 	starts := make([]string, 0, len(graph))
 	for node := range graph {
 		starts = append(starts, node)
@@ -117,70 +136,38 @@ func (v View) Cycles(ctx context.Context) ([][]string, error) {
 	sort.Strings(starts)
 
 	var (
-		found   [][]string
-		seenKey = map[string]bool{}
-		onStack = map[string]bool{}
-		done    = map[string]bool{}
-		path    []string
+		found  [][]string
+		path   []string
+		onPath map[string]bool
 	)
-
-	var walk func(node string)
-	walk = func(node string) {
-		onStack[node] = true
-		path = append(path, node)
-
+	// walk extends path one hop at a time, looking for the way back to start.
+	var walk func(start, node string)
+	walk = func(start, node string) {
 		next := append([]string(nil), graph[node]...)
 		sort.Strings(next)
 		for _, target := range next {
 			switch {
-			case onStack[target]:
-				cycle := cycleFrom(path, target)
-				if key := cycleKey(cycle); !seenKey[key] {
-					seenKey[key] = true
-					found = append(found, cycle)
-				}
-			case !done[target]:
-				walk(target)
+			case target == start:
+				// The path closed: report it as it stands, starting at start.
+				found = append(found, append([]string(nil), path...))
+			case target < start || onPath[target]:
+				// Below start: every loop through it has a smaller node than start,
+				// so it belongs to that node's pass and not to this one. Already on
+				// the path: going round twice is not one loop.
+				continue
+			default:
+				onPath[target] = true
+				path = append(path, target)
+				walk(start, target)
+				path = path[:len(path)-1]
+				onPath[target] = false
 			}
 		}
-
-		path = path[:len(path)-1]
-		onStack[node] = false
-		done[node] = true
 	}
-	for _, node := range starts {
-		if !done[node] {
-			walk(node)
-		}
+	for _, start := range starts {
+		path = []string{start}
+		onPath = map[string]bool{start: true}
+		walk(start, start)
 	}
 	return found, nil
-}
-
-// cycleFrom slices the current DFS path from the node the back edge closed on.
-func cycleFrom(path []string, target string) []string {
-	for i, node := range path {
-		if node == target {
-			return append([]string(nil), path[i:]...)
-		}
-	}
-	return append([]string(nil), path...)
-}
-
-// cycleKey canonicalises a cycle so the same loop found from two entry points is
-// reported once: rotate it to start at its smallest identity.
-func cycleKey(cycle []string) string {
-	if len(cycle) == 0 {
-		return ""
-	}
-	smallest := 0
-	for i, node := range cycle {
-		if node < cycle[smallest] {
-			smallest = i
-		}
-	}
-	key := ""
-	for i := range cycle {
-		key += cycle[(smallest+i)%len(cycle)] + ">"
-	}
-	return key
 }

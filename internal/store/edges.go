@@ -75,10 +75,31 @@ func insertEdge(ctx context.Context, tx *sql.Tx, ev Event) error {
 }
 
 // tombstoneEdge projects dependency.removed.
+//
+// The payload names both the edge and the blocker, which is redundant with the row
+// the edge id already identifies — and this is where that redundancy earns its
+// keep. `dependency.removed`'s subject is the *blocked* node (see payloads.go), so
+// the event states which pair it is dissolving, and an event naming an edge that
+// belongs to some other pair is describing something that did not happen. Checked
+// here, it is a write-time error; unchecked, one node's removal quietly tombstoned
+// another node's edge. Same reasoning as applyTransition's From.
 func tombstoneEdge(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p DependencyChange
 	if err := decode(ev, &p); err != nil {
 		return err
+	}
+	var blocked, blocker string
+	err := tx.QueryRowContext(ctx,
+		`SELECT blocked, blocker FROM edges WHERE id = ?`, p.Edge).Scan(&blocked, &blocker)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names edge %q, which is not an edge", ev.Type, p.Edge)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if blocked != ev.Subject || blocker != p.Blocker {
+		return fmt.Errorf("store: %s says %s stops waiting for %s, but edge %s is %s waiting for %s",
+			ev.Type, ev.Subject, p.Blocker, p.Edge, blocked, blocker)
 	}
 	return tombstone(ctx, tx, "edges", p.Edge, ev)
 }

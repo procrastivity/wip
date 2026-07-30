@@ -29,40 +29,6 @@ import (
 // Writing a history worth rebuilding
 // ---------------------------------------------------------------------------
 
-// depend adds a `blocked-by` edge, refusing a cycle before anything is written —
-// which is the arrangement itself: the static check runs in the decide function,
-// so a cycle is never recorded as an event at all (D28, D29).
-func (h *harness) depend(blocked, blocker string) string {
-	h.t.Helper()
-	var edge string
-	h.commitWith(func(ctx context.Context, tx *Tx) ([]Draft, error) {
-		cycle, err := tx.WouldCycle(ctx, blocked, blocker)
-		if err != nil {
-			return nil, err
-		}
-		if cycle {
-			return nil, fmt.Errorf("test: %s blocked by %s would close a cycle", blocked, blocker)
-		}
-		edge = tx.NewID()
-		return []Draft{{
-			Type:    TypeDependencyAdded,
-			Subject: blocked,
-			Payload: DependencyChange{Edge: edge, Blocker: blocker},
-		}}, nil
-	})
-	return edge
-}
-
-// undepend removes an edge, which tombstones it rather than deleting it (D44).
-func (h *harness) undepend(blocked, edge, blocker string) {
-	h.t.Helper()
-	h.commit(Draft{
-		Type:    TypeDependencyRemoved,
-		Subject: blocked,
-		Payload: DependencyChange{Edge: edge, Blocker: blocker},
-	})
-}
-
 // insertStep is step.inserted: a Step arriving in a plan that already exists,
 // which is amendment and not creation even though it projects the same row.
 func (h *harness) insertStep(parent, locator, title string, sortKey int64) string {

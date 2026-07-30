@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -362,6 +364,162 @@ func (h *harness) wantLifecycle(node string, want Lifecycle) {
 }
 
 // ---------------------------------------------------------------------------
+// Edges
+// ---------------------------------------------------------------------------
+
+// dependDecide is the decide function `write-surface`'s `wip depend add <node>
+// --blocked-by <node>` will be, and the arrangement is the point: the static
+// check runs *inside* the decide function, so a cycle is refused before anything
+// is persisted and no `dependency.added` is ever appended (CONTRACT §B, D28,
+// D29). The refusal's wording is the caller's, because the verb lives in another
+// Matter; what belongs to `schema` is WouldCycle's answer.
+func dependDecide(blocked, blocker string, edge *string) func(context.Context, *Tx) ([]Draft, error) {
+	return func(ctx context.Context, tx *Tx) ([]Draft, error) {
+		cycle, err := tx.WouldCycle(ctx, blocked, blocker)
+		if err != nil {
+			return nil, err
+		}
+		if cycle {
+			return nil, fmt.Errorf("test: %s blocked by %s would close a cycle", blocked, blocker)
+		}
+		*edge = tx.NewID()
+		return []Draft{{
+			Type:    TypeDependencyAdded,
+			Subject: blocked,
+			Payload: DependencyChange{Edge: *edge, Blocker: blocker},
+		}}, nil
+	}
+}
+
+// depend adds a `blocked-by` edge and returns the edge's own identity.
+func (h *harness) depend(blocked, blocker string) string {
+	h.t.Helper()
+	var edge string
+	h.commitWith(dependDecide(blocked, blocker, &edge))
+	return edge
+}
+
+// dependError is depend expecting the command to be refused — the add-time
+// precondition turning a cycle down.
+func (h *harness) dependError(blocked, blocker string) error {
+	h.t.Helper()
+	var edge string
+	return h.commitError(dependDecide(blocked, blocker, &edge))
+}
+
+// removeEdgeDraft is `dependency.removed`. It names the edge by identity, which
+// is what makes removal a tombstone of one row rather than a search for a pair.
+func removeEdgeDraft(blocked, edge, blocker string) Draft {
+	return Draft{
+		Type:    TypeDependencyRemoved,
+		Subject: blocked,
+		Payload: DependencyChange{Edge: edge, Blocker: blocker},
+	}
+}
+
+// undepend removes an edge, which tombstones it rather than deleting it (D44).
+func (h *harness) undepend(blocked, edge, blocker string) {
+	h.t.Helper()
+	h.commit(removeEdgeDraft(blocked, edge, blocker))
+}
+
+// wantBlockers asserts what a node is waiting for, through the read surface and
+// by locator rather than by identity, so a failure is readable.
+func (h *harness) wantBlockers(what, node string, want ...string) {
+	h.t.Helper()
+	edges, err := h.BlockedBy(h.ctx, node)
+	if err != nil {
+		h.t.Fatalf("%s: read what %s waits for: %v", what, node, err)
+		return
+	}
+	got := make([]string, 0, len(edges))
+	for _, e := range edges {
+		if e.Blocked != node {
+			h.t.Errorf("%s: BlockedBy(%s) returned an edge blocking %s", what, node, e.Blocked)
+		}
+		got = append(got, h.locatorOf(e.Blocker))
+	}
+	sort.Strings(got)
+	wanted := make([]string, 0, len(want))
+	wanted = append(wanted, want...)
+	sort.Strings(wanted)
+	if !reflect.DeepEqual(got, wanted) {
+		h.t.Errorf("%s: %s waits for %v, want %v", what, h.locatorOf(node), got, wanted)
+	}
+}
+
+// wantLiveEdges asserts the whole live edge set, in the identity order LiveEdges
+// returns it in.
+func (h *harness) wantLiveEdges(what string, want ...Edge) {
+	h.t.Helper()
+	got, err := h.LiveEdges(h.ctx)
+	if err != nil {
+		h.t.Fatalf("%s: read the live edge set: %v", what, err)
+		return
+	}
+	if g, w := h.edgePicture(got), h.edgePicture(want); !reflect.DeepEqual(g, w) {
+		h.t.Errorf("%s: the live edge set is %v, want %v", what, g, w)
+	}
+}
+
+// edgePicture renders edges as `blocked<-blocker` by locator, each with its own
+// identity: exact enough to assert on and readable enough to fail with.
+func (h *harness) edgePicture(edges []Edge) []string {
+	h.t.Helper()
+	out := make([]string, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, fmt.Sprintf("%s<-%s (%s)", h.locatorOf(e.Blocked), h.locatorOf(e.Blocker), e.ID))
+	}
+	return out
+}
+
+// locatorOf reads a node's locator straight from the row, tombstoned or not: it
+// is for failure messages, and a message about a removed node is exactly when it
+// is needed.
+func (h *harness) locatorOf(node string) string {
+	h.t.Helper()
+	var locator string
+	err := h.db.QueryRowContext(h.ctx, `SELECT locator FROM nodes WHERE id = ?`, node).Scan(&locator)
+	if err != nil {
+		return node
+	}
+	return locator
+}
+
+// rawEdgeSQL is the INSERT insertEdge performs. It is shared with the tests that
+// have to go around the API — the substrate's own refusals, and the cycle the
+// add-time check makes otherwise unreachable, which is the point of the check.
+const rawEdgeSQL = `INSERT INTO edges (id, blocked, blocker, birth_event, last_event) VALUES (?, ?, ?, ?, ?)`
+
+// rawEdgeInsert inserts one edge around the API, against an event the caller
+// already appended, and returns the identity it minted for it.
+func (h *harness) rawEdgeInsert(event, blocked, blocker string) (string, error) {
+	h.t.Helper()
+	id := h.NewID()
+	return id, h.rawExec(rawEdgeSQL, id, blocked, blocker, event, event)
+}
+
+// rawEdge inserts one live edge around the API and fails the test if the
+// substrate turns it down.
+func (h *harness) rawEdge(blocked, blocker string) string {
+	h.t.Helper()
+	id, err := h.rawEdgeInsert(h.newEvent(blocked), blocked, blocker)
+	if err != nil {
+		h.t.Fatalf("insert %s blocked by %s around the API: %v",
+			h.locatorOf(blocked), h.locatorOf(blocker), err)
+	}
+	return id
+}
+
+// newEvent appends the cheapest well-formed event there is and returns its
+// identity — an event for a raw row to point at, since every projection row must
+// name one (the projection guards) and `render.performed` projects nothing.
+func (h *harness) newEvent(subject string) string {
+	h.t.Helper()
+	return h.commit(renderDraft(subject))[0].ID
+}
+
+// ---------------------------------------------------------------------------
 // Assertions shared across Steps
 // ---------------------------------------------------------------------------
 
@@ -430,6 +588,17 @@ func (h *harness) birthEventOf(subject string) Event {
 		h.t.Fatalf("%s has no history at all", subject)
 	}
 	return events[0]
+}
+
+// lastEventOf is the most recent event about a subject — the one the row a write
+// just moved should be naming as its last_event.
+func (h *harness) lastEventOf(subject string) Event {
+	h.t.Helper()
+	events := h.eventsOf(subject)
+	if len(events) == 0 {
+		h.t.Fatalf("%s has no history at all", subject)
+	}
+	return events[len(events)-1]
 }
 
 // ---------------------------------------------------------------------------

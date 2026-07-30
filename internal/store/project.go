@@ -236,12 +236,20 @@ func matterOf(ctx context.Context, tx *sql.Tx, scale Scale, id, parent string) (
 }
 
 // applyTransition moves a node's lifecycle, and only from the state the event
-// says it was in.
+// says it was in, and only while the node is still there.
 //
 // The `AND lifecycle = ?` is load-bearing: with it, an event describing a
 // transition that could not have happened fails at write time; without it, the
 // store would append the event and quietly agree. This is `store-fork`'s
 // "assert a guarded transition affected exactly one row" finding, kept.
+//
+// `AND tombstone_event IS NULL` is the same guard against the other way a
+// transition can be impossible. A removed node keeps its identity and its history
+// (D44) but it is out of every answer, so a lifecycle move against it would be a
+// state change no reader can reach — and it would make "removed while still
+// Planned" (the `schema` Brief, "Tombstones and Canceled") a fact that does not
+// stay put. Every other rule here already reads only live rows; this one had been
+// left out. See step-05's report.
 func applyTransition(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p Transition
 	if err := decode(ev, &p); err != nil {
@@ -251,7 +259,8 @@ func applyTransition(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: %s must record both ends of the transition", ev.Type)
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE nodes SET lifecycle = ?, last_event = ? WHERE id = ? AND lifecycle = ?`,
+		`UPDATE nodes SET lifecycle = ?, last_event = ?
+		 WHERE id = ? AND lifecycle = ? AND tombstone_event IS NULL`,
 		string(p.To), ev.ID, ev.Subject, string(p.From))
 	if err != nil {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
