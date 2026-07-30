@@ -3,11 +3,13 @@
 The design of record is the `schema` Brief (`workplans/schema.md`, external). This
 file records what building it *forced* — the calls the Brief left open, the
 findings `store-fork` handed over, and the places the implementation diverged
-from the Brief text. Step-11 folds the divergences back into the Brief; this is
-the working record it reads.
+from the Brief text. Step-11 folded the divergences back into the Brief; this is
+the working record it read, and it stays as the rationale the Brief's amended
+sentences are short for.
 
-Status: **in progress.** Steps 01–10 are complete and tested; step-11 remains.
-See "Where this stands" at the bottom.
+Status: **steps 01–11 complete.** The seal condition is discharged; the
+`reviewed-local` gate is the user's to close. See "Where this stands" at the
+bottom.
 
 ## D46's outcome, consumed (step-01)
 
@@ -127,6 +129,12 @@ initiative — in this Matter, exactly the ancestors `start` auto-starts") and
 again in step-03. Its step-03 already says to follow `schema`'s Brief §A rather
 than re-deciding, so it is self-deferring rather than invalidated — but the two
 sentences are now wrong and should be amended.
+
+`workplans/events-traces.md` carries the same stale posture (its step on the
+D57 cascade: "`system:wip` for the ancestors D57 auto-starts"). That one matters
+more than write-surface's, because `events-traces` **audits** the produced
+streams for fidelity — an audit written to the retired posture would flag every
+correctly-attributed cascade in the log as wrong. Two Matters to amend, not one.
 
 ## Storage calls the Brief left to the implementation
 
@@ -349,6 +357,14 @@ next Matter finds them rather than rediscovering them.
   appending to findings after reading them will hit it.
 - **A nested `Commit` inside a decide function deadlocks** rather than erroring
   (`SetMaxOpenConns(1)`). A guard on `Tx` would be cheap.
+- **`runs` and `outbox_entries` are declared projections with no fold rule.**
+  They are in `v1ProjectionTables` — so the guard triggers apply and `Rebuild`
+  clears them — but no P1 event writes either, so nothing refolds them: a
+  rebuild empties them permanently. Harmless today because nothing writes them
+  at all, and it is the correct posture (the row exists so the dispatch path
+  never needs a retrofit, MODEL §10), but the P2 Builder who reads "the row
+  exists from P1" and writes one directly will lose it at the next rebuild. The
+  event that fills these tables has to arrive with its fold rule.
 - **A migration cannot backfill a projection column.** The `*_advance` guard
   refuses any `UPDATE` that does not move `last_event` to a strictly newer event,
   and a migration has no event to move it to — so a numbered migration that adds
@@ -407,4 +423,27 @@ that are refusals), D56 as a table-driven assertion over `registeredTypes()`
 rather than over three samples, D51 stated as what a reorder does *not* move, and
 `ErrNoEvent` — invariant 1 from the side nothing had tested.
 
-Not done: **step-11's reconciliation** of the Brief.
+**Step-11 reconciled the Brief** in place in `workplans/schema.md`. Every
+divergence above that *contradicted* the Brief's own text is now folded into it:
+the taxonomy as a table rather than an open token column, one `nodes` table
+discriminated by `kind`, Archive as a predicate and a view rather than a state,
+`edges_in_force` as the second view, config and gate declarations (and the
+taxonomy table) as the exceptions to "every durable table is a projection", the
+actor-in-cascade resolution, and "stage equivalents" as a real bar rather than
+four `INSERT`s. Four more went in because a Matter reading only the Brief would
+otherwise get them wrong: the write path (`Commit`/Drafts/`Cause`/`ErrNoEvent`,
+and that `Tx` cannot write), that lifecycle payloads carry both states and a
+transition that could not have happened is refused at write time, that the two
+cycle callers share the in-force graph rather than one function, and that `runs`
+and `outbox_entries` are projections a rebuild empties. The fenced D46 passage
+names event-sourced as the built branch and keeps the tables+audit-log branch
+documented, not deleted.
+
+One edit landed just outside the Brief proper: **step-02's own Done clause said
+`type` (open token)**, the exact claim the reconciliation retired, so it now
+points at the Brief and says what it used to say. Nothing else in
+`wip-reboot` was touched.
+
+The seal condition — "Brief documents every 1.2 decision; schema + migrations +
+backup-before-migrate implemented; static cycle check tested" — is discharged.
+The `reviewed-local` gate is the user's to close.
