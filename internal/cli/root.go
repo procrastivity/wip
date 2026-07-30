@@ -13,8 +13,13 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
+	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
+	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
+	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
+	labelverb "github.com/procrastivity/wip/internal/verbs/label"
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
+	statusverb "github.com/procrastivity/wip/internal/verbs/status"
 	uninstallverb "github.com/procrastivity/wip/internal/verbs/uninstall"
 	versionverb "github.com/procrastivity/wip/internal/verbs/version"
 )
@@ -54,6 +59,11 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(manifestverb.Command(streams, build, root))
 	root.AddCommand(installverb.Command(streams, build, root))
 	root.AddCommand(uninstallverb.Command(streams))
+	root.AddCommand(initverb.Command(streams))
+	root.AddCommand(cloneverb.Command(streams))
+	root.AddCommand(labelverb.Command(streams))
+	root.AddCommand(doctorverb.Command(streams))
+	root.AddCommand(statusverb.Command(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json
