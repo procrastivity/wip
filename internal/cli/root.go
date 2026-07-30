@@ -13,6 +13,9 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
+	installverb "github.com/procrastivity/wip/internal/verbs/install"
+	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
+	uninstallverb "github.com/procrastivity/wip/internal/verbs/uninstall"
 	versionverb "github.com/procrastivity/wip/internal/verbs/version"
 )
 
@@ -48,6 +51,9 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.PersistentFlags().BoolP("verbose", "v", false, "extra diagnostic lines on stderr")
 
 	root.AddCommand(versionverb.Command(streams, build))
+	root.AddCommand(manifestverb.Command(streams, build, root))
+	root.AddCommand(installverb.Command(streams, build, root))
+	root.AddCommand(uninstallverb.Command(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json
