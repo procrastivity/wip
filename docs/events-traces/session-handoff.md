@@ -10,18 +10,16 @@ Step-by-step spec); this file is *how*, not *what*.
 - `evidence/traces/trace-02-stages-and-steps.md` — committed, complete.
 - `evidence/traces/trace-03-session-two-matters.md` — committed, complete.
 - `evidence/traces/trace-04-amendment.md` — committed, complete.
+- `evidence/traces/trace-05-two-clones.md` — committed, complete.
 
 ## Remaining
 
-- **step-05 — trace 5** (planned in one clone, worked from another). Not
-  started — the hardest one (needs two clones of one Repo).
 - **step-06 — fidelity audit** against MODEL §10's list, over all five
-  trace files. Not started; run last, after traces 4 and 5 both exist.
+  trace files. Not started; run last, now that traces 4 and 5 both exist.
 
 All upstream Matters (`write-surface`, `read-surface`, `tiers`,
 `render-scratch`) are locally complete — there is no unblock-ordering
-constraint left to respect; do traces 4, 5, then the audit, in that order,
-as the workplan's own Step numbering says.
+constraint left to respect; only the audit (step-06) remains.
 
 ## How a trace gets produced (the method traces 1–3 used)
 
@@ -119,7 +117,34 @@ unchanged in the alias legend before/after — that's the whole finding
 after the insert, showing the new node in its placed position. No gate,
 no seal — this trace never finishes the Matter.
 
-## Trace 5 — pointers (step-05), the hard one
+## Trace 5 — done (step-05)
+
+Produced as `evidence/traces/trace-05-two-clones.md`, committed. Notes
+for the audit (step-06), not re-derivable from the pointers below without
+running it again:
+
+- **`git clone`'s own default local remote URL doesn't parse.**
+  `NormalizeRemote` (`internal/tiers/remote.go`) accepts the scp-like
+  shorthand (`host:path`) and any `scheme://host/path` form, but not a
+  bare filesystem path — a fresh `git clone` of a local bare repo leaves
+  `origin` as a plain absolute path, which trips
+  `validation.unparseable-remote` on `wip init`. Worked around with `git
+  remote set-url origin localhost:<abs-path>` on each clone before `wip
+  init`; not a fidelity gap (the workplan doesn't mandate a transport),
+  just a fixture detail the trace's own text now records so it isn't
+  rediscovered.
+- **`batch.joined` still does not fire.** Confirmed still-open in this
+  Matter's own event table: `write-surface`'s documented gap
+  (`docs/write-surface/decisions.md`, "A documented gap: `batch.joined`
+  on first start inside an open dispatch") — no `dispatches.batch`
+  column exists in `internal/store/schema_v1.go` yet, even though
+  `render-scratch`'s `wip refresh` now opens the dispatch. This is the
+  same pre-existing gap reappearing, not a new one; do **not** list it as
+  a fresh MODEL §10 finding in the step-06 audit — it's already tracked
+  upstream in `write-surface`'s decisions doc.
+
+Original pointers (kept for reference; superseded by the actual write-up
+above where they differ):
 
 Needs **two clone directories of the *same* Repo**. `wip init` keys Repo
 identity off a normalized remote URL (`tiers` Brief, "Remote-URL normal
