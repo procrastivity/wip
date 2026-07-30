@@ -13,6 +13,7 @@ package cli_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -498,18 +499,27 @@ func TestWorkedExample7_CrossRepoBatch(t *testing.T) {
 
 	// Dispatched from a single clone of repo-a: `wip status`'s own
 	// repo-wide/current-clone-marked scope (step-08) is unaffected by the
-	// Batch's cross-repo membership — it never mentions repo-b or the Batch,
-	// because tier-scoped status doesn't render Matter or Batch content at
-	// all (that is `read-surface`'s extension, reading this Step's output
-	// as settled input).
+	// Batch's cross-repo membership — it never mentions repo-b or the
+	// Batch (Batch-scoped rendering is D25's deferred territory, and status
+	// composes over the tiers read scope, D66). What it *does* now render is
+	// `read-surface`'s extension: the durable answer to the founding
+	// questions over repo-a alone — here, both of repo-a's Matters are
+	// Planned with no blockers, so they show up as the unblocked frontier
+	// ("next to start"), and nothing about repo-b or the cross-repo Batch
+	// leaks in.
 	statusResult := runIn(t, repoA, dbEnv, "status")
 	if statusResult.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", statusResult.exitCode, statusResult.stderr)
 	}
 	t.Logf("wip status (dispatched from repo-a, batch spans repo-a+repo-b):\n%s", statusResult.stdout)
-	want := "acme/repo-a\n  repo-a             Clone · current\n"
+	want := "acme/repo-a\n" +
+		"  repo-a             Clone · current\n" +
+		"\n" +
+		"next to start:\n" +
+		fmt.Sprintf("  %-24s %s · %s\n", "matter-a1", "matter", "planned") +
+		fmt.Sprintf("  %-24s %s · %s\n", "matter-a2", "matter", "planned")
 	if statusResult.stdout != want {
-		t.Errorf("status =\n%s\nwant\n%s\n(status must stay tier-scoped regardless of Batch/Matter content elsewhere in the store)", statusResult.stdout, want)
+		t.Errorf("status =\n%s\nwant\n%s\n(status must stay tier-scoped and never mention repo-b or the Batch, but does now render repo-a's own founding-question content)", statusResult.stdout, want)
 	}
 }
 

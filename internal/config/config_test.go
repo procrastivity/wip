@@ -15,10 +15,14 @@ func TestLoad_NoOverride_ReturnsShippedDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// The shipped default (assets/config.default.yaml) declares no keys of
-	// its own yet — chassis owns the mechanism, not any config key.
-	if len(cfg) != 0 {
-		t.Fatalf("cfg = %+v, want empty (no keys defined by the shipped default)", cfg)
+	// chassis owns the mechanism, not any config key; read-surface is the
+	// first Matter to earn one — the default idle gap for `wip session`
+	// (MODEL §2.4), documented next to the key in config.default.yaml.
+	if got := cfg["idle_gap"]; got != "6h" {
+		t.Fatalf(`cfg["idle_gap"] = %v, want "6h"`, got)
+	}
+	if len(cfg) != 1 {
+		t.Fatalf("cfg = %+v, want exactly the one key the shipped default declares", cfg)
 	}
 }
 
