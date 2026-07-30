@@ -47,8 +47,7 @@ as the workplan's own Step numbering says.
 3. Dump the event table: `sqlite3 -json "$DB" "select id,type,occurred_at,
    actor,causation,correlation,repo,clone,worktree,subject,payload from
    events order by id;"` piped to a file.
-4. Alias it: `/private/tmp/claude-501/-Users-beausimensen-Code-wip-go/
-   633cd86e-6ccc-4f6c-99cd-195217ee5a63/scratchpad/mktable.py
+4. Alias it: `python3 /tmp/events-traces-storage/mktable.py
    events.json alias.json <skip_n>` — `<skip_n>` drops the leading N
    tier-attachment setup rows (see "Setup events" below). Write
    `alias.json` by hand as `{"<ULID>": "matter-A", ...}`; anything not
@@ -186,12 +185,14 @@ report them separately, as this file already does.
 
 ## Reusable tooling
 
-- `/private/tmp/claude-501/-Users-beausimensen-Code-wip-go/
-  633cd86e-6ccc-4f6c-99cd-195217ee5a63/scratchpad/mktable.py` — the table
-  generator described above. That scratchpad directory is
-  session-specific and may not survive into a new session; if it's gone,
-  it's ~70 lines, reconstructable from trace 1–3's artifacts' structure
-  (read one of them plus this file's step 4 above).
+- `/tmp/events-traces-storage/mktable.py` — the table generator described
+  above. This lives outside the per-session scratchpad specifically so it
+  survives across the fresh sessions doing traces 4, 5, and the audit —
+  don't regenerate it, just call it. Usage:
+  `python3 /tmp/events-traces-storage/mktable.py events.json alias.json
+  <skip_n> > table.md 2> legend.txt`. If it's ever missing, it's ~70
+  lines, reconstructable from trace 1–3's artifacts' structure (read one
+  of them plus this file's step 4 above).
 - Full CLI surface (`--help` output for every verb) was captured once
   during this Matter's setup and is not re-pasted here — run `wip <verb>
   --help` directly, it's cheap.
