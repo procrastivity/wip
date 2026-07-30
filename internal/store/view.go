@@ -208,17 +208,21 @@ func (v View) NextStepLocator(ctx context.Context, matter string) (string, error
 // Edges
 // ---------------------------------------------------------------------------
 
-// BlockedBy lists the live edges on which a node waits.
+// BlockedBy lists the edges in force on which a node waits.
+//
+// It reads edges_in_force and not `edges`, so a blocker that was structurally
+// removed does not go on blocking: removing the blocker is how amendment clears
+// an obstruction (D44), and an edge reported here always names something that
+// could still complete.
 func (v View) BlockedBy(ctx context.Context, node string) ([]Edge, error) {
 	return v.edgeList(ctx,
-		`SELECT id, blocked, blocker FROM edges
-		 WHERE blocked = ? AND tombstone_event IS NULL ORDER BY id`, node)
+		`SELECT id, blocked, blocker FROM edges_in_force WHERE blocked = ? ORDER BY id`, node)
 }
 
-// LiveEdges lists every live edge in the store.
+// LiveEdges lists every edge in force in the store — every `blocked-by` relation
+// that is still a relation, both of whose ends are still there.
 func (v View) LiveEdges(ctx context.Context) ([]Edge, error) {
-	return v.edgeList(ctx,
-		`SELECT id, blocked, blocker FROM edges WHERE tombstone_event IS NULL ORDER BY id`)
+	return v.edgeList(ctx, `SELECT id, blocked, blocker FROM edges_in_force ORDER BY id`)
 }
 
 func (v View) edgeList(ctx context.Context, query string, args ...any) ([]Edge, error) {

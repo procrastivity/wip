@@ -25,9 +25,11 @@ import (
 // is waiting for.
 type waitsFor map[string][]string
 
-// liveEdgeGraph loads every live edge. A tombstoned edge is not part of the
+// liveEdgeGraph loads every edge in force. A tombstoned edge is not part of the
 // graph: removal means removed, and an edge whose only cycle ran through a
-// removed edge is legal again.
+// removed edge is legal again. Nor is an edge either of whose ends was removed —
+// edges_in_force is the one definition of that, shared with BlockedBy, so a loop
+// the audit reports is always one a repair can actually break.
 //
 // It loads the whole set rather than walking the database per hop. wip is a
 // personal store (D34) whose edge count is bounded by a plan a person wrote; the
@@ -35,7 +37,7 @@ type waitsFor map[string][]string
 // a recursive query that would have to be written twice.
 func (v View) liveEdgeGraph(ctx context.Context) (waitsFor, error) {
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT blocked, blocker FROM edges WHERE tombstone_event IS NULL ORDER BY id`)
+		`SELECT blocked, blocker FROM edges_in_force ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: read the live edge set: %w", err)
 	}

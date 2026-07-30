@@ -331,6 +331,27 @@ func v1Statements() []string {
 		`CREATE UNIQUE INDEX edges_live ON edges(blocked, blocker) WHERE tombstone_event IS NULL`,
 		`CREATE INDEX edges_blocker ON edges(blocker) WHERE tombstone_event IS NULL`,
 
+		// An edge is in force only while both its ends are, and this view is the
+		// single definition of that — every read of the dependency graph goes
+		// through it, so "what blocks this" and "what loops does this store have"
+		// cannot answer the question differently.
+		//
+		// Why both ends and not just the row: an edge is a relation between two
+		// nodes, and a relation to a node that has been structurally removed is not
+		// a relation. Removing the blocker is how D44's amendment clears an
+		// obstruction; if the edge outlived it, `wip status` would report a blocker
+		// that can never complete and `doctor` would report loops running through
+		// removed nodes — loops no repair can break, because there is nothing left
+		// to unblock. The edge row itself is untouched and stays tombstone-free: it
+		// is out of force, not removed, and its own `dependency.removed` would still
+		// be a legitimate event.
+		`CREATE VIEW edges_in_force AS
+		 SELECT e.id, e.blocked, e.blocker
+		 FROM   edges e
+		 JOIN   nodes blocked ON blocked.id = e.blocked AND blocked.tombstone_event IS NULL
+		 JOIN   nodes blocker ON blocker.id = e.blocker AND blocker.tombstone_event IS NULL
+		 WHERE  e.tombstone_event IS NULL`,
+
 		// -------------------------------------------------------------------
 		// Gate state, storable at any scale (MODEL §9). This is a storage
 		// capability, not a declaration: the dogfood declares exactly one gate,

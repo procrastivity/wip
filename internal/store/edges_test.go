@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -639,4 +640,117 @@ func TestCanceledAndTombstonedAreOrthogonalInBothOrders(t *testing.T) {
 	})
 	refusalMentions(t, "canceling a removed Step", err, "touched 0 projection rows")
 	h.wantRow("removed while still Planned, and still Planned", "nodes", "id = ?", []any{untouched}, plannedAndRemoved)
+}
+
+// TestAnEdgeIsOutOfForceOnceEitherEndIsRemoved is the other half of what removal
+// means for a relation.
+//
+// An edge is a relation between two nodes, and a relation to a node that has been
+// structurally removed is not a relation. Removing the blocker is precisely how
+// D44's amendment clears an obstruction — so if the edge outlived it, `wip status`
+// would report a blocker that can never complete, and `doctor` would report loops
+// running through removed nodes: loops no repair can break, because there is
+// nothing left to unblock.
+//
+// The edge row itself is untouched and stays tombstone-free. It is out of force,
+// not removed — which is a different thing, and the row says so.
+func TestAnEdgeIsOutOfForceOnceEitherEndIsRemoved(t *testing.T) {
+	h := newHarness(t)
+	matter := h.matter("force", "Edges in force")
+
+	for i, end := range []struct {
+		name    string
+		removes func(blocked, blocker string) string
+	}{
+		{"the blocker", func(_, blocker string) string { return blocker }},
+		{"the blocked node", func(blocked, _ string) string { return blocked }},
+	} {
+		t.Run("removing "+end.name, func(t *testing.T) {
+			blocker := h.step(matter, fmt.Sprintf("step-%02d", 2*i+1), "The blocker")
+			blocked := h.step(matter, fmt.Sprintf("step-%02d", 2*i+2), "The blocked node")
+			edge := h.depend(blocked, blocker)
+			h.wantBlockers("before the removal", blocked, h.locatorOf(blocker))
+
+			// The row as it stands, so the assertion after the removal is that
+			// nothing about the edge itself moved.
+			before := h.rowOf("edges", "id = ?", edge)
+
+			h.remove(end.removes(blocked, blocker), "the plan changed")
+
+			// Out of every read of the dependency graph.
+			h.wantBlockers("after removing "+end.name, blocked)
+			for _, e := range mustLiveEdges(h) {
+				if e.ID == edge {
+					t.Errorf("edge %s is still in force with %s removed", edge, end.name)
+				}
+			}
+
+			// And the row is untouched, tombstone included: nothing removed *the
+			// edge*, so it is out of force rather than removed — a different thing,
+			// and its own dependency.removed would still be a legitimate event.
+			if after := h.rowOf("edges", "id = ?", edge); !reflect.DeepEqual(after, before) {
+				t.Errorf("removing %s moved the edge row: %v, want %v", end.name, after, before)
+			}
+		})
+	}
+}
+
+// TestTheAuditIgnoresLoopsThroughRemovedNodes is the same rule reaching the audit,
+// because BlockedBy and Cycles read one definition of an edge in force and must
+// therefore agree about a removed node.
+func TestTheAuditIgnoresLoopsThroughRemovedNodes(t *testing.T) {
+	h := newHarness(t)
+	matter := h.matter("phantom", "Loops through removed nodes")
+
+	a := h.step(matter, "step-01", "A")
+	b := h.step(matter, "step-02", "B")
+	c := h.step(matter, "step-03", "C")
+
+	// A three-node loop, closed around the API: the add-time check exists so the
+	// write path cannot make one.
+	h.depend(a, b)
+	h.depend(b, c)
+	h.rawEdge(c, a)
+
+	found, err := h.Cycles(h.ctx)
+	if err != nil {
+		t.Fatalf("audit for cycles: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("the audit reports %d loops, want 1: %v", len(found), found)
+	}
+
+	// Remove one node of the loop. The loop is gone from the audit, because the
+	// two edges it ran through are no longer relations — and, crucially, the audit
+	// no longer asks the user to break a loop whose repair is already done.
+	h.remove(b, "removed mid-loop")
+
+	found, err = h.Cycles(h.ctx)
+	if err != nil {
+		t.Fatalf("audit for cycles: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("the audit still reports %v after a node of the loop was removed", found)
+	}
+
+	// And the add-time check agrees, which is the property that makes them one
+	// definition rather than two: the edge that closed the loop would now be
+	// accepted.
+	would, err := h.WouldCycle(h.ctx, c, a)
+	if err != nil {
+		t.Fatalf("ask whether c may wait for a: %v", err)
+	}
+	if would {
+		t.Error("the add-time check still calls it a loop after a node of it was removed")
+	}
+}
+
+// mustLiveEdges is LiveEdges or a failed test.
+func mustLiveEdges(h *harness) []Edge {
+	h.t.Helper()
+	edges, err := h.LiveEdges(h.ctx)
+	if err != nil {
+		h.t.Fatalf("read the edges in force: %v", err)
+	}
+	return edges
 }
