@@ -1,0 +1,206 @@
+package store
+
+// The payloads. One struct per event type or per family of types with the same
+// type-specific fields, so a caller never hand-rolls JSON and the projection
+// never guesses at a shape.
+//
+// A locator may appear in a payload — it is a fact about the write, and MODEL
+// §10 permits that explicitly. What a payload may never be is what an event
+// *references*: that is `subject`, and it is always an identity.
+
+// NodeBirth is the payload of matter.created / stage.created / step.created and
+// of step.inserted. The node's kind comes from the event type and its repo from
+// the envelope, so neither is repeated here; its Matter is derived from Parent
+// by the projection, so a payload cannot disagree with the tree.
+type NodeBirth struct {
+	Title   string `json:"title"`
+	Locator string `json:"locator"`
+	// Parent is empty for a Matter and required for anything else.
+	Parent string `json:"parent,omitempty"`
+	// SortKey is presentation-only (D51): sibling position, carrying no
+	// execution-ordering meaning at all.
+	SortKey int64 `json:"sort_key"`
+}
+
+// Transition is the payload of every lifecycle event. From is not decoration:
+// the projection updates the row only if it is still in that state, so a
+// transition that did not happen becomes a write-time error rather than an
+// event describing a move the store never made.
+type Transition struct {
+	From Lifecycle `json:"from"`
+	To   Lifecycle `json:"to"`
+	// Cascade marks a node wip started on its own initiative because a
+	// descendant was started (D57). The actor is still the caller — the command
+	// is theirs and so is its whole chain — and this is where the fact that they
+	// did not name this node is recorded. See docs/schema/decisions.md.
+	Cascade bool `json:"cascade,omitempty"`
+}
+
+// ContentWritten is the payload of content.created and content.appended. The
+// bytes travel in the event, because the log is the source of truth for all
+// content including prose (D36, D61) — except when they spilled, in which case
+// the reference travels and the bytes live in a sidecar file the store owns.
+type ContentWritten struct {
+	Kind ContentKind `json:"kind"`
+	// Content is the content row's own identity. Append kinds accumulate as
+	// segments, one per event, ordered by this identity.
+	Content string `json:"content"`
+	Bytes   []byte `json:"bytes,omitempty"`
+	// BlobRef names the sidecar file under the store's blobs directory, set
+	// exactly when Bytes is absent.
+	BlobRef string `json:"blob_ref,omitempty"`
+	ByteLen int64  `json:"byte_len"`
+	SHA256  string `json:"sha256"`
+}
+
+// Reordered is the payload of step.reordered. subject is the parent whose
+// children moved; Order is every live child, in the order they should present.
+// Reordering is inherently about a set, and carrying the whole set is what makes
+// the log narrate the result rather than a delta.
+type Reordered struct {
+	Order []string `json:"order"`
+}
+
+// Replaced is the payload of step.replaced. subject is the Step being replaced:
+// it is tombstoned and the replacement is born in its sibling position, which is
+// the amendment D44's identity rule made expressible.
+type Replaced struct {
+	Replacement string `json:"replacement"`
+	Title       string `json:"title"`
+	Locator     string `json:"locator"`
+}
+
+// Removed is the payload of step.removed. The row is tombstoned, never deleted:
+// its identity is never reissued and every prior event referencing it stays a
+// valid reference.
+type Removed struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// DependencyChange is the payload of dependency.added and dependency.removed.
+// subject is the *blocked* node — the node the verb was invoked on — and the
+// edge carries its own identity.
+type DependencyChange struct {
+	Edge    string `json:"edge"`
+	Blocker string `json:"blocker"`
+}
+
+// GateClosed is the payload of gate.closed: gate name + scale + subject, where
+// the subject is the envelope's.
+type GateClosed struct {
+	Gate  string `json:"gate"`
+	Scale Scale  `json:"scale"`
+}
+
+// BacklogEntered is the payload of backlog.entered. subject is the entry.
+type BacklogEntered struct {
+	Provenance Provenance `json:"provenance"`
+	Title      string     `json:"title"`
+	// Detail carries why, which `deferred` provenance needs and the others may
+	// leave empty.
+	Detail string `json:"detail,omitempty"`
+	// OriginNode is the node a mid-flight discovery was found in.
+	OriginNode string `json:"origin_node,omitempty"`
+}
+
+// BacklogPlanned is the payload of backlog.planned: the Matter the entry became.
+type BacklogPlanned struct {
+	Matter string `json:"matter"`
+}
+
+// BacklogDeclined is the payload of backlog.declined. Declined must be
+// distinguishable from not-yet-acted-upon (MODEL §4), and a reason is what makes
+// it so at the point of the decision rather than in a retro.
+type BacklogDeclined struct {
+	Reason string `json:"reason"`
+}
+
+// ReferenceBound is the payload of reference.bound. References are acquired, not
+// assigned (MODEL §5): a late, mutable update to a nullable column keyed on
+// identity. Inert until P3.
+type ReferenceBound struct {
+	Ref string `json:"ref"`
+}
+
+// RepoAttached is the payload of repo.attached. RemoteURL is the normalised
+// remote in its normal form, and is empty for a local-only repo — the natural
+// key is nullable (D37, D39).
+type RepoAttached struct {
+	RemoteURL string `json:"remote_url,omitempty"`
+	// IdentityRemote is which remote name the URL came from (`origin` by
+	// convention), so origin-is-my-fork has an explicit answer rather than a
+	// default.
+	IdentityRemote string `json:"identity_remote,omitempty"`
+	Label          string `json:"label,omitempty"`
+}
+
+// CloneAttached is the payload of clone.attached. The git-common-dir is the
+// Clone's natural key: it resolves identically from a subdirectory and from a
+// linked worktree.
+type CloneAttached struct {
+	Repo         string `json:"repo"`
+	GitCommonDir string `json:"git_common_dir"`
+	Label        string `json:"label"`
+}
+
+// WorktreeAttached is the payload of worktree.attached. Name is empty for the
+// main worktree — D37's null case.
+type WorktreeAttached struct {
+	Clone string `json:"clone"`
+	Name  string `json:"name,omitempty"`
+}
+
+// RepoKeyAdopted is the payload of repo.key-adopted: a local-only Repo gaining a
+// remote. It keeps its ULID and its whole history, because nothing keys on the
+// natural key (D37).
+type RepoKeyAdopted struct {
+	RemoteURL      string `json:"remote_url"`
+	IdentityRemote string `json:"identity_remote,omitempty"`
+}
+
+// CloneRelinked is the payload of clone.relinked: the same clone at a new
+// git-common-dir.
+type CloneRelinked struct {
+	GitCommonDir string `json:"git_common_dir"`
+}
+
+// CloneLabeled is the payload of clone.labeled.
+type CloneLabeled struct {
+	Label string `json:"label"`
+}
+
+// CursorMoved is the payload of cursor.moved. subject is the Worktree the cursor
+// belongs to; the Clone is the event's own dimension, which is what makes the
+// cursor keyed at Clone + Worktree (D38). Node is empty when the cursor is
+// cleared. The cursor is attention, never a fact about the work.
+type CursorMoved struct {
+	Node     string `json:"node,omitempty"`
+	Previous string `json:"previous,omitempty"`
+}
+
+// BatchCreated is the payload of batch.created. Name is empty for the anonymous
+// batch a bare "work this Matter" wraps in, so there is exactly one dispatch
+// path (D23).
+type BatchCreated struct {
+	Name string `json:"name,omitempty"`
+}
+
+// BatchMembership is the payload of batch.joined and batch.left. subject is the
+// Batch; membership implies nothing and is idempotent per (batch, matter) (D58).
+type BatchMembership struct {
+	Matter string `json:"matter"`
+}
+
+// DispatchClosed is the payload of dispatch.closed. Session discounts every
+// reason but `completed`, whose occurred_at is the only one that is evidence of
+// work rather than administration (D59).
+type DispatchClosed struct {
+	Reason CloseReason `json:"reason"`
+}
+
+// RenderPerformed is the payload of render.performed. Nothing is projected from
+// it: the render target is a projection of the store and never a source (D36,
+// D40), so the event exists to be read as history, not folded into state.
+type RenderPerformed struct {
+	Target string `json:"target,omitempty"`
+}
