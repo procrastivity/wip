@@ -2,3 +2,11 @@
 # user-override -> shipped-default, same mechanism as any other asset).
 # No keys are owned by chassis itself; later Matters add their own tool
 # config here as they earn it.
+
+# read-surface: the default idle gap for `wip session` — the threshold that
+# ends one working period and begins the next (MODEL §2.4). 6h bridges an
+# ordinary intra-day interruption (lunch, a meeting, an afternoon away) into
+# one Session while a normal overnight break still splits into two. `wip
+# session --idle-gap <duration>` overrides this per invocation; the value is
+# any Go duration string (e.g. "6h", "90m").
+idle_gap: 6h

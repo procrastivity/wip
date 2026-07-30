@@ -26,6 +26,8 @@ import (
 	lifecycleverb "github.com/procrastivity/wip/internal/verbs/lifecycle"
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
+	nextverb "github.com/procrastivity/wip/internal/verbs/next"
+	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
 	stepverb "github.com/procrastivity/wip/internal/verbs/step"
@@ -73,6 +75,12 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(labelverb.Command(streams))
 	root.AddCommand(doctorverb.Command(streams))
 	root.AddCommand(statusverb.Command(streams))
+
+	// read-surface: status's founding-question content lives inside
+	// statusverb itself (it extends tiers/tier-verbs step-08's stub in
+	// place); next and session are this Matter's two new verbs.
+	root.AddCommand(nextverb.Command(streams))
+	root.AddCommand(sessionverb.Command(streams))
 
 	// write-surface: birth-and-amendment.
 	root.AddCommand(matterverb.Command(streams))
