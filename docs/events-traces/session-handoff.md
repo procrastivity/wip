@@ -14,12 +14,14 @@ Step-by-step spec); this file is *how*, not *what*.
 
 ## Remaining
 
-- **step-06 — fidelity audit** against MODEL §10's list, over all five
-  trace files. Not started; run last, now that traces 4 and 5 both exist.
+- **step-06 — fidelity audit**, done: `evidence/traces/fidelity-audit.md`,
+  committed. Walked all six MODEL §10 items against all five traces; no
+  fidelity gap found, no amendment needed. This closes the Matter's Steps —
+  the `reviewed-local` gate is the user's to close.
 
 All upstream Matters (`write-surface`, `read-surface`, `tiers`,
-`render-scratch`) are locally complete — there is no unblock-ordering
-constraint left to respect; only the audit (step-06) remains.
+`render-scratch`) are locally complete, and this Matter's own six Steps are
+now all produced — nothing left to run in a fresh session for this Matter.
 
 ## How a trace gets produced (the method traces 1–3 used)
 
