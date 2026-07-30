@@ -140,6 +140,16 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 		_, err := fmt.Fprintln(streams.Out, "pick one: wip next --set <locator>")
 		return err
 
+	case readsurface.InProgressNoCursor:
+		if _, err := fmt.Fprintf(streams.Out, "no cursor set for this clone — nothing planned, %d in progress:\n", len(view.InProgress)); err != nil {
+			return err
+		}
+		if err := printCandidates(ctx, streams, v, view.InProgress); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(streams.Out, "pick one: wip next --set <locator>")
+		return err
+
 	case readsurface.EverythingSealed:
 		if _, err := fmt.Fprintln(streams.Out, "nothing in progress or planned — every Matter sealed"); err != nil {
 			return err
@@ -268,12 +278,13 @@ func toNodeJSONs(ctx context.Context, v store.View, nodes []store.Node) ([]nodeJ
 
 func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View) error {
 	kind := map[readsurface.Kind]string{
-		readsurface.BareMatter:       "bare-matter",
-		readsurface.Positioned:       "positioned",
-		readsurface.NothingUnblocked: "nothing-unblocked",
-		readsurface.NoCursor:         "no-cursor",
-		readsurface.EverythingSealed: "everything-sealed",
-		readsurface.Dangling:         "dangling",
+		readsurface.BareMatter:         "bare-matter",
+		readsurface.Positioned:         "positioned",
+		readsurface.NothingUnblocked:   "nothing-unblocked",
+		readsurface.NoCursor:           "no-cursor",
+		readsurface.EverythingSealed:   "everything-sealed",
+		readsurface.InProgressNoCursor: "in-progress-no-cursor",
+		readsurface.Dangling:           "dangling",
 	}[view.Kind]
 
 	payload := struct {
@@ -286,6 +297,7 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 		Cand    []nodeJSON `json:"candidates,omitempty"`
 		Blocked []blockedJ `json:"blocked,omitempty"`
 		Backlog int        `json:"backlogUnprocessed,omitempty"`
+		InProg  []nodeJSON `json:"inProgress,omitempty"`
 	}{Kind: kind, Reason: view.DanglingReason, Backlog: view.BacklogCount}
 
 	if view.Kind == readsurface.BareMatter || view.Kind == readsurface.Positioned ||
@@ -319,6 +331,13 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 			return err
 		}
 		payload.Cand = c
+	}
+	if view.InProgress != nil {
+		p, err := toNodeJSONs(ctx, v, view.InProgress)
+		if err != nil {
+			return err
+		}
+		payload.InProg = p
 	}
 	for _, b := range view.Blocked {
 		n, err := toNodeJSON(ctx, v, b.Node)

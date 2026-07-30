@@ -34,8 +34,13 @@ const (
 	// non-empty — candidates are listed, never guessed among.
 	NoCursor
 	// EverythingSealed is vocabulary output 5: no cursor, nothing Planned is
-	// outstanding at all.
+	// outstanding at all, and nothing is In Progress.
 	EverythingSealed
+	// InProgressNoCursor is the trace-1 finding made first-class: no cursor
+	// and an empty Planned frontier, but work actively In Progress (a node
+	// started with no plan, before any `wip next --set`). Reported as its own
+	// shape so output 5 is never reused for a state it does not describe.
+	InProgressNoCursor
 	// Dangling is D67's first-class result: the cursor's target is
 	// tombstoned, Canceled, or sealed. next reports the fact and the
 	// unblocked candidates, and never moves the cursor itself.
@@ -70,6 +75,10 @@ type View struct {
 
 	// EverythingSealed's nudge.
 	BacklogCount int
+
+	// InProgressNoCursor's list: what is actively In Progress, repo-scoped —
+	// distinct from Candidates, which is always the ready frontier.
+	InProgress []store.Node
 }
 
 // Next computes the fused cursor+frontier answer for the current Clone +
@@ -132,6 +141,13 @@ func noCursorView(ctx context.Context, v store.View, repo string, ready []store.
 	}
 	if len(blocked) > 0 {
 		return View{Kind: NothingUnblocked, Blocked: blocked}, nil
+	}
+	inProgress, err := v.InProgress(ctx)
+	if err != nil {
+		return View{}, err
+	}
+	if inRepo := filterByRepo(inProgress, repo); len(inRepo) > 0 {
+		return View{Kind: InProgressNoCursor, InProgress: inRepo}, nil
 	}
 	entries, err := v.Backlog(ctx, repo)
 	if err != nil {

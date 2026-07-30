@@ -124,6 +124,26 @@ func TestNext_EverythingSealed(t *testing.T) {
 	}
 }
 
+// TestNext_InProgressNoCursor is the trace-1 finding: no cursor, an empty
+// Planned frontier, nothing blocked — but work actively In Progress (a
+// Matter started immediately with no plan, before any `wip next --set`).
+// next must report the in-progress work, never EverythingSealed — output 5
+// was being reused for a state it does not describe.
+func TestNext_InProgressNoCursor(t *testing.T) {
+	f := newFixture(t)
+	m := f.matter("bugfix-no-plan", "Started immediately, no plan, no cursor")
+	f.start(m)
+
+	cur := f.current()
+	view := nextFor(t, f, cur)
+	if view.Kind != InProgressNoCursor {
+		t.Fatalf("Kind = %v, want InProgressNoCursor", view.Kind)
+	}
+	if len(view.InProgress) != 1 || view.InProgress[0].ID != m {
+		t.Errorf("InProgress = %+v, want [bugfix-no-plan]", view.InProgress)
+	}
+}
+
 // TestNext_DanglingCursor_Sealed is D67: the cursor's target has itself
 // become sealed since it was set — reported as a fact, and the cursor is
 // never moved by a read.
