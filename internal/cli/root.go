@@ -15,6 +15,7 @@ import (
 	"github.com/procrastivity/wip/internal/selftest"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
+	contentverb "github.com/procrastivity/wip/internal/verbs/content"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
@@ -80,6 +81,12 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(lifecycleverb.PauseCommand(streams))
 	root.AddCommand(lifecycleverb.ResumeCommand(streams))
 	root.AddCommand(backlogverb.Command(streams))
+
+	// write-surface: content-prose.
+	root.AddCommand(contentverb.BriefCommand(streams))
+	root.AddCommand(contentverb.WorkplanCommand(streams))
+	root.AddCommand(contentverb.BodyCommand(streams))
+	root.AddCommand(contentverb.FindingCommand(streams))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json
