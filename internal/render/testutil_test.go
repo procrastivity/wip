@@ -77,7 +77,7 @@ func setup(t *testing.T) (*store.Store, string, Current) {
 // matter births a Matter and returns its locator.
 func matter(t *testing.T, s *store.Store, repo, title string) string {
 	t.Helper()
-	n, err := writesurface.CreateMatter(ctx, s, store.ActorHuman, repo, title)
+	n, err := writesurface.CreateMatter(ctx, s, store.ActorHuman, repo, title, "")
 	if err != nil {
 		t.Fatalf("CreateMatter: %v", err)
 	}

@@ -29,7 +29,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 }
 
 func createCommand(streams *iostreams.Streams) *cobra.Command {
-	var title string
+	var title, locator string
 
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -52,7 +52,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node, err := writesurface.CreateMatter(cmd.Context(), s, store.ActorHuman, repo.ID, title)
+			node, err := writesurface.CreateMatter(cmd.Context(), s, store.ActorHuman, repo.ID, title, locator)
 			if err != nil {
 				return err
 			}
@@ -74,6 +74,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&title, "title", "", "the matter's title")
+	cmd.Flags().StringVar(&locator, "locator", "", "the matter's locator (default: derived from the title)")
 	_ = cmd.MarkFlagRequired("title")
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd

@@ -142,6 +142,34 @@ func TestBirth_MatterStageStep_OneEventEach(t *testing.T) {
 	}
 }
 
+// TestBirth_MatterLocatorOverride: --locator overrides the title-derived
+// locator (a descriptive title must not force an unwieldy address), refuses
+// anything not already in slug form, and still collides like a derived one.
+func TestBirth_MatterLocatorOverride(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+
+	m := runIn(t, dir, dbEnv, "matter", "create",
+		"--title", "wip next: the no-cursor view must see in-progress work",
+		"--locator", "next-sees-in-progress", "--json")
+	if m.exitCode != 0 {
+		t.Fatalf("matter create --locator: exit=%d stderr=%q", m.exitCode, m.stderr)
+	}
+	matter := mustJSON[nodePayload](t, m.stdout)
+	if matter.Locator != "next-sees-in-progress" {
+		t.Errorf("locator = %q, want the override", matter.Locator)
+	}
+
+	bad := runIn(t, dir, dbEnv, "matter", "create", "--title", "t", "--locator", "Not A Slug", "--json")
+	if bad.exitCode != 1 {
+		t.Fatalf("non-slug locator: exit=%d, want 1 (validation)", bad.exitCode)
+	}
+
+	dup := runIn(t, dir, dbEnv, "matter", "create", "--title", "different title", "--locator", "next-sees-in-progress", "--json")
+	if dup.exitCode != 1 {
+		t.Fatalf("colliding override: exit=%d, want 1 (validation)", dup.exitCode)
+	}
+}
+
 func dbEnvPath(dbEnv []string) string {
 	const prefix = "WIP_DB_PATH="
 	for _, e := range dbEnv {

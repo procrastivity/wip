@@ -15,14 +15,22 @@ import (
 )
 
 // CreateMatter births a Matter — the addressable root, no parent (D2). Its
-// own locator is slugify(title); a Matter's locator has to be unique across
-// the whole Repo for addressing to resolve unambiguously, which the DB's own
-// (matter, locator) unique index does not enforce for a row that is its own
-// matter, so this is checked here rather than left to a constraint.
-func CreateMatter(ctx context.Context, s *store.Store, actor store.Actor, repo, title string) (store.Node, error) {
-	locator := slugify(title)
+// own locator is slugify(title) unless an explicit locator overrides the
+// derivation (a locator is an address typed in every subsequent command, so
+// a descriptive title must not force an unwieldy one); an override must
+// already be in slug form — slugify of it changes nothing — so addressing
+// never has to guess a normalization. A Matter's locator has to be unique
+// across the whole Repo for addressing to resolve unambiguously, which the
+// DB's own (matter, locator) unique index does not enforce for a row that is
+// its own matter, so this is checked here rather than left to a constraint.
+func CreateMatter(ctx context.Context, s *store.Store, actor store.Actor, repo, title, locator string) (store.Node, error) {
 	if locator == "" {
-		return store.Node{}, wiperr.New("validation.invalid-title", "a matter's title must contain at least one letter or digit")
+		locator = slugify(title)
+		if locator == "" {
+			return store.Node{}, wiperr.New("validation.invalid-title", "a matter's title must contain at least one letter or digit")
+		}
+	} else if slugify(locator) != locator {
+		return store.Node{}, wiperr.New("validation.invalid-locator", fmt.Sprintf("%q is not in locator form — lowercase letters, digits and single hyphens only (try %q)", locator, slugify(locator)))
 	}
 	if _, err := s.MatterByLocator(ctx, repo, locator); err == nil {
 		return store.Node{}, wiperr.New("validation.locator-collision", fmt.Sprintf("a matter labeled %q already exists in this repo", locator))

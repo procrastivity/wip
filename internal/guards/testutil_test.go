@@ -58,7 +58,7 @@ func run(t *testing.T, dir string, args ...string) {
 // matter births a Matter and returns its ID.
 func matter(t *testing.T, s *store.Store, repo, title string) string {
 	t.Helper()
-	n, err := writesurface.CreateMatter(ctx, s, store.ActorHuman, repo, title)
+	n, err := writesurface.CreateMatter(ctx, s, store.ActorHuman, repo, title, "")
 	if err != nil {
 		t.Fatalf("CreateMatter(%q): %v", title, err)
 	}
