@@ -21,15 +21,15 @@ var ctx = context.Background()
 func newRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	real, err := filepath.EvalSymlinks(dir)
+	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	run(t, real, "init", "-q")
-	run(t, real, "config", "user.email", "test@example.com")
-	run(t, real, "config", "user.name", "test")
-	run(t, real, "commit", "--allow-empty", "-q", "-m", "init")
-	return real
+	run(t, resolved, "init", "-q")
+	run(t, resolved, "config", "user.email", "test@example.com")
+	run(t, resolved, "config", "user.name", "test")
+	run(t, resolved, "commit", "--allow-empty", "-q", "-m", "init")
+	return resolved
 }
 
 func addRemote(t *testing.T, dir, name, url string) {
