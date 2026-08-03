@@ -33,6 +33,10 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			harnessName := args[0]
+			if harnessName != claudecode.Name && harnessName != codex.Name {
+				return wiperr.New("validation.unknown-harness",
+					fmt.Sprintf("unknown harness %q — only %q or %q is supported", harnessName, claudecode.Name, codex.Name))
+			}
 
 			flags := cliflags.FromContext(cmd.Context())
 
@@ -47,9 +51,6 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				dir, err = claudecode.Install(m)
 			case codex.Name:
 				dir, err = codex.Install(m)
-			default:
-				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q or %q is supported", harnessName, claudecode.Name, codex.Name))
 			}
 			if err != nil {
 				return err
