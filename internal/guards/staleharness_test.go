@@ -8,6 +8,7 @@ import (
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/guards"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
+	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
 )
@@ -112,6 +113,55 @@ func TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T)
 	findings, err = guards.CheckStaleHarnessArtifact(root, build)
 	if err != nil {
 		t.Fatalf("CheckStaleHarnessArtifact after re-install: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	}
+}
+
+// TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall is
+// install-target-codex/step-03's counterpart to the claude-code test above:
+// same drift-then-reinstall shape, against the codex harness.
+func TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
+	t.Setenv(codex.SkillsDirEnv, t.TempDir())
+	build := buildinfo.Info{Version: "1.0.0"}
+	root := fakeRoot()
+
+	m, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := codex.Install(m); err != nil {
+		t.Fatalf("codex.Install: %v", err)
+	}
+
+	extra := &cobra.Command{
+		Use:   "gizmo",
+		Short: "a second synthetic plumbing verb, added after install",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(extra, surface.Plumbing)
+	root.AddCommand(extra)
+
+	findings, err := guards.CheckStaleCodexHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStaleCodexHarnessArtifact: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
+	}
+
+	m2, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := codex.Install(m2); err != nil {
+		t.Fatalf("codex.Install (re-install): %v", err)
+	}
+
+	findings, err = guards.CheckStaleCodexHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStaleCodexHarnessArtifact after re-install: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)

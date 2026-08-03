@@ -23,6 +23,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
+	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/manifest"
 )
 
@@ -39,7 +40,23 @@ const staleHarnessCode = "advisory.stale-harness-artifact"
 // actually registered. A never-installed target carries no stamp and is
 // not a finding — there is nothing to have drifted from.
 func CheckStaleHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
-	dir, err := claudecode.InstallDir()
+	return checkStaleHarnessArtifact(root, build, claudecode.Name, claudecode.InstallDir, claudecode.Generate)
+}
+
+// CheckStaleCodexHarnessArtifact is CheckStaleHarnessArtifact's codex
+// counterpart (install-target-codex/step-03): same drift comparison,
+// against what `wip install codex` last stamped.
+func CheckStaleCodexHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
+	return checkStaleHarnessArtifact(root, build, codex.Name, codex.InstallDir, codex.Generate)
+}
+
+func checkStaleHarnessArtifact(
+	root *cobra.Command, build buildinfo.Info,
+	harnessName string,
+	installDir func() (string, error),
+	generate func(manifest.Manifest) (map[string][]byte, error),
+) ([]Finding, error) {
+	dir, err := installDir()
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +72,7 @@ func CheckStaleHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Fin
 	if err != nil {
 		return nil, err
 	}
-	files, err := claudecode.Generate(m)
+	files, err := generate(m)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +84,7 @@ func CheckStaleHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Fin
 		findings = append(findings, Finding{
 			Code: staleHarnessCode,
 			Message: fmt.Sprintf("found: %s harness artifact %s %s since last install; run `wip install %s` to refresh it",
-				claudecode.Name, d.Path, d.Reason, claudecode.Name),
+				harnessName, d.Path, d.Reason, harnessName),
 		})
 	}
 	return findings, nil
