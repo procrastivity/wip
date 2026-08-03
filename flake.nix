@@ -11,6 +11,14 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # A flake sees rev/shortRev/dirtyRev and lastModified — never tags.
+        # So the Nix path stamps the commit where the make path stamps the
+        # release tag (release-engineering step-04): `nix build` reports
+        # `171ee47`, `make build` at a tag reports `v0.1.0`. Both name the
+        # same commit, and for `nix build github:procrastivity/wip/v0.1.0`
+        # the rev is the tag resolved — a stricter identifier, not a looser
+        # one. Do not "fix" this with a VERSION file: the tag is the single
+        # source of truth, and a second copy would go stale in silence.
         version = self.shortRev or self.dirtyShortRev or "dev";
 
         wip = pkgs.buildGoModule {
@@ -24,6 +32,9 @@
           ldflags = [
             "-X main.version=${version}"
             "-X main.commit=${self.rev or self.dirtyRev or "unknown"}"
+            # A fixed epoch, not an oversight: a real build date would make
+            # the derivation unreproducible. `commit` above carries the
+            # provenance the date would otherwise supply.
             "-X main.date=1970-01-01T00:00:00Z"
           ];
 

@@ -1,10 +1,9 @@
 # CI for the go branch. main's existing CI (bash line) is untouched and
 # unaffected by this workflow.
 #
-# No release/publish job here on purpose: release-engineering is a deferred
-# Backlog entry (HANDOFF H7), bootstrapped once there's something worth
-# releasing. Nothing in this workflow (or cliff.toml) makes wiring git-cliff
-# into a future release job any harder — that's H4's constraint, discharged.
+# Releasing lives in release.yml, on its own tag trigger — this workflow
+# never publishes. Keeping the two apart is what lets the release gate on
+# `make check` without either workflow having to know the other's schedule.
 name: CI
 
 on:
