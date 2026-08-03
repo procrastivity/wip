@@ -14,9 +14,10 @@ import (
 // choice this Matter is free to make and revise without any migration.
 //
 // Every Matter always gets a summary file (`matter.md`) carrying its
-// lifecycle, gate state, body and findings — content that has to render
-// somewhere regardless of earned shape. A Matter that has additionally
-// earned a Brief and/or Stages/Steps also gets `brief.md`, `roadmap.md`, and
+// lifecycle, gate state, in-force blocked-by edges, body and findings —
+// content that has to render somewhere regardless of earned shape. A Matter
+// that has additionally earned a Brief and/or a Matter-grain Workplan also
+// gets `brief.md` / `workplan.md`; one with Stages/Steps gets `roadmap.md` and
 // one `workplan-<stage-locator>.md` per Stage that carries Workplan content
 // — MODEL §3.1's own examples: "a bugfix Matter with no Stages renders as
 // one matter.md; a Matter with a Brief, Stages, and per-Stage Workplans
@@ -37,6 +38,14 @@ func renderMatterTree(ctx context.Context, s *store.Store, root string, matter s
 		return err
 	} else if has {
 		if err := writeGenerated(filepath.Join(dir, "brief.md"), brief); err != nil {
+			return err
+		}
+	}
+
+	if wp, has, err := readContentIfAny(ctx, s, matter.ID, store.KindWorkplan); err != nil {
+		return err
+	} else if has {
+		if err := writeGenerated(filepath.Join(dir, "workplan.md"), wp); err != nil {
 			return err
 		}
 	}
@@ -86,6 +95,22 @@ func renderMatterSummary(ctx context.Context, s *store.Store, dir string, matter
 	fmt.Fprintf(&b, "# %s\n\n", matter.Title)
 	fmt.Fprintf(&b, "locator: %s\n", matter.Locator)
 	fmt.Fprintf(&b, "lifecycle: %s\n", matter.Lifecycle)
+
+	edges, err := s.BlockedBy(ctx, matter.ID)
+	if err != nil {
+		return err
+	}
+	if len(edges) > 0 {
+		blockers := make([]string, 0, len(edges))
+		for _, e := range edges {
+			blocker, err := s.Node(ctx, e.Blocker)
+			if err != nil {
+				return err
+			}
+			blockers = append(blockers, blocker.Locator)
+		}
+		fmt.Fprintf(&b, "blocked-by: %s\n", strings.Join(blockers, ", "))
+	}
 
 	gates, err := s.ClosedGates(ctx, matter.ID)
 	if err != nil {

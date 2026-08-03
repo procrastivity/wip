@@ -3,9 +3,11 @@ package render
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/procrastivity/wip/internal/store"
+	"github.com/procrastivity/wip/internal/writesurface"
 )
 
 // TestDepthPolicy_NoStagesRendersOneMatterFile is MODEL §3.1's first example:
@@ -59,6 +61,62 @@ func TestDepthPolicy_BriefStagesAndWorkplansRenderSeparateFiles(t *testing.T) {
 	}
 	if string(brief) != "# Brief\n\nwhy this exists\n" {
 		t.Errorf("brief.md = %q, want the stored Brief content verbatim", brief)
+	}
+}
+
+// TestDepthPolicy_MatterGrainWorkplanRendersAsWorkplanFile covers the
+// steps-only shape with store-resident prose: a Matter whose Workplan lives
+// on the Matter itself (no Stages) renders it as `workplan.md`, verbatim,
+// beside `matter.md`.
+func TestDepthPolicy_MatterGrainWorkplanRendersAsWorkplanFile(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Steps-only Matter")
+	writeOnce(t, s, cur.Repo.ID, locator, store.KindWorkplan, []byte("# Workplan\n\nintent, shape, seal condition\n"))
+
+	if _, err := Refresh(ctx, s, cur, store.ActorHuman, NoPrecondition); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	path := filepath.Join(GeneratedDir(cur.Root), locator, "workplan.md")
+	wp, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the Matter-grain workplan did not render: %v", err)
+	}
+	if string(wp) != "# Workplan\n\nintent, shape, seal condition\n" {
+		t.Errorf("workplan.md = %q, want the stored Workplan content verbatim", wp)
+	}
+}
+
+// TestMatterSummaryListsInForceBlockedByEdges: matter.md carries the node's
+// in-force blocked-by edges as locators, so orientation from the projection
+// sees the ordering without querying the store.
+func TestMatterSummaryListsInForceBlockedByEdges(t *testing.T) {
+	s, _, cur := setup(t)
+	blocker := matter(t, s, cur.Repo.ID, "The Blocker")
+	blocked := matter(t, s, cur.Repo.ID, "The Blocked")
+	if _, err := writesurface.DependAdd(ctx, s, store.ActorHuman, cur.Repo.ID, blocked, blocker); err != nil {
+		t.Fatalf("DependAdd: %v", err)
+	}
+
+	if _, err := Refresh(ctx, s, cur, store.ActorHuman, NoPrecondition); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	md, err := os.ReadFile(filepath.Join(GeneratedDir(cur.Root), blocked, "matter.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "blocked-by: " + blocker + "\n"
+	if !strings.Contains(string(md), want) {
+		t.Errorf("matter.md for %s does not carry %q:\n%s", blocked, want, md)
+	}
+
+	blockerMd, err := os.ReadFile(filepath.Join(GeneratedDir(cur.Root), blocker, "matter.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blockerMd), "blocked-by:") {
+		t.Errorf("matter.md for unblocked %s carries a blocked-by line:\n%s", blocker, blockerMd)
 	}
 }
 
