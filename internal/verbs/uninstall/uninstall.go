@@ -13,6 +13,7 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/surface"
@@ -39,9 +40,11 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				dir, err = codex.Uninstall()
 			case pi.Name:
 				dir, err = pi.Uninstall()
+			case opencode.Name:
+				dir, err = opencode.Uninstall()
 			default:
 				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q, %q, or %q is supported", harnessName, claudecode.Name, codex.Name, pi.Name))
+					fmt.Sprintf("unknown harness %q — only %q, %q, %q, or %q is supported", harnessName, claudecode.Name, codex.Name, pi.Name, opencode.Name))
 			}
 			if err != nil {
 				return err

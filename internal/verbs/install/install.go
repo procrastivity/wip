@@ -1,9 +1,9 @@
 // Package install implements the `wip install <harness>` verb: it runs the
 // manifest pipeline, filters to plumbing verbs, and writes the result to
 // the target harness's install path, stamped (manifest-install Brief,
-// "Claude-code install target"). claude-code, codex, and pi are the
-// recognized targets; an unrecognized harness name fails validation rather
-// than silently no-op'ing.
+// "Claude-code install target"). claude-code, codex, pi, and opencode are
+// the recognized targets; an unrecognized harness name fails validation
+// rather than silently no-op'ing.
 package install
 
 import (
@@ -16,6 +16,7 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
@@ -34,9 +35,9 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			harnessName := args[0]
-			if harnessName != claudecode.Name && harnessName != codex.Name && harnessName != pi.Name {
+			if harnessName != claudecode.Name && harnessName != codex.Name && harnessName != pi.Name && harnessName != opencode.Name {
 				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q, %q, or %q is supported", harnessName, claudecode.Name, codex.Name, pi.Name))
+					fmt.Sprintf("unknown harness %q — only %q, %q, %q, or %q is supported", harnessName, claudecode.Name, codex.Name, pi.Name, opencode.Name))
 			}
 
 			flags := cliflags.FromContext(cmd.Context())
@@ -54,6 +55,8 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				dir, err = codex.Install(m)
 			case pi.Name:
 				dir, err = pi.Install(m)
+			case opencode.Name:
+				dir, err = opencode.Install(m)
 			}
 			if err != nil {
 				return err
