@@ -24,6 +24,7 @@ import (
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/manifest"
 )
@@ -56,6 +57,13 @@ func CheckStaleCodexHarnessArtifact(root *cobra.Command, build buildinfo.Info) (
 // install pi` last stamped.
 func CheckStalePiHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
 	return checkStaleHarnessArtifact(root, build, pi.Name, pi.InstallDir, pi.Generate)
+}
+
+// CheckStaleOpencodeHarnessArtifact is CheckStaleHarnessArtifact's opencode
+// counterpart (install-target-opencode/step-03): same drift comparison,
+// against what `wip install opencode` last stamped.
+func CheckStaleOpencodeHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
+	return checkStaleHarnessArtifact(root, build, opencode.Name, opencode.InstallDir, opencode.Generate)
 }
 
 func checkStaleHarnessArtifact(

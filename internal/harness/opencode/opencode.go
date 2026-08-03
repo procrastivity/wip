@@ -1,0 +1,132 @@
+// Package opencode is the OpenCode harness generator: it renders wip's
+// manifest into a SKILL.md at OpenCode's own tool-owned skills path — the
+// arch doc §4 mechanism, mirrored here per install-target-opencode/step-01's
+// finding. OpenCode discovers skills from several merged locations
+// (project-local .opencode/skills/, .claude/skills/, .agents/skills/, and
+// their three global counterparts), but wip's projection writes exactly one
+// tree, targeting OpenCode's own ~/.config/opencode/skills — the same
+// choice codex and pi each made for their own tool-owned directory over the
+// shared ~/.agents/skills/ the arch doc leaves open. There is no plugin or
+// TypeScript shim (step-01's finding): OpenCode's skill mechanism is
+// SKILL.md only, loaded on-demand via a native `skill` tool. Everything in
+// the generated SKILL.md traces back to the manifest except the same two
+// hand-authored blocks claudecode, codex, and pi all carry: this package's
+// own judgment paragraph and vocabulary's ratified harness-guidance
+// paragraph.
+package opencode
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/procrastivity/wip/internal/asset"
+	"github.com/procrastivity/wip/internal/harness"
+	"github.com/procrastivity/wip/internal/manifest"
+)
+
+// Name is this harness's install-target name, as passed to `wip install
+// <harness>` / `wip uninstall <harness>`. It is also the generated skill's
+// own directory name under SkillsDir().
+const Name = "opencode"
+
+// skillName is the directory name the generated skill is installed under.
+const skillName = "wip"
+
+// judgmentAsset is the one hand-authored prose paragraph this Matter owns,
+// resolved through chassis's asset chain (assets/templates/skills/opencode/).
+const judgmentAsset = "templates/skills/opencode/judgment.md"
+
+// guidanceAsset is vocabulary's ratified 0444 harness-guidance paragraph,
+// the same partial claudecode, codex, and pi project, seeded at the top
+// level of the shipped asset tree.
+const guidanceAsset = "agent-write-guidance.md"
+
+// SkillsDirEnv is an environment variable that, when set, overrides
+// SkillsDir()'s result — a test seam only (mirrors codex's
+// WIP_CODEX_SKILLS_DIR pattern), never read for any other purpose.
+const SkillsDirEnv = "WIP_OPENCODE_SKILLS_DIR"
+
+var userHomeDir = os.UserHomeDir
+
+// SkillsDir returns the directory OpenCode loads skills from,
+// ~/.config/opencode/skills — per install-target-opencode/step-01's
+// finding.
+func SkillsDir() (string, error) {
+	if dir := os.Getenv(SkillsDirEnv); dir != "" {
+		return dir, nil
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("opencode: locating home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "opencode", "skills"), nil
+}
+
+// InstallDir returns the directory the generated skill is written to and
+// read back from: SkillsDir()/wip.
+func InstallDir() (string, error) {
+	dir, err := SkillsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, skillName), nil
+}
+
+// Generate renders m into the generated tree's content, keyed by path
+// relative to InstallDir(). It filters m's verbs to the plumbing subset
+// (harness.Projectable, D53) before rendering — the manifest's own full
+// verb list is never projected as-is.
+func Generate(m manifest.Manifest) (map[string][]byte, error) {
+	verbs := harness.Projectable(m.Verbs)
+
+	judgment, err := asset.Resolve(judgmentAsset)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: resolving judgment template: %w", err)
+	}
+	guidance, err := asset.Resolve(guidanceAsset)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: resolving harness-guidance partial: %w", err)
+	}
+
+	return map[string][]byte{
+		"SKILL.md": renderSkillMD(m, verbs, judgment.Bytes(), guidance.Bytes()),
+	}, nil
+}
+
+func renderSkillMD(m manifest.Manifest, verbs []manifest.Verb, judgment, guidance []byte) []byte {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "---\n")
+	fmt.Fprintf(&b, "name: %s\n", skillName)
+	fmt.Fprintf(&b, "description: Track and drive %s work — Matters, Stages, Steps — through its verb surface.\n", m.Tool.Name)
+	fmt.Fprintf(&b, "---\n\n")
+
+	fmt.Fprintf(&b, "# %s\n\n", m.Tool.Name)
+	fmt.Fprintf(&b, "Generated from %s %s (schema %d) — never hand-edit; re-run `%s install %s` after upgrading.\n\n",
+		m.Tool.Name, m.Tool.Version, m.SchemaVersion, m.Tool.Name, Name)
+
+	b.Write(judgment)
+	fmt.Fprintf(&b, "\n\n")
+
+	fmt.Fprintf(&b, "## Verbs\n\n")
+	if len(verbs) == 0 {
+		fmt.Fprintf(&b, "(none registered yet)\n\n")
+	} else {
+		fmt.Fprintf(&b, "| Verb | Description |\n|---|---|\n")
+		for _, v := range verbs {
+			desc := v.Description
+			if desc == "" {
+				desc = "(no description)"
+			}
+			fmt.Fprintf(&b, "| `%s %s` | %s |\n", m.Tool.Name, v.Name, desc)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+
+	b.Write(guidance)
+	fmt.Fprintf(&b, "\n")
+
+	return []byte(b.String())
+}
