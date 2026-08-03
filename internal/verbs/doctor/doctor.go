@@ -65,6 +65,9 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				func(_ context.Context, _ *store.Store, _ string) ([]guards.Finding, error) {
 					return guards.CheckStaleHarnessArtifact(root, build)
 				},
+				func(_ context.Context, _ *store.Store, _ string) ([]guards.Finding, error) {
+					return guards.CheckStaleCodexHarnessArtifact(root, build)
+				},
 			)
 			if err != nil {
 				return err

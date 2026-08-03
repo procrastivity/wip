@@ -1,9 +1,9 @@
 // Package install implements the `wip install <harness>` verb: it runs the
 // manifest pipeline, filters to plumbing verbs, and writes the result to
 // the target harness's install path, stamped (manifest-install Brief,
-// "Claude-code install target"). claude-code is the sole P1 target (H9);
-// an unrecognized harness name fails validation rather than silently
-// no-op'ing.
+// "Claude-code install target"). claude-code and codex are the recognized
+// targets; an unrecognized harness name fails validation rather than
+// silently no-op'ing.
 package install
 
 import (
@@ -15,6 +15,7 @@ import (
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
+	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
@@ -32,10 +33,6 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			harnessName := args[0]
-			if harnessName != claudecode.Name {
-				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q is supported", harnessName, claudecode.Name))
-			}
 
 			flags := cliflags.FromContext(cmd.Context())
 
@@ -44,7 +41,16 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				return err
 			}
 
-			dir, err := claudecode.Install(m)
+			var dir string
+			switch harnessName {
+			case claudecode.Name:
+				dir, err = claudecode.Install(m)
+			case codex.Name:
+				dir, err = codex.Install(m)
+			default:
+				return wiperr.New("validation.unknown-harness",
+					fmt.Sprintf("unknown harness %q — only %q or %q is supported", harnessName, claudecode.Name, codex.Name))
+			}
 			if err != nil {
 				return err
 			}

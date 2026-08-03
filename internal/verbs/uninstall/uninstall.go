@@ -12,6 +12,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
+	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/wiperr"
@@ -25,14 +26,20 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			harnessName := args[0]
-			if harnessName != claudecode.Name {
-				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q is supported", harnessName, claudecode.Name))
-			}
 
 			flags := cliflags.FromContext(cmd.Context())
 
-			dir, err := claudecode.Uninstall()
+			var dir string
+			var err error
+			switch harnessName {
+			case claudecode.Name:
+				dir, err = claudecode.Uninstall()
+			case codex.Name:
+				dir, err = codex.Uninstall()
+			default:
+				return wiperr.New("validation.unknown-harness",
+					fmt.Sprintf("unknown harness %q — only %q or %q is supported", harnessName, claudecode.Name, codex.Name))
+			}
 			if err != nil {
 				return err
 			}
