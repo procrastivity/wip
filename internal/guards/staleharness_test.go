@@ -9,6 +9,7 @@ import (
 	"github.com/procrastivity/wip/internal/guards"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
 )
@@ -162,6 +163,55 @@ func TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testi
 	findings, err = guards.CheckStaleCodexHarnessArtifact(root, build)
 	if err != nil {
 		t.Fatalf("CheckStaleCodexHarnessArtifact after re-install: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	}
+}
+
+// TestCheckStalePiHarnessArtifact_FlagsDriftThenClearsOnReinstall is
+// install-target-pi/step-03's counterpart to the claude-code/codex tests
+// above: same drift-then-reinstall shape, against the pi harness.
+func TestCheckStalePiHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
+	t.Setenv(pi.SkillsDirEnv, t.TempDir())
+	build := buildinfo.Info{Version: "1.0.0"}
+	root := fakeRoot()
+
+	m, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := pi.Install(m); err != nil {
+		t.Fatalf("pi.Install: %v", err)
+	}
+
+	extra := &cobra.Command{
+		Use:   "gizmo",
+		Short: "a second synthetic plumbing verb, added after install",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(extra, surface.Plumbing)
+	root.AddCommand(extra)
+
+	findings, err := guards.CheckStalePiHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStalePiHarnessArtifact: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
+	}
+
+	m2, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := pi.Install(m2); err != nil {
+		t.Fatalf("pi.Install (re-install): %v", err)
+	}
+
+	findings, err = guards.CheckStalePiHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStalePiHarnessArtifact after re-install: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)

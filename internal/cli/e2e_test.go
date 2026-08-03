@@ -44,16 +44,17 @@ type result struct {
 }
 
 // hermeticEnv is the process environment plus the caller's overrides, with
-// WIP_CLAUDE_SKILLS_DIR and WIP_CODEX_SKILLS_DIR each defaulted to their own
-// per-test temp dir when the caller does not set them — the suite must
-// never read this host's real skill installs (found live: a
-// ~/.claude/skills/wip stamped by an older build failed doctor inside tests
-// that never mentioned skills; install-target-codex carries the same risk
-// for ~/.codex/skills/wip).
+// WIP_CLAUDE_SKILLS_DIR, WIP_CODEX_SKILLS_DIR, and WIP_PI_SKILLS_DIR each
+// defaulted to their own per-test temp dir when the caller does not set
+// them — the suite must never read this host's real skill installs (found
+// live: a ~/.claude/skills/wip stamped by an older build failed doctor
+// inside tests that never mentioned skills; install-target-codex and
+// install-target-pi carry the same risk for ~/.codex/skills/wip and
+// ~/.pi/agent/skills/wip).
 func hermeticEnv(t *testing.T, env []string) []string {
 	t.Helper()
 	out := append(os.Environ(), env...)
-	for _, name := range []string{"WIP_CLAUDE_SKILLS_DIR", "WIP_CODEX_SKILLS_DIR"} {
+	for _, name := range []string{"WIP_CLAUDE_SKILLS_DIR", "WIP_CODEX_SKILLS_DIR", "WIP_PI_SKILLS_DIR"} {
 		set := false
 		for _, e := range env {
 			if strings.HasPrefix(e, name+"=") {
@@ -301,6 +302,44 @@ func TestInstallUninstall_Codex_RoundTrip(t *testing.T) {
 	}
 
 	uninstallResult := run(t, env, "uninstall", "codex", "--json")
+	if uninstallResult.exitCode != 0 {
+		t.Fatalf("uninstall exit code = %d, want 0; stderr=%q", uninstallResult.exitCode, uninstallResult.stderr)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("install dir still exists after uninstall: err=%v", err)
+	}
+}
+
+func TestInstallUninstall_Pi_RoundTrip(t *testing.T) {
+	skillsDir := t.TempDir()
+	env := []string{"WIP_PI_SKILLS_DIR=" + skillsDir}
+
+	installResult := run(t, env, "install", "pi", "--json")
+	if installResult.exitCode != 0 {
+		t.Fatalf("install exit code = %d, want 0; stderr=%q", installResult.exitCode, installResult.stderr)
+	}
+	var installPayload struct {
+		Harness string `json:"harness"`
+		Dir     string `json:"dir"`
+	}
+	if err := json.Unmarshal([]byte(installResult.stdout), &installPayload); err != nil {
+		t.Fatalf("install stdout is not JSON: %v (stdout=%q)", err, installResult.stdout)
+	}
+	if installPayload.Harness != "pi" {
+		t.Errorf("installed harness = %q, want %q", installPayload.Harness, "pi")
+	}
+
+	dir := installPayload.Dir
+	for _, want := range []string{"SKILL.md", ".wip-manifest-stamp.json"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Errorf("expected generated file %q missing: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "plugin.json")); !os.IsNotExist(err) {
+		t.Errorf("pi install wrote .claude-plugin/plugin.json, want none — that mechanism is claude-code's own")
+	}
+
+	uninstallResult := run(t, env, "uninstall", "pi", "--json")
 	if uninstallResult.exitCode != 0 {
 		t.Fatalf("uninstall exit code = %d, want 0; stderr=%q", uninstallResult.exitCode, uninstallResult.stderr)
 	}
