@@ -24,9 +24,9 @@ up to the Run cap. An absent edge carries no hidden sequence.
 
 “Eligible” does not mean “must run concurrently.” The cap, available agents,
 claims, and configured D30 handling can reduce the selected set. A cap of 1
-remains ordinary sequential execution under D31. The scheduler can also pick
-Ready nodes in stable presentation order when it needs a deterministic subset;
-that choice does not turn the sort key into a dependency.
+remains ordinary sequential execution under D31. When it needs a subset, the
+scheduler applies a selection policy that does not read sibling sort order;
+the `scheduler` Matter owns that policy.
 
 This closes D51 without changing its first half: sibling order remains a sort
 key for display only. Reordering siblings can never change the Ready set or
