@@ -58,13 +58,36 @@ coordinator would leave a lock that resume cannot take and that stand-down
 must refuse, and S5 gives that Run no force path. The whole escape hatch
 depends on the kernel doing the release.
 
-The lock file lives under the host runtime area, at
-`$XDG_RUNTIME_DIR/wip/<store-id>/run/<run-ulid>.lock`, with mode `0700` on
-the directories. When `XDG_RUNTIME_DIR` is unset, the fallback is
-`/tmp/wip-<uid>/<store-id>/run/<run-ulid>.lock`. The store scope keeps two
-stores on one host from reading each other's locks. Both locations clear on
-reboot, which matches the lock's ephemeral nature. Presence of the file means
-nothing; only the held advisory lock does.
+The lock file resolves the way every other wip path resolves — environment
+variable first, then the XDG default under `$HOME`, then the D49 host key:
+
+1. `$XDG_RUNTIME_DIR/wip/<host>/run/<run-ulid>.lock` when `XDG_RUNTIME_DIR`
+   is set. This is the correct home for ephemeral coordination: the
+   directory is already per-user and `0700`, and the session clears it.
+2. `$XDG_STATE_HOME/wip/<host>/run/<run-ulid>.lock` otherwise, with
+   `$XDG_STATE_HOME` defaulting to `$HOME/.local/state`. XDG defines no
+   default for `XDG_RUNTIME_DIR`, so state is the nearest defined base. This
+   mirrors `store.DataDir`, which resolves `$XDG_DATA_HOME` then
+   `$HOME/.local/share`, and it is the macOS path in practice.
+
+wip creates the `run` directory with mode `0700`. No `/tmp` path is used:
+`/tmp` is world-visible and would need uid-mangled names to stay per-user,
+while both bases above are per-user by construction.
+
+The host key is D49 for the same reason the store carries one — a home
+directory that is synced or shared across hosts must never let two hosts
+read one lock namespace. `WIP_RUNTIME_DIR` overrides the computed root
+outright, the same escape hatch `WIP_DB_PATH` gives the store, so a test
+store never contends with the host's real Runs.
+
+The fallback base does not clear on reboot, and that costs nothing:
+presence of the lock file means nothing, and only the held advisory lock
+answers the probe. Closing a Run may unlink its lock file, best-effort. A
+leftover file is not a leftover lock.
+
+One caveat follows from the fallback: a home directory on a network mount
+may not support the advisory lock. That case is not silent — it reports
+`liveness: unknown` with cause `probe-unsupported` under S3.
 
 The ownership lock is never the source of Run state, never rendered, and
 never replayed. Durable Run state and its history remain in the store. The
