@@ -182,7 +182,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 	before, err := s.Events(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -130,7 +130,7 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
 			if err != nil {
 				return err

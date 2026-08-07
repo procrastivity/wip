@@ -617,6 +617,7 @@ type Batch struct {
 	LastEvent   string
 }
 
+// Batch reads one Batch row by ID.
 func (v View) Batch(ctx context.Context, id string) (Batch, error) {
 	var b Batch
 	var name, matter, reason, closed string
@@ -690,7 +691,7 @@ func (v View) LiveBatches(ctx context.Context) ([]Batch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: read live Batches: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Batch
 	for rows.Next() {
 		var id string
@@ -772,6 +773,7 @@ type Run struct {
 	LastEvent   string
 }
 
+// Run reads one Run row by ID.
 func (v View) Run(ctx context.Context, id string) (Run, error) {
 	var r Run
 	var state, started string
@@ -800,12 +802,13 @@ func (v View) Run(ctx context.Context, id string) (Run, error) {
 	return r, nil
 }
 
+// RunMatters reads a Run's frozen Matter set in ordinal order.
 func (v View) RunMatters(ctx context.Context, id string) ([]string, error) {
 	rows, err := v.q.QueryContext(ctx, `SELECT matter FROM run_matters WHERE run=? ORDER BY ordinal`, id)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var m string
@@ -863,7 +866,7 @@ func (v View) OpenDispatchesForRun(ctx context.Context, run string) ([]Dispatch,
 	if err != nil {
 		return nil, fmt.Errorf("store: list open Dispatches for Run %s: %w", run, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Dispatch
 	for rows.Next() {
 		var d Dispatch

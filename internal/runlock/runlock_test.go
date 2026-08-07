@@ -20,7 +20,7 @@ func TestAcquireAndProbeHeldVersusFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 	held, err := Probe(run)
 	if err != nil || held.State != LivenessLive {
 		t.Fatalf("held probe = %#v, err=%v", held, err)

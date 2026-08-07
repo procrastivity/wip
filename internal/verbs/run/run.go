@@ -23,6 +23,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
+// Command is the `wip run` verb group: list, show, stand-down.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{Use: "run", Short: "inspect Runs and stand down an interrupted Run"}
 	cmd.AddCommand(listCommand(streams), showCommand(streams), standDownCommand(streams))
@@ -105,7 +106,7 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			clone, err := currentClone(cmd.Context(), s)
 			if err != nil {
 				return err
@@ -161,7 +162,7 @@ func showCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			clone, err := currentClone(cmd.Context(), s)
 			if err != nil {
 				return err
@@ -195,7 +196,7 @@ func standDownCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
 			if err != nil {
 				return err

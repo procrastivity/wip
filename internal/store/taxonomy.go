@@ -200,12 +200,8 @@ var P1Taxonomy = []EventType{
 	batchScoped(TypeBatchLeft),
 }
 
-// taxonomySets is one slice per numbered migration that seeds event types.
-// P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
-// types as a *new* slice, seeded by its own migration and appended here. That is
-// what keeps "never edit a shipped migration; append" structural rather than
-// remembered — the migration's INSERT is generated from the same slice that
-// stamp-time validation reads, so the two cannot drift.
+// V2Taxonomy is the run.* event family seeded by the v2 migration. Like
+// P1Taxonomy, it is frozen once shipped.
 var V2Taxonomy = []EventType{
 	execution(TypeRunStarted, FamilyRun),
 	execution(TypeRunSkipped, FamilyRun),
@@ -214,11 +210,19 @@ var V2Taxonomy = []EventType{
 	execution(TypeRunStoodDown, FamilyRun),
 }
 
+// V3Taxonomy is the Batch lifecycle-close pair seeded by the v3 migration.
+// Like P1Taxonomy, it is frozen once shipped.
 var V3Taxonomy = []EventType{
 	batchScoped(TypeBatchDismissed),
 	batchScoped(TypeBatchSwept),
 }
 
+// taxonomySets is one slice per numbered migration that seeds event types.
+// P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
+// types as a *new* slice, seeded by its own migration and appended here. That is
+// what keeps "never edit a shipped migration; append" structural rather than
+// remembered — the migration's INSERT is generated from the same slice that
+// stamp-time validation reads, so the two cannot drift.
 var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
@@ -309,23 +313,27 @@ const (
 // but `completed`.
 type CloseReason string
 
-// The three close reasons.
+// RunSkipReason is why a Run was skipped rather than started.
 type RunSkipReason string
 
+// The three skip reasons.
 const (
 	RunSkipContention RunSkipReason = "contention"
 	RunSkipBlocked    RunSkipReason = "blocked"
 	RunSkipFailed     RunSkipReason = "failed"
 )
 
+// The three close reasons.
 const (
 	CloseCompleted  CloseReason = "completed"
 	CloseSuperseded CloseReason = "superseded"
 	CloseReaped     CloseReason = "reaped"
 )
 
+// BatchCloseReason is why a Batch left the live state (run-model F5/F7).
 type BatchCloseReason string
 
+// The two Batch close reasons.
 const (
 	BatchDismissed BatchCloseReason = "dismissed"
 	BatchSwept     BatchCloseReason = "swept"

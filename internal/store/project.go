@@ -1065,6 +1065,7 @@ func validateRunSkipped(ctx context.Context, tx *sql.Tx, ev Event) error {
 	}
 	return nil
 }
+
 func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []string {
 	_ = ctx
 	_ = tx

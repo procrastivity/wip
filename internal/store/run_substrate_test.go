@@ -205,17 +205,17 @@ func TestRunTransitionsValidateOwnershipAndStandDownAcrossClones(t *testing.T) {
 	if skipped.Subject != matter {
 		t.Fatalf("run.skipped subject = %s, want Matter %s", skipped.Subject, matter)
 	}
-	if err := h.commitError(func(_ context.Context, tx *Tx) ([]Draft, error) {
+	if err := h.commitError(func(_ context.Context, _ *Tx) ([]Draft, error) {
 		return []Draft{{Type: TypeRunSkipped, Subject: matter, Payload: RunSkipped{Run: resumed, Reason: RunSkipReason("not-a-reason")}}}, nil
 	}); err == nil || !strings.Contains(err.Error(), "invalid Run or reason") {
 		t.Errorf("invalid run.skipped reason = %v", err)
 	}
-	if err := acting.commitError(func(_ context.Context, tx *Tx) ([]Draft, error) {
+	if err := acting.commitError(func(_ context.Context, _ *Tx) ([]Draft, error) {
 		return []Draft{{Type: TypeRunResumed, Subject: resumed, Payload: RunResumed{}}}, nil
 	}); err == nil || !strings.Contains(err.Error(), "dimensions") {
 		t.Errorf("resumed from a non-owning Clone = %v", err)
 	}
-	if err := h.commitError(func(_ context.Context, tx *Tx) ([]Draft, error) {
+	if err := h.commitError(func(_ context.Context, _ *Tx) ([]Draft, error) {
 		return []Draft{{Type: TypeRunStoodDown, Subject: resumed, Payload: RunStoodDown{}}}, nil
 	}); err == nil || !strings.Contains(err.Error(), "invalid acting") {
 		t.Errorf("empty stand-down payload = %v", err)
