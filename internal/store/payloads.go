@@ -198,7 +198,10 @@ type BatchMembership struct {
 	Matter string `json:"matter"`
 }
 
+// BatchDismissedPayload is the empty payload of batch.dismissed.
 type BatchDismissedPayload struct{}
+
+// BatchSweptPayload is the empty payload of batch.swept.
 type BatchSweptPayload struct{}
 
 // DispatchOpened is the payload of dispatch.opened. Empty Run and Matter keep
@@ -215,18 +218,28 @@ type DispatchClosed struct {
 	Reason CloseReason `json:"reason"`
 }
 
+// RunStarted is the payload of run.started: the Batch this pass covers and the
+// frozen Matter set at start.
 type RunStarted struct {
 	Batch   string   `json:"batch"`
 	Locator string   `json:"locator"`
 	Matters []string `json:"matters"`
 }
 
+// RunSkipped is the payload of run.skipped.
 type RunSkipped struct {
 	Run    string        `json:"run"`
 	Reason RunSkipReason `json:"reason"`
 }
+
+// RunResumed is the empty payload of run.resumed.
 type RunResumed struct{}
+
+// RunFinished is the empty payload of run.finished.
 type RunFinished struct{}
+
+// RunStoodDown is the payload of run.stood-down. The event Clone is the acting
+// Clone; OwningClone is the Run owner — F9 allows them to differ.
 type RunStoodDown struct {
 	ActingClone string `json:"acting_clone"`
 	OwningClone string `json:"owning_clone"`

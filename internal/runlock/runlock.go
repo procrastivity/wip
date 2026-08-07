@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Liveness states and unknown-probe causes surfaced on Run reads.
 const (
 	LivenessLive        = "live"
 	LivenessInterrupted = "interrupted"
@@ -21,6 +22,7 @@ const (
 	CauseFailed      = "probe-failed"
 )
 
+// ErrHeld reports that another process holds the Run lock.
 var ErrHeld = errors.New("run lock is held")
 
 // Error reports why the operating system could not probe or acquire a lock.
@@ -45,6 +47,7 @@ type Lock struct {
 	file *os.File
 }
 
+// Release closes the lock file, releasing the kernel lock. It is idempotent.
 func (l *Lock) Release() error {
 	if l == nil || l.file == nil {
 		return nil
@@ -134,16 +137,17 @@ func Probe(runID string) (Result, error) {
 		return Result{State: LivenessUnknown, Cause: CauseFailed}, err
 	}
 	defer func() { _ = f.Close() }()
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
 		if err := unix.Flock(int(f.Fd()), unix.LOCK_UN); err != nil {
 			return Result{State: LivenessUnknown, Cause: classify(err)}, nil
 		}
 		return Result{State: LivenessInterrupted}, nil
-	} else if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-		return Result{State: LivenessLive}, nil
-	} else {
-		return Result{State: LivenessUnknown, Cause: classify(err)}, nil
 	}
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return Result{State: LivenessLive}, nil
+	}
+	return Result{State: LivenessUnknown, Cause: classify(err)}, nil
 }
 
 func classify(err error) string {

@@ -178,6 +178,8 @@ func Finish(ctx context.Context, s *store.Store, actor store.Actor, repo, locato
 	return simpleTransition(ctx, s, actor, repo, locator, "finished", store.InProgress, store.Done)
 }
 
+// FinishWithEnv is Finish with the caller's full Env, so a sealing Matter
+// finish can sweep its anonymous Batch with correct event dimensions.
 func FinishWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (store.Node, error) {
 	return simpleTransitionEnv(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done)
 }

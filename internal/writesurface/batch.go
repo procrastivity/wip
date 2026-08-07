@@ -26,6 +26,7 @@ func ResolveBatch(ctx context.Context, v store.View, locator string) (store.Batc
 	return b, nil
 }
 
+// CreateBatch births a named Batch, refusing empty and duplicate live names.
 func CreateBatch(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, name string) (store.Batch, error) {
 	if strings.TrimSpace(name) == "" {
 		return store.Batch{}, wiperr.New("validation.empty-batch-name", "a named Batch needs a non-empty name")
@@ -69,6 +70,8 @@ func CreateAnonymousBatch(ctx context.Context, s *store.Store, actor store.Actor
 	return s.Batch(ctx, id)
 }
 
+// JoinBatch adds a Matter to a named Batch. Anonymous Batches refuse user
+// membership changes; CreateAnonymousBatch is the only path into them.
 func JoinBatch(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, batchLocator, matterLocator string) (store.Batch, string, error) {
 	repo := env.Repo
 	batch, err := ResolveBatch(ctx, s.View, batchLocator)
@@ -99,6 +102,8 @@ func JoinBatch(ctx context.Context, s *store.Store, actor store.Actor, env store
 	return result, matter.ID, err
 }
 
+// LeaveBatch removes a Matter from a named Batch, under the same anonymous
+// refusal as JoinBatch.
 func LeaveBatch(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, batchLocator, matterLocator string) (store.Batch, string, error) {
 	repo := env.Repo
 	batch, err := ResolveBatch(ctx, s.View, batchLocator)
@@ -136,6 +141,7 @@ func LeaveBatch(ctx context.Context, s *store.Store, actor store.Actor, env stor
 	return result, matter.ID, err
 }
 
+// DismissBatch closes a live named Batch with reason dismissed.
 func DismissBatch(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (store.Batch, error) {
 	batch, err := ResolveBatch(ctx, s.View, locator)
 	if err != nil {

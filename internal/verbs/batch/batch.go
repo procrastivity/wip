@@ -17,6 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
+// Command is the `wip batch` verb group: create, join, leave, dismiss.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{Use: "batch", Short: "manage named Batches"}
 	cmd.AddCommand(createCommand(streams), joinCommand(streams), leaveCommand(streams), dismissCommand(streams))
@@ -93,7 +94,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			b, err := writesurface.CreateBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
 			if err != nil {
 				return err
@@ -112,7 +113,7 @@ func joinCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			b, member, err := writesurface.JoinBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
@@ -131,7 +132,7 @@ func leaveCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			b, member, err := writesurface.LeaveBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
@@ -150,7 +151,7 @@ func dismissCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			b, err := writesurface.DismissBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
 			if err != nil {
 				return err

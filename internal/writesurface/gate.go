@@ -51,6 +51,8 @@ func CloseGate(ctx context.Context, s *store.Store, actor store.Actor, repo, gat
 	return closeGateEnv(ctx, s, actor, store.Env{Repo: repo}, gate, locator)
 }
 
+// CloseGateWithEnv is CloseGate with the caller's full Env, so a final Matter
+// gate can seal and sweep with correct event dimensions.
 func CloseGateWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (store.Node, error) {
 	return closeGateEnv(ctx, s, actor, env, gate, locator)
 }
