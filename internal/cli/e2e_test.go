@@ -72,7 +72,13 @@ func hermeticEnv(t *testing.T, env []string) []string {
 
 func run(t *testing.T, env []string, args ...string) result {
 	t.Helper()
+	return runInDir(t, "", env, args...)
+}
+
+func runInDir(t *testing.T, dir string, env []string, args ...string) result {
+	t.Helper()
 	cmd := exec.Command(binPath, args...)
+	cmd.Dir = dir
 	cmd.Env = hermeticEnv(t, env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -183,6 +189,163 @@ func TestVersion_JSONMode(t *testing.T) {
 	}
 	if payload.Version == "" || payload.Commit == "" || payload.Date == "" {
 		t.Fatalf("payload has an empty field: %+v", payload)
+	}
+}
+
+func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
+	dir := t.TempDir()
+	gitInit := exec.Command("git", "init", "-q", dir)
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	dbPath := filepath.Join(t.TempDir(), "wip.db")
+	env := []string{"WIP_DB_PATH=" + dbPath}
+
+	if r := runInDir(t, dir, env, "init", "--json"); r.exitCode != 0 {
+		t.Fatalf("init exit code = %d, stderr=%q", r.exitCode, r.stderr)
+	}
+	matterResult := runInDir(t, dir, env, "matter", "create", "--title", "Batch Matter", "--locator", "batch-matter", "--json")
+	if matterResult.exitCode != 0 {
+		t.Fatalf("matter create exit code = %d, stderr=%q", matterResult.exitCode, matterResult.stderr)
+	}
+	var matter struct {
+		ID      string `json:"id"`
+		Locator string `json:"locator"`
+	}
+	if err := json.Unmarshal([]byte(matterResult.stdout), &matter); err != nil || matter.ID == "" || matter.Locator != "batch-matter" {
+		t.Fatalf("matter create JSON = %q, err=%v", matterResult.stdout, err)
+	}
+
+	created := runInDir(t, dir, env, "batch", "create", "release", "--json")
+	if created.exitCode != 0 {
+		t.Fatalf("batch create exit code = %d, stderr=%q", created.exitCode, created.stderr)
+	}
+	var batch struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Matter      string `json:"matter"`
+		State       string `json:"state"`
+		CloseReason string `json:"close_reason"`
+		Member      string `json:"member"`
+		Action      string `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(created.stdout), &batch); err != nil {
+		t.Fatalf("batch create JSON = %q, err=%v", created.stdout, err)
+	}
+	if batch.ID == "" || batch.Name != "release" || batch.Matter != "" || batch.State != "live" || batch.Action != "created" {
+		t.Fatalf("batch create payload = %+v, want full live Batch identity and action", batch)
+	}
+	batchID := batch.ID
+
+	joined := runInDir(t, dir, env, "batch", "join", "release", matter.Locator, "--json")
+	if joined.exitCode != 0 {
+		t.Fatalf("batch join exit code = %d, stderr=%q", joined.exitCode, joined.stderr)
+	}
+	if err := json.Unmarshal([]byte(joined.stdout), &batch); err != nil {
+		t.Fatalf("batch join JSON = %q, err=%v", joined.stdout, err)
+	}
+	if batch.ID != batchID || batch.Member != matter.ID || batch.Action != "joined" {
+		t.Fatalf("batch join payload = %+v, want Batch %s, member %s and action joined", batch, batchID, matter.ID)
+	}
+
+	partial := batch.ID[:12]
+	refused := runInDir(t, dir, env, "batch", "join", partial, matter.Locator, "--json")
+	if refused.exitCode != 1 || refused.stdout != "" {
+		t.Fatalf("partial Batch identity result = %+v, want validation refusal", refused)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(refused.stderr), &envelope); err != nil || envelope.Error.Code != "validation.unknown-batch" {
+		t.Fatalf("partial Batch identity error = %q, err=%v", refused.stderr, err)
+	}
+
+	left := runInDir(t, dir, env, "batch", "leave", batch.ID, matter.Locator, "--json")
+	if left.exitCode != 0 {
+		t.Fatalf("batch leave exit code = %d, stderr=%q", left.exitCode, left.stderr)
+	}
+	if err := json.Unmarshal([]byte(left.stdout), &batch); err != nil {
+		t.Fatalf("batch leave JSON = %q, err=%v", left.stdout, err)
+	}
+	if batch.Member != matter.ID || batch.Action != "left" {
+		t.Fatalf("batch leave payload = %+v, want member %s and action left", batch, matter.ID)
+	}
+
+	rejoined := runInDir(t, dir, env, "batch", "join", batch.ID, matter.Locator, "--json")
+	if rejoined.exitCode != 0 {
+		t.Fatalf("batch rejoin by full ULID exit code = %d, stderr=%q", rejoined.exitCode, rejoined.stderr)
+	}
+	if err := json.Unmarshal([]byte(rejoined.stdout), &batch); err != nil || batch.Action != "joined" {
+		t.Fatalf("batch rejoin JSON = %q, err=%v", rejoined.stdout, err)
+	}
+
+	dismissed := runInDir(t, dir, env, "batch", "dismiss", "release", "--json")
+	if dismissed.exitCode != 0 {
+		t.Fatalf("batch dismiss exit code = %d, stderr=%q", dismissed.exitCode, dismissed.stderr)
+	}
+	if err := json.Unmarshal([]byte(dismissed.stdout), &batch); err != nil {
+		t.Fatalf("batch dismiss JSON = %q, err=%v", dismissed.stdout, err)
+	}
+	if batch.ID == "" || batch.Name != "release" || batch.State != "closed" || batch.CloseReason != "dismissed" || batch.Action != "dismissed" {
+		t.Fatalf("batch dismiss payload = %+v, want terminal Batch identity and reason", batch)
+	}
+
+	human := runInDir(t, dir, env, "batch", "create", "human-output")
+	if human.exitCode != 0 || !strings.Contains(human.stdout, "created Batch human-output (") || human.stderr != "" {
+		t.Fatalf("human batch output = %+v", human)
+	}
+
+	help := runInDir(t, dir, nil, "--help")
+	if help.exitCode != 0 || !strings.Contains(help.stdout, "batch") {
+		t.Fatalf("root help does not register batch: %+v", help)
+	}
+	manifestResult := runInDir(t, dir, nil, "manifest", "--json")
+	if manifestResult.exitCode != 0 {
+		t.Fatalf("manifest exit code = %d, stderr=%q", manifestResult.exitCode, manifestResult.stderr)
+	}
+	var manifest struct {
+		Verbs []struct {
+			Name string `json:"name"`
+			Kind string `json:"kind"`
+		} `json:"verbs"`
+	}
+	if err := json.Unmarshal([]byte(manifestResult.stdout), &manifest); err != nil {
+		t.Fatalf("manifest JSON = %q, err=%v", manifestResult.stdout, err)
+	}
+	for _, name := range []string{"batch create", "batch join", "batch leave", "batch dismiss"} {
+		found := false
+		for _, verb := range manifest.Verbs {
+			if verb.Name == name {
+				found = true
+				if verb.Kind != "plumbing" {
+					t.Errorf("manifest %q kind = %q, want plumbing", name, verb.Kind)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("manifest does not register %q", name)
+		}
+	}
+
+	skillsDir := t.TempDir()
+	installed := runInDir(t, dir, []string{"WIP_PI_SKILLS_DIR=" + skillsDir}, "install", "pi", "--json")
+	if installed.exitCode != 0 {
+		t.Fatalf("pi install exit code = %d, stderr=%q", installed.exitCode, installed.stderr)
+	}
+	var installPayload struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.Unmarshal([]byte(installed.stdout), &installPayload); err != nil {
+		t.Fatalf("pi install JSON = %q, err=%v", installed.stdout, err)
+	}
+	skill, err := os.ReadFile(filepath.Join(installPayload.Dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read generated Pi skill: %v", err)
+	}
+	if !strings.Contains(string(skill), "batch create") || strings.Contains(string(skill), "control-plane") {
+		t.Fatalf("generated Pi skill does not project Batch as plumbing: %s", skill)
 	}
 }
 

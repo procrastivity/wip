@@ -129,6 +129,11 @@ func Start(ctx context.Context, s *store.Store, actor store.Actor, repo, locator
 // simpleTransition is Finish/Cancel/Pause/Resume's shared shape: one node,
 // one event, no cascade.
 func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, repo, locator, action string, from, to store.Lifecycle) (store.Node, error) {
+	return simpleTransitionEnv(ctx, s, actor, store.Env{Repo: repo}, locator, action, from, to)
+}
+
+func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator, action string, from, to store.Lifecycle) (store.Node, error) {
+	repo := env.Repo
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
 		return store.Node{}, err
@@ -138,7 +143,7 @@ func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, re
 			fmt.Sprintf("%s is %s; %s requires %s", locator, n.Lifecycle, action, from))
 	}
 
-	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
+	req := store.Request{Actor: actor, Env: env}
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
 		fresh, err := tx.Node(ctx, n.ID)
 		if err != nil {
@@ -148,11 +153,20 @@ func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, re
 			return nil, wiperr.New("refusal.invalid-transition",
 				fmt.Sprintf("%s is %s; %s requires %s", locator, fresh.Lifecycle, action, from))
 		}
-		return []store.Draft{{
+		drafts := []store.Draft{{
 			Type:    lifecycleEvents[action][fresh.Kind],
 			Subject: fresh.ID,
 			Payload: store.Transition{From: from, To: to},
-		}}, nil
+		}}
+		if action == "finished" && fresh.Kind == store.ScaleMatter {
+			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, true, ""); err != nil {
+				return nil, err
+			} else if found {
+				sweep.Cause = 0
+				drafts = append(drafts, sweep)
+			}
+		}
+		return drafts, nil
 	}); err != nil {
 		return store.Node{}, err
 	}
@@ -162,6 +176,10 @@ func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, re
 // Finish moves a node from InProgress to Done.
 func Finish(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string) (store.Node, error) {
 	return simpleTransition(ctx, s, actor, repo, locator, "finished", store.InProgress, store.Done)
+}
+
+func FinishWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (store.Node, error) {
+	return simpleTransitionEnv(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done)
 }
 
 // Cancel moves a node from InProgress to Canceled.

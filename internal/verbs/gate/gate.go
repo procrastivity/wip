@@ -12,6 +12,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
@@ -91,13 +92,21 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
-			s, repo, err := openRepo(cmd)
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			s, err := tiers.OpenStore()
 			if err != nil {
 				return err
 			}
 			defer func() { _ = s.Close() }()
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			if err != nil {
+				return err
+			}
 
-			n, err := writesurface.CloseGate(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], args[1])
+			n, err := writesurface.CloseGateWithEnv(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
 			}

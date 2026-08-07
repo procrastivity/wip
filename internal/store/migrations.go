@@ -28,15 +28,18 @@ import (
 // migration is one numbered, all-or-nothing schema unit. Never edit a shipped
 // entry; append.
 type migration struct {
-	version int
-	name    string
-	stmts   []string
+	version   int
+	name      string
+	stmts     []string
+	preflight func(context.Context, *sql.Tx) error
 }
 
 // register is the ordered migration register, embedded in the binary. Its last
 // entry is the version a fresh store is created at.
 var register = []migration{
 	{version: 1, name: "baseline", stmts: v1Statements()},
+	{version: 2, name: "run-substrate", stmts: v2Statements(), preflight: rejectLegacyRuns},
+	{version: 3, name: "batch-lifecycle", stmts: v3Statements(), preflight: rejectLegacyBatches},
 }
 
 // latestVersion is the highest migration this binary carries.
@@ -54,7 +57,7 @@ func latestVersion(reg []migration) int {
 // the same log means. Bumping it makes every existing store rebuild its
 // projection at the next open, which is exactly the affordance the event-sourced
 // shape buys and the tables shape cannot offer.
-const projectionVersion = 1
+const projectionVersion = 3
 
 // projectionVersionKey is where the store records the projection version it was
 // last folded under.
@@ -92,6 +95,21 @@ func migrate(ctx context.Context, db *sql.DB, path string, reg []migration, targ
 	}
 	if len(pending) == 0 {
 		return current, nil
+	}
+
+	// A v1-to-v3 open must reject an unconvertible anonymous Batch before v2
+	// can commit. This read-only preflight spans the pending migration chain;
+	// v3's own preflight remains the guard for a v2-to-v3 open.
+	if target >= 3 && current >= 1 && current < 3 {
+		check, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return current, fmt.Errorf("store: migration v3 preflight: %w", err)
+		}
+		err = rejectLegacyBatches(ctx, check)
+		_ = check.Rollback()
+		if err != nil {
+			return current, fmt.Errorf("store: migration v3 (batch-lifecycle) preflight: %w", err)
+		}
 	}
 
 	// Backup before migrate, but only when there is something to lose: a
@@ -132,6 +150,11 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if m.preflight != nil {
+		if err := m.preflight(ctx, tx); err != nil {
+			return fmt.Errorf("store: migration v%d (%s) preflight: %w", m.version, m.name, err)
+		}
+	}
 	for i, stmt := range m.stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("store: migration v%d (%s) statement %d: %w", m.version, m.name, i+1, err)

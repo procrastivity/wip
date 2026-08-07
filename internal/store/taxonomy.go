@@ -79,8 +79,16 @@ const (
 	TypeBatchCreated   = "batch.created"
 	TypeBatchJoined    = "batch.joined"
 	TypeBatchLeft      = "batch.left"
+	TypeBatchDismissed = "batch.dismissed"
+	TypeBatchSwept     = "batch.swept"
 	TypeDispatchOpened = "dispatch.opened"
 	TypeDispatchClosed = "dispatch.closed"
+
+	TypeRunStarted   = "run.started"
+	TypeRunSkipped   = "run.skipped"
+	TypeRunResumed   = "run.resumed"
+	TypeRunFinished  = "run.finished"
+	TypeRunStoodDown = "run.stood-down"
 )
 
 // Family groups event types for auditing (MODEL §10's family list). It is
@@ -102,6 +110,7 @@ const (
 	FamilyCursor     Family = "cursor"
 	FamilyBatch      Family = "batch"
 	FamilyDispatch   Family = "dispatch"
+	FamilyRun        Family = "run"
 )
 
 // EventType is one row of the taxonomy: a type token, its family, and the tier
@@ -197,7 +206,20 @@ var P1Taxonomy = []EventType{
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy}
+var V2Taxonomy = []EventType{
+	execution(TypeRunStarted, FamilyRun),
+	execution(TypeRunSkipped, FamilyRun),
+	execution(TypeRunResumed, FamilyRun),
+	execution(TypeRunFinished, FamilyRun),
+	execution(TypeRunStoodDown, FamilyRun),
+}
+
+var V3Taxonomy = []EventType{
+	batchScoped(TypeBatchDismissed),
+	batchScoped(TypeBatchSwept),
+}
+
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.
@@ -288,8 +310,23 @@ const (
 type CloseReason string
 
 // The three close reasons.
+type RunSkipReason string
+
+const (
+	RunSkipContention RunSkipReason = "contention"
+	RunSkipBlocked    RunSkipReason = "blocked"
+	RunSkipFailed     RunSkipReason = "failed"
+)
+
 const (
 	CloseCompleted  CloseReason = "completed"
 	CloseSuperseded CloseReason = "superseded"
 	CloseReaped     CloseReason = "reaped"
+)
+
+type BatchCloseReason string
+
+const (
+	BatchDismissed BatchCloseReason = "dismissed"
+	BatchSwept     BatchCloseReason = "swept"
 )

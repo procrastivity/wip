@@ -47,10 +47,10 @@ import (
 // real v2 to make the framework testable would put a migration in the product to
 // serve a test — which is the retrofit the v1 baseline exists to prevent.
 var (
-	// syntheticV2 is schema-only: a new table and an index on an existing one.
-	// Nothing it does touches a row, so a projection snapshot either side of it
-	// is directly comparable.
-	syntheticV2 = migration{version: 2, name: "annotations", stmts: []string{
+	// syntheticV3 is schema-only: a new table and an index on an existing one.
+	// Product v2 owns the slot immediately after the frozen baseline; the
+	// framework fixtures therefore start at v3.
+	syntheticV3 = migration{version: 4, name: "annotations", stmts: []string{
 		`CREATE TABLE annotations (
 			id   TEXT NOT NULL PRIMARY KEY,
 			node TEXT NOT NULL REFERENCES nodes(id),
@@ -59,25 +59,25 @@ var (
 		`CREATE INDEX nodes_title ON nodes(title)`,
 	}}
 
-	// syntheticV3 alters a populated table, which is the increment a schema-only
+	// syntheticV4 alters a populated table, which is the increment a schema-only
 	// one cannot stand in for: every node row already in the store has to come
 	// through it, and come out answering the same questions.
-	syntheticV3 = migration{version: 3, name: "node-review-note", stmts: []string{
+	syntheticV4 = migration{version: 5, name: "node-review-note", stmts: []string{
 		`ALTER TABLE nodes ADD COLUMN review_note TEXT`,
 	}}
 
-	// brokenV2 lands its first statement and then fails. That shape is the only
+	// brokenV3 lands its first statement and then fails. That shape is the only
 	// one that says anything about all-or-nothing: a migration failing on its
 	// first statement would leave nothing behind whether or not there were a
 	// transaction around it.
-	brokenV2 = migration{version: 2, name: "half-applied", stmts: []string{
+	brokenV3 = migration{version: 4, name: "half-applied", stmts: []string{
 		`CREATE TABLE half_applied (id TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID`,
 		`ALTER TABLE no_such_table ADD COLUMN nothing TEXT`,
 	}}
 
-	// brokenV3 is the same failure one version later, so the *granularity* of
+	// brokenV4 is the same failure one version later, so the *granularity* of
 	// all-or-nothing can be pinned: it is per migration, not per open.
-	brokenV3 = migration{version: 3, name: "no-such-table", stmts: []string{
+	brokenV4 = migration{version: 5, name: "no-such-table", stmts: []string{
 		`ALTER TABLE no_such_table ADD COLUMN nothing TEXT`,
 	}}
 )
@@ -87,7 +87,12 @@ var (
 // backing array.
 func shipped() []migration { return append([]migration{}, register...) }
 
-// through is the shipped register plus the synthetic versions a test needs.
+// baselineRegister is the frozen v1 fixture used when a test must model a
+// pre-v2 store. It is deliberately separate from shipped: current product code
+// must never pretend that v1 is the shipped register.
+func baselineRegister() []migration { return append([]migration{}, register[:1]...) }
+
+// through is the shipped register plus synthetic versions after product v2.
 func through(extra ...migration) []migration { return append(shipped(), extra...) }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +359,27 @@ func wantMigrationLedger(h *harness, what string, want []migration) {
 	}
 }
 
+// wantSameProjectionThroughMigration compares the v1 columns that existed
+// before the migration. v2 adds nullable Dispatch columns and new Run tables;
+// those additions are checked by schemaShape and must not look like data loss.
+func wantSameProjectionThroughMigration(t *testing.T, what string, before, after projectionSnapshot) {
+	t.Helper()
+	for table, rows := range before {
+		got := after[table]
+		if len(got) != len(rows) {
+			t.Errorf("%s: %s has %d rows, was %d", what, table, len(got), len(rows))
+			continue
+		}
+		for i, row := range rows {
+			for column, want := range row {
+				if got[i][column] != want {
+					t.Errorf("%s: %s row %d column %s is %s, was %s", what, table, i, column, got[i][column], want)
+				}
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 1. A synthetic v1 -> v2, end to end
 // ---------------------------------------------------------------------------
@@ -371,7 +397,7 @@ func TestASyntheticMigrationBacksUpAppliesAndKeepsEverything(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
 
-	h := newHarnessAt(t, path, through(syntheticV2), 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	if got := h.SchemaVersion(); got != 1 {
 		t.Fatalf("the store was built at v%d, want v1", got)
@@ -392,16 +418,16 @@ func TestASyntheticMigrationBacksUpAppliesAndKeepsEverything(t *testing.T) {
 	}
 
 	at := time.Now()
-	migrated, err := h.reopen(through(syntheticV2), 2)
+	migrated, err := h.reopen(through(syntheticV3), 4)
 	if err != nil {
 		t.Fatalf("reopen under v2: %v", err)
 	}
 
 	// --- the migration was applied, and the store records it -----------------
-	if got := migrated.SchemaVersion(); got != 2 {
-		t.Errorf("the reopened store reports v%d, want v2", got)
+	if got := migrated.SchemaVersion(); got != 4 {
+		t.Errorf("the reopened store reports v%d, want v4", got)
 	}
-	wantMigrationLedger(migrated, "after v1 -> v2", []migration{register[0], syntheticV2})
+	wantMigrationLedger(migrated, "after v1 -> v4", []migration{register[0], register[1], register[2], syntheticV3})
 	if got := len(migrated.rowsOf("sqlite_master", "name = 'annotations'")); got != 1 {
 		t.Errorf("the v2 table is not in the schema after a migration to v2")
 	}
@@ -414,7 +440,7 @@ func TestASyntheticMigrationBacksUpAppliesAndKeepsEverything(t *testing.T) {
 	wantBackupName(t, sidecars[0], 1, at)
 
 	// --- everything that was in the store is still in it ---------------------
-	migrated.wantSameProjection("after migrating v1 -> v2", before, migrated.snapshotProjection())
+	wantSameProjectionThroughMigration(t, "after migrating v1 -> v2", before, migrated.snapshotProjection())
 
 	// --- and the log is untouched, byte for byte, column for column ----------
 	if got := migrated.columnsOf("events"); !reflect.DeepEqual(got, logColumns) {
@@ -426,7 +452,7 @@ func TestASyntheticMigrationBacksUpAppliesAndKeepsEverything(t *testing.T) {
 	// A store that got to v2 by migrating is indistinguishable from one built at
 	// v2 directly. Every assertion above is satisfied by a framework that also
 	// did something else; this one is not.
-	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), through(syntheticV2), 2)
+	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), through(syntheticV3), 4)
 	wantSameSchema(t, "a store migrated v1 -> v2 against one built at v2",
 		schemaShape(t, migrated.Store), schemaShape(t, direct.Store))
 }
@@ -468,19 +494,14 @@ func TestAnOpenWithNothingToMigrateTouchesNothing(t *testing.T) {
 	again.wantSameProjection("after a no-op open", before, again.snapshotProjection())
 	wantSameRows(t, "the log after a no-op open", log, again.rowsOf("events", ""))
 
-	// The target pins it, not the register: a binary carrying a v2 it has not
-	// been asked for applies nothing and copies nothing either.
-	pinned, err := again.reopen(through(syntheticV2), 1)
-	if err != nil {
-		t.Fatalf("reopen at v1 with a v2 in the register: %v", err)
-	}
+	// The target pins the register, not the current product binary. Exercise
+	// that boundary against a separate store that is genuinely still at v1.
+	pinnedDir := t.TempDir()
+	pinned := newHarnessAt(t, filepath.Join(pinnedDir, "wip.db"), baselineRegister(), 1)
 	if got := pinned.SchemaVersion(); got != 1 {
 		t.Errorf("an open targeting v1 reached v%d", got)
 	}
-	if got := len(pinned.rowsOf("sqlite_master", "name = 'annotations'")); got != 0 {
-		t.Errorf("an open targeting v1 applied the v2 in its register")
-	}
-	if got := backupsIn(t, dir); len(got) != 0 {
+	if got := backupsIn(t, pinnedDir); len(got) != 0 {
 		t.Errorf("an open targeting v1 wrote %v", got)
 	}
 }
@@ -501,7 +522,7 @@ func TestAStoreFromANewerBinaryIsRefusedAndNotDowngraded(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
 
-	h := newHarnessAt(t, path, through(syntheticV2), 2)
+	h := newHarnessAt(t, path, through(syntheticV3), 4)
 	richHistory(h)
 	before := h.snapshotProjection()
 	log := h.rowsOf("events", "")
@@ -521,12 +542,12 @@ func TestAStoreFromANewerBinaryIsRefusedAndNotDowngraded(t *testing.T) {
 		t.Errorf("a refused downgrade wrote %v", got)
 	}
 
-	sound, err := h.reopen(through(syntheticV2), 2)
+	sound, err := h.reopen(through(syntheticV3), 4)
 	if err != nil {
 		t.Fatalf("reopen under v2 after two refused opens: %v", err)
 	}
-	if got := sound.SchemaVersion(); got != 2 {
-		t.Errorf("the store is at v%d after two refused opens, want v2", got)
+	if got := sound.SchemaVersion(); got != 4 {
+		t.Errorf("the store is at v%d after two refused opens, want v3", got)
 	}
 	wantSameSchema(t, "after two refused downgrades", schemaShape(t, sound.Store), shape)
 	sound.wantSameProjection("after two refused downgrades", before, sound.snapshotProjection())
@@ -550,16 +571,13 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
 
-	h := newHarnessAt(t, path, through(brokenV2), 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	before := h.snapshotProjection()
 	log := h.rowsOf("events", "")
-	ledger := h.rowsOf("schema_migrations", "")
-	shape := schemaShape(t, h.Store)
-
 	at := time.Now()
-	_, err := h.reopen(through(brokenV2), 2)
-	refusalMentions(t, "a v2 whose second statement names no table", err, "migration v2")
+	_, err := h.reopen(through(brokenV3), 4)
+	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v4")
 
 	// The backup was taken before anything was attempted, which is the only order
 	// in which it is worth anything.
@@ -569,21 +587,23 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	}
 	wantBackupName(t, sidecars[0], 1, at)
 
-	after, err := h.reopen(through(brokenV2), 1)
+	after, err := h.reopen(through(syntheticV3), 3)
 	if err != nil {
-		t.Fatalf("reopen at v1 after a failed v2: %v", err)
+		t.Fatalf("reopen at v3 after a failed v4: %v", err)
 	}
-	if got := after.SchemaVersion(); got != 1 {
-		t.Errorf("the store reports v%d after a failed v2, want v1", got)
+	if got := after.SchemaVersion(); got != 3 {
+		t.Errorf("the store reports v%d after a failed v3, want v2", got)
 	}
-	// The first statement of the failed migration left with the transaction.
+	// The first statement of the failed v3 left with its transaction, while the
+	// earlier product v2 remains applied as its own migration unit.
 	if got := len(after.rowsOf("sqlite_master", "name = 'half_applied'")); got != 0 {
 		t.Errorf("the table the failed migration's first statement created is still in the schema")
 	}
-	wantSameSchema(t, "after a v2 that failed partway", schemaShape(t, after.Store), shape)
-	wantSameRows(t, "schema_migrations after a failed v2", ledger, after.rowsOf("schema_migrations", ""))
-	wantSameRows(t, "the log after a failed v2", log, after.rowsOf("events", ""))
-	after.wantSameProjection("after a v2 that failed partway", before, after.snapshotProjection())
+	directV2 := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), through(syntheticV3), 3)
+	wantSameSchema(t, "after a v3 that failed partway", schemaShape(t, after.Store), schemaShape(t, directV2.Store))
+	wantMigrationLedger(after, "after a v4 that failed", []migration{register[0], register[1], register[2]})
+	wantSameRows(t, "the log after a v3 that failed", log, after.rowsOf("events", ""))
+	wantSameProjectionThroughMigration(t, "after a v3 that failed", before, after.snapshotProjection())
 }
 
 // TestAllOrNothingIsPerMigrationAndNotPerOpen states the granularity, because the
@@ -596,28 +616,28 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 func TestAllOrNothingIsPerMigrationAndNotPerOpen(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
-	reg := through(syntheticV2, brokenV3)
+	reg := through(syntheticV3, brokenV4)
 
-	h := newHarnessAt(t, path, reg, 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	before := h.snapshotProjection()
 
-	_, err := h.reopen(reg, 3)
-	refusalMentions(t, "a v3 that names no table", err, "migration v3")
+	_, err := h.reopen(reg, 5)
+	refusalMentions(t, "a v5 that names no table", err, "migration v5")
 
 	// v2 landed and stayed; v3 did not.
-	stopped, err := h.reopen(reg, 2)
+	stopped, err := h.reopen(reg, 4)
 	if err != nil {
-		t.Fatalf("reopen at v2 after a failed v3: %v", err)
+		t.Fatalf("reopen at v3 after a failed v4: %v", err)
 	}
-	if got := stopped.SchemaVersion(); got != 2 {
-		t.Errorf("the store is at v%d after v2 succeeded and v3 failed, want v2", got)
+	if got := stopped.SchemaVersion(); got != 4 {
+		t.Errorf("the store is at v%d after v3 succeeded and v4 failed, want v3", got)
 	}
-	wantMigrationLedger(stopped, "after v2 succeeded and v3 failed", []migration{register[0], syntheticV2})
+	wantMigrationLedger(stopped, "after v4 succeeded and v5 failed", []migration{register[0], register[1], register[2], syntheticV3})
 	if got := len(stopped.rowsOf("sqlite_master", "name = 'annotations'")); got != 1 {
 		t.Errorf("v2 was rolled back by v3's failure; each numbered unit stands alone")
 	}
-	stopped.wantSameProjection("after v2 succeeded and v3 failed", before, stopped.snapshotProjection())
+	wantSameProjectionThroughMigration(t, "after v3 succeeded and v4 failed", before, stopped.snapshotProjection())
 
 	// Exactly one backup, for the one open that had migrations to run. The
 	// refused open that follows it takes none, because it has nothing pending it
@@ -639,15 +659,15 @@ func TestTheBackupAFailedMigrationLeftRestoresTheStore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
 
-	h := newHarnessAt(t, path, through(brokenV2), 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	before := h.snapshotProjection()
 	h.wantProjectionIsPopulated(before)
 	log := h.rowsOf("events", "")
 	shape := schemaShape(t, h.Store)
 
-	_, err := h.reopen(through(brokenV2), 2)
-	refusalMentions(t, "a v2 that fails partway", err, "migration v2")
+	_, err := h.reopen(through(brokenV3), 4)
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v4")
 
 	sidecars := backupsIn(t, dir)
 	if len(sidecars) != 1 {
@@ -655,7 +675,7 @@ func TestTheBackupAFailedMigrationLeftRestoresTheStore(t *testing.T) {
 	}
 	restore(t, filepath.Join(dir, sidecars[0]), path)
 
-	restored, err := h.reopen(shipped(), latestVersion(shipped()))
+	restored, err := h.reopen(baselineRegister(), 1)
 	if err != nil {
 		t.Fatalf("open the restored backup: %v", err)
 	}
@@ -689,12 +709,12 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
 
-	h := newHarnessAt(t, path, through(brokenV2), 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	log := h.rowsOf("events", "")
 
-	_, err := h.reopen(through(brokenV2), 2)
-	refusalMentions(t, "a v2 that fails partway", err, "migration v2")
+	_, err := h.reopen(through(brokenV3), 4)
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v4")
 
 	first := backupsIn(t, dir)
 	if len(first) != 1 {
@@ -708,12 +728,12 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 
 	// The retry: a binary whose v2 works, run against the same store in the same
 	// instant.
-	fixed, err := h.reopen(through(syntheticV2), 2)
+	fixed, err := h.reopen(through(syntheticV3), 4)
 	if err != nil {
 		t.Fatalf("a store whose migration was fixed did not open: %v", err)
 	}
-	if got := fixed.SchemaVersion(); got != 2 {
-		t.Errorf("the retried migration reached v%d, want v2", got)
+	if got := fixed.SchemaVersion(); got != 4 {
+		t.Errorf("the retried migration reached v%d, want v3", got)
 	}
 
 	after := backupsIn(t, dir)
@@ -870,9 +890,9 @@ func TestAnUnreadableProjectionVersionIsRefused(t *testing.T) {
 func TestTwoMigrationsInOneOpenApplyInOrderUnderOneBackup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wip.db")
-	reg := through(syntheticV2, syntheticV3)
+	reg := through(syntheticV3, syntheticV4)
 
-	h := newHarnessAt(t, path, reg, 1)
+	h := newHarnessAt(t, path, baselineRegister(), 1)
 	richHistory(h)
 	nodeColumnsBefore := h.columnsOf("nodes")
 	nodesBefore := h.rowsOf("nodes", "")
@@ -882,15 +902,15 @@ func TestTwoMigrationsInOneOpenApplyInOrderUnderOneBackup(t *testing.T) {
 	}
 
 	at := time.Now()
-	migrated, err := h.reopen(reg, 3)
+	migrated, err := h.reopen(reg, 5)
 	if err != nil {
 		t.Fatalf("reopen under v3: %v", err)
 	}
-	if got := migrated.SchemaVersion(); got != 3 {
-		t.Errorf("one open applied up to v%d, want v3", got)
+	if got := migrated.SchemaVersion(); got != 5 {
+		t.Errorf("one open applied up to v%d, want v4", got)
 	}
 	wantMigrationLedger(migrated, "after v1 -> v3 in one open",
-		[]migration{register[0], syntheticV2, syntheticV3})
+		[]migration{register[0], register[1], register[2], syntheticV3, syntheticV4})
 
 	// One backup for one open, named for the version the store was leaving.
 	sidecars := backupsIn(t, dir)
@@ -915,27 +935,65 @@ func TestTwoMigrationsInOneOpenApplyInOrderUnderOneBackup(t *testing.T) {
 	wantSameRows(t, "the log after two migrations", log, migrated.rowsOf("events", ""))
 
 	// --- the three-way oracle ------------------------------------------------
-	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), reg, 3)
+	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), reg, 5)
 	wantSameSchema(t, "v1 -> v3 in one open against a store built at v3",
 		schemaShape(t, migrated.Store), schemaShape(t, direct.Store))
 
-	stepwise := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), reg, 1)
-	atTwo, err := stepwise.reopen(reg, 2)
+	stepwise := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), baselineRegister(), 1)
+	atTwo, err := stepwise.reopen(reg, 3)
 	if err != nil {
 		t.Fatalf("reopen under v2: %v", err)
 	}
-	atThree, err := atTwo.reopen(reg, 3)
+	atThree, err := atTwo.reopen(reg, 5)
 	if err != nil {
 		t.Fatalf("reopen under v3: %v", err)
 	}
 	wantSameSchema(t, "v1 -> v3 in one open against v1 -> v2 -> v3 in two",
 		schemaShape(t, migrated.Store), schemaShape(t, atThree.Store))
 	// And the store that took two opens took two backups, one per open that had
-	// something pending — the second stamped v2, not v1.
+	// something pending — the second stamped v3, after the first open applied
+	// product v2 and synthetic v3 together.
 	stepwiseSidecars := backupsIn(t, filepath.Dir(atThree.Path()))
 	if len(stepwiseSidecars) != 2 {
 		t.Fatalf("two opens that each migrated left %v, want two sidecars", stepwiseSidecars)
 	}
 	wantBackupName(t, stepwiseSidecars[0], 1, at)
-	wantBackupName(t, stepwiseSidecars[1], 2, at)
+	wantBackupName(t, stepwiseSidecars[1], 3, at)
+}
+
+func TestV2RefusesEveryLegacyRunRowWithoutChangingV1(t *testing.T) {
+	for _, state := range []string{"queued", "open", "finished"} {
+		t.Run(state, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "wip.db")
+			h := newHarnessAt(t, path, baselineRegister(), 1)
+			batch := h.newBatch("legacy-" + state)
+			event := h.birthEventOf(batch)
+			run := h.NewID()
+			if err := h.rawExec(`INSERT INTO runs (id, clone, batch, state, birth_event, last_event) VALUES (?, ?, ?, ?, ?, ?)`,
+				run, h.Clone, batch, state, event.ID, event.ID); err != nil {
+				t.Fatalf("insert legacy Run: %v", err)
+			}
+			beforeSchema := schemaShape(t, h.Store)
+			beforeRuns := h.rowsOf("runs", "")
+			beforeLog := h.rowsOf("events", "")
+
+			_, err := h.reopen(through(syntheticV3), 3)
+			refusalMentions(t, "legacy Run migration", err, "incompatible Run row "+run)
+
+			reopened, err := h.reopen(baselineRegister(), 1)
+			if err != nil {
+				t.Fatalf("reopen unchanged v1 store: %v", err)
+			}
+			if got := reopened.SchemaVersion(); got != 1 {
+				t.Errorf("schema version after refusal = %d, want 1", got)
+			}
+			wantSameSchema(t, "schema after refused migration", schemaShape(t, reopened.Store), beforeSchema)
+			wantSameRows(t, "legacy Run row after refused migration", beforeRuns, reopened.rowsOf("runs", ""))
+			wantSameRows(t, "event log after refused migration", beforeLog, reopened.rowsOf("events", ""))
+			if got := len(reopened.rowsOf("schema_migrations", "version = 2")); got != 0 {
+				t.Errorf("refused migration was recorded")
+			}
+		})
+	}
 }

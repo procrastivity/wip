@@ -14,6 +14,7 @@ import (
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
+	batchverb "github.com/procrastivity/wip/internal/verbs/batch"
 	bindverb "github.com/procrastivity/wip/internal/verbs/bind"
 	cleanverb "github.com/procrastivity/wip/internal/verbs/clean"
 	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
@@ -30,6 +31,7 @@ import (
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
 	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
+	runverb "github.com/procrastivity/wip/internal/verbs/run"
 	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
@@ -95,6 +97,8 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(lifecycleverb.PauseCommand(streams))
 	root.AddCommand(lifecycleverb.ResumeCommand(streams))
 	root.AddCommand(backlogverb.Command(streams))
+	root.AddCommand(batchverb.Command(streams))
+	root.AddCommand(runverb.Command(streams))
 
 	// write-surface: content-prose.
 	root.AddCommand(contentverb.BriefCommand(streams))
