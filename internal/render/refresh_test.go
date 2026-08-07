@@ -114,11 +114,9 @@ func TestRefresh_SupersedesStaleDispatch(t *testing.T) {
 	}
 }
 
-// TestDispatch_EmitsBatchCreatedThenDispatchOpened is step-06's Done for the
-// open half: the anonymous batch-of-one is created transparently the moment
-// a dispatch opens with no explicit Batch, causing dispatch.opened — one
-// causal chain, batch first.
-func TestDispatch_EmitsBatchCreatedThenDispatchOpened(t *testing.T) {
+// TestDispatch_OpensWithoutBatchCreation preserves the P1 dispatch bracket;
+// Batch creation belongs to the later scheduler path.
+func TestDispatch_OpensWithoutBatchCreation(t *testing.T) {
 	s, _, cur := setup(t)
 
 	before, err := s.Events(ctx)
@@ -139,23 +137,14 @@ func TestDispatch_EmitsBatchCreatedThenDispatchOpened(t *testing.T) {
 		t.Fatal(err)
 	}
 	newEvents := after[len(before):]
-	if len(newEvents) != 2 {
-		t.Fatalf("dispatch open produced %d events, want exactly 2 (batch.created, dispatch.opened)", len(newEvents))
+	if len(newEvents) != 1 {
+		t.Fatalf("dispatch open produced %d events, want exactly 1 (dispatch.opened)", len(newEvents))
 	}
-	if newEvents[0].Type != store.TypeBatchCreated {
-		t.Errorf("first event = %s, want %s", newEvents[0].Type, store.TypeBatchCreated)
+	if newEvents[0].Type != store.TypeDispatchOpened {
+		t.Errorf("event = %s, want %s", newEvents[0].Type, store.TypeDispatchOpened)
 	}
-	if newEvents[1].Type != store.TypeDispatchOpened {
-		t.Errorf("second event = %s, want %s", newEvents[1].Type, store.TypeDispatchOpened)
-	}
-	if newEvents[1].Subject != dispatch.ID {
-		t.Errorf("dispatch.opened subject = %s, want %s", newEvents[1].Subject, dispatch.ID)
-	}
-	if newEvents[1].Causation != newEvents[0].ID {
-		t.Errorf("dispatch.opened causation = %s, want the batch.created event %s", newEvents[1].Causation, newEvents[0].ID)
-	}
-	if newEvents[0].Repo != "" {
-		t.Errorf("batch.created carries repo %q, want empty (D56: batch.* carries a null repo)", newEvents[0].Repo)
+	if newEvents[0].Subject != dispatch.ID {
+		t.Errorf("dispatch.opened subject = %s, want %s", newEvents[0].Subject, dispatch.ID)
 	}
 }
 

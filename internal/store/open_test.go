@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -18,7 +19,7 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
-// TestFreshStoreOpensAtTheBaselineVersion is the floor under everything else:
+// TestFreshStoreOpensAtTheLatestVersion is the floor under everything else:
 // the v1 baseline applies, the taxonomy is seeded, and the projection version is
 // recorded.
 func TestFreshStoreOpensAtTheBaselineVersion(t *testing.T) {
@@ -33,7 +34,7 @@ func TestFreshStoreOpensAtTheBaselineVersion(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_types`).Scan(&types); err != nil {
 		t.Fatalf("count event types: %v", err)
 	}
-	if got, want := types, len(P1Taxonomy); got != want {
+	if got, want := types, len(registeredTypes()); got != want {
 		t.Errorf("seeded %d event types, want %d", got, want)
 	}
 
@@ -41,8 +42,8 @@ func TestFreshStoreOpensAtTheBaselineVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read projection version: %v", err)
 	}
-	if !present || recorded != "1" {
-		t.Errorf("projection version = %q (present %v), want \"1\"", recorded, present)
+	if !present || recorded != fmt.Sprint(projectionVersion) {
+		t.Errorf("projection version = %q (present %v), want the current projection version", recorded, present)
 	}
 
 	// An empty store answers the founding question with nothing, not an error.

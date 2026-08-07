@@ -185,11 +185,11 @@ type CursorMoved struct {
 	Previous string `json:"previous,omitempty"`
 }
 
-// BatchCreated is the payload of batch.created. Name is empty for the anonymous
-// batch a bare "work this Matter" wraps in, so there is exactly one dispatch
-// path (D23).
+// BatchCreated is the payload of batch.created. A named Batch carries Name;
+// an anonymous Batch carries its associated Matter identity.
 type BatchCreated struct {
-	Name string `json:"name,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Matter string `json:"matter,omitempty"`
 }
 
 // BatchMembership is the payload of batch.joined and batch.left. subject is the
@@ -198,11 +198,38 @@ type BatchMembership struct {
 	Matter string `json:"matter"`
 }
 
+type BatchDismissedPayload struct{}
+type BatchSweptPayload struct{}
+
+// DispatchOpened is the payload of dispatch.opened. Empty Run and Matter keep
+// the P1 shape; both fields are required for a P2 Run dispatch.
+type DispatchOpened struct {
+	Run    string `json:"run,omitempty"`
+	Matter string `json:"matter,omitempty"`
+}
+
 // DispatchClosed is the payload of dispatch.closed. Session discounts every
 // reason but `completed`, whose occurred_at is the only one that is evidence of
 // work rather than administration (D59).
 type DispatchClosed struct {
 	Reason CloseReason `json:"reason"`
+}
+
+type RunStarted struct {
+	Batch   string   `json:"batch"`
+	Locator string   `json:"locator"`
+	Matters []string `json:"matters"`
+}
+
+type RunSkipped struct {
+	Run    string        `json:"run"`
+	Reason RunSkipReason `json:"reason"`
+}
+type RunResumed struct{}
+type RunFinished struct{}
+type RunStoodDown struct {
+	ActingClone string `json:"acting_clone"`
+	OwningClone string `json:"owning_clone"`
 }
 
 // RenderPerformed is the payload of render.performed. Nothing is projected from

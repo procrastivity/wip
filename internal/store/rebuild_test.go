@@ -205,9 +205,9 @@ func richHistory(h *harness) string {
 	h.commit(Draft{Type: TypeBatchJoined, Subject: named, Payload: BatchMembership{Matter: elsewhere}})
 	h.commit(Draft{Type: TypeBatchLeft, Subject: named, Payload: BatchMembership{Matter: elsewhere}})
 	h.commit(Draft{Type: TypeBatchJoined, Subject: named, Payload: BatchMembership{Matter: elsewhere}})
-	anonymous := h.newBatch("")
-	h.commit(Draft{Type: TypeBatchJoined, Subject: anonymous, Payload: BatchMembership{Matter: sealed}})
-	h.commit(Draft{Type: TypeBatchLeft, Subject: anonymous, Payload: BatchMembership{Matter: sealed}})
+	if h.SchemaVersion() >= 3 {
+		_ = h.newAnonymousBatch(sealed)
+	}
 
 	// --- Cursors: one pointing somewhere, one deliberately nowhere (D38) ----
 	onFeature := h.with(Env{Repo: h.Repo, Clone: h.Clone, Worktree: feature})
@@ -242,11 +242,18 @@ func (h *harness) enterBacklog(p BacklogEntered) string {
 	})
 }
 
-// newBatch creates a Batch; an empty name is the anonymous one (D23).
+// newBatch creates a named Batch.
 func (h *harness) newBatch(name string) string {
 	h.t.Helper()
 	return h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
 		return Draft{Type: TypeBatchCreated, Subject: tx.NewID(), Payload: BatchCreated{Name: name}}, nil
+	})
+}
+
+func (h *harness) newAnonymousBatch(matter string) string {
+	h.t.Helper()
+	return h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+		return Draft{Type: TypeBatchCreated, Subject: tx.NewID(), Payload: BatchCreated{Matter: matter}}, nil
 	})
 }
 
@@ -267,6 +274,9 @@ func (h *harness) snapshotProjection() projectionSnapshot {
 	h.t.Helper()
 	out := make(projectionSnapshot, len(projectionTables))
 	for _, table := range projectionTables {
+		if !h.hasProjectionTable(table) {
+			continue
+		}
 		out[table] = h.rowsOf(table, "")
 	}
 	return out
@@ -281,6 +291,9 @@ func (h *harness) diffProjection(before, after projectionSnapshot) []string {
 	h.t.Helper()
 	var diffs []string
 	for _, table := range projectionTables {
+		if _, ok := before[table]; !ok {
+			continue
+		}
 		b, a := before[table], after[table]
 		if len(b) != len(a) {
 			diffs = append(diffs, fmt.Sprintf("%s holds %d rows, held %d", table, len(a), len(b)))
@@ -312,9 +325,12 @@ func (h *harness) wantSameProjection(what string, before, after projectionSnapsh
 func (h *harness) wantProjectionIsPopulated(snapshot projectionSnapshot) {
 	h.t.Helper()
 	for _, table := range projectionTables {
+		if !h.hasProjectionTable(table) {
+			continue
+		}
 		// Run and OutboxEntry have no P1 event and therefore no projection rule;
 		// they are provisioned to exist from event one and nothing more (MODEL §10).
-		if table == "runs" || table == "outbox_entries" {
+		if table == "runs" || table == "outbox_entries" || table == "run_matters" {
 			if len(snapshot[table]) != 0 {
 				h.t.Errorf("%s has rows, and no P1 event can have put them there", table)
 			}
@@ -324,6 +340,12 @@ func (h *harness) wantProjectionIsPopulated(snapshot projectionSnapshot) {
 			h.t.Errorf("%s is empty, so the rebuild assertion says nothing about it", table)
 		}
 	}
+}
+
+func (h *harness) hasProjectionTable(table string) bool {
+	// The schema version is the compatibility boundary. Do not turn a failed
+	// schema probe into "table absent"; only v2 adds this projection table.
+	return table != "run_matters" || h.SchemaVersion() >= 2
 }
 
 // ---------------------------------------------------------------------------
@@ -697,8 +719,8 @@ func TestAProjectionRowMayNotBeDeletedOutsideARebuild(t *testing.T) {
 	ev := h.birthEventOf(h.Repo)
 	batch := h.newBatch("for-a-run")
 	if err := h.rawExec(
-		`INSERT INTO runs (id, clone, batch, state, birth_event, last_event) VALUES (?, ?, ?, 'queued', ?, ?)`,
-		h.NewID(), h.Clone, batch, ev.ID, ev.ID); err != nil {
+		`INSERT INTO runs (id, clone, batch, locator, state, started_at, birth_event, last_event) VALUES (?, ?, ?, 'run-01', 'open', ?, ?, ?)`,
+		h.NewID(), h.Clone, batch, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID); err != nil {
 		t.Fatalf("seed a Run row: %v", err)
 	}
 	if err := h.rawExec(
@@ -709,6 +731,9 @@ func TestAProjectionRowMayNotBeDeletedOutsideARebuild(t *testing.T) {
 	}
 
 	for _, table := range projectionTables {
+		if table == "run_matters" {
+			continue
+		} // populated only by a run.started event
 		if len(h.rowsOf(table, "")) == 0 {
 			t.Fatalf("%s is empty, so a DELETE over it would find nothing to refuse", table)
 		}
@@ -719,6 +744,9 @@ func TestAProjectionRowMayNotBeDeletedOutsideARebuild(t *testing.T) {
 	// Nothing was deleted, and the whole projection is still there.
 	before := h.snapshotProjection()
 	for _, table := range projectionTables {
+		if table == "run_matters" {
+			continue
+		}
 		if len(before[table]) == 0 {
 			t.Errorf("%s is empty after a refused DELETE", table)
 		}

@@ -1,10 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 )
 
 // applyEvent folds one event into the projection.
@@ -20,6 +23,10 @@ import (
 // the registered taxonomy, and render.performed is the one member that
 // deliberately projects nothing.
 func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
+	return applyEventVersion(ctx, tx, ev, 3)
+}
+
+func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	switch ev.Type {
 	// ---- lifecycle -------------------------------------------------------
 	case TypeMatterCreated:
@@ -89,15 +96,32 @@ func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
 
 	// ---- batch and dispatch ---------------------------------------------
 	case TypeBatchCreated:
-		return insertBatch(ctx, tx, ev)
+		return insertBatch(ctx, tx, ev, schemaVersion)
 	case TypeBatchJoined:
-		return joinBatch(ctx, tx, ev)
+		return joinBatch(ctx, tx, ev, schemaVersion)
 	case TypeBatchLeft:
-		return leaveBatch(ctx, tx, ev)
+		return leaveBatch(ctx, tx, ev, schemaVersion)
+	case TypeBatchDismissed:
+		return dismissBatch(ctx, tx, ev)
+	case TypeBatchSwept:
+		return sweepBatch(ctx, tx, ev)
 	case TypeDispatchOpened:
-		return openDispatch(ctx, tx, ev)
+		return openDispatch(ctx, tx, ev, schemaVersion)
 	case TypeDispatchClosed:
 		return closeDispatch(ctx, tx, ev)
+	case TypeRunStarted:
+		return startRun(ctx, tx, ev, schemaVersion)
+	case TypeRunFinished:
+		return finishRun(ctx, tx, ev, "completed")
+	case TypeRunStoodDown:
+		return standDownRun(ctx, tx, ev)
+	case TypeRunResumed:
+		if err := decodeStrict(ev, &RunResumed{}); err != nil {
+			return err
+		}
+		return validateRunContext(ctx, tx, ev, ev.Subject, true)
+	case TypeRunSkipped:
+		return validateRunSkipped(ctx, tx, ev)
 
 	// ---- render ----------------------------------------------------------
 	case TypeRenderPerformed:
@@ -116,7 +140,7 @@ func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
 //
 // Order matters only for readability; Rebuild defers foreign-key checks to
 // commit rather than sorting the deletes.
-var projectionTables = v1ProjectionTables
+var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -154,13 +178,13 @@ func (s *Store) Rebuild(ctx context.Context) error {
 		 ON CONFLICT (key) DO UPDATE SET value = '1'`, rebuildSentinel); err != nil {
 		return fmt.Errorf("store: rebuild: %w", err)
 	}
-	for _, table := range projectionTables {
+	for _, table := range projectionTablesForTx(ctx, tx, s.schemaVersion) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil { //nolint:gosec // table names are this package's own constants
 			return fmt.Errorf("store: clear %s: %w", table, err)
 		}
 	}
 	for _, ev := range events {
-		if err := applyEvent(ctx, tx, ev); err != nil {
+		if err := applyEventVersion(ctx, tx, ev, s.schemaVersion); err != nil {
 			return fmt.Errorf("store: rebuild at event %s: %w", ev.ID, err)
 		}
 	}
@@ -589,8 +613,34 @@ func moveCursor(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return nil
 }
 
-func insertBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+func insertBatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	var p BatchCreated
+	if schemaVersion >= 3 {
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		if (p.Name == "") == (p.Matter == "") {
+			return fmt.Errorf("store: %s requires either a non-empty name or one Matter", ev.Type)
+		}
+		if p.Matter != "" {
+			if err := validateLiveMatter(ctx, tx, ev.Type, p.Matter); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO batches (id,name,matter,state,birth_event,last_event) VALUES (?,?,?,'live',?,?)`,
+			ev.Subject, nullable(p.Name), nullable(p.Matter), ev.ID, ev.ID); err != nil {
+			return fmt.Errorf("store: project %s: %w", ev.Type, err)
+		}
+		if p.Matter != "" {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO batch_members (batch,matter,left_event,last_event) VALUES (?,?,NULL,?)`,
+				ev.Subject, p.Matter, ev.ID); err != nil {
+				return fmt.Errorf("store: project %s: %w", ev.Type, err)
+			}
+		}
+		return nil
+	}
 	if err := decode(ev, &p); err != nil {
 		return err
 	}
@@ -603,12 +653,44 @@ func insertBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return nil
 }
 
+func validateLiveMatter(ctx context.Context, tx *sql.Tx, eventType, matter string) error {
+	var kind string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT kind FROM nodes WHERE id=? AND tombstone_event IS NULL`, matter).Scan(&kind); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown or tombstoned Matter %s", eventType, matter)
+	} else if err != nil {
+		return err
+	} else if kind != string(ScaleMatter) {
+		return fmt.Errorf("store: %s names %s, which is not a Matter", eventType, matter)
+	}
+	return nil
+}
+
 // joinBatch is an upsert because joining is idempotent per (batch, matter)
 // (D58): a Matter that leaves and rejoins is the same membership row moving
 // forward, not a second one.
-func joinBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+func joinBatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	var p BatchMembership
-	if err := decode(ev, &p); err != nil {
+	if schemaVersion >= 3 {
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		var name, owner, state sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT name,matter,state FROM batches WHERE id=?`, ev.Subject).Scan(&name, &owner, &state); err == sql.ErrNoRows {
+			return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+		} else if err != nil {
+			return err
+		}
+		if state.String != "live" {
+			return fmt.Errorf("store: %s names a closed Batch", ev.Type)
+		}
+		if owner.Valid && owner.String != p.Matter {
+			return fmt.Errorf("store: %s cannot add membership to an anonymous Batch", ev.Type)
+		}
+		if err := validateLiveMatter(ctx, tx, ev.Type, p.Matter); err != nil {
+			return err
+		}
+	} else if err := decode(ev, &p); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx,
@@ -621,9 +703,28 @@ func joinBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return nil
 }
 
-func leaveBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+func leaveBatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	var p BatchMembership
-	if err := decode(ev, &p); err != nil {
+	if schemaVersion >= 3 {
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		var owner, state sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT matter,state FROM batches WHERE id=?`, ev.Subject).Scan(&owner, &state); err == sql.ErrNoRows {
+			return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+		} else if err != nil {
+			return err
+		}
+		if state.String != "live" {
+			return fmt.Errorf("store: %s names a closed Batch", ev.Type)
+		}
+		if owner.Valid {
+			return fmt.Errorf("store: %s cannot remove the membership of an anonymous Batch", ev.Type)
+		}
+		if err := validateLiveMatter(ctx, tx, ev.Type, p.Matter); err != nil {
+			return err
+		}
+	} else if err := decode(ev, &p); err != nil {
 		return err
 	}
 	res, err := tx.ExecContext(ctx,
@@ -636,12 +737,119 @@ func leaveBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
-func openDispatch(ctx context.Context, tx *sql.Tx, ev Event) error {
-	_, err := tx.ExecContext(ctx,
-		`INSERT INTO dispatches (id, clone, worktree, state, opened_at, birth_event, last_event)
-		 VALUES (?, ?, ?, 'open', ?, ?, ?)`,
-		ev.Subject, ev.Clone, ev.Worktree, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID)
+func dismissBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+	if err := decodeStrict(ev, &BatchDismissedPayload{}); err != nil {
+		return err
+	}
+	var matter, state sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT matter,state FROM batches WHERE id=?`, ev.Subject).Scan(&matter, &state); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+	} else if err != nil {
+		return err
+	}
+	if matter.Valid {
+		return fmt.Errorf("store: %s can dismiss only a named Batch", ev.Type)
+	}
+	if state.String != "live" {
+		return fmt.Errorf("store: %s names a closed Batch", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE batches SET state='closed',close_reason='dismissed',closed_at=?,last_event=? WHERE id=? AND state='live'`,
+		ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.Subject)
 	if err != nil {
+		return err
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func sweepBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+	if err := decodeStrict(ev, &BatchSweptPayload{}); err != nil {
+		return err
+	}
+	var matter, state sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT matter,state FROM batches WHERE id=?`, ev.Subject).Scan(&matter, &state); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+	} else if err != nil {
+		return err
+	}
+	if !matter.Valid {
+		return fmt.Errorf("store: %s can sweep only an anonymous Batch", ev.Type)
+	}
+	if state.String != "live" {
+		return fmt.Errorf("store: %s names a closed Batch", ev.Type)
+	}
+	at := ev.OccurredAt.UTC().Format(timestampLayout)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE dispatches SET state='closed',close_reason='reaped',closed_at=?,last_event=?
+		 WHERE state='open' AND run IN (SELECT id FROM runs WHERE batch=?)`, at, ev.ID, ev.Subject); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE runs SET state='closed',close_reason='reaped',closed_at=?,last_event=?
+		 WHERE state='open' AND batch=?`, at, ev.ID, ev.Subject); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE batches SET state='closed',close_reason='swept',closed_at=?,last_event=? WHERE id=? AND state='live'`,
+		at, ev.ID, ev.Subject)
+	if err != nil {
+		return err
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func openDispatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
+	var p DispatchOpened
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if (p.Run == "") != (p.Matter == "") {
+		return fmt.Errorf("store: %s requires both Run and Matter or neither", ev.Type)
+	}
+	if p.Run != "" {
+		if err := validateRunContext(ctx, tx, ev, p.Run, true); err != nil {
+			return err
+		}
+		var ok int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_matters WHERE run=? AND matter=?`, p.Run, p.Matter).Scan(&ok); err != nil {
+			return err
+		}
+		if ok != 1 {
+			return fmt.Errorf("store: %s Matter is outside the Run frozen set", ev.Type)
+		}
+		var kind string
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM nodes WHERE id=? AND tombstone_event IS NULL`, p.Matter).Scan(&kind); err == sql.ErrNoRows {
+			return fmt.Errorf("store: %s names an unknown or tombstoned Matter", ev.Type)
+		} else if err != nil {
+			return err
+		} else if kind != string(ScaleMatter) {
+			return fmt.Errorf("store: %s names a node that is not a Matter", ev.Type)
+		}
+	}
+
+	var err error
+	if schemaVersion >= 2 {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO dispatches (id, clone, worktree, run, matter, state, opened_at, birth_event, last_event)
+			 VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+			ev.Subject, ev.Clone, ev.Worktree, nullable(p.Run), nullable(p.Matter), ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID)
+	} else {
+		if p.Run != "" {
+			return fmt.Errorf("store: P2 Dispatch requires schema v2")
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO dispatches (id, clone, worktree, state, opened_at, birth_event, last_event) VALUES (?, ?, ?, 'open', ?, ?, ?)`,
+			ev.Subject, ev.Clone, ev.Worktree, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID)
+	}
+	if err != nil {
+		// modernc/sqlite reports this as a UNIQUE constraint on either the
+		// partial index or its table-qualified column. Both are the same
+		// domain refusal; do not make callers depend on the driver wording.
+		message := err.Error()
+		if strings.Contains(message, "UNIQUE constraint failed") &&
+			strings.Contains(message, "dispatches") && strings.Contains(message, "matter") {
+			return fmt.Errorf("refusal.dispatch-contention: Matter %s already has an open Dispatch", p.Matter)
+		}
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	return nil
@@ -655,6 +863,15 @@ func closeDispatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if p.Reason == "" {
 		return fmt.Errorf("store: %s must carry a reason (D59)", ev.Type)
 	}
+	var clone, worktree string
+	if err := tx.QueryRowContext(ctx, `SELECT clone,worktree FROM dispatches WHERE id=? AND state='open'`, ev.Subject).Scan(&clone, &worktree); err == sql.ErrNoRows {
+		return fmt.Errorf("store: event %s (%s) touched 0 projection rows, want 1", ev.ID, ev.Type)
+	} else if err != nil {
+		return err
+	}
+	if clone != ev.Clone || worktree != ev.Worktree {
+		return fmt.Errorf("store: %s dimensions disagree with the Dispatch", ev.Type)
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE dispatches SET state = 'closed', close_reason = ?, closed_at = ?, last_event = ?
 		 WHERE id = ? AND state = 'open'`,
@@ -665,12 +882,235 @@ func closeDispatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
+func startRun(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
+	var p RunStarted
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Batch == "" || len(p.Matters) == 0 {
+		return fmt.Errorf("store: %s requires a Batch and non-empty frozen set", ev.Type)
+	}
+	if err := validateExecutionContext(ctx, tx, ev, ev.Clone); err != nil {
+		return err
+	}
+	if !validRunLocator(p.Locator) {
+		return fmt.Errorf("store: %s has malformed Run locator %q", ev.Type, p.Locator)
+	}
+	if schemaVersion >= 3 {
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM batches WHERE id=?`, p.Batch).Scan(&state); err == sql.ErrNoRows {
+			return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+		} else if err != nil {
+			return err
+		}
+		if state != "live" {
+			return fmt.Errorf("store: %s names a closed Batch", ev.Type)
+		}
+	} else {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM batches WHERE id=?`, p.Batch).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 1 {
+			return fmt.Errorf("store: %s names an unknown Batch", ev.Type)
+		}
+	}
+	seen := make(map[string]struct{}, len(p.Matters))
+	for _, matter := range p.Matters {
+		if _, duplicate := seen[matter]; duplicate {
+			return fmt.Errorf("store: %s repeats Matter %s", ev.Type, matter)
+		}
+		seen[matter] = struct{}{}
+		var kind string
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM nodes WHERE id=? AND tombstone_event IS NULL`, matter).Scan(&kind); err == sql.ErrNoRows {
+			return fmt.Errorf("store: %s names an unknown or tombstoned Matter %s", ev.Type, matter)
+		} else if err != nil {
+			return err
+		} else if kind != string(ScaleMatter) {
+			return fmt.Errorf("store: %s names %s, which is not a Matter", ev.Type, matter)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs (id,clone,batch,locator,state,started_at,birth_event,last_event) VALUES (?,?,?,?,'open',?,?,?)`, ev.Subject, ev.Clone, p.Batch, p.Locator, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	for i, matter := range p.Matters {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO run_matters(run,matter,ordinal) VALUES(?,?,?)`, ev.Subject, matter, i); err != nil {
+			return fmt.Errorf("store: project %s: %w", ev.Type, err)
+		}
+	}
+	return nil
+}
+
+func validRunLocator(locator string) bool {
+	if !strings.HasPrefix(locator, "run-") {
+		return false
+	}
+	digits := strings.TrimPrefix(locator, "run-")
+	if len(digits) < 2 || (len(digits) > 2 && digits[0] == '0') {
+		return false
+	}
+	nonzero := false
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+		nonzero = nonzero || digit != '0'
+	}
+	return nonzero
+}
+
+func validateExecutionContext(ctx context.Context, tx *sql.Tx, ev Event, clone string) error {
+	var repo, worktreeClone string
+	err := tx.QueryRowContext(ctx, `SELECT c.repo,w.clone FROM clones c JOIN worktrees w ON w.id=? WHERE c.id=?`, ev.Worktree, clone).Scan(&repo, &worktreeClone)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Clone or Worktree", ev.Type)
+	}
+	if err != nil {
+		return err
+	}
+	if ev.Clone != clone || worktreeClone != clone || ev.Repo != repo {
+		return fmt.Errorf("store: %s tier dimensions disagree with Clone %s", ev.Type, clone)
+	}
+	return nil
+}
+
+func validateRunContext(ctx context.Context, tx *sql.Tx, ev Event, run string, requireOpen bool) error {
+	var owner, state string
+	if err := tx.QueryRowContext(ctx, `SELECT clone,state FROM runs WHERE id=?`, run).Scan(&owner, &state); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Run", ev.Type)
+	} else if err != nil {
+		return err
+	}
+	if requireOpen && state != "open" {
+		return fmt.Errorf("store: %s names a closed Run", ev.Type)
+	}
+	if err := validateExecutionContext(ctx, tx, ev, owner); err != nil {
+		return err
+	}
+	return nil
+}
+
+func finishRun(ctx context.Context, tx *sql.Tx, ev Event, reason string) error {
+	if err := decodeStrict(ev, &struct{}{}); err != nil {
+		return err
+	}
+	if err := validateRunContext(ctx, tx, ev, ev.Subject, true); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE runs SET state='closed',close_reason=?,closed_at=?,last_event=? WHERE id=? AND state='open'`, reason, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.Subject)
+	if err != nil {
+		return err
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func standDownRun(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p RunStoodDown
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	var owner, state string
+	if err := tx.QueryRowContext(ctx, `SELECT clone,state FROM runs WHERE id=?`, ev.Subject).Scan(&owner, &state); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Run", ev.Type)
+	} else if err != nil {
+		return err
+	}
+	if state != "open" {
+		return fmt.Errorf("store: %s names a closed Run", ev.Type)
+	}
+	if p.ActingClone == "" || p.OwningClone == "" || p.OwningClone != owner || p.ActingClone != ev.Clone {
+		return fmt.Errorf("store: %s has invalid acting or owning Clone", ev.Type)
+	}
+	if err := validateExecutionContext(ctx, tx, ev, p.ActingClone); err != nil {
+		return err
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM clones WHERE id=?`, p.OwningClone).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 1 {
+		return fmt.Errorf("store: %s names an unknown owning Clone", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE runs SET state='closed',close_reason='stood-down',closed_at=?,last_event=? WHERE id=? AND state='open'`, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.Subject)
+	if err != nil {
+		return err
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func validateRunSkipped(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p RunSkipped
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Run == "" || (p.Reason != RunSkipContention && p.Reason != RunSkipBlocked && p.Reason != RunSkipFailed) {
+		return fmt.Errorf("store: %s has invalid Run or reason", ev.Type)
+	}
+	if err := validateRunContext(ctx, tx, ev, p.Run, true); err != nil {
+		return err
+	}
+	var ok int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_matters WHERE run=? AND matter=?`, p.Run, ev.Subject).Scan(&ok); err != nil {
+		return err
+	}
+	if ok != 1 {
+		return fmt.Errorf("store: %s Matter is not in the Run frozen set", ev.Type)
+	}
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM nodes WHERE id=? AND tombstone_event IS NULL`, ev.Subject).Scan(&kind); err != nil {
+		return err
+	}
+	if kind != string(ScaleMatter) {
+		return fmt.Errorf("store: %s subject is not a live Matter", ev.Type)
+	}
+	return nil
+}
+func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []string {
+	_ = ctx
+	_ = tx
+	base := projectionTables
+	if version < 2 {
+		base = v1ProjectionTables
+	}
+	if len(base) == 0 {
+		return nil
+	}
+	// run_matters is a child projection of runs. Clear it first so the rebuild
+	// remains valid even when foreign-key deferral is unavailable on a driver.
+	out := make([]string, 0, len(base))
+	if version >= 2 && base[len(base)-1] == "run_matters" {
+		out = append(out, "run_matters")
+		base = base[:len(base)-1]
+	}
+	return append(out, base...)
+}
+
 // ---------------------------------------------------------------------------
 // Shared projection mechanics
 // ---------------------------------------------------------------------------
 
 func decode(ev Event, into any) error {
 	if err := json.Unmarshal(ev.Payload, into); err != nil {
+		return fmt.Errorf("store: event %s (%s) payload: %w", ev.ID, ev.Type, err)
+	}
+	return nil
+}
+
+func decodeStrict(ev Event, into any) error {
+	trimmed := bytes.TrimSpace(ev.Payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("store: event %s (%s) payload must be a JSON object", ev.ID, ev.Type)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		return fmt.Errorf("store: event %s (%s) payload: %w", ev.ID, ev.Type, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("store: event %s (%s) payload has trailing data", ev.ID, ev.Type)
+		}
 		return fmt.Errorf("store: event %s (%s) payload: %w", ev.ID, ev.Type, err)
 	}
 	return nil

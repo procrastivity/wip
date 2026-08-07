@@ -114,6 +114,12 @@ type Draft struct {
 	Subject string
 	Payload any
 
+	// Env overrides the request tier context for this event. It is used only
+	// when one atomic command emits events for already-existing execution
+	// objects whose original dimensions differ from the acting command, such
+	// as reaping a Dispatch from a different known Clone.
+	Env *Env
+
 	// Cause is the index, within this command's own drafts, of the draft that
 	// entailed this one. Ignored for the first draft, which is the chain
 	// origin. A linear cascade points at its predecessor (a:a:a, b:a:a, c:b:a);
@@ -198,7 +204,7 @@ func openAt(path string, reg []migration, target int, clock func() time.Time) (*
 	}
 
 	s := &Store{
-		View:    View{q: db},
+		View:    View{q: db, schemaVersion: version},
 		db:      db,
 		path:    path,
 		blobDir: blobDirFor(path),
@@ -268,7 +274,14 @@ func (s *Store) verifyTaxonomy(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("store: read the event taxonomy: %w", err)
 	}
-	for _, t := range registeredTypes() {
+	types := append([]EventType{}, P1Taxonomy...)
+	if s.version >= 2 {
+		types = append(types, V2Taxonomy...)
+	}
+	if s.version >= 3 {
+		types = append(types, V3Taxonomy...)
+	}
+	for _, t := range types {
 		if !known[t.Type] {
 			return fmt.Errorf(
 				"store: this wip can emit %q but the store's taxonomy does not carry it; the migration that seeds it is missing", t.Type)
@@ -342,7 +355,7 @@ func (s *Store) Commit(ctx context.Context, req Request, decide func(context.Con
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	handle := &Tx{View: View{q: tx}, store: s}
+	handle := &Tx{View: View{q: tx, schemaVersion: s.version}, store: s}
 	drafts, err := decide(ctx, handle)
 	if err != nil {
 		return nil, err
@@ -373,7 +386,7 @@ func (s *Store) Commit(ctx context.Context, req Request, decide func(context.Con
 		if err := appendEvent(ctx, tx, ev); err != nil {
 			return nil, err
 		}
-		if err := applyEvent(ctx, tx, ev); err != nil {
+		if err := applyEventVersion(ctx, tx, ev, s.version); err != nil {
 			return nil, err
 		}
 		events[i] = ev
@@ -418,23 +431,27 @@ func (s *Store) stamp(req Request, d Draft) (Event, error) {
 		Subject:    d.Subject,
 		Payload:    raw,
 	}
+	env := req.Env
+	if d.Env != nil {
+		env = *d.Env
+	}
 	if rule.Repo {
-		if req.Env.Repo == "" {
+		if env.Repo == "" {
 			return Event{}, fmt.Errorf("store: %s requires a repo dimension and this command has no Repo in its tier context", d.Type)
 		}
-		ev.Repo = req.Env.Repo
+		ev.Repo = env.Repo
 	}
 	if rule.Clone {
-		if req.Env.Clone == "" {
+		if env.Clone == "" {
 			return Event{}, fmt.Errorf("store: %s is an execution event and this command has no Clone in its tier context", d.Type)
 		}
-		ev.Clone = req.Env.Clone
+		ev.Clone = env.Clone
 	}
 	if rule.Worktree {
-		if req.Env.Worktree == "" {
+		if env.Worktree == "" {
 			return Event{}, fmt.Errorf("store: %s is an execution event and this command has no Worktree in its tier context", d.Type)
 		}
-		ev.Worktree = req.Env.Worktree
+		ev.Worktree = env.Worktree
 	}
 	return ev, nil
 }

@@ -54,21 +54,14 @@ func OpenOrReuse(ctx context.Context, s *store.Store, cur Current, actor store.A
 	return d, true, superseded, nil
 }
 
-// openNewDispatch mints the anonymous batch-of-one and the dispatch itself in
-// one causal chain (step-06): `batch.created` (born empty, MODEL §6) causes
-// `dispatch.opened`. No explicit-batch verb exists in P1 (HANDOFF §1.1: no
-// Orchestrator), so every dispatch open creates a fresh anonymous batch —
-// there is no reuse to consider.
+// openNewDispatch opens the P1 dispatch bracket. Batch creation belongs to the
+// later scheduler path; P1 dispatch rows remain valid with null Run and Matter.
 func openNewDispatch(ctx context.Context, s *store.Store, cur Current, actor store.Actor) (store.Dispatch, error) {
 	req := store.Request{Actor: actor, Env: cur.Env()}
 	var dispatchID string
 	if _, err := s.Commit(ctx, req, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
-		batchID := tx.NewID()
 		dispatchID = tx.NewID()
-		return []store.Draft{
-			{Type: store.TypeBatchCreated, Subject: batchID, Payload: store.BatchCreated{}},
-			{Type: store.TypeDispatchOpened, Subject: dispatchID, Cause: 0},
-		}, nil
+		return []store.Draft{{Type: store.TypeDispatchOpened, Subject: dispatchID}}, nil
 	}); err != nil {
 		return store.Dispatch{}, err
 	}

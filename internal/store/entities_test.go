@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1203,10 +1204,8 @@ func TestABatchKeysAtNoTier(t *testing.T) {
 	})
 	birth := h.birthEventOf(named)
 	h.wantRow("a named Batch", "batches", "id = ?", []any{named}, map[string]any{
-		"id":          named,
-		"name":        "release-1",
-		"birth_event": birth.ID,
-		"last_event":  birth.ID,
+		"id": named, "name": "release-1", "matter": nil, "state": "live",
+		"close_reason": nil, "closed_at": nil, "birth_event": birth.ID, "last_event": birth.ID,
 	})
 	h.wantDimensions(birth, "", h.Clone, h.Worktree)
 
@@ -1214,15 +1213,14 @@ func TestABatchKeysAtNoTier(t *testing.T) {
 	// one dispatch path (D23). Its name is absent, and absent names do not collide:
 	// the unique index is partial for that reason.
 	for i := 0; i < 2; i++ {
+		matter := h.matter(fmt.Sprintf("anonymous-%d", i), "Anonymous Matter")
 		anon := h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
-			return Draft{Type: TypeBatchCreated, Subject: tx.NewID(), Payload: BatchCreated{}}, nil
+			return Draft{Type: TypeBatchCreated, Subject: tx.NewID(), Payload: BatchCreated{Matter: matter}}, nil
 		})
 		anonBirth := h.birthEventOf(anon)
 		h.wantRow("an anonymous Batch", "batches", "id = ?", []any{anon}, map[string]any{
-			"id":          anon,
-			"name":        nil,
-			"birth_event": anonBirth.ID,
-			"last_event":  anonBirth.ID,
+			"id": anon, "name": nil, "matter": matter, "state": "live",
+			"close_reason": nil, "closed_at": nil, "birth_event": anonBirth.ID, "last_event": anonBirth.ID,
 		})
 	}
 	h.wantRowCount("two anonymous Batches", "batches", "name IS NULL", nil, 2)
@@ -1308,7 +1306,7 @@ func (h *harness) wantMembers(what, batch string, want ...string) {
 func TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet(t *testing.T) {
 	h := newHarness(t)
 
-	wantColumns(h, "runs", []string{"id", "clone", "batch", "state", "birth_event", "last_event"})
+	wantColumns(h, "runs", []string{"id", "clone", "batch", "locator", "state", "close_reason", "started_at", "closed_at", "birth_event", "last_event"})
 	wantColumns(h, "outbox_entries", []string{
 		"id", "state", "subject", "idempotency_key", "payload", "birth_event", "last_event",
 	})
@@ -1336,14 +1334,14 @@ func TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet(t *testing.T) {
 	// A well-formed Run row is accepted around the API: the shape is real and only
 	// the verb is missing (D48, provisional noun).
 	if err := h.rawExec(
-		`INSERT INTO runs (id, clone, batch, state, birth_event, last_event) VALUES (?, ?, ?, 'queued', ?, ?)`,
-		h.NewID(), h.Clone, batch, ev.ID, ev.ID); err != nil {
+		`INSERT INTO runs (id, clone, batch, locator, state, started_at, birth_event, last_event) VALUES (?, ?, ?, 'run-01', 'open', ?, ?, ?)`,
+		h.NewID(), h.Clone, batch, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID); err != nil {
 		t.Fatalf("the substrate refused a well-formed Run row: %v", err)
 	}
 	// The generated guards apply to it like any other projection table.
 	rawRefusedBy(h, "a Run born by two events", "a row is born by exactly one event",
-		`INSERT INTO runs (id, clone, batch, state, birth_event, last_event) VALUES (?, ?, ?, 'queued', ?, ?)`,
-		h.NewID(), h.Clone, batch, ev.ID, h.birthEventOf(h.Clone).ID)
+		`INSERT INTO runs (id, clone, batch, locator, state, started_at, birth_event, last_event) VALUES (?, ?, ?, 'run-02', 'open', ?, ?, ?)`,
+		h.NewID(), h.Clone, batch, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, h.birthEventOf(h.Clone).ID)
 
 	// The outbox's own constraints (D15, D50): three states, a JSON-object payload,
 	// and an idempotency key that is delivered once.
@@ -1615,6 +1613,8 @@ func TestADispatchIsBracketedAndAlwaysClosesWithAReason(t *testing.T) {
 		opened := h.birthEventOf(dispatch)
 		h.wantRow("an open dispatch", "dispatches", "id = ?", []any{dispatch}, map[string]any{
 			"id":       dispatch,
+			"run":      nil,
+			"matter":   nil,
 			"clone":    h.Clone,
 			"worktree": h.Worktree,
 			"state":    "open",
@@ -1639,6 +1639,8 @@ func TestADispatchIsBracketedAndAlwaysClosesWithAReason(t *testing.T) {
 		})[0]
 		h.wantRow("a dispatch closed as "+string(reason), "dispatches", "id = ?", []any{dispatch}, map[string]any{
 			"id":           dispatch,
+			"run":          nil,
+			"matter":       nil,
 			"clone":        h.Clone,
 			"worktree":     h.Worktree,
 			"state":        "closed",

@@ -283,6 +283,7 @@ var executionFamilies = map[Family]bool{
 	FamilyCursor:   true,
 	FamilyBatch:    true,
 	FamilyDispatch: true,
+	FamilyRun:      true,
 	FamilyRender:   true,
 }
 

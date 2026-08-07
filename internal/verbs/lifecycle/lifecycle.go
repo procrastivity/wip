@@ -14,6 +14,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
@@ -117,10 +118,50 @@ func transitionCommand(use, short string, move func(context.Context, *store.Stor
 	}
 }
 
+func transitionCommandWithEnv(use, short string, move func(context.Context, *store.Store, store.Actor, store.Env, string) (store.Node, error), verbWord string) func(*iostreams.Streams) *cobra.Command {
+	return func(streams *iostreams.Streams) *cobra.Command {
+		cmd := &cobra.Command{Use: use, Short: short, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			s, err := tiers.OpenStore()
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			if err != nil {
+				return err
+			}
+			n, err := move(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				b, err := json.Marshal(struct {
+					ID        string `json:"id"`
+					Lifecycle string `json:"lifecycle"`
+				}{n.ID, string(n.Lifecycle)})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+			_, err = fmt.Fprintf(streams.Out, "%s %s\n", verbWord, args[0])
+			return err
+		}}
+		surface.Annotate(cmd, surface.Plumbing)
+		return cmd
+	}
+}
+
 // FinishCommand constructs `wip finish <locator>`.
 func FinishCommand(streams *iostreams.Streams) *cobra.Command {
-	return transitionCommand("finish <locator>", "move a matter, stage or step from In Progress to Done",
-		writesurface.Finish, "finished")(streams)
+	return transitionCommandWithEnv("finish <locator>", "move a matter, stage or step from In Progress to Done",
+		writesurface.FinishWithEnv, "finished")(streams)
 }
 
 // CancelCommand constructs `wip cancel <locator>`.

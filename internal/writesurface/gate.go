@@ -48,6 +48,15 @@ func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale s
 // always the subject's own kind (D62) — never a second opinion from the
 // caller — and closing a gate the subject's Repo never declared is refused.
 func CloseGate(ctx context.Context, s *store.Store, actor store.Actor, repo, gate, locator string) (store.Node, error) {
+	return closeGateEnv(ctx, s, actor, store.Env{Repo: repo}, gate, locator)
+}
+
+func CloseGateWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (store.Node, error) {
+	return closeGateEnv(ctx, s, actor, env, gate, locator)
+}
+
+func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (store.Node, error) {
+	repo := env.Repo
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
 		return store.Node{}, err
@@ -67,13 +76,26 @@ func CloseGate(ctx context.Context, s *store.Store, actor store.Actor, repo, gat
 		return store.Node{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
 	}
 
-	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
-		return []store.Draft{{
+	req := store.Request{Actor: actor, Env: env}
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		fresh, err := tx.Node(ctx, n.ID)
+		if err != nil {
+			return nil, err
+		}
+		drafts := []store.Draft{{
 			Type:    store.TypeGateClosed,
-			Subject: n.ID,
-			Payload: store.GateClosed{Gate: gate, Scale: n.Kind},
-		}}, nil
+			Subject: fresh.ID,
+			Payload: store.GateClosed{Gate: gate, Scale: fresh.Kind},
+		}}
+		if fresh.Kind == store.ScaleMatter {
+			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, false, gate); err != nil {
+				return nil, err
+			} else if found {
+				sweep.Cause = 0
+				drafts = append(drafts, sweep)
+			}
+		}
+		return drafts, nil
 	}); err != nil {
 		return store.Node{}, err
 	}

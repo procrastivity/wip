@@ -699,7 +699,7 @@ func TestTierDimensionsAreAStaticFunctionOfType(t *testing.T) {
 	refusalMentions(t, "an execution event with no Worktree in its tier context", err, "no Worktree")
 
 	_, err = h.stamp(Request{Actor: ActorHuman, Env: Env{Repo: h.Repo}},
-		Draft{Type: TypeBatchCreated, Subject: matter, Payload: BatchCreated{}})
+		Draft{Type: TypeBatchCreated, Subject: matter, Payload: BatchCreated{Matter: matter}})
 	refusalMentions(t, "a batch event with no Clone in its tier context", err, "no Clone")
 
 	// And the trigger refuses every way a row can disagree with its type's rule.
