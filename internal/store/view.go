@@ -901,15 +901,20 @@ type Dispatch struct {
 	LastEvent   string
 }
 
-// OpenDispatch reads the open dispatch on a worktree, if there is one. A stale
-// open bracket is what `refresh` supersedes.
+// OpenDispatch reads the open *plain* dispatch on a worktree — the P1
+// bracket `refresh` opens and reuses, with no Run and no Matter — if there
+// is one. A Run's claim dispatches (run and matter set, F4) share the
+// worktree while the Run is engaged and are deliberately not this bracket:
+// they are addressed by Run and Matter, and letting one answer here would
+// hand `refresh`, `dispatch close`, and role spawn/close a bracket they do
+// not own.
 func (v View) OpenDispatch(ctx context.Context, worktree string) (Dispatch, bool, error) {
 	var d Dispatch
 	var openedAt string
 	var run, matter sql.NullString
 	var err error
 	if v.schemaVersion >= 2 {
-		err = v.q.QueryRowContext(ctx, `SELECT id,clone,worktree,run,matter,opened_at,last_event FROM dispatches WHERE worktree=? AND state='open'`, worktree).Scan(&d.ID, &d.Clone, &d.Worktree, &run, &matter, &openedAt, &d.LastEvent)
+		err = v.q.QueryRowContext(ctx, `SELECT id,clone,worktree,run,matter,opened_at,last_event FROM dispatches WHERE worktree=? AND state='open' AND run IS NULL`, worktree).Scan(&d.ID, &d.Clone, &d.Worktree, &run, &matter, &openedAt, &d.LastEvent)
 	} else {
 		err = v.q.QueryRowContext(ctx, `SELECT id,clone,worktree,opened_at,last_event FROM dispatches WHERE worktree=? AND state='open'`, worktree).Scan(&d.ID, &d.Clone, &d.Worktree, &openedAt, &d.LastEvent)
 	}

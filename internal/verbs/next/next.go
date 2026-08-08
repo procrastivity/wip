@@ -48,7 +48,18 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				return renderSet(cmd.Context(), streams, s.View, flags.JSON, node)
 			}
 
-			view, err := readsurface.Next(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
+			actor := store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole)
+
+			// An open Run with a parallel frontier takes the display (the
+			// ratified draft in parallelism-decisions.md): the full Ready
+			// set, the cap, the available slots — never a selection, which
+			// is the scheduler's alone. With one Ready node or no open Run,
+			// the existing outputs stand unchanged.
+			if handled, err := renderRunFrontier(cmd.Context(), streams, s, actor, dir, flags.JSON); handled || err != nil {
+				return err
+			}
+
+			view, err := readsurface.Next(cmd.Context(), s, actor, dir)
 			if err != nil {
 				return err
 			}

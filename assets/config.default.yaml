@@ -10,3 +10,9 @@
 # session --idle-gap <duration>` overrides this per invocation; the value is
 # any Go duration string (e.g. "6h", "90m").
 idle_gap: 6h
+
+# scheduler: the default Run-wide concurrency cap (G4/D31) `wip next` uses
+# to display available slots for an open Run's parallel frontier. One cap
+# covers all engaged work in a Run; 1 is plain sequential. The engine takes
+# its cap per invocation; this key only shapes the read.
+run_cap: 1

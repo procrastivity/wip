@@ -15,14 +15,19 @@ func TestLoad_NoOverride_ReturnsShippedDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// chassis owns the mechanism, not any config key; read-surface is the
-	// first Matter to earn one — the default idle gap for `wip session`
-	// (MODEL §2.4), documented next to the key in config.default.yaml.
+	// chassis owns the mechanism, not any config key; read-surface earned
+	// the first one — the default idle gap for `wip session` (MODEL
+	// §2.4) — and scheduler added the second — the default Run cap `wip
+	// next`'s frontier display uses (G4/D31) — both documented next to
+	// their keys in config.default.yaml.
 	if got := cfg["idle_gap"]; got != "6h" {
 		t.Fatalf(`cfg["idle_gap"] = %v, want "6h"`, got)
 	}
-	if len(cfg) != 1 {
-		t.Fatalf("cfg = %+v, want exactly the one key the shipped default declares", cfg)
+	if got := cfg["run_cap"]; got != 1 {
+		t.Fatalf(`cfg["run_cap"] = %v, want 1`, got)
+	}
+	if len(cfg) != 2 {
+		t.Fatalf("cfg = %+v, want exactly the two keys the shipped default declares", cfg)
 	}
 }
 
