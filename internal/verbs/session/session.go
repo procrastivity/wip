@@ -85,24 +85,45 @@ func renderHuman(streams *iostreams.Streams, sessions []readsurface.Session) err
 			sess.Start.Local().Format(time.RFC3339), sess.End.Local().Format(time.RFC3339), len(sess.Events)); err != nil {
 			return err
 		}
+		for _, role := range readsurface.RoleActivity(sess) {
+			if _, err := fmt.Fprintf(streams.Out, "  role:%-12s %d event(s) · %d spawned · %d closed\n",
+				role.Name, role.Events, role.Spawned, role.Closed); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 type sessionJSON struct {
-	Start  string `json:"start"`
-	End    string `json:"end"`
-	Events int    `json:"events"`
+	Start  string     `json:"start"`
+	End    string     `json:"end"`
+	Events int        `json:"events"`
+	Roles  []roleJSON `json:"roles,omitempty"`
+}
+
+type roleJSON struct {
+	Name    string `json:"name"`
+	Events  int    `json:"events"`
+	Spawned int    `json:"spawned"`
+	Closed  int    `json:"closed"`
 }
 
 func renderJSON(streams *iostreams.Streams, sessions []readsurface.Session) error {
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, sess := range sessions {
-		out = append(out, sessionJSON{
+		row := sessionJSON{
 			Start:  sess.Start.UTC().Format(time.RFC3339),
 			End:    sess.End.UTC().Format(time.RFC3339),
 			Events: len(sess.Events),
-		})
+		}
+		for _, role := range readsurface.RoleActivity(sess) {
+			row.Roles = append(row.Roles, roleJSON{
+				Name: string(role.Name), Events: role.Events,
+				Spawned: role.Spawned, Closed: role.Closed,
+			})
+		}
+		out = append(out, row)
 	}
 	b, err := json.Marshal(struct {
 		Sessions []sessionJSON `json:"sessions"`

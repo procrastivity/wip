@@ -41,14 +41,14 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			defer func() { _ = s.Close() }()
 
 			if set != "" {
-				node, err := readsurface.SetCursor(cmd.Context(), s, store.ActorHuman, dir, set)
+				node, err := readsurface.SetCursor(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir, set)
 				if err != nil {
 					return err
 				}
 				return renderSet(cmd.Context(), streams, s.View, flags.JSON, node)
 			}
 
-			view, err := readsurface.Next(cmd.Context(), s, store.ActorHuman, dir)
+			view, err := readsurface.Next(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}

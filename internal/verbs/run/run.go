@@ -87,7 +87,7 @@ func currentClone(ctx context.Context, s *store.Store) (store.Clone, error) {
 	if err != nil {
 		return store.Clone{}, err
 	}
-	clone, found, err := tiers.ResolveCurrentClone(ctx, s, store.ActorHuman, dir)
+	clone, found, err := tiers.ResolveCurrentClone(ctx, s, store.ActorFor(cliflags.FromContext(ctx).AsRole), dir)
 	if err != nil {
 		return store.Clone{}, err
 	}
@@ -197,11 +197,11 @@ func standDownCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
-			closed, events, err := writesurface.StandDownRun(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
+			closed, events, err := writesurface.StandDownRun(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
 			if err != nil {
 				return err
 			}

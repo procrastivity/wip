@@ -47,11 +47,11 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
-			closed, err := render.CloseExplicit(cmd.Context(), s, cur, store.ActorHuman)
+			closed, err := render.CloseExplicit(cmd.Context(), s, cur, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole))
 			if err != nil {
 				return err
 			}

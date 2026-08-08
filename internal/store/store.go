@@ -31,12 +31,31 @@ const ActorHuman Actor = "human"
 // RoleActor names an inner- or outer-loop role: Builder, Verifier, Warden.
 func RoleActor(name string) Actor { return Actor("role:" + name) }
 
+// ActorFor resolves the CLI's acting identity: the role actor when the
+// invocation claims one (`--as-role` / WIP_AS_ROLE), the human otherwise.
+// The claim is verified against an open spawned role on the write path, so
+// this is resolution, not authorization.
+func ActorFor(asRole string) Actor {
+	if asRole == "" {
+		return ActorHuman
+	}
+	return RoleActor(asRole)
+}
+
 // SystemActor names a system acting on its own initiative — a CI webhook, a
 // watcher. MODEL §10 requires the envelope to be able to say this ("a Builder
 // closing and CI going red are events, or outer-loop roles are invisible to
 // Session"); nothing in P1 emits one, and that is a fact about P1's role set
 // rather than a gap in the envelope.
 func SystemActor(source string) Actor { return Actor("system:" + source) }
+
+// Role returns the role name a `role:` actor claims, if it is one.
+func (a Actor) Role() (RoleName, bool) {
+	if len(a) > len("role:") && a[:len("role:")] == "role:" {
+		return RoleName(a[len("role:"):]), true
+	}
+	return "", false
+}
 
 func (a Actor) valid() bool {
 	switch {
@@ -281,6 +300,9 @@ func (s *Store) verifyTaxonomy(ctx context.Context) error {
 	if s.version >= 3 {
 		types = append(types, V3Taxonomy...)
 	}
+	if s.version >= 4 {
+		types = append(types, V4Taxonomy...)
+	}
 	for _, t := range types {
 		if !known[t.Type] {
 			return fmt.Errorf(
@@ -355,6 +377,18 @@ func (s *Store) Commit(ctx context.Context, req Request, decide func(context.Con
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// A role actor is a claim about a spawned role, not a label (MODEL §6):
+	// it speaks only while an instance of that role is open — scoped to the
+	// request's worktree when it names one, to its clone when it names only
+	// that, host-wide otherwise. This is what makes "spawned roles key at
+	// Clone" load-bearing rather than decoration; the check lives on the one
+	// write path so no verb can opt out of it.
+	if name, isRole := req.Actor.Role(); isRole && s.version >= 4 {
+		if err := verifyRoleActor(ctx, tx, req.Env, string(name)); err != nil {
+			return nil, err
+		}
+	}
+
 	handle := &Tx{View: View{q: tx, schemaVersion: s.version}, store: s}
 	drafts, err := decide(ctx, handle)
 	if err != nil {
@@ -396,6 +430,31 @@ func (s *Store) Commit(ctx context.Context, req Request, decide func(context.Con
 		return nil, fmt.Errorf("store: commit: %w", err)
 	}
 	return events, nil
+}
+
+// verifyRoleActor is the read behind the role-actor claim: an open role row
+// with the claimed name, in the narrowest scope the request's tier context
+// can name.
+func verifyRoleActor(ctx context.Context, tx *sql.Tx, env Env, name string) error {
+	query := `SELECT COUNT(*) FROM roles r JOIN dispatches d ON d.id = r.dispatch
+	          WHERE r.state='open' AND r.name=?`
+	args := []any{name}
+	switch {
+	case env.Worktree != "":
+		query += ` AND d.worktree=?`
+		args = append(args, env.Worktree)
+	case env.Clone != "":
+		query += ` AND r.clone=?`
+		args = append(args, env.Clone)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return fmt.Errorf("store: verify actor role:%s: %w", name, err)
+	}
+	if count == 0 {
+		return fmt.Errorf("store: actor role:%s claims a role with no open spawn behind it; `wip role spawn %s` first (MODEL §6, D59)", name, name)
+	}
+	return nil
 }
 
 // stamp completes the envelope around a verb's decision. Tier dimensions are a

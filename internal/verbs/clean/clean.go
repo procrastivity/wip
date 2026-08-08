@@ -39,11 +39,11 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
-			result, err := render.Clean(cmd.Context(), s, cur, store.ActorHuman, time.Now(), render.DefaultStaleBound)
+			result, err := render.Clean(cmd.Context(), s, cur, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), time.Now(), render.DefaultStaleBound)
 			if err != nil {
 				return err
 			}

@@ -31,6 +31,7 @@ import (
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
 	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
+	roleverb "github.com/procrastivity/wip/internal/verbs/role"
 	runverb "github.com/procrastivity/wip/internal/verbs/run"
 	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
@@ -61,7 +62,14 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 			if err != nil {
 				return err
 			}
-			cmd.SetContext(cliflags.WithFlags(cmd.Context(), cliflags.Flags{JSON: jsonOut, Verbose: verbose}))
+			asRole, err := cmd.Flags().GetString("as-role")
+			if err != nil {
+				return err
+			}
+			if asRole == "" {
+				asRole = os.Getenv("WIP_AS_ROLE")
+			}
+			cmd.SetContext(cliflags.WithFlags(cmd.Context(), cliflags.Flags{JSON: jsonOut, Verbose: verbose, AsRole: asRole}))
 			return nil
 		},
 	}
@@ -70,6 +78,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 
 	root.PersistentFlags().Bool("json", false, "emit the success payload as one JSON value")
 	root.PersistentFlags().BoolP("verbose", "v", false, "extra diagnostic lines on stderr")
+	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip role spawn` behind it")
 
 	root.AddCommand(versionverb.Command(streams, build))
 	root.AddCommand(manifestverb.Command(streams, build, root))
@@ -99,6 +108,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(backlogverb.Command(streams))
 	root.AddCommand(batchverb.Command(streams))
 	root.AddCommand(runverb.Command(streams))
+	root.AddCommand(roleverb.Command(streams))
 
 	// write-surface: content-prose.
 	root.AddCommand(contentverb.BriefCommand(streams))

@@ -103,7 +103,7 @@ func resolveTargetRepo(ctx context.Context, s *store.Store, dir, repoLocator str
 	if repoLocator != "" {
 		return tiers.ResolveRepo(ctx, s.View, repoLocator)
 	}
-	clone, found, err := tiers.ResolveCurrentClone(ctx, s, store.ActorHuman, dir)
+	clone, found, err := tiers.ResolveCurrentClone(ctx, s, store.ActorFor(cliflags.FromContext(ctx).AsRole), dir)
 	if err != nil {
 		return store.Repo{}, err
 	}
@@ -132,7 +132,7 @@ func relinkCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			clone, err := tiers.Relink(cmd.Context(), s, store.ActorHuman, dir, args[0])
+			clone, err := tiers.Relink(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir, args[0])
 			if err != nil {
 				return err
 			}

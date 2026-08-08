@@ -89,6 +89,12 @@ const (
 	TypeRunResumed   = "run.resumed"
 	TypeRunFinished  = "run.finished"
 	TypeRunStoodDown = "run.stood-down"
+
+	// Role — execution events (MODEL §6, §7). subject = the role instance's
+	// own ULID; the instance keys at Clone and binds to the Dispatch that
+	// spawned it (D59).
+	TypeRoleSpawned = "role.spawned"
+	TypeRoleClosed  = "role.closed"
 )
 
 // Family groups event types for auditing (MODEL §10's family list). It is
@@ -111,6 +117,7 @@ const (
 	FamilyBatch      Family = "batch"
 	FamilyDispatch   Family = "dispatch"
 	FamilyRun        Family = "run"
+	FamilyRole       Family = "role"
 )
 
 // EventType is one row of the taxonomy: a type token, its family, and the tier
@@ -217,13 +224,20 @@ var V3Taxonomy = []EventType{
 	batchScoped(TypeBatchSwept),
 }
 
+// V4Taxonomy is the role pair seeded by the v4 migration. Like P1Taxonomy, it
+// is frozen once shipped.
+var V4Taxonomy = []EventType{
+	execution(TypeRoleSpawned, FamilyRole),
+	execution(TypeRoleClosed, FamilyRole),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.
@@ -337,4 +351,78 @@ type BatchCloseReason string
 const (
 	BatchDismissed BatchCloseReason = "dismissed"
 	BatchSwept     BatchCloseReason = "swept"
+)
+
+// RoleName is one of the six roles (MODEL §6). The `actor` column stays an
+// open-ended token — new roles arrive without a migration — but a role *row*
+// is one of these: the taxonomy is a fact of the model, and a row the model
+// cannot name is a typo, not a new role.
+type RoleName string
+
+// The six roles. Inner loop — spawned to do a bounded thing, then close.
+// Outer loop — watchers attending gates that answer asynchronously (D14).
+const (
+	RoleOrchestrator RoleName = "orchestrator"
+	RoleCoordinator  RoleName = "coordinator"
+	RoleResearcher   RoleName = "researcher"
+	RoleBuilder      RoleName = "builder"
+	RoleVerifier     RoleName = "verifier"
+	RoleWarden       RoleName = "warden"
+)
+
+// KnownRole reports whether name is one of the six roles.
+func KnownRole(name RoleName) bool {
+	switch name {
+	case RoleOrchestrator, RoleCoordinator, RoleResearcher, RoleBuilder,
+		RoleVerifier, RoleWarden:
+		return true
+	default:
+		return false
+	}
+}
+
+// OuterLoop reports whether a role is a gate-owning watcher. Everything else
+// known is inner loop.
+func (n RoleName) OuterLoop() bool { return n == RoleVerifier || n == RoleWarden }
+
+// Actor is the role's own actor token.
+func (n RoleName) Actor() Actor { return RoleActor(string(n)) }
+
+// GateOwner reports the outer-loop role that owns a gate (D14: the gate list
+// and the outer-loop role list are one list from two sides). A gate no role
+// owns — `reviewed-local`, and any name this table does not know — is
+// human-owned, and false says so.
+func GateOwner(gate string) (RoleName, bool) {
+	switch gate {
+	case "verified":
+		return RoleVerifier, true
+	case "reviewed", "ci-green":
+		return RoleWarden, true
+	default:
+		return "", false
+	}
+}
+
+// OwnedGates is GateOwner from the role's side: the gates whose declaration
+// activates this role. Empty for every inner-loop role.
+func (n RoleName) OwnedGates() []string {
+	switch n {
+	case RoleVerifier:
+		return []string{"verified"}
+	case RoleWarden:
+		return []string{"reviewed", "ci-green"}
+	default:
+		return nil
+	}
+}
+
+// RoleCloseReason is why a role instance closed: `completed` when its bounded
+// thing is done or its watch ended, `reaped` when the Dispatch it was bound to
+// closed under it.
+type RoleCloseReason string
+
+// The two role close reasons.
+const (
+	RoleCloseCompleted RoleCloseReason = "completed"
+	RoleCloseReaped    RoleCloseReason = "reaped"
 )

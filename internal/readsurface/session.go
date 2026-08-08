@@ -91,6 +91,51 @@ func Derive(ctx context.Context, s *store.Store, idleGap time.Duration) ([]Sessi
 	return bounds, nil
 }
 
+// RoleSummary is one role's footprint inside a Session: how many events it
+// spoke (its `role:<name>` actor), and how many spawns and closes of it the
+// window saw. Roles are ordinary execution events, so this is derivation over
+// Session.Events, not a new query — which is exactly MODEL §10's requirement
+// that outer-loop roles be visible to Session without special casing.
+type RoleSummary struct {
+	Name    store.RoleName
+	Events  int
+	Spawned int
+	Closed  int
+}
+
+// RoleActivity derives the per-role summary of one Session, in first-seen
+// order.
+func RoleActivity(sess Session) []RoleSummary {
+	index := map[store.RoleName]int{}
+	var out []RoleSummary
+	at := func(name store.RoleName) *RoleSummary {
+		i, ok := index[name]
+		if !ok {
+			i = len(out)
+			index[name] = i
+			out = append(out, RoleSummary{Name: name})
+		}
+		return &out[i]
+	}
+	for _, ev := range sess.Events {
+		if name, isRole := ev.Actor.Role(); isRole {
+			at(name).Events++
+		}
+		switch ev.Type {
+		case store.TypeRoleSpawned:
+			var p store.RoleSpawned
+			if err := json.Unmarshal(ev.Payload, &p); err == nil {
+				at(p.Name).Spawned++
+			}
+		case store.TypeRoleClosed:
+			if name, isRole := ev.Actor.Role(); isRole {
+				at(name).Closed++
+			}
+		}
+	}
+	return out
+}
+
 func isDiscountedClose(ev store.Event) bool {
 	if ev.Type != store.TypeDispatchClosed {
 		return false

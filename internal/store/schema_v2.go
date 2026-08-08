@@ -22,8 +22,17 @@ func rejectLegacyRuns(ctx context.Context, tx *sql.Tx) error {
 	return rows.Err()
 }
 
+// rejectLegacyBatches guards the v3 Batch rebuild. An owner-less anonymous
+// Batch is legal P1 history — the old refresh path minted one per dispatch,
+// behavior run-substrate later removed — and while it stayed memberless and
+// run-less the v3 copy converts it to a closed (swept) legacy row. One that
+// gained members or runs has an owner the migration cannot infer, and refuses.
+// (Amended by `roles` from a blanket refusal, by decision: the blanket made
+// every real P1 store structurally unable to migrate past v2.)
 func rejectLegacyBatches(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM batches WHERE name IS NULL ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT b.id FROM batches b WHERE b.name IS NULL AND (
+		EXISTS (SELECT 1 FROM batch_members m WHERE m.batch = b.id)
+		OR EXISTS (SELECT 1 FROM runs r WHERE r.batch = b.id)) ORDER BY b.id`)
 	if err != nil {
 		return err
 	}

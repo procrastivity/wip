@@ -52,7 +52,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node, err := writesurface.CreateMatter(cmd.Context(), s, store.ActorHuman, repo.ID, title, locator)
+			node, err := writesurface.CreateMatter(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, title, locator)
 			if err != nil {
 				return err
 			}

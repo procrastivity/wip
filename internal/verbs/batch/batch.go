@@ -48,7 +48,7 @@ func current(ctxCmd *cobra.Command) (*store.Store, render.Current, error) {
 	if err != nil {
 		return nil, render.Current{}, err
 	}
-	cur, err := render.ResolveCurrent(ctxCmd.Context(), s, store.ActorHuman, dir)
+	cur, err := render.ResolveCurrent(ctxCmd.Context(), s, store.ActorFor(cliflags.FromContext(ctxCmd.Context()).AsRole), dir)
 	if err != nil {
 		_ = s.Close()
 		return nil, render.Current{}, err
@@ -95,7 +95,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			b, err := writesurface.CreateBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
+			b, err := writesurface.CreateBatch(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
 			if err != nil {
 				return err
 			}
@@ -114,7 +114,7 @@ func joinCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			b, member, err := writesurface.JoinBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
+			b, member, err := writesurface.JoinBatch(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -133,7 +133,7 @@ func leaveCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			b, member, err := writesurface.LeaveBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
+			b, member, err := writesurface.LeaveBatch(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -152,7 +152,7 @@ func dismissCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			b, err := writesurface.DismissBatch(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
+			b, err := writesurface.DismissBatch(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
 			if err != nil {
 				return err
 			}

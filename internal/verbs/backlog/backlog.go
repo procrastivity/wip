@@ -74,7 +74,7 @@ func addCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			entry, err := writesurface.BacklogAdd(cmd.Context(), s, store.ActorHuman, repo.ID,
+			entry, err := writesurface.BacklogAdd(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID,
 				store.Provenance(provenance), title, detail, origin)
 			if err != nil {
 				return err
@@ -161,7 +161,7 @@ func planCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			entry, err := writesurface.BacklogPlan(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], args[1])
+			entry, err := writesurface.BacklogPlan(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -195,7 +195,7 @@ func declineCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			entry, err := writesurface.BacklogDecline(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], reason)
+			entry, err := writesurface.BacklogDecline(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], reason)
 			if err != nil {
 				return err
 			}

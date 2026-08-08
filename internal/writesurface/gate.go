@@ -78,6 +78,22 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 		return store.Node{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
 	}
 
+	// Gate config drives role activation (D14), and ownership is the other
+	// side of the same list: a role-owned gate closes only under its owning
+	// role's actor — which the write path in turn verifies against an open
+	// spawn — and a human-owned gate closes only under the human. This is
+	// what turns MODEL §2.3's "closed by" column from discipline into
+	// structure.
+	if owner, owned := store.GateOwner(gate); owned {
+		if actor != owner.Actor() {
+			return store.Node{}, wiperr.New("refusal.gate-owner",
+				fmt.Sprintf("%s is closed by its owning role %s (D14); spawn it and run under --as-role %s", gate, owner, owner))
+		}
+	} else if actor != store.ActorHuman {
+		return store.Node{}, wiperr.New("refusal.gate-owner",
+			fmt.Sprintf("%s is human-owned; a role or system actor cannot close it", gate))
+	}
+
 	req := store.Request{Actor: actor, Env: env}
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
 		fresh, err := tx.Node(ctx, n.ID)

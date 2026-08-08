@@ -40,7 +40,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			result, err := tiers.Init(cmd.Context(), s, store.ActorHuman, dir, identityRemote)
+			result, err := tiers.Init(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir, identityRemote)
 			if err != nil {
 				return err
 			}

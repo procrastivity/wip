@@ -220,11 +220,47 @@ func richHistory(h *harness) string {
 		dispatch := h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
 			return Draft{Type: TypeDispatchOpened, Subject: tx.NewID()}, nil
 		})
+		if h.SchemaVersion() >= 4 && reason == CloseReaped {
+			// A role left open when its bracket closes is reaped by the
+			// close itself — the cascade rule the rebuild has to reproduce.
+			h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+				return Draft{
+					Type: TypeRoleSpawned, Subject: tx.NewID(),
+					Payload: RoleSpawned{Dispatch: dispatch, Name: RoleBuilder},
+				}, nil
+			})
+		}
 		h.commit(Draft{Type: TypeDispatchClosed, Subject: dispatch, Payload: DispatchClosed{Reason: reason}})
 	}
-	onFeature.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+	featureDispatch := onFeature.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
 		return Draft{Type: TypeDispatchOpened, Subject: tx.NewID()}, nil
 	})
+
+	// --- Roles: closed by its own event under a role actor, and left open ---
+	if h.SchemaVersion() >= 4 {
+		researcher := onFeature.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+			return Draft{
+				Type: TypeRoleSpawned, Subject: tx.NewID(),
+				Payload: RoleSpawned{Dispatch: featureDispatch, Name: RoleResearcher},
+			}, nil
+		})
+		if _, err := h.Commit(h.ctx,
+			Request{Actor: RoleResearcher.Actor(), Env: Env{Repo: h.Repo, Clone: h.Clone, Worktree: feature}},
+			func(context.Context, *Tx) ([]Draft, error) {
+				return []Draft{{
+					Type: TypeRoleClosed, Subject: researcher,
+					Payload: RoleClosed{Reason: RoleCloseCompleted},
+				}}, nil
+			}); err != nil {
+			h.t.Fatalf("close the researcher under its own actor: %v", err)
+		}
+		onFeature.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+			return Draft{
+				Type: TypeRoleSpawned, Subject: tx.NewID(),
+				Payload: RoleSpawned{Dispatch: featureDispatch, Name: RoleVerifier},
+			}, nil
+		})
+	}
 
 	// --- A reference bound, and a render that projects nothing --------------
 	h.commit(Draft{Type: TypeReferenceBound, Subject: waiting, Payload: ReferenceBound{Ref: "GH-17"}})
@@ -344,8 +380,16 @@ func (h *harness) wantProjectionIsPopulated(snapshot projectionSnapshot) {
 
 func (h *harness) hasProjectionTable(table string) bool {
 	// The schema version is the compatibility boundary. Do not turn a failed
-	// schema probe into "table absent"; only v2 adds this projection table.
-	return table != "run_matters" || h.SchemaVersion() >= 2
+	// schema probe into "table absent"; each case names the version that adds
+	// the projection table.
+	switch table {
+	case "run_matters":
+		return h.SchemaVersion() >= 2
+	case "roles":
+		return h.SchemaVersion() >= 4
+	default:
+		return true
+	}
 }
 
 // ---------------------------------------------------------------------------

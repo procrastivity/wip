@@ -39,16 +39,16 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
 
 			var result render.Result
 			if len(args) == 1 {
-				result, err = render.Render(cmd.Context(), s, cur, store.ActorHuman, args[0], trackedwip.RenderPrecondition)
+				result, err = render.Render(cmd.Context(), s, cur, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), args[0], trackedwip.RenderPrecondition)
 			} else {
-				result, err = render.Refresh(cmd.Context(), s, cur, store.ActorHuman, trackedwip.RenderPrecondition)
+				result, err = render.Refresh(cmd.Context(), s, cur, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), trackedwip.RenderPrecondition)
 			}
 			if err != nil {
 				return err

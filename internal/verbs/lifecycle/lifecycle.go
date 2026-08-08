@@ -52,7 +52,7 @@ func StartCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			events, err := writesurface.Start(cmd.Context(), s, store.ActorHuman, repo.ID, args[0])
+			events, err := writesurface.Start(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0])
 			if err != nil {
 				return err
 			}
@@ -94,7 +94,7 @@ func transitionCommand(use, short string, move func(context.Context, *store.Stor
 				}
 				defer func() { _ = s.Close() }()
 
-				node, err := move(cmd.Context(), s, store.ActorHuman, repo.ID, args[0])
+				node, err := move(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0])
 				if err != nil {
 					return err
 				}
@@ -131,11 +131,11 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
-			n, err := move(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0])
+			n, err := move(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
 			if err != nil {
 				return err
 			}
