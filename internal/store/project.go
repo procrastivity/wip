@@ -23,7 +23,7 @@ import (
 // the registered taxonomy, and render.performed is the one member that
 // deliberately projects nothing.
 func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
-	return applyEventVersion(ctx, tx, ev, 3)
+	return applyEventVersion(ctx, tx, ev, 4)
 }
 
 func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
@@ -104,11 +104,11 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 	case TypeBatchDismissed:
 		return dismissBatch(ctx, tx, ev)
 	case TypeBatchSwept:
-		return sweepBatch(ctx, tx, ev)
+		return sweepBatch(ctx, tx, ev, schemaVersion)
 	case TypeDispatchOpened:
 		return openDispatch(ctx, tx, ev, schemaVersion)
 	case TypeDispatchClosed:
-		return closeDispatch(ctx, tx, ev)
+		return closeDispatch(ctx, tx, ev, schemaVersion)
 	case TypeRunStarted:
 		return startRun(ctx, tx, ev, schemaVersion)
 	case TypeRunFinished:
@@ -122,6 +122,12 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return validateRunContext(ctx, tx, ev, ev.Subject, true)
 	case TypeRunSkipped:
 		return validateRunSkipped(ctx, tx, ev)
+
+	// ---- roles -----------------------------------------------------------
+	case TypeRoleSpawned:
+		return spawnRole(ctx, tx, ev)
+	case TypeRoleClosed:
+		return closeRole(ctx, tx, ev)
 
 	// ---- render ----------------------------------------------------------
 	case TypeRenderPerformed:
@@ -140,7 +146,7 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 //
 // Order matters only for readability; Rebuild defers foreign-key checks to
 // commit rather than sorting the deletes.
-var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters")
+var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -619,7 +625,21 @@ func insertBatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) e
 		if err := decodeStrict(ev, &p); err != nil {
 			return err
 		}
-		if (p.Name == "") == (p.Matter == "") {
+		if p.Name == "" && p.Matter == "" {
+			// The legacy P1 shape: the old refresh path minted an anonymous
+			// Batch with neither name nor Matter, one per dispatch. The event
+			// is legal history and must replay (a fold that refuses it makes
+			// Rebuild partial over real logs), and it folds the way the v3
+			// migration converts the row: closed, swept, at its own birth.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO batches (id,name,matter,state,close_reason,closed_at,birth_event,last_event)
+				 VALUES (?,NULL,NULL,'closed','swept',?,?,?)`,
+				ev.Subject, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID); err != nil {
+				return fmt.Errorf("store: project %s: %w", ev.Type, err)
+			}
+			return nil
+		}
+		if p.Name != "" && p.Matter != "" {
 			return fmt.Errorf("store: %s requires either a non-empty name or one Matter", ev.Type)
 		}
 		if p.Matter != "" {
@@ -762,7 +782,7 @@ func dismissBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
-func sweepBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+func sweepBatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	if err := decodeStrict(ev, &BatchSweptPayload{}); err != nil {
 		return err
 	}
@@ -779,6 +799,17 @@ func sweepBatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: %s names a closed Batch", ev.Type)
 	}
 	at := ev.OccurredAt.UTC().Format(timestampLayout)
+	if schemaVersion >= 4 {
+		// A role does not outlive its bracket: reaping a Dispatch reaps the
+		// roles bound to it, the same way the sweep reaps the Dispatch itself.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE roles SET state='closed',close_reason='reaped',closed_at=?,last_event=?
+			 WHERE state='open' AND dispatch IN (
+				SELECT id FROM dispatches WHERE state='open' AND run IN (SELECT id FROM runs WHERE batch=?))`,
+			at, ev.ID, ev.Subject); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE dispatches SET state='closed',close_reason='reaped',closed_at=?,last_event=?
 		 WHERE state='open' AND run IN (SELECT id FROM runs WHERE batch=?)`, at, ev.ID, ev.Subject); err != nil {
@@ -855,7 +886,7 @@ func openDispatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) 
 	return nil
 }
 
-func closeDispatch(ctx context.Context, tx *sql.Tx, ev Event) error {
+func closeDispatch(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	var p DispatchClosed
 	if err := decode(ev, &p); err != nil {
 		return err
@@ -871,6 +902,17 @@ func closeDispatch(ctx context.Context, tx *sql.Tx, ev Event) error {
 	}
 	if clone != ev.Clone || worktree != ev.Worktree {
 		return fmt.Errorf("store: %s dimensions disagree with the Dispatch", ev.Type)
+	}
+	if schemaVersion >= 4 {
+		// A role does not outlive its bracket (D59): whatever closes the
+		// Dispatch reaps any role still open inside it. An explicitly closed
+		// role took its own role.closed first and is untouched here.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE roles SET state='closed',close_reason='reaped',closed_at=?,last_event=?
+			 WHERE state='open' AND dispatch=?`,
+			ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.Subject); err != nil {
+			return fmt.Errorf("store: project %s: %w", ev.Type, err)
+		}
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE dispatches SET state = 'closed', close_reason = ?, closed_at = ?, last_event = ?
@@ -1038,6 +1080,80 @@ func standDownRun(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
+// spawnRole births a role instance bound to an open Dispatch (D59). Which
+// roles a gate config *activates* (D14) is deliberately not asked here: gate
+// declarations are config, not events, so a fold rule reading them would make
+// a rebuild depend on state outside the log. Activation is the write surface's
+// question; the fold checks only what the log itself can answer.
+func spawnRole(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p RoleSpawned
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if !KnownRole(p.Name) {
+		return fmt.Errorf("store: %s names %q, which is not one of the six roles (MODEL §6)", ev.Type, p.Name)
+	}
+	var clone, worktree, state string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT clone,worktree,state FROM dispatches WHERE id=?`, p.Dispatch).Scan(&clone, &worktree, &state); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names an unknown Dispatch %s", ev.Type, p.Dispatch)
+	} else if err != nil {
+		return err
+	}
+	if state != "open" {
+		return fmt.Errorf("store: %s names a closed Dispatch %s: a role cannot be spawned into a closed bracket", ev.Type, p.Dispatch)
+	}
+	if clone != ev.Clone || worktree != ev.Worktree {
+		return fmt.Errorf("store: %s dimensions disagree with Dispatch %s", ev.Type, p.Dispatch)
+	}
+	if err := validateExecutionContext(ctx, tx, ev, clone); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO roles (id,clone,dispatch,name,state,spawned_at,birth_event,last_event)
+		 VALUES (?,?,?,?,'open',?,?,?)`,
+		ev.Subject, clone, p.Dispatch, string(p.Name),
+		ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.ID); err != nil {
+		message := err.Error()
+		if strings.Contains(message, "UNIQUE constraint failed") && strings.Contains(message, "roles") {
+			return fmt.Errorf("refusal.role-contention: Dispatch %s already has an open %s", p.Dispatch, p.Name)
+		}
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return nil
+}
+
+func closeRole(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p RoleClosed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Reason != RoleCloseCompleted && p.Reason != RoleCloseReaped {
+		return fmt.Errorf("store: %s must carry reason completed or reaped", ev.Type)
+	}
+	var clone, worktree string
+	err := tx.QueryRowContext(ctx,
+		`SELECT r.clone, d.worktree FROM roles r JOIN dispatches d ON d.id = r.dispatch
+		 WHERE r.id=? AND r.state='open'`, ev.Subject).Scan(&clone, &worktree)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: event %s (%s) touched 0 projection rows, want 1", ev.ID, ev.Type)
+	}
+	if err != nil {
+		return err
+	}
+	if clone != ev.Clone || worktree != ev.Worktree {
+		return fmt.Errorf("store: %s dimensions disagree with the role's Dispatch", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE roles SET state='closed',close_reason=?,closed_at=?,last_event=?
+		 WHERE id=? AND state='open'`,
+		string(p.Reason), ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, ev.Subject)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
 func validateRunSkipped(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p RunSkipped
 	if err := decodeStrict(ev, &p); err != nil {
@@ -1069,21 +1185,18 @@ func validateRunSkipped(ctx context.Context, tx *sql.Tx, ev Event) error {
 func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []string {
 	_ = ctx
 	_ = tx
-	base := projectionTables
 	if version < 2 {
-		base = v1ProjectionTables
+		return append([]string{}, v1ProjectionTables...)
 	}
-	if len(base) == 0 {
-		return nil
+	// Child projections first — run_matters under runs, roles under
+	// dispatches — so the rebuild remains valid even when foreign-key
+	// deferral is unavailable on a driver.
+	var out []string
+	if version >= 4 {
+		out = append(out, "roles")
 	}
-	// run_matters is a child projection of runs. Clear it first so the rebuild
-	// remains valid even when foreign-key deferral is unavailable on a driver.
-	out := make([]string, 0, len(base))
-	if version >= 2 && base[len(base)-1] == "run_matters" {
-		out = append(out, "run_matters")
-		base = base[:len(base)-1]
-	}
-	return append(out, base...)
+	out = append(out, "run_matters")
+	return append(out, v1ProjectionTables...)
 }
 
 // ---------------------------------------------------------------------------

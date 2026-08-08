@@ -8,10 +8,16 @@ import "context"
 
 type contextKey struct{}
 
-// Flags is the pair of global flag values threaded through context.
+// Flags is the set of global flag values threaded through context.
 type Flags struct {
 	JSON    bool
 	Verbose bool
+
+	// AsRole is the role name this invocation acts as (`--as-role`, or the
+	// WIP_AS_ROLE environment the agent harness sets once per role session);
+	// empty means the human. Verbs resolve it through store.ActorFor, and the
+	// write path verifies the claim against an open spawned role.
+	AsRole string
 }
 
 // WithFlags returns a context carrying f, for verbs to read via FromContext.

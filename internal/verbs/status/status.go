@@ -42,7 +42,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			view, err := tiers.Status(cmd.Context(), s, store.ActorHuman, dir)
+			view, err := tiers.Status(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
@@ -53,7 +53,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			// resolve (an un-init'd linked worktree, or the host-wide case)
 			// just means nothing gets marked — never a status failure.
 			var cursorNode string
-			if cur, err := readsurface.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir); err == nil {
+			if cur, err := readsurface.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir); err == nil {
 				if node, set, err := readsurface.Cursor(cmd.Context(), s.View, cur); err == nil && set {
 					cursorNode = node
 				}

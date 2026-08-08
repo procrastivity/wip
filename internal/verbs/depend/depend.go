@@ -59,7 +59,7 @@ func addCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			edge, err := writesurface.DependAdd(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], blockedBy)
+			edge, err := writesurface.DependAdd(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], blockedBy)
 			if err != nil {
 				return err
 			}
@@ -99,7 +99,7 @@ func removeCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			if err := writesurface.DependRemove(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], blockedBy); err != nil {
+			if err := writesurface.DependRemove(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], blockedBy); err != nil {
 				return err
 			}
 			if flags.JSON {

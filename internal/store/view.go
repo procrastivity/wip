@@ -955,6 +955,98 @@ func (v View) Dispatch(ctx context.Context, id string) (Dispatch, error) {
 	return d, nil
 }
 
+// Role is one role instance (MODEL §6): execution keyed at Clone, bound to
+// the Dispatch that spawned it (D59).
+type Role struct {
+	ID          string
+	Clone       string
+	Dispatch    string
+	Name        RoleName
+	Open        bool
+	SpawnedAt   time.Time
+	CloseReason RoleCloseReason
+	ClosedAt    *time.Time
+	BirthEvent  string
+	LastEvent   string
+}
+
+const roleColumns = `id,clone,dispatch,name,state,COALESCE(close_reason,''),spawned_at,COALESCE(closed_at,''),birth_event,last_event`
+
+func scanRole(scan func(...any) error) (Role, error) {
+	var r Role
+	var state, reason, spawned, closed string
+	if err := scan(&r.ID, &r.Clone, &r.Dispatch, &r.Name, &state, &reason,
+		&spawned, &closed, &r.BirthEvent, &r.LastEvent); err != nil {
+		return Role{}, err
+	}
+	r.Open = state == "open"
+	r.CloseReason = RoleCloseReason(reason)
+	var err error
+	r.SpawnedAt, err = time.Parse(timestampLayout, spawned)
+	if err != nil {
+		return Role{}, fmt.Errorf("store: role %s carries an unreadable spawned_at %q: %w", r.ID, spawned, err)
+	}
+	if closed != "" {
+		t, err := time.Parse(timestampLayout, closed)
+		if err != nil {
+			return Role{}, fmt.Errorf("store: role %s carries an unreadable closed_at %q: %w", r.ID, closed, err)
+		}
+		r.ClosedAt = &t
+	}
+	return r, nil
+}
+
+// Role reads one role instance by identity.
+func (v View) Role(ctx context.Context, id string) (Role, error) {
+	row := v.q.QueryRowContext(ctx, `SELECT `+roleColumns+` FROM roles WHERE id=?`, id)
+	r, err := scanRole(row.Scan)
+	if err == sql.ErrNoRows {
+		return Role{}, fmt.Errorf("store: no role %s", id)
+	}
+	if err != nil {
+		return Role{}, fmt.Errorf("store: read role %s: %w", id, err)
+	}
+	return r, nil
+}
+
+// RolesForDispatch lists every role instance bound to a Dispatch, open and
+// closed, in spawn order.
+func (v View) RolesForDispatch(ctx context.Context, dispatch string) ([]Role, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT `+roleColumns+` FROM roles WHERE dispatch=? ORDER BY birth_event`, dispatch)
+	if err != nil {
+		return nil, fmt.Errorf("store: list roles of Dispatch %s: %w", dispatch, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Role
+	for rows.Next() {
+		r, err := scanRole(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: list roles of Dispatch %s: %w", dispatch, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list roles of Dispatch %s: %w", dispatch, err)
+	}
+	return out, nil
+}
+
+// OpenRole reads the open instance of one role on a Dispatch, if there is one
+// — at most one exists per (dispatch, name).
+func (v View) OpenRole(ctx context.Context, dispatch string, name RoleName) (Role, bool, error) {
+	row := v.q.QueryRowContext(ctx,
+		`SELECT `+roleColumns+` FROM roles WHERE dispatch=? AND name=? AND state='open'`, dispatch, string(name))
+	r, err := scanRole(row.Scan)
+	if err == sql.ErrNoRows {
+		return Role{}, false, nil
+	}
+	if err != nil {
+		return Role{}, false, fmt.Errorf("store: read the open %s on Dispatch %s: %w", name, dispatch, err)
+	}
+	return r, true, nil
+}
+
 // BacklogEntry is one Backlog row (MODEL §4). Deferred is a provenance, not a
 // second list (D9).
 type BacklogEntry struct {

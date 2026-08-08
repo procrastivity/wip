@@ -285,6 +285,7 @@ var executionFamilies = map[Family]bool{
 	FamilyDispatch: true,
 	FamilyRun:      true,
 	FamilyRender:   true,
+	FamilyRole:     true,
 }
 
 // TestEveryRegisteredTypeCarriesExactlyTheDimensionsItsRuleNames is D56 as a

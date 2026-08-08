@@ -15,6 +15,7 @@ package readsurface
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -200,4 +201,30 @@ func (f *fixture) closeDispatch(dispatch string, reason store.CloseReason) store
 		return []store.Draft{{Type: store.TypeDispatchClosed, Subject: dispatch, Payload: store.DispatchClosed{Reason: reason}}}, nil
 	})
 	return evs[0]
+}
+
+// TestRoleActivityDerivesFromSessionEvents covers the role summary: role
+// actors counted, spawns attributed by payload name, closes by the role's own
+// actor, first-seen order kept.
+func TestRoleActivityDerivesFromSessionEvents(t *testing.T) {
+	ev := func(actor store.Actor, evType string, payload string) store.Event {
+		return store.Event{Actor: actor, Type: evType, Payload: []byte(payload)}
+	}
+	sess := Session{Events: []store.Event{
+		ev(store.ActorHuman, store.TypeRoleSpawned, `{"dispatch":"d","name":"researcher"}`),
+		ev(store.RoleActor("researcher"), store.TypeStepCreated, `{}`),
+		ev(store.RoleActor("researcher"), store.TypeStepCreated, `{}`),
+		ev(store.RoleActor("researcher"), store.TypeRoleClosed, `{"reason":"completed"}`),
+		ev(store.ActorHuman, store.TypeRoleSpawned, `{"dispatch":"d","name":"builder"}`),
+		ev(store.ActorHuman, store.TypeMatterCreated, `{}`),
+	}}
+
+	got := RoleActivity(sess)
+	want := []RoleSummary{
+		{Name: store.RoleResearcher, Events: 3, Spawned: 1, Closed: 1},
+		{Name: store.RoleBuilder, Events: 0, Spawned: 1, Closed: 0},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RoleActivity = %+v, want %+v", got, want)
+	}
 }

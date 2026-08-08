@@ -40,7 +40,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			n, err := writesurface.Bind(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], args[1])
+			n, err := writesurface.Bind(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], args[1])
 			if err != nil {
 				return err
 			}

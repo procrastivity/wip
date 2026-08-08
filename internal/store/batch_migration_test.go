@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,4 +85,47 @@ func TestV2NamedBatchRunAndDispatchMigrateToV3(t *testing.T) {
 	if err != nil || !gotDispatch.Open || gotDispatch.Run != run || gotDispatch.Matter != matter {
 		t.Fatalf("migrated Dispatch = %#v, err=%v", gotDispatch, err)
 	}
+}
+
+// TestV1MemberlessAnonymousBatchConvertsToSweptLegacyRow is the amended
+// legacy-Batch path (roles, by decision): the old P1 refresh minted one
+// owner-less anonymous Batch per dispatch, so every real P1 store carries
+// them. Memberless and run-less, they are legal history — the migration
+// converts each to a closed (swept) row at its own birth moment, the fold
+// replays the event identically, and a rebuild reproduces the migrated
+// projection. The refusal remains for one with members (the test above).
+func TestV1MemberlessAnonymousBatchConvertsToSweptLegacyRow(t *testing.T) {
+	h := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), baselineRegister(), 1)
+	richHistory(h)
+	legacy := h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+		return Draft{Type: TypeBatchCreated, Subject: tx.NewID(), Payload: BatchCreated{}}, nil
+	})
+	log := h.rowsOf("events", "")
+
+	migrated, err := h.reopen(shipped(), latestVersion(shipped()))
+	if err != nil {
+		t.Fatalf("migrating a store with a memberless legacy Batch: %v", err)
+	}
+	wantSameRows(t, "event log through the legacy conversion", log, migrated.rowsOf("events", ""))
+
+	b, err := migrated.Batch(migrated.ctx, legacy)
+	if err != nil || b.State != "closed" || b.CloseReason != BatchSwept || b.Name != "" || b.Matter != "" || b.ClosedAt == nil {
+		t.Fatalf("legacy Batch after migration = %#v, err=%v (want closed, swept, owner-less)", b, err)
+	}
+
+	// The row is terminal: no membership, no Run can start over it.
+	matter := migrated.matter("post-legacy", "Post-legacy Matter")
+	err = migrated.commitError(func(_ context.Context, _ *Tx) ([]Draft, error) {
+		return []Draft{{Type: TypeBatchJoined, Subject: legacy, Payload: BatchMembership{Matter: matter}}}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "closed Batch") {
+		t.Fatalf("joining the legacy Batch = %v, want a closed-Batch refusal", err)
+	}
+
+	// The fold reproduces the migration's conversion: rebuild and compare.
+	before := migrated.snapshotProjection()
+	if err := migrated.Rebuild(migrated.ctx); err != nil {
+		t.Fatalf("rebuild over legacy history: %v", err)
+	}
+	migrated.wantSameProjection("rebuild over a converted legacy Batch", before, migrated.snapshotProjection())
 }

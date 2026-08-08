@@ -101,12 +101,12 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			defer func() { _ = s.Close() }()
-			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorHuman, dir)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}
 
-			n, err := writesurface.CloseGateWithEnv(cmd.Context(), s, store.ActorHuman, cur.Env(), args[0], args[1])
+			n, err := writesurface.CloseGateWithEnv(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
 			}

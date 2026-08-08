@@ -79,7 +79,7 @@ func createCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			node, err := writesurface.CreateStep(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], title)
+			node, err := writesurface.CreateStep(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], title)
 			if err != nil {
 				return err
 			}
@@ -110,7 +110,7 @@ func insertCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			node, err := writesurface.InsertStep(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], title, after, before)
+			node, err := writesurface.InsertStep(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], title, after, before)
 			if err != nil {
 				return err
 			}
@@ -142,7 +142,7 @@ func reorderCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			node, err := writesurface.ReorderStep(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], args[1:])
+			node, err := writesurface.ReorderStep(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], args[1:])
 			if err != nil {
 				return err
 			}
@@ -171,7 +171,7 @@ func replaceCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			node, err := writesurface.ReplaceStep(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], title)
+			node, err := writesurface.ReplaceStep(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], title)
 			if err != nil {
 				return err
 			}
@@ -202,7 +202,7 @@ func removeCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			if err := writesurface.RemoveStep(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], reason); err != nil {
+			if err := writesurface.RemoveStep(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], reason); err != nil {
 				return err
 			}
 			if flags.JSON {

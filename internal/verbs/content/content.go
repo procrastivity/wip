@@ -73,7 +73,7 @@ func writeOnceCommand(use, short string, kind store.ContentKind) func(*iostreams
 				}
 				defer func() { _ = s.Close() }()
 
-				n, err := writesurface.WriteOnce(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], kind, data)
+				n, err := writesurface.WriteOnce(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], kind, data)
 				if err != nil {
 					return err
 				}
@@ -155,7 +155,7 @@ func findingAddCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			n, err := writesurface.AppendFinding(cmd.Context(), s, store.ActorHuman, repo.ID, args[0], data)
+			n, err := writesurface.AppendFinding(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], data)
 			if err != nil {
 				return err
 			}

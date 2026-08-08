@@ -518,6 +518,14 @@ func TestActorIsNeverEmptyAndAlwaysPrefixed(t *testing.T) {
 		refusalMentions(t, fmt.Sprintf("actor %q", bad), err, "is not an actor")
 	}
 
+	// A role actor is a claim about an open spawned role, so the builder needs
+	// a spawn behind it before it may speak (MODEL §6). A claim with no spawn
+	// behind it is refused on the write path, not by the token check.
+	_, err := commitAs(RoleActor("builder"))
+	refusalMentions(t, "a role actor with no open spawn", err, "no open spawn")
+	dispatch := openDispatchForTest(h)
+	spawnRoleForTest(h, dispatch, RoleBuilder)
+
 	for _, good := range []Actor{ActorHuman, RoleActor("builder"), SystemActor("ci")} {
 		events, err := commitAs(good)
 		if err != nil {

@@ -43,13 +43,26 @@ func v3Statements() []string {
 			birth_event TEXT NOT NULL REFERENCES events(id),
 			last_event TEXT NOT NULL REFERENCES events(id),
 			CHECK (length(id)=26),
-			CHECK ((name IS NULL) = (matter IS NOT NULL)),
+			-- An anonymous Batch carries its Matter — except the legacy P1
+			-- shape: an owner-less anonymous row survives only closed and
+			-- swept, which is how a pre-run-model refresh artifact reads
+			-- after the fact (amended by roles, see rejectLegacyBatches).
+			CHECK ((name IS NULL) = (matter IS NOT NULL)
+			       OR (name IS NULL AND matter IS NULL AND state='closed' AND close_reason='swept')),
 			CHECK (name IS NULL OR length(name) > 0),
 			CHECK ((state='closed') = (close_reason IS NOT NULL)),
 			CHECK ((state='closed') = (closed_at IS NOT NULL))
 		) STRICT, WITHOUT ROWID`,
-		`INSERT INTO batches (id,name,matter,state,birth_event,last_event)
-		 SELECT id,name,NULL,'live',birth_event,last_event FROM batches_old`,
+		// Named Batches copy over live; owner-less anonymous ones — legal P1
+		// history the preflight admitted precisely because they are memberless
+		// and run-less — close as swept at their own birth moment.
+		`INSERT INTO batches (id,name,matter,state,close_reason,closed_at,birth_event,last_event)
+		 SELECT b.id, b.name, NULL,
+		        CASE WHEN b.name IS NULL THEN 'closed' ELSE 'live' END,
+		        CASE WHEN b.name IS NULL THEN 'swept' END,
+		        CASE WHEN b.name IS NULL THEN (SELECT e.occurred_at FROM events e WHERE e.id = b.birth_event) END,
+		        b.birth_event, b.last_event
+		 FROM batches_old b`,
 		`CREATE UNIQUE INDEX batches_name ON batches(name) WHERE name IS NOT NULL`,
 		`CREATE UNIQUE INDEX batches_anonymous_matter ON batches(matter) WHERE matter IS NOT NULL`,
 

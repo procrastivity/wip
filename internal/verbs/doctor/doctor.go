@@ -53,7 +53,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 			// rather than ever contribute a finding, so it is deliberately
 			// not folded into the flat, no-severity findings list
 			// guards.md's "Doctor output shape" resolves for the rest.
-			report, err := tiers.CheckUnknownClone(cmd.Context(), s, store.ActorHuman, dir)
+			report, err := tiers.CheckUnknownClone(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
 			if err != nil {
 				return err
 			}

@@ -36,7 +36,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			clone, err := tiers.SetLabel(cmd.Context(), s, store.ActorHuman, dir, args[0])
+			clone, err := tiers.SetLabel(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir, args[0])
 			if err != nil {
 				return err
 			}

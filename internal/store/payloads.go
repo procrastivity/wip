@@ -245,6 +245,19 @@ type RunStoodDown struct {
 	OwningClone string `json:"owning_clone"`
 }
 
+// RoleSpawned is the payload of role.spawned. subject is the role instance;
+// Dispatch is the bracket it is bound to (D59) and Name is which of the six
+// roles it is (MODEL §6).
+type RoleSpawned struct {
+	Dispatch string   `json:"dispatch"`
+	Name     RoleName `json:"name"`
+}
+
+// RoleClosed is the payload of role.closed.
+type RoleClosed struct {
+	Reason RoleCloseReason `json:"reason"`
+}
+
 // RenderPerformed is the payload of render.performed. Nothing is projected from
 // it: the render target is a projection of the store and never a source (D36,
 // D40), so the event exists to be read as history, not folded into state.
