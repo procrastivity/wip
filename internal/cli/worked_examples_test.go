@@ -4,10 +4,12 @@
 // from e2e_test.go / tiers_e2e_test.go, same package) so the captured
 // behavior is real, not asserted against an internal model of it.
 //
-// Example 7 is the one exception the workplan itself calls for: because
-// `write-surface` (Matter-birth verbs) does not exist yet, its Matter/Batch
-// rows are seeded directly through the store's data-access layer as
-// fixtures, per the Stage's own posture note.
+// Example 7 is the one exception the workplan itself calls for: `write-surface`
+// (Matter-birth verbs) did not exist yet when its Batch half landed, so that
+// half's Matter/Batch rows are seeded directly through the store's data-access
+// layer as fixtures, per the Stage's own posture note. Its Run half
+// (TestWorkedExample7_CrossRepoRun, Phase 2's `cross-repo-run` Matter) rebuilds
+// the same shape through the verbs that exist now.
 package cli_test
 
 import (
@@ -16,8 +18,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/procrastivity/wip/internal/scheduler"
 	"github.com/procrastivity/wip/internal/store"
 )
 
@@ -520,6 +524,170 @@ func TestWorkedExample7_CrossRepoBatch(t *testing.T) {
 		fmt.Sprintf("  %-24s %s · %s\n", "matter-a2", "matter", "planned")
 	if statusResult.stdout != want {
 		t.Errorf("status =\n%s\nwant\n%s\n(status must stay tier-scoped and never mention repo-b or the Batch, but does now render repo-a's own founding-question content)", statusResult.stdout, want)
+	}
+}
+
+// TestWorkedExample7_CrossRepoRun: the Run half of the same scenario —
+// appendix-orchestration item 7, the `cross-repo-run` Matter — executed
+// before cross-repo Runs are called supported. The same shape (four Matters,
+// two Repos, one Batch, one clone) is rebuilt through the verbs that now
+// exist (`matter create`, `batch create/join` — the Batch half's
+// store-fixture posture is gone), then a Run over the Batch is driven
+// through scheduler.Orchestrate at cap 1 from repo-a's single clone.
+//
+// What the example must record (workplan seal condition): the rows and
+// events the Run leaves behind, and what `status` and `next` show from the
+// dispatching clone. The load-bearing question is the tier stamp: the pass
+// runs under one Env — repo-a's — so every event it commits for repo-b's
+// Matters carries repo-a's repo dimension.
+func TestWorkedExample7_CrossRepoRun(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wip.db")
+	dbEnv := []string{"WIP_DB_PATH=" + dbPath}
+	ctx := context.Background()
+
+	repoA := newGitRepo(t, "repo-a")
+	gitIn(t, repoA, "remote", "add", "origin", "git@github.com:acme/repo-a.git")
+	initA := runIn(t, repoA, dbEnv, "init", "--json")
+	if initA.exitCode != 0 {
+		t.Fatalf("init repo-a: exit=%d stderr=%q", initA.exitCode, initA.stderr)
+	}
+	var envA struct {
+		Repo     string `json:"repo"`
+		Clone    string `json:"clone"`
+		Worktree string `json:"worktree"`
+	}
+	if err := json.Unmarshal([]byte(initA.stdout), &envA); err != nil {
+		t.Fatal(err)
+	}
+
+	repoB := newGitRepo(t, "repo-b")
+	gitIn(t, repoB, "remote", "add", "origin", "git@github.com:acme/repo-b.git")
+	if r := runIn(t, repoB, dbEnv, "init"); r.exitCode != 0 {
+		t.Fatalf("init repo-b: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	// Four Matters through the birth verbs, two per Repo. Locator resolution
+	// is repo-scoped, so each Matter is born — and joined to the Batch — from
+	// its own Repo's clone; only the Run itself is dispatched cross-repo.
+	seed := func(dir, locator, title string) string {
+		t.Helper()
+		r := runIn(t, dir, dbEnv, "matter", "create", "--locator", locator, "--title", title, "--json")
+		if r.exitCode != 0 {
+			t.Fatalf("matter create %s: exit=%d stderr=%q", locator, r.exitCode, r.stderr)
+		}
+		return mustJSON[nodePayload](t, r.stdout).ID
+	}
+	a1 := seed(repoA, "matter-a1", "Repo A, Matter 1")
+	a2 := seed(repoA, "matter-a2", "Repo A, Matter 2")
+	b1 := seed(repoB, "matter-b1", "Repo B, Matter 1")
+	b2 := seed(repoB, "matter-b2", "Repo B, Matter 2")
+
+	if r := runIn(t, repoA, dbEnv, "batch", "create", "cross-repo-run"); r.exitCode != 0 {
+		t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, join := range []struct{ dir, locator string }{
+		{repoA, "matter-a1"},
+		{repoA, "matter-a2"},
+		{repoB, "matter-b1"},
+		{repoB, "matter-b2"},
+	} {
+		if r := runIn(t, join.dir, dbEnv, "batch", "join", "cross-repo-run", join.locator); r.exitCode != 0 {
+			t.Fatalf("batch join %s: exit=%d stderr=%q", join.locator, r.exitCode, r.stderr)
+		}
+	}
+
+	// The plain bracket the Orchestrator binds to (D59).
+	if r := runIn(t, repoA, dbEnv, "refresh"); r.exitCode != 0 {
+		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	batch, err := s.BatchByName(ctx, "cross-repo-run")
+	if err != nil {
+		t.Fatalf("BatchByName: %v", err)
+	}
+	env := store.Env{Repo: envA.Repo, Clone: envA.Clone, Worktree: envA.Worktree}
+	run := startRunDirect(t, s, env, batch.ID, "run-01", a1, a2, b1, b2)
+
+	hooks := &noopHooks{}
+	outcome, err := scheduler.Orchestrate(ctx, s, store.ActorHuman, env, run.ID, 1,
+		scheduler.Policy{}, scheduler.Hooks{Work: hooks.work})
+	if err != nil {
+		t.Fatalf("Orchestrate: %v", err)
+	}
+	if outcome.State != scheduler.StateFinished {
+		t.Fatalf("outcome = %+v, want Finished", outcome)
+	}
+	if len(outcome.Worked) != 4 {
+		t.Fatalf("worked %d nodes, want 4 (both Repos' Matters)", len(outcome.Worked))
+	}
+
+	// The record the Run leaves: every event of the pass — claims, starts,
+	// finishes, for repo-b's Matters as much as repo-a's — carries repo-a's
+	// tier context, because a pass has exactly one Env (the dispatching
+	// clone's) and the store stamps dimensions from Env, not from the
+	// subject's own Repo.
+	for _, m := range []struct{ id, name string }{{b1, "matter-b1"}, {b2, "matter-b2"}} {
+		evs, err := s.EventsOfSubject(ctx, m.id)
+		if err != nil {
+			t.Fatalf("events for %s: %v", m.name, err)
+		}
+		lifecycle := 0
+		for _, ev := range evs {
+			if ev.Type == store.TypeMatterStarted || ev.Type == store.TypeMatterFinished {
+				lifecycle++
+				if ev.Repo != envA.Repo {
+					t.Errorf("%s %s: repo dimension = %q, want the dispatching clone's repo %q (one Env per pass)",
+						m.name, ev.Type, ev.Repo, envA.Repo)
+				}
+			}
+		}
+		if lifecycle != 2 {
+			t.Errorf("%s: %d lifecycle events, want started+finished", m.name, lifecycle)
+		}
+	}
+
+	// What the dispatching clone sees afterward: `status` stays repo-scoped —
+	// repo-a's two Matters are sealed; repo-b's never appear, even though this
+	// clone's Run just worked them.
+	statusA := runIn(t, repoA, dbEnv, "status")
+	if statusA.exitCode != 0 {
+		t.Fatalf("status: exit=%d stderr=%q", statusA.exitCode, statusA.stderr)
+	}
+	t.Logf("wip status (dispatching clone, after the cross-repo Run):\n%s", statusA.stdout)
+	for _, want := range []string{"matter-a1", "matter-a2"} {
+		if !strings.Contains(statusA.stdout, want) {
+			t.Errorf("status from repo-a lacks %s:\n%s", want, statusA.stdout)
+		}
+	}
+	for _, leak := range []string{"matter-b1", "matter-b2", "repo-b"} {
+		if strings.Contains(statusA.stdout, leak) {
+			t.Errorf("status from repo-a mentions %s — tier scope leaked:\n%s", leak, statusA.stdout)
+		}
+	}
+	nextA := runIn(t, repoA, dbEnv, "next")
+	if nextA.exitCode != 0 {
+		t.Fatalf("next: exit=%d stderr=%q", nextA.exitCode, nextA.stderr)
+	}
+	t.Logf("wip next (dispatching clone, after the cross-repo Run):\n%s", nextA.stdout)
+
+	// And repo-b's own clone reads its Matters as sealed work it never saw
+	// happen: the lifecycle is durable and repo-scoped reads pick it up, but
+	// every event that moved them carries another Repo's dimension.
+	statusB := runIn(t, repoB, dbEnv, "status")
+	if statusB.exitCode != 0 {
+		t.Fatalf("status from repo-b: exit=%d stderr=%q", statusB.exitCode, statusB.stderr)
+	}
+	t.Logf("wip status (repo-b's clone, after the cross-repo Run):\n%s", statusB.stdout)
+	for _, want := range []string{"matter-b1", "matter-b2"} {
+		if !strings.Contains(statusB.stdout, want) {
+			t.Errorf("status from repo-b lacks %s:\n%s", want, statusB.stdout)
+		}
 	}
 }
 

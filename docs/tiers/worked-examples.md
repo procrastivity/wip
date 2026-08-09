@@ -205,3 +205,58 @@ cross-repo membership — it never mentions `repo-b`, because a tier-scoped
 confirms all four Matters (two from each Repo) are live members of the one
 Batch, directly against the store. Run and dispatch mechanics for this same
 scenario are `appendix-orchestration.md` item 7, Phase 2 — not attempted here.
+
+## Example 7, the Run half — cross-repo Run: one cap, one clone (Phase 2)
+
+The `cross-repo-run` Matter's worked example
+(`TestWorkedExample7_CrossRepoRun`, same file, same mechanical
+re-verification): the four-Matter/two-Repo shape above, rebuilt through the
+verbs that exist now (`matter create`, `batch create`/`join` — the Batch
+half's store-fixture posture is gone), then driven through a Run at cap 1
+from repo-a's single clone via `scheduler.Orchestrate`. Locator resolution
+is repo-scoped, so each Matter is born and joined from its own Repo's clone;
+only the Run is dispatched cross-repo.
+
+The pass finishes clean: `StateFinished`, all four Matters worked in one
+pass, claims opened and closed per Matter, no skip, no park, no refusal
+anywhere in the path. The record it leaves is the load-bearing observation:
+
+- **Every event of the pass carries repo-a's tier context — including
+  repo-b's Matters' `matter.started`/`matter.finished`.** A pass has exactly
+  one Env (the dispatching clone's, D56), and the store stamps event
+  dimensions from Env, not from the subject's home Repo. The event log
+  answers "where did this write happen" with the dispatching tier; the
+  subject's own Repo stays derivable from its birth row, so reads do not
+  misproject.
+- Reads stay tier-scoped and unconfused: `status` from the dispatching
+  clone shows repo-a's two Matters sealed and never mentions repo-b;
+  `status` from repo-b's clone shows its own two Matters sealed — work its
+  Repo's event dimensions never saw happen; `next` from the dispatching
+  clone reports every Matter sealed.
+
+```
+$ wip status   # dispatching clone, after the cross-repo Run
+acme/repo-a
+  repo-a             Clone · current
+
+finished:
+  matter-a1                matter · sealed
+  matter-a2                matter · sealed
+
+$ wip next     # dispatching clone
+nothing in progress or planned — every Matter sealed
+
+$ wip status   # repo-b's clone, after the cross-repo Run
+acme/repo-b
+  repo-b             Clone · current
+
+finished:
+  matter-b1                matter · sealed
+  matter-b2                matter · sealed
+```
+
+Decision recorded on the `cross-repo-run` Matter: **supported**, not
+refused — executed in practice with zero refusals, per the workplan's own
+test ("if it is declined in practice, that is a refusal-list entry"). The
+repo-dimension semantics above are the one caveat worth its own finding,
+not a ground for refusal.
