@@ -174,7 +174,7 @@ func (p *pass) execute(ctx context.Context) (Outcome, error) {
 		return p.out, wiperr.New("validation.no-open-dispatch",
 			"no open dispatch on this worktree for the Orchestrator to bind to; run `wip refresh` first")
 	}
-	p.orchestrator, err = p.spawnRole(ctx, bracket.ID, store.RoleOrchestrator)
+	p.orchestrator, err = p.spawnRole(ctx, p.driver, bracket.ID, store.RoleOrchestrator)
 	if err != nil {
 		return p.out, err
 	}
@@ -288,7 +288,7 @@ func (p *pass) engageOne(ctx context.Context, node store.Node) (bool, error) {
 			return false, err
 		}
 	}
-	builder, err := p.spawnRole(ctx, claim, store.RoleBuilder)
+	builder, err := p.spawnRole(ctx, store.RoleOrchestrator.Actor(), claim, store.RoleBuilder)
 	if err != nil {
 		return false, err
 	}
@@ -361,7 +361,7 @@ func (p *pass) plan(ctx context.Context, matter store.Node, claim string) (bool,
 	if len(specs) == 0 {
 		return false, nil
 	}
-	researcher, err := p.spawnRole(ctx, claim, store.RoleResearcher)
+	researcher, err := p.spawnRole(ctx, store.RoleOrchestrator.Actor(), claim, store.RoleResearcher)
 	if err != nil {
 		return false, err
 	}
@@ -602,10 +602,12 @@ func (p *pass) matterSealed(ctx context.Context, matter store.Node) (bool, error
 
 // spawnRole and closeRole are direct drafts rather than writesurface calls:
 // the writesurface pair binds to the worktree's plain bracket, and the
-// loop's roles bind to the claim brackets it opens itself.
-func (p *pass) spawnRole(ctx context.Context, dispatch string, name store.RoleName) (string, error) {
+// loop's roles bind to the claim brackets it opens itself. The actor is the
+// spawner, never the role being born: the driver spawns the Orchestrator,
+// and the Orchestrator spawns everything it dispatches.
+func (p *pass) spawnRole(ctx context.Context, actor store.Actor, dispatch string, name store.RoleName) (string, error) {
 	var id string
-	_, err := p.s.Commit(ctx, p.req(p.driver), func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+	_, err := p.s.Commit(ctx, p.req(actor), func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
 		id = tx.NewID()
 		return []store.Draft{{
 			Type: store.TypeRoleSpawned, Subject: id,
