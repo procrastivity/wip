@@ -161,6 +161,32 @@ func (v View) Matters(ctx context.Context, repo string) ([]Node, error) {
 		 WHERE repo = ? AND kind = 'matter' AND tombstone_event IS NULL ORDER BY birth_event`, repo)
 }
 
+// TrackerReferences returns a Matter's active provider-neutral references.
+func (v View) TrackerReferences(ctx context.Context, matter string) ([]string, error) {
+	if v.schemaVersion < 5 {
+		return nil, nil
+	}
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT ref FROM tracker_references
+		 WHERE matter=? AND removed_event IS NULL ORDER BY birth_event,ref`, matter)
+	if err != nil {
+		return nil, fmt.Errorf("store: read tracker references of %s: %w", matter, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("store: read tracker references of %s: %w", matter, err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read tracker references of %s: %w", matter, err)
+	}
+	return refs, nil
+}
+
 // inProgressSQL is the whole of MODEL §10 invariant 2 under this shape: one
 // indexed read of the maintained projection. No replay, no join, no fold.
 //
