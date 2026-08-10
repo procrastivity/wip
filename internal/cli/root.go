@@ -120,6 +120,8 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(gateverb.Command(streams))
 	root.AddCommand(dependverb.Command(streams))
 	root.AddCommand(bindverb.Command(streams))
+	root.AddCommand(bindverb.UnbindCommand(streams))
+	root.AddCommand(bindverb.RebindCommand(streams))
 
 	// render-scratch: dispatch-open/refresh, explicit dispatch close, clean.
 	root.AddCommand(refreshverb.Command(streams))

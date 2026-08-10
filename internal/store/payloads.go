@@ -129,6 +129,23 @@ type ReferenceBound struct {
 	Ref string `json:"ref"`
 }
 
+// ReferenceAdded and ReferenceRemoved change one member of a Matter's active
+// tracker-reference set. The subject is always the Matter.
+type ReferenceAdded struct {
+	Ref string `json:"ref"`
+}
+
+// ReferenceRemoved identifies the membership that leaves the active set.
+type ReferenceRemoved struct {
+	Ref string `json:"ref"`
+}
+
+// ReferenceRebound atomically replaces one member of a Matter's reference set.
+type ReferenceRebound struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 // RepoAttached is the payload of repo.attached. RemoteURL is the normalised
 // remote in its normal form, and is empty for a local-only repo — the natural
 // key is nullable (D37, D39).

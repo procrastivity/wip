@@ -58,7 +58,10 @@ const (
 	TypeBacklogDeclined = "backlog.declined"
 
 	// Reference — ships in P1, inert until P3.
-	TypeReferenceBound = "reference.bound"
+	TypeReferenceBound   = "reference.bound"
+	TypeReferenceAdded   = "reference.added"
+	TypeReferenceRemoved = "reference.removed"
+	TypeReferenceRebound = "reference.rebound"
 
 	// Tier — emitted by `tiers`.
 	TypeRepoAttached     = "repo.attached"
@@ -231,13 +234,21 @@ var V4Taxonomy = []EventType{
 	execution(TypeRoleClosed, FamilyRole),
 }
 
+// V5Taxonomy is the provider-neutral tracker substrate. Like every earlier
+// taxonomy slice, it is frozen when its migration ships.
+var V5Taxonomy = []EventType{
+	durable(TypeReferenceAdded, FamilyReference),
+	durable(TypeReferenceRemoved, FamilyReference),
+	durable(TypeReferenceRebound, FamilyReference),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

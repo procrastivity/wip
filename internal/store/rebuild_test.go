@@ -264,6 +264,9 @@ func richHistory(h *harness) string {
 
 	// --- A reference bound, and a render that projects nothing --------------
 	h.commit(Draft{Type: TypeReferenceBound, Subject: waiting, Payload: ReferenceBound{Ref: "GH-17"}})
+	if h.SchemaVersion() >= 5 {
+		h.commit(Draft{Type: TypeReferenceAdded, Subject: running, Payload: ReferenceAdded{Ref: "GH-18"}})
+	}
 	h.commit(renderDraft(running))
 
 	_ = replacement
@@ -387,6 +390,8 @@ func (h *harness) hasProjectionTable(table string) bool {
 		return h.SchemaVersion() >= 2
 	case "roles":
 		return h.SchemaVersion() >= 4
+	case "tracker_references":
+		return h.SchemaVersion() >= 5
 	default:
 		return true
 	}

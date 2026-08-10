@@ -187,7 +187,7 @@ func TestDepend_AddRemoveAndCycleRefusal(t *testing.T) {
 	}
 }
 
-func TestBind_ShipsInertOneEvent(t *testing.T) {
+func TestBindUnbindRebind_MatterReferenceSetOneEventEach(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
 	dir := newGitRepo(t, "widget")
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
@@ -201,13 +201,34 @@ func TestBind_ShipsInertOneEvent(t *testing.T) {
 		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s := openTestStore(t, dbPathStr)
-	wantAppendedEvent(t, s, m.ID, 1, store.TypeReferenceBound) // m already carried matter.created
+	wantAppendedEvent(t, s, m.ID, 1, store.TypeReferenceAdded) // m already carried matter.created
 
-	n, err := s.Node(context.Background(), m.ID)
+	refs, err := s.TrackerReferences(context.Background(), m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n.ExternalRef != "https://tracker.example.com/issue/42" {
-		t.Errorf("external ref = %q, want the bound URL", n.ExternalRef)
+	if len(refs) != 1 || refs[0] != "https://tracker.example.com/issue/42" {
+		t.Fatalf("tracker refs = %v, want the bound URL", refs)
+	}
+
+	second := "https://tracker.example.com/issue/43"
+	if r := runIn(t, dir, dbEnv, "rebind", m.ID, refs[0], second, "--json"); r.exitCode != 0 {
+		t.Fatalf("rebind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	s = openTestStore(t, dbPathStr)
+	wantAppendedEvent(t, s, m.ID, 2, store.TypeReferenceRebound)
+	refs, err = s.TrackerReferences(context.Background(), m.ID)
+	if err != nil || len(refs) != 1 || refs[0] != second {
+		t.Fatalf("tracker refs after rebind = %v (err %v), want %s", refs, err, second)
+	}
+
+	if r := runIn(t, dir, dbEnv, "unbind", m.ID, second, "--json"); r.exitCode != 0 {
+		t.Fatalf("unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	s = openTestStore(t, dbPathStr)
+	wantAppendedEvent(t, s, m.ID, 3, store.TypeReferenceRemoved)
+	refs, err = s.TrackerReferences(context.Background(), m.ID)
+	if err != nil || len(refs) != 0 {
+		t.Fatalf("tracker refs after unbind = %v (err %v), want none", refs, err)
 	}
 }

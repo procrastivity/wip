@@ -74,7 +74,19 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 
 	// ---- reference -------------------------------------------------------
 	case TypeReferenceBound:
-		return bindReference(ctx, tx, ev)
+		if err := bindReference(ctx, tx, ev); err != nil {
+			return err
+		}
+		if schemaVersion >= 5 {
+			return projectLegacyMatterReference(ctx, tx, ev)
+		}
+		return nil
+	case TypeReferenceAdded:
+		return addTrackerReference(ctx, tx, ev)
+	case TypeReferenceRemoved:
+		return removeTrackerReference(ctx, tx, ev)
+	case TypeReferenceRebound:
+		return reboundTrackerReference(ctx, tx, ev)
 
 	// ---- tiers -----------------------------------------------------------
 	case TypeRepoAttached:
@@ -146,7 +158,7 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 //
 // Order matters only for readability; Rebuild defers foreign-key checks to
 // commit rather than sorting the deletes.
-var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles")
+var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles", "tracker_references")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -496,6 +508,130 @@ func declineBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	return exactlyRows(res, 1, ev)
+}
+
+// ---------------------------------------------------------------------------
+// Tracker references
+// ---------------------------------------------------------------------------
+
+func requireMatterSubject(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var kind string
+	err := tx.QueryRowContext(ctx,
+		`SELECT kind FROM nodes WHERE id = ? AND tombstone_event IS NULL`, ev.Subject).Scan(&kind)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s subject is not a live Matter", ev.Type)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if kind != string(ScaleMatter) {
+		return fmt.Errorf("store: %s subject is not a Matter", ev.Type)
+	}
+	return nil
+}
+
+func addTrackerReference(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p ReferenceAdded
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Ref == "" {
+		return fmt.Errorf("store: %s must carry a non-empty reference", ev.Type)
+	}
+	if err := requireMatterSubject(ctx, tx, ev); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO tracker_references (matter,ref,birth_event,last_event)
+		 VALUES (?,?,?,?)
+		 ON CONFLICT (matter,ref) DO UPDATE SET removed_event=NULL,last_event=excluded.last_event
+		 WHERE tracker_references.removed_event IS NOT NULL`,
+		ev.Subject, p.Ref, ev.ID, ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func removeTrackerReference(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p ReferenceRemoved
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if err := requireMatterSubject(ctx, tx, ev); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tracker_references SET removed_event=?,last_event=?
+		 WHERE matter=? AND ref=? AND removed_event IS NULL`,
+		ev.ID, ev.ID, ev.Subject, p.Ref)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func reboundTrackerReference(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p ReferenceRebound
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.From == "" || p.To == "" || p.From == p.To {
+		return fmt.Errorf("store: %s needs two different non-empty references", ev.Type)
+	}
+	if err := requireMatterSubject(ctx, tx, ev); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tracker_references SET removed_event=?,last_event=?
+		 WHERE matter=? AND ref=? AND removed_event IS NULL`,
+		ev.ID, ev.ID, ev.Subject, p.From)
+	if err != nil {
+		return fmt.Errorf("store: project %s source: %w", ev.Type, err)
+	}
+	if err := exactlyRows(res, 1, ev); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx,
+		`INSERT INTO tracker_references (matter,ref,birth_event,last_event)
+		 VALUES (?,?,?,?)
+		 ON CONFLICT (matter,ref) DO UPDATE SET removed_event=NULL,last_event=excluded.last_event
+		 WHERE tracker_references.removed_event IS NOT NULL`,
+		ev.Subject, p.To, ev.ID, ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project %s destination: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+// projectLegacyMatterReference preserves the P1 meaning of reference.bound:
+// singleton replacement on Matters. Historical child bindings remain inert.
+func projectLegacyMatterReference(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM nodes WHERE id=?`, ev.Subject).Scan(&kind); err != nil {
+		return err
+	}
+	if kind != string(ScaleMatter) {
+		return nil
+	}
+	var p ReferenceBound
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tracker_references SET removed_event=?,last_event=?
+		 WHERE matter=? AND ref<>? AND removed_event IS NULL`, ev.ID, ev.ID, ev.Subject, p.Ref); err != nil {
+		return fmt.Errorf("store: project legacy %s: %w", ev.Type, err)
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO tracker_references (matter,ref,birth_event,last_event)
+		 VALUES (?,?,?,?)
+		 ON CONFLICT (matter,ref) DO UPDATE SET removed_event=NULL,last_event=excluded.last_event`,
+		ev.Subject, p.Ref, ev.ID, ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project legacy %s: %w", ev.Type, err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,6 +1328,9 @@ func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []strin
 	// dispatches — so the rebuild remains valid even when foreign-key
 	// deferral is unavailable on a driver.
 	var out []string
+	if version >= 5 {
+		out = append(out, "tracker_references")
+	}
 	if version >= 4 {
 		out = append(out, "roles")
 	}
