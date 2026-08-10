@@ -369,7 +369,7 @@ func (h *harness) wantProjectionIsPopulated(snapshot projectionSnapshot) {
 		}
 		// Run and OutboxEntry have no P1 event and therefore no projection rule;
 		// they are provisioned to exist from event one and nothing more (MODEL §10).
-		if table == "runs" || table == "outbox_entries" || table == "run_matters" {
+		if table == "runs" || table == "outbox_entries" || table == "run_matters" || table == "tracker_push_records" {
 			if len(snapshot[table]) != 0 {
 				h.t.Errorf("%s has rows, and no P1 event can have put them there", table)
 			}
@@ -391,6 +391,8 @@ func (h *harness) hasProjectionTable(table string) bool {
 	case "roles":
 		return h.SchemaVersion() >= 4
 	case "tracker_references":
+		return h.SchemaVersion() >= 5
+	case "tracker_push_records":
 		return h.SchemaVersion() >= 5
 	default:
 		return true
@@ -773,10 +775,15 @@ func TestAProjectionRowMayNotBeDeletedOutsideARebuild(t *testing.T) {
 		t.Fatalf("seed a Run row: %v", err)
 	}
 	if err := h.rawExec(
-		`INSERT INTO outbox_entries (id, state, subject, idempotency_key, payload, birth_event, last_event)
-		 VALUES (?, 'pending', NULL, 'seed', '{}', ?, ?)`,
-		h.NewID(), ev.ID, ev.ID); err != nil {
+		`INSERT INTO outbox_entries (id,repo,kind,state,subject,idempotency_key,payload,birth_event,last_event)
+		 VALUES (?,?,'create','queued',?,'seed','{}',?,?)`,
+		h.NewID(), h.Repo, h.Repo, ev.ID, ev.ID); err != nil {
 		t.Fatalf("seed an outbox row: %v", err)
+	}
+	if err := h.rawExec(
+		`INSERT INTO tracker_push_records (ref,disposition,lease,outbox,birth_event,last_event)
+		 VALUES ('seed-ref','active','seed-lease',?,?,?)`, h.NewID(), ev.ID, ev.ID); err != nil {
+		t.Fatalf("seed a tracker push record: %v", err)
 	}
 
 	for _, table := range projectionTables {
@@ -807,7 +814,7 @@ func TestAProjectionRowMayNotBeDeletedOutsideARebuild(t *testing.T) {
 	if err := h.Rebuild(h.ctx); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
-	for _, table := range []string{"runs", "outbox_entries"} {
+	for _, table := range []string{"runs", "outbox_entries", "tracker_push_records"} {
 		if got := len(h.rowsOf(table, "")); got != 0 {
 			t.Errorf("%s holds %d rows after a rebuild, want 0: no event can restore them", table, got)
 		}

@@ -122,6 +122,14 @@ type BacklogDeclined struct {
 	Reason string `json:"reason"`
 }
 
+// BacklogDelegated is the third backlog exit. Outbox is the durable creation
+// entry that owns every retry, and IdempotencyKey is the provider-neutral key
+// that prevents a retry from creating a second external item.
+type BacklogDelegated struct {
+	Outbox         string `json:"outbox"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
 // ReferenceBound is the payload of reference.bound. References are acquired, not
 // assigned (MODEL §5): a late, mutable update to a nullable column keyed on
 // identity. Inert until P3.
@@ -144,6 +152,29 @@ type ReferenceRemoved struct {
 type ReferenceRebound struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+// TrackerDisposition is the monotonic provider-neutral state recorded at the
+// seam. A provider adapter maps these values to its own state vocabulary.
+type TrackerDisposition string
+
+const (
+	// TrackerActive means at least one bound Matter is in progress.
+	TrackerActive TrackerDisposition = "active"
+	// TrackerCompleted means all bound Matters are terminal and at least one sealed.
+	TrackerCompleted TrackerDisposition = "completed"
+	// TrackerCanceled means all bound Matters were canceled.
+	TrackerCanceled TrackerDisposition = "canceled"
+)
+
+// TrackerStatePushed records one successful, lease-guarded state delivery.
+// The event subject is the outbox entry. Ref identifies the shared external
+// item; Lease is the opaque provider token established by the successful
+// conditional write.
+type TrackerStatePushed struct {
+	Ref         string             `json:"ref"`
+	Disposition TrackerDisposition `json:"disposition"`
+	Lease       string             `json:"lease"`
 }
 
 // RepoAttached is the payload of repo.attached. RemoteURL is the normalised

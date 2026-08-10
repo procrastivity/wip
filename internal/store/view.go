@@ -1089,13 +1089,14 @@ type BacklogEntry struct {
 	Detail     string
 	OriginNode string
 	Matter     string
+	Outbox     string
 }
 
 // Backlog lists a Repo's entries.
 func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) {
 	rows, err := v.q.QueryContext(ctx,
 		`SELECT id, repo, provenance, state, title, detail,
-		        COALESCE(origin_node, ''), COALESCE(matter, '')
+		        COALESCE(origin_node, ''), COALESCE(matter, ''), COALESCE(outbox, '')
 		 FROM   backlog_entries WHERE repo = ? ORDER BY id`, repo)
 	if err != nil {
 		return nil, fmt.Errorf("store: read the backlog of %s: %w", repo, err)
@@ -1106,7 +1107,7 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 	for rows.Next() {
 		var e BacklogEntry
 		if err := rows.Scan(&e.ID, &e.Repo, &e.Provenance, &e.State, &e.Title,
-			&e.Detail, &e.OriginNode, &e.Matter); err != nil {
+			&e.Detail, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
 			return nil, fmt.Errorf("store: read the backlog of %s: %w", repo, err)
 		}
 		out = append(out, e)
@@ -1115,6 +1116,77 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 		return nil, fmt.Errorf("store: read the backlog of %s: %w", repo, err)
 	}
 	return out, nil
+}
+
+// OutboxEntry is one provider-neutral write awaiting or recording delivery.
+type OutboxEntry struct {
+	ID             string
+	Repo           string
+	Kind           string
+	State          string
+	Subject        string
+	Ref            string
+	IdempotencyKey string
+	Payload        json.RawMessage
+	Reason         string
+	Attempts       int
+}
+
+// Outbox lists a Repo's entries in creation order. The list remains useful
+// when no provider is configured: queued work is a legitimate steady state.
+func (v View) Outbox(ctx context.Context, repo string) ([]OutboxEntry, error) {
+	if v.schemaVersion < 5 {
+		return nil, nil
+	}
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT id,repo,kind,state,subject,COALESCE(ref,''),idempotency_key,payload,reason,attempts
+		 FROM outbox_entries WHERE repo=? ORDER BY birth_event`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("store: read outbox of %s: %w", repo, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []OutboxEntry
+	for rows.Next() {
+		var e OutboxEntry
+		var payload string
+		if err := rows.Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref,
+			&e.IdempotencyKey, &payload, &e.Reason, &e.Attempts); err != nil {
+			return nil, fmt.Errorf("store: read outbox of %s: %w", repo, err)
+		}
+		e.Payload = json.RawMessage(payload)
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read outbox of %s: %w", repo, err)
+	}
+	return out, nil
+}
+
+// TrackerPushRecord is the last successful monotonic state write for one
+// provider-neutral reference.
+type TrackerPushRecord struct {
+	Ref         string
+	Disposition TrackerDisposition
+	Lease       string
+	Outbox      string
+}
+
+// TrackerPushRecord returns the last successful state write for ref.
+func (v View) TrackerPushRecord(ctx context.Context, ref string) (TrackerPushRecord, error) {
+	if v.schemaVersion < 5 {
+		return TrackerPushRecord{}, fmt.Errorf("store: tracker push records require schema v5")
+	}
+	var r TrackerPushRecord
+	err := v.q.QueryRowContext(ctx,
+		`SELECT ref,disposition,lease,outbox FROM tracker_push_records WHERE ref=?`, ref).
+		Scan(&r.Ref, &r.Disposition, &r.Lease, &r.Outbox)
+	if err == sql.ErrNoRows {
+		return TrackerPushRecord{}, fmt.Errorf("store: no tracker push record for %s", ref)
+	}
+	if err != nil {
+		return TrackerPushRecord{}, fmt.Errorf("store: read tracker push record for %s: %w", ref, err)
+	}
+	return r, nil
 }
 
 // ArchivedMatters lists the sealed Matters of a Repo — the Archive (MODEL §9).

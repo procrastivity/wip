@@ -1294,8 +1294,8 @@ func (h *harness) wantMembers(what, batch string, want ...string) {
 // 6. Run and OutboxEntry — shape only
 // ---------------------------------------------------------------------------
 
-// TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet is the whole of what this
-// Step owes these two tables.
+// TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet pins the original Run
+// shape and the tracker substrate's now-active Outbox shape.
 //
 // Neither noun has a P1 event, so neither has a projection rule, and inventing one
 // here would be inventing a verb. MODEL §9/§10 asks only that the rows exist from
@@ -1305,10 +1305,12 @@ func (h *harness) wantMembers(what, batch string, want ...string) {
 // covered by Rebuild.
 func TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet(t *testing.T) {
 	h := newHarness(t)
+	matter := h.matter("outbox-shape", "Outbox shape")
 
 	wantColumns(h, "runs", []string{"id", "clone", "batch", "locator", "state", "close_reason", "started_at", "closed_at", "birth_event", "last_event"})
 	wantColumns(h, "outbox_entries", []string{
-		"id", "state", "subject", "idempotency_key", "payload", "birth_event", "last_event",
+		"id", "repo", "kind", "state", "subject", "ref", "idempotency_key", "payload",
+		"reason", "attempts", "birth_event", "last_event",
 	})
 
 	for _, table := range []string{"runs", "outbox_entries"} {
@@ -1343,20 +1345,20 @@ func TestRunAndOutboxRowsExistFromEventOneWithNoVerbsYet(t *testing.T) {
 		`INSERT INTO runs (id, clone, batch, locator, state, started_at, birth_event, last_event) VALUES (?, ?, ?, 'run-02', 'open', ?, ?, ?)`,
 		h.NewID(), h.Clone, batch, ev.OccurredAt.UTC().Format(timestampLayout), ev.ID, h.birthEventOf(h.Clone).ID)
 
-	// The outbox's own constraints (D15, D50): three states, a JSON-object payload,
-	// and an idempotency key that is delivered once.
+	// The outbox's own constraints (D15, D50): provider-neutral kinds and states,
+	// a JSON-object payload, and an idempotency key that is delivered once.
 	const outboxInsert = `INSERT INTO outbox_entries
-		 (id, state, subject, idempotency_key, payload, birth_event, last_event)
-		 VALUES (?, ?, NULL, ?, ?, ?, ?)`
-	if err := h.rawExec(outboxInsert, h.NewID(), "pending", "one", `{"kind":"probe"}`, ev.ID, ev.ID); err != nil {
+		 (id, repo, kind, state, subject, idempotency_key, payload, birth_event, last_event)
+		 VALUES (?, ?, 'create', ?, ?, ?, ?, ?, ?)`
+	if err := h.rawExec(outboxInsert, h.NewID(), h.Repo, "queued", matter, "one", `{"kind":"probe"}`, ev.ID, ev.ID); err != nil {
 		t.Fatalf("the substrate refused a well-formed outbox row: %v", err)
 	}
 	rawRefusedBy(h, "an outbox entry in a state that is not a state", "CHECK constraint failed",
-		outboxInsert, h.NewID(), "flushed", "two", `{}`, ev.ID, ev.ID)
+		outboxInsert, h.NewID(), h.Repo, "pending", matter, "two", `{}`, ev.ID, ev.ID)
 	rawRefusedBy(h, "an outbox payload that is not a JSON object", "CHECK constraint failed",
-		outboxInsert, h.NewID(), "pending", "three", `["not an object"]`, ev.ID, ev.ID)
+		outboxInsert, h.NewID(), h.Repo, "queued", matter, "three", `["not an object"]`, ev.ID, ev.ID)
 	rawRefusedBy(h, "a second outbox entry under one idempotency key", "UNIQUE constraint failed: outbox_entries.idempotency_key",
-		outboxInsert, h.NewID(), "pending", "one", `{}`, ev.ID, ev.ID)
+		outboxInsert, h.NewID(), h.Repo, "queued", matter, "one", `{}`, ev.ID, ev.ID)
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,6 +1407,7 @@ func TestABacklogEntryRecordsHowItArrived(t *testing.T) {
 			// An entry that has not been acted upon names no Matter, which is the
 			// same CHECK that makes `planned` name one.
 			"matter":      nil,
+			"outbox":      nil,
 			"birth_event": birth.ID,
 			"last_event":  birth.ID,
 		})
@@ -1450,6 +1453,7 @@ func TestABacklogEntryLeavesByPlanningOrDeclining(t *testing.T) {
 		"origin_node": nil,
 		// Planned names what it became.
 		"matter":      matter,
+		"outbox":      nil,
 		"birth_event": h.birthEventOf(planned).ID,
 		"last_event":  plan.ID,
 	})
@@ -1472,6 +1476,7 @@ func TestABacklogEntryLeavesByPlanningOrDeclining(t *testing.T) {
 		"detail":      "the premise stopped being true",
 		"origin_node": nil,
 		"matter":      nil,
+		"outbox":      nil,
 		"birth_event": h.birthEventOf(declined).ID,
 		"last_event":  decline.ID,
 	})

@@ -53,9 +53,10 @@ const (
 	TypeGateClosed = "gate.closed"
 
 	// Intake/backlog.
-	TypeBacklogEntered  = "backlog.entered"
-	TypeBacklogPlanned  = "backlog.planned"
-	TypeBacklogDeclined = "backlog.declined"
+	TypeBacklogEntered   = "backlog.entered"
+	TypeBacklogPlanned   = "backlog.planned"
+	TypeBacklogDeclined  = "backlog.declined"
+	TypeBacklogDelegated = "backlog.delegated"
 
 	// Reference — ships in P1, inert until P3.
 	TypeReferenceBound   = "reference.bound"
@@ -98,6 +99,10 @@ const (
 	// spawned it (D59).
 	TypeRoleSpawned = "role.spawned"
 	TypeRoleClosed  = "role.closed"
+
+	// Tracker — provider-neutral delivery facts. Provider-specific names and
+	// states never enter this family.
+	TypeTrackerStatePushed = "tracker.state-pushed"
 )
 
 // Family groups event types for auditing (MODEL §10's family list). It is
@@ -121,6 +126,7 @@ const (
 	FamilyDispatch   Family = "dispatch"
 	FamilyRun        Family = "run"
 	FamilyRole       Family = "role"
+	FamilyTracker    Family = "tracker"
 )
 
 // EventType is one row of the taxonomy: a type token, its family, and the tier
@@ -240,6 +246,8 @@ var V5Taxonomy = []EventType{
 	durable(TypeReferenceAdded, FamilyReference),
 	durable(TypeReferenceRemoved, FamilyReference),
 	durable(TypeReferenceRebound, FamilyReference),
+	durable(TypeBacklogDelegated, FamilyBacklog),
+	durable(TypeTrackerStatePushed, FamilyTracker),
 }
 
 // taxonomySets is one slice per numbered migration that seeds event types.

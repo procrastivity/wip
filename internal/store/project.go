@@ -23,7 +23,7 @@ import (
 // the registered taxonomy, and render.performed is the one member that
 // deliberately projects nothing.
 func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
-	return applyEventVersion(ctx, tx, ev, 4)
+	return applyEventVersion(ctx, tx, ev, latestVersion(register))
 }
 
 func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
@@ -71,6 +71,8 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return planBacklogEntry(ctx, tx, ev)
 	case TypeBacklogDeclined:
 		return declineBacklogEntry(ctx, tx, ev)
+	case TypeBacklogDelegated:
+		return delegateBacklogEntry(ctx, tx, ev)
 
 	// ---- reference -------------------------------------------------------
 	case TypeReferenceBound:
@@ -87,6 +89,10 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return removeTrackerReference(ctx, tx, ev)
 	case TypeReferenceRebound:
 		return reboundTrackerReference(ctx, tx, ev)
+
+	// ---- tracker ---------------------------------------------------------
+	case TypeTrackerStatePushed:
+		return recordTrackerStatePush(ctx, tx, ev)
 
 	// ---- tiers -----------------------------------------------------------
 	case TypeRepoAttached:
@@ -158,7 +164,7 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 //
 // Order matters only for readability; Rebuild defers foreign-key checks to
 // commit rather than sorting the deletes.
-var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles", "tracker_references")
+var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles", "tracker_references", "tracker_push_records")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -510,6 +516,57 @@ func declineBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
+func delegateBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p BacklogDelegated
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if !IsIdentityShaped(p.Outbox) || p.IdempotencyKey == "" {
+		return fmt.Errorf("store: %s requires an Outbox identity and idempotency key", ev.Type)
+	}
+
+	var repo, provenance, title, detail, origin string
+	err := tx.QueryRowContext(ctx,
+		`SELECT repo,provenance,title,detail,COALESCE(origin_node,'')
+		 FROM backlog_entries WHERE id=? AND state='entered'`, ev.Subject).
+		Scan(&repo, &provenance, &title, &detail, &origin)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s touched 0 projection rows", ev.Type)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if repo != ev.Repo {
+		return fmt.Errorf("store: %s backlog entry belongs to another Repo", ev.Type)
+	}
+	payload, err := json.Marshal(struct {
+		Kind       string `json:"kind"`
+		Backlog    string `json:"backlog"`
+		Provenance string `json:"provenance"`
+		Title      string `json:"title"`
+		Detail     string `json:"detail,omitempty"`
+		Origin     string `json:"origin_node,omitempty"`
+	}{"create", ev.Subject, provenance, title, detail, origin})
+	if err != nil {
+		return fmt.Errorf("store: project %s payload: %w", ev.Type, err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO outbox_entries
+		 (id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
+		 VALUES (?,?,'create','queued',?,NULL,?,?,?,?)`,
+		p.Outbox, ev.Repo, ev.Subject, p.IdempotencyKey, string(payload), ev.ID, ev.ID); err != nil {
+		return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE backlog_entries SET state='delegated',outbox=?,last_event=?
+		 WHERE id=? AND repo=? AND state='entered'`, p.Outbox, ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
 // ---------------------------------------------------------------------------
 // Tracker references
 // ---------------------------------------------------------------------------
@@ -632,6 +689,42 @@ func projectLegacyMatterReference(ctx context.Context, tx *sql.Tx, ev Event) err
 		return fmt.Errorf("store: project legacy %s: %w", ev.Type, err)
 	}
 	return nil
+}
+
+func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p TrackerStatePushed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Ref == "" || p.Lease == "" || (p.Disposition != TrackerActive && p.Disposition != TrackerCompleted && p.Disposition != TrackerCanceled) {
+		return fmt.Errorf("store: %s has an invalid reference, disposition, or lease", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='flushed',attempts=attempts+1,last_event=?
+		 WHERE id=? AND repo=? AND kind='state' AND state='approved' AND ref=?`,
+		ev.ID, ev.Subject, ev.Repo, p.Ref)
+	if err != nil {
+		return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+	}
+	if err := exactlyRows(res, 1, ev); err != nil {
+		return err
+	}
+
+	res, err = tx.ExecContext(ctx,
+		`INSERT INTO tracker_push_records
+		 (ref,disposition,lease,outbox,birth_event,last_event) VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(ref) DO UPDATE SET
+		   disposition=excluded.disposition,
+		   lease=excluded.lease,
+		   outbox=excluded.outbox,
+		   last_event=excluded.last_event
+		 WHERE tracker_push_records.disposition='active'
+		    OR tracker_push_records.disposition=excluded.disposition`,
+		p.Ref, p.Disposition, p.Lease, ev.Subject, ev.ID, ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project %s push record: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,7 +1422,7 @@ func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []strin
 	// deferral is unavailable on a driver.
 	var out []string
 	if version >= 5 {
-		out = append(out, "tracker_references")
+		out = append(out, "tracker_push_records", "tracker_references")
 	}
 	if version >= 4 {
 		out = append(out, "roles")
