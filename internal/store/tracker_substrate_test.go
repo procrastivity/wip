@@ -143,6 +143,50 @@ func TestBacklogDelegationCreatesOneDurableStubAndCreationEntry(t *testing.T) {
 	}
 }
 
+func TestTrackerItemCreatedRetiresDelegatedStubAfterConfirmation(t *testing.T) {
+	h := newHarness(t)
+	entry := h.enterBacklog(BacklogEntered{Provenance: ProvenanceIntake, Title: "Send outward"})
+	outbox := h.NewID()
+	h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{
+		Outbox: outbox, IdempotencyKey: "backlog:" + entry,
+	}})
+
+	active, err := h.ActiveBacklog(h.ctx, h.Repo)
+	if err != nil || len(active) != 1 || active[0].ID != entry {
+		t.Fatalf("active backlog before confirmation = %+v (err %v)", active, err)
+	}
+	h.commit(Draft{Type: TypeTrackerItemCreated, Subject: outbox, Payload: TrackerItemCreated{Ref: "GH-99"}})
+	active, err = h.ActiveBacklog(h.ctx, h.Repo)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active backlog after confirmation = %+v (err %v)", active, err)
+	}
+	all, err := h.Backlog(h.ctx, h.Repo)
+	if err != nil || len(all) != 1 || all[0].State != "delegated" {
+		t.Fatalf("historical delegated stub = %+v (err %v)", all, err)
+	}
+	queued, err := h.Outbox(h.ctx, h.Repo)
+	if err != nil || len(queued) != 1 || queued[0].State != "flushed" || queued[0].Attempts != 1 {
+		t.Fatalf("confirmed creation entry = %+v (err %v)", queued, err)
+	}
+
+	before := len(h.eventsOf(outbox))
+	err = h.commitError(func(context.Context, *Tx) ([]Draft, error) {
+		return []Draft{{Type: TypeTrackerItemCreated, Subject: outbox, Payload: TrackerItemCreated{Ref: "GH-99"}}}, nil
+	})
+	refusalMentions(t, "confirming one creation twice", err, "touched 0 projection rows")
+	if got := len(h.eventsOf(outbox)); got != before {
+		t.Fatalf("duplicate confirmation appended %d events", got-before)
+	}
+
+	if err := h.Rebuild(h.ctx); err != nil {
+		t.Fatalf("rebuild confirmed delegation: %v", err)
+	}
+	active, err = h.ActiveBacklog(h.ctx, h.Repo)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("rebuilt active backlog = %+v (err %v)", active, err)
+	}
+}
+
 func TestTrackerStatePushAdvancesAnApprovedEntryAndNeverRegresses(t *testing.T) {
 	h := newHarness(t)
 	matter := h.matter("push-record", "Push record")

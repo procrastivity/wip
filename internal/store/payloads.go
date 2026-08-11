@@ -177,6 +177,12 @@ type TrackerStatePushed struct {
 	Lease       string             `json:"lease"`
 }
 
+// TrackerItemCreated records an unambiguous successful response for one
+// delegated creation entry. Ref remains in the event log after retirement.
+type TrackerItemCreated struct {
+	Ref string `json:"ref"`
+}
+
 // RepoAttached is the payload of repo.attached. RemoteURL is the normalised
 // remote in its normal form, and is empty for a local-only repo — the natural
 // key is nullable (D37, D39).

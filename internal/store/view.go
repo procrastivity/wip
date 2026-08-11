@@ -1118,6 +1118,37 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 	return out, nil
 }
 
+// ActiveBacklog lists entries that still require local action or delivery.
+// A delegated stub retires when its creation entry is flushed. Both projection
+// rows remain available through Backlog and Outbox for audit and rebuild.
+func (v View) ActiveBacklog(ctx context.Context, repo string) ([]BacklogEntry, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT b.id,b.repo,b.provenance,b.state,b.title,b.detail,
+		        COALESCE(b.origin_node,''),COALESCE(b.matter,''),COALESCE(b.outbox,'')
+		 FROM backlog_entries b
+		 LEFT JOIN outbox_entries o ON o.id=b.outbox
+		 WHERE b.repo=? AND (b.state='entered' OR (b.state='delegated' AND o.state<>'flushed'))
+		 ORDER BY b.id`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("store: read the active backlog of %s: %w", repo, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []BacklogEntry
+	for rows.Next() {
+		var e BacklogEntry
+		if err := rows.Scan(&e.ID, &e.Repo, &e.Provenance, &e.State, &e.Title,
+			&e.Detail, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
+			return nil, fmt.Errorf("store: read the active backlog of %s: %w", repo, err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read the active backlog of %s: %w", repo, err)
+	}
+	return out, nil
+}
+
 // OutboxEntry is one provider-neutral write awaiting or recording delivery.
 type OutboxEntry struct {
 	ID             string

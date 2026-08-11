@@ -91,6 +91,8 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return reboundTrackerReference(ctx, tx, ev)
 
 	// ---- tracker ---------------------------------------------------------
+	case TypeTrackerItemCreated:
+		return recordTrackerItemCreated(ctx, tx, ev)
 	case TypeTrackerStatePushed:
 		return recordTrackerStatePush(ctx, tx, ev)
 
@@ -723,6 +725,47 @@ func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {
 		p.Ref, p.Disposition, p.Lease, ev.Subject, ev.ID, ev.ID)
 	if err != nil {
 		return fmt.Errorf("store: project %s push record: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p TrackerItemCreated
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Ref == "" {
+		return fmt.Errorf("store: %s requires a non-empty reference", ev.Type)
+	}
+
+	var backlog string
+	err := tx.QueryRowContext(ctx,
+		`SELECT subject FROM outbox_entries
+		 WHERE id=? AND repo=? AND kind='create' AND state IN ('queued','approved')`,
+		ev.Subject, ev.Repo).Scan(&backlog)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s touched 0 projection rows", ev.Type)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s creation entry: %w", ev.Type, err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='flushed',attempts=attempts+1,last_event=?
+		 WHERE id=? AND repo=? AND kind='create' AND state IN ('queued','approved')`,
+		ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+	}
+	if err := exactlyRows(res, 1, ev); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx,
+		`UPDATE backlog_entries SET last_event=?
+		 WHERE id=? AND repo=? AND state='delegated' AND outbox=?`,
+		ev.ID, backlog, ev.Repo, ev.Subject)
+	if err != nil {
+		return fmt.Errorf("store: project %s stub: %w", ev.Type, err)
 	}
 	return exactlyRows(res, 1, ev)
 }

@@ -412,6 +412,8 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	type entry struct {
 		ID         string `json:"id"`
 		Provenance string `json:"provenance"`
+		State      string `json:"state"`
+		Outbox     string `json:"outbox"`
 	}
 	intakeEntry := mustJSON[entry](t, intake.stdout)
 	foundEntry := mustJSON[entry](t, found.stdout)
@@ -467,4 +469,28 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	if dp.Reason == "" {
 		t.Errorf("declined entry must carry a reason (distinguishable from not-yet-acted-upon, MODEL §4)")
 	}
+
+	delegate := runIn(t, dir, dbEnv, "backlog", "delegate", deferredEntry.ID, "--json")
+	if delegate.exitCode != 0 {
+		t.Fatalf("backlog delegate: exit=%d stderr=%q", delegate.exitCode, delegate.stderr)
+	}
+	delegated := mustJSON[entry](t, delegate.stdout)
+	if delegated.State != "delegated" || delegated.Outbox == "" {
+		t.Fatalf("delegated entry = %+v, want delegated with an outbox", delegated)
+	}
+	s = openTestStore(t, dbPath)
+	ev := wantAppendedEvent(t, s, deferredEntry.ID, 1, store.TypeBacklogDelegated)
+	var delegatedPayload store.BacklogDelegated
+	if err := json.Unmarshal(ev.Payload, &delegatedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if delegatedPayload.Outbox != delegated.Outbox || delegatedPayload.IdempotencyKey != "backlog:"+deferredEntry.ID {
+		t.Fatalf("delegation payload = %+v", delegatedPayload)
+	}
+	duplicate := runIn(t, dir, dbEnv, "backlog", "delegate", deferredEntry.ID)
+	if duplicate.exitCode == 0 {
+		t.Fatal("delegating one entry twice should be refused")
+	}
+	s = openTestStore(t, dbPath)
+	wantAppendedEvent(t, s, deferredEntry.ID, 1, store.TypeBacklogDelegated)
 }

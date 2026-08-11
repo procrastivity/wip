@@ -306,6 +306,9 @@ func (s *Store) verifyTaxonomy(ctx context.Context) error {
 	if s.version >= 5 {
 		types = append(types, V5Taxonomy...)
 	}
+	if s.version >= 6 {
+		types = append(types, V6Taxonomy...)
+	}
 	for _, t := range types {
 		if !known[t.Type] {
 			return fmt.Errorf(

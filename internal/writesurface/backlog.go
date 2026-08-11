@@ -94,6 +94,38 @@ func BacklogDecline(ctx context.Context, s *store.Store, actor store.Actor, repo
 	return backlogEntryByID(ctx, s, repo, entryID)
 }
 
+// BacklogDelegate moves one entered item to provider-neutral delivery. The
+// entry identity is the stable idempotency boundary across all later retries.
+func BacklogDelegate(ctx context.Context, s *store.Store, actor store.Actor, repo, entryID string) (store.BacklogEntry, error) {
+	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
+	if _, err := s.Commit(ctx, req, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeBacklogDelegated,
+			Subject: entryID,
+			Payload: store.BacklogDelegated{Outbox: tx.NewID(), IdempotencyKey: "backlog:" + entryID},
+		}}, nil
+	}); err != nil {
+		return store.BacklogEntry{}, err
+	}
+	return backlogEntryByID(ctx, s, repo, entryID)
+}
+
+// ConfirmBacklogDelegation records the provider seam's successful creation
+// response. Provider adapters call this only after they have an unambiguous ref.
+func ConfirmBacklogDelegation(ctx context.Context, s *store.Store, actor store.Actor, repo, outbox, ref string) error {
+	if ref == "" {
+		return wiperr.New("validation.missing-reference", "a creation confirmation needs a reference")
+	}
+	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
+	_, err := s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type: store.TypeTrackerItemCreated, Subject: outbox,
+			Payload: store.TrackerItemCreated{Ref: ref},
+		}}, nil
+	})
+	return err
+}
+
 func backlogEntryByID(ctx context.Context, s *store.Store, repo, id string) (store.BacklogEntry, error) {
 	entries, err := s.Backlog(ctx, repo)
 	if err != nil {

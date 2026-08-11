@@ -42,6 +42,7 @@ var register = []migration{
 	{version: 3, name: "batch-lifecycle", stmts: v3Statements(), preflight: rejectLegacyBatches},
 	{version: 4, name: "roles", stmts: v4Statements()},
 	{version: 5, name: "tracker-substrate", stmts: v5Statements()},
+	{version: 6, name: "tracker-item-created", stmts: v6Statements()},
 }
 
 // latestVersion is the highest migration this binary carries.
@@ -59,7 +60,7 @@ func latestVersion(reg []migration) int {
 // the same log means. Bumping it makes every existing store rebuild its
 // projection at the next open, which is exactly the affordance the event-sourced
 // shape buys and the tables shape cannot offer.
-const projectionVersion = 5
+const projectionVersion = 6
 
 // projectionVersionKey is where the store records the projection version it was
 // last folded under.

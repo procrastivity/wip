@@ -102,6 +102,7 @@ const (
 
 	// Tracker — provider-neutral delivery facts. Provider-specific names and
 	// states never enter this family.
+	TypeTrackerItemCreated = "tracker.item-created"
 	TypeTrackerStatePushed = "tracker.state-pushed"
 )
 
@@ -250,13 +251,19 @@ var V5Taxonomy = []EventType{
 	durable(TypeTrackerStatePushed, FamilyTracker),
 }
 
+// V6Taxonomy records successful creation at the provider seam. It is separate
+// from v5 because numbered taxonomy migrations are immutable once committed.
+var V6Taxonomy = []EventType{
+	durable(TypeTrackerItemCreated, FamilyTracker),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

@@ -1,5 +1,5 @@
 // Package backlog implements the `wip backlog` verb family: `add`, `list`,
-// `plan`, `decline` (MODEL §4). `list` is read-only and emits no event.
+// `plan`, `decline`, `delegate` (MODEL §4). `list` is read-only.
 package backlog
 
 import (
@@ -17,13 +17,13 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip backlog` parent command and its four verbs.
+// Command constructs the `wip backlog` parent command and its verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backlog",
 		Short: "one list, one noun, one exit set (MODEL §4)",
 	}
-	cmd.AddCommand(addCommand(streams), listCommand(streams), planCommand(streams), declineCommand(streams))
+	cmd.AddCommand(addCommand(streams), listCommand(streams), planCommand(streams), declineCommand(streams), delegateCommand(streams))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -54,9 +54,10 @@ func entryJSON(e store.BacklogEntry) any {
 		Detail     string `json:"detail,omitempty"`
 		OriginNode string `json:"originNode,omitempty"`
 		Matter     string `json:"matter,omitempty"`
+		Outbox     string `json:"outbox,omitempty"`
 	}{
 		ID: e.ID, Provenance: string(e.Provenance), State: e.State, Title: e.Title,
-		Detail: e.Detail, OriginNode: e.OriginNode, Matter: e.Matter,
+		Detail: e.Detail, OriginNode: e.OriginNode, Matter: e.Matter, Outbox: e.Outbox,
 	}
 }
 
@@ -114,7 +115,7 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			entries, err := s.Backlog(cmd.Context(), repo.ID)
+			entries, err := s.ActiveBacklog(cmd.Context(), repo.ID)
 			if err != nil {
 				return err
 			}
@@ -213,6 +214,39 @@ func declineCommand(streams *iostreams.Streams) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "why this entry was declined")
 	_ = cmd.MarkFlagRequired("reason")
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func delegateCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delegate <entry-id>",
+		Short: "delegate a backlog entry through the tracker outbox",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			entry, err := writesurface.BacklogDelegate(cmd.Context(), s, store.ActorFor(flags.AsRole), repo.ID, args[0])
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				b, err := json.Marshal(entryJSON(entry))
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+			_, err = fmt.Fprintf(streams.Out, "delegated %s through outbox %s\n", entry.ID, entry.Outbox)
+			return err
+		},
+	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
