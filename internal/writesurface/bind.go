@@ -17,11 +17,15 @@ func Bind(ctx context.Context, s *store.Store, actor store.Actor, repo, locator,
 	}
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
 		return []store.Draft{{
 			Type:    store.TypeReferenceAdded,
 			Subject: n.ID,
-			Payload: store.ReferenceAdded{Ref: ref},
+			Payload: store.ReferenceAdded{Ref: ref, TrackerPushLevel: level},
 		}}, nil
 	}); err != nil {
 		return store.Node{}, err
@@ -36,8 +40,12 @@ func Unbind(ctx context.Context, s *store.Store, actor store.Actor, repo, locato
 		return store.Node{}, err
 	}
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
-		return []store.Draft{{Type: store.TypeReferenceRemoved, Subject: n.ID, Payload: store.ReferenceRemoved{Ref: ref}}}, nil
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return []store.Draft{{Type: store.TypeReferenceRemoved, Subject: n.ID, Payload: store.ReferenceRemoved{Ref: ref, TrackerPushLevel: level}}}, nil
 	}); err != nil {
 		return store.Node{}, err
 	}
@@ -51,8 +59,12 @@ func Rebind(ctx context.Context, s *store.Store, actor store.Actor, repo, locato
 		return store.Node{}, err
 	}
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
-		return []store.Draft{{Type: store.TypeReferenceRebound, Subject: n.ID, Payload: store.ReferenceRebound{From: from, To: to}}}, nil
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return []store.Draft{{Type: store.TypeReferenceRebound, Subject: n.ID, Payload: store.ReferenceRebound{From: from, To: to, TrackerPushLevel: level}}}, nil
 	}); err != nil {
 		return store.Node{}, err
 	}

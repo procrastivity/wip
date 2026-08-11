@@ -96,6 +96,10 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 
 	req := store.Request{Actor: actor, Env: env}
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
 		fresh, err := tx.Node(ctx, n.ID)
 		if err != nil {
 			return nil, err
@@ -103,7 +107,7 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 		drafts := []store.Draft{{
 			Type:    store.TypeGateClosed,
 			Subject: fresh.ID,
-			Payload: store.GateClosed{Gate: gate, Scale: fresh.Kind},
+			Payload: store.GateClosed{Gate: gate, Scale: fresh.Kind, TrackerPushLevel: level},
 		}}
 		if fresh.Kind == store.ScaleMatter {
 			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, false, gate); err != nil {

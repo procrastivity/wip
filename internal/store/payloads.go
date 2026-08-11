@@ -34,6 +34,9 @@ type Transition struct {
 	// is theirs and so is its whole chain — and this is where the fact that they
 	// did not name this node is recorded. See docs/schema/decisions.md.
 	Cascade bool `json:"cascade,omitempty"`
+	// TrackerPushLevel snapshots candidate policy at the causal boundary so a
+	// rebuild never consults mutable current configuration.
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
 // ContentWritten is the payload of content.created and content.appended. The
@@ -95,8 +98,9 @@ type DependencyChange struct {
 // GateClosed is the payload of gate.closed: gate name + scale + subject, where
 // the subject is the envelope's.
 type GateClosed struct {
-	Gate  string `json:"gate"`
-	Scale Scale  `json:"scale"`
+	Gate             string           `json:"gate"`
+	Scale            Scale            `json:"scale"`
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
 // BacklogEntered is the payload of backlog.entered. subject is the entry.
@@ -140,18 +144,21 @@ type ReferenceBound struct {
 // ReferenceAdded and ReferenceRemoved change one member of a Matter's active
 // tracker-reference set. The subject is always the Matter.
 type ReferenceAdded struct {
-	Ref string `json:"ref"`
+	Ref              string           `json:"ref"`
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
 // ReferenceRemoved identifies the membership that leaves the active set.
 type ReferenceRemoved struct {
-	Ref string `json:"ref"`
+	Ref              string           `json:"ref"`
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
 // ReferenceRebound atomically replaces one member of a Matter's reference set.
 type ReferenceRebound struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From             string           `json:"from"`
+	To               string           `json:"to"`
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
 // TrackerDisposition is the monotonic provider-neutral state recorded at the
@@ -182,6 +189,35 @@ type TrackerStatePushed struct {
 type TrackerItemCreated struct {
 	Ref string `json:"ref"`
 }
+
+// OutboxApproved records the human boundary before a provider seam call.
+type OutboxApproved struct{}
+
+// OutboxDeclined records a terminal human disposition.
+type OutboxDeclined struct {
+	Reason string `json:"reason"`
+}
+
+// OutboxWithheld records work that must remain visible and must not be sent.
+// Attempted distinguishes a local composition/monotonicity refusal from a
+// provider response; only a provider call increments Attempts.
+type OutboxWithheld struct {
+	Reason    string `json:"reason"`
+	Attempted bool   `json:"attempted"`
+}
+
+// OutboxDeliveryFailed records a retryable provider response.
+type OutboxDeliveryFailed struct {
+	Reason string `json:"reason"`
+}
+
+// OutboxRetried records an explicit decision to send failed or withheld work
+// again. It preserves the entry identity, payload, and idempotency key.
+type OutboxRetried struct{}
+
+// OutboxFlushed records successful delivery for an entry whose tracker fact
+// needs no richer event. State and create success retain their existing events.
+type OutboxFlushed struct{}
 
 // RepoAttached is the payload of repo.attached. RemoteURL is the normalised
 // remote in its normal form, and is empty for a local-only repo — the natural

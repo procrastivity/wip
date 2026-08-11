@@ -102,8 +102,14 @@ const (
 
 	// Tracker — provider-neutral delivery facts. Provider-specific names and
 	// states never enter this family.
-	TypeTrackerItemCreated = "tracker.item-created"
-	TypeTrackerStatePushed = "tracker.state-pushed"
+	TypeTrackerItemCreated   = "tracker.item-created"
+	TypeTrackerStatePushed   = "tracker.state-pushed"
+	TypeOutboxApproved       = "outbox.approved"
+	TypeOutboxDeclined       = "outbox.declined"
+	TypeOutboxWithheld       = "outbox.withheld"
+	TypeOutboxDeliveryFailed = "outbox.delivery-failed"
+	TypeOutboxRetried        = "outbox.retried"
+	TypeOutboxFlushed        = "outbox.flushed"
 )
 
 // Family groups event types for auditing (MODEL §10's family list). It is
@@ -257,13 +263,24 @@ var V6Taxonomy = []EventType{
 	durable(TypeTrackerItemCreated, FamilyTracker),
 }
 
+// V7Taxonomy records every provider-neutral outbox transition that is not
+// already represented by a successful tracker delivery event.
+var V7Taxonomy = []EventType{
+	durable(TypeOutboxApproved, FamilyTracker),
+	durable(TypeOutboxDeclined, FamilyTracker),
+	durable(TypeOutboxWithheld, FamilyTracker),
+	durable(TypeOutboxDeliveryFailed, FamilyTracker),
+	durable(TypeOutboxRetried, FamilyTracker),
+	durable(TypeOutboxFlushed, FamilyTracker),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

@@ -30,6 +30,7 @@ import (
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
+	outboxverb "github.com/procrastivity/wip/internal/verbs/outbox"
 	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
 	roleverb "github.com/procrastivity/wip/internal/verbs/role"
 	runverb "github.com/procrastivity/wip/internal/verbs/run"
@@ -106,6 +107,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(lifecycleverb.PauseCommand(streams))
 	root.AddCommand(lifecycleverb.ResumeCommand(streams))
 	root.AddCommand(backlogverb.Command(streams))
+	root.AddCommand(outboxverb.Command(streams, nil))
 	root.AddCommand(batchverb.Command(streams))
 	root.AddCommand(runverb.Command(streams))
 	root.AddCommand(roleverb.Command(streams))

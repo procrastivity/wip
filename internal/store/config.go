@@ -6,6 +6,70 @@ import (
 	"fmt"
 )
 
+// TrackerPushLevel controls which provider-neutral tracker candidates are
+// queued. It is Repo-tier configuration, not domain history.
+type TrackerPushLevel string
+
+const (
+	// TrackerPushOff suppresses lifecycle and narration candidates.
+	TrackerPushOff TrackerPushLevel = "off"
+	// TrackerPushBoundary queues Matter boundary state candidates.
+	TrackerPushBoundary TrackerPushLevel = "boundary"
+	// TrackerPushNarrated adds Stage closure comments to boundary candidates.
+	TrackerPushNarrated TrackerPushLevel = "narrated"
+)
+
+const (
+	// TrackerPushLevelKey is the explicit Repo-tier push-level config key.
+	TrackerPushLevelKey = "tracker.push-level"
+	// TrackerBackendKey is the provider-neutral configured-backend marker.
+	TrackerBackendKey = "tracker.backend"
+)
+
+// ParseTrackerPushLevel validates one push-level token.
+func ParseTrackerPushLevel(value string) (TrackerPushLevel, error) {
+	level := TrackerPushLevel(value)
+	switch level {
+	case TrackerPushOff, TrackerPushBoundary, TrackerPushNarrated:
+		return level, nil
+	default:
+		return "", fmt.Errorf("store: %q is not a tracker push level; expected off, boundary, or narrated", value)
+	}
+}
+
+// EffectiveTrackerPushLevel resolves the explicit Repo value first. A
+// configured provider-neutral backend defaults an otherwise unset level to
+// boundary; without one, tracker pushes default to off.
+func (v View) EffectiveTrackerPushLevel(ctx context.Context, repo string) (TrackerPushLevel, error) {
+	if value, present, err := v.Config(ctx, repo, TrackerPushLevelKey); err != nil {
+		return "", err
+	} else if present {
+		return ParseTrackerPushLevel(value)
+	}
+	backend, present, err := v.Config(ctx, repo, TrackerBackendKey)
+	if err != nil {
+		return "", err
+	}
+	if present && backend != "" {
+		return TrackerPushBoundary, nil
+	}
+	return TrackerPushOff, nil
+}
+
+// SetTrackerPushLevel validates and writes the explicit Repo-tier level.
+// Configuration changes are lazy: this direct config write emits no event and
+// queues no candidate.
+func (s *Store) SetTrackerPushLevel(ctx context.Context, repo, value string) (TrackerPushLevel, error) {
+	level, err := ParseTrackerPushLevel(value)
+	if err != nil {
+		return "", err
+	}
+	if err := s.SetConfig(ctx, repo, TrackerPushLevelKey, string(level)); err != nil {
+		return "", err
+	}
+	return level, nil
+}
+
 // Project config, and the one documented exception to "everything durable is a
 // projection of the log."
 //

@@ -150,6 +150,7 @@ func TestTrackerItemCreatedRetiresDelegatedStubAfterConfirmation(t *testing.T) {
 	h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{
 		Outbox: outbox, IdempotencyKey: "backlog:" + entry,
 	}})
+	h.commit(Draft{Type: TypeOutboxApproved, Subject: outbox, Payload: OutboxApproved{}})
 
 	active, err := h.ActiveBacklog(h.ctx, h.Repo)
 	if err != nil || len(active) != 1 || active[0].ID != entry {
@@ -185,6 +186,156 @@ func TestTrackerItemCreatedRetiresDelegatedStubAfterConfirmation(t *testing.T) {
 	if err != nil || len(active) != 0 {
 		t.Fatalf("rebuilt active backlog = %+v (err %v)", active, err)
 	}
+}
+
+func TestOutboxLifecycleIsEventProjectedAndRetryPreservesIdentity(t *testing.T) {
+	h := newHarness(t)
+	entry := h.enterBacklog(BacklogEntered{Provenance: ProvenanceIntake, Title: "Deliver once"})
+	outbox := h.NewID()
+	h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{
+		Outbox: outbox, IdempotencyKey: "backlog:" + entry,
+	}})
+
+	h.commit(Draft{Type: TypeOutboxApproved, Subject: outbox, Payload: OutboxApproved{}})
+	wantOutbox := func(state, reason string, attempts int) OutboxEntry {
+		t.Helper()
+		got, err := h.OutboxEntry(h.ctx, h.Repo, outbox)
+		if err != nil {
+			t.Fatalf("read outbox lifecycle: %v", err)
+		}
+		if got.State != state || got.Reason != reason || got.Attempts != attempts {
+			t.Fatalf("outbox = %+v, want state=%s reason=%q attempts=%d", got, state, reason, attempts)
+		}
+		if got.ID != outbox || got.IdempotencyKey != "backlog:"+entry {
+			t.Fatalf("retry changed identity or idempotency: %+v", got)
+		}
+		return got
+	}
+	wantOutbox("approved", "", 0)
+
+	h.commit(Draft{Type: TypeOutboxDeliveryFailed, Subject: outbox, Payload: OutboxDeliveryFailed{Reason: "temporary outage"}})
+	wantOutbox("queued", "temporary outage", 1)
+	h.commit(Draft{Type: TypeOutboxRetried, Subject: outbox, Payload: OutboxRetried{}})
+	wantOutbox("approved", "", 1)
+	h.commit(Draft{Type: TypeOutboxWithheld, Subject: outbox, Payload: OutboxWithheld{Reason: "lease mismatch", Attempted: true}})
+	wantOutbox("withheld", "lease mismatch", 2)
+	h.commit(Draft{Type: TypeOutboxRetried, Subject: outbox, Payload: OutboxRetried{}})
+	h.commit(Draft{Type: TypeTrackerItemCreated, Subject: outbox, Payload: TrackerItemCreated{Ref: "GH-123"}})
+	wantOutbox("flushed", "", 3)
+
+	events := h.eventsOf(outbox)
+	wantTypes := []string{TypeOutboxApproved, TypeOutboxDeliveryFailed, TypeOutboxRetried, TypeOutboxWithheld, TypeOutboxRetried, TypeTrackerItemCreated}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("outbox events = %d, want %d", len(events), len(wantTypes))
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Errorf("outbox event %d = %s, want %s", i, events[i].Type, want)
+		}
+	}
+
+	for _, invalid := range []Draft{
+		{Type: TypeOutboxApproved, Subject: outbox, Payload: OutboxApproved{}},
+		{Type: TypeOutboxRetried, Subject: outbox, Payload: OutboxRetried{}},
+		{Type: TypeOutboxDeclined, Subject: outbox, Payload: OutboxDeclined{Reason: "too late"}},
+	} {
+		before := len(h.eventsOf(outbox))
+		err := h.commitError(func(context.Context, *Tx) ([]Draft, error) { return []Draft{invalid}, nil })
+		refusalMentions(t, "a terminal outbox transition", err, "touched 0 projection rows")
+		if got := len(h.eventsOf(outbox)); got != before {
+			t.Fatalf("refused transition appended %d event(s)", got-before)
+		}
+	}
+
+	if err := h.Rebuild(h.ctx); err != nil {
+		t.Fatalf("rebuild outbox lifecycle: %v", err)
+	}
+	wantOutbox("flushed", "", 3)
+	reopened, err := h.reopen(register, latestVersion(register))
+	if err != nil {
+		t.Fatalf("reopen outbox lifecycle: %v", err)
+	}
+	got, err := reopened.OutboxEntry(reopened.ctx, reopened.Repo, outbox)
+	if err != nil || got.State != "flushed" || got.Attempts != 3 {
+		t.Fatalf("reopened outbox = %+v (err %v)", got, err)
+	}
+}
+
+func TestOutboxDeclineAndLocalWithholdingDoNotCountAttempts(t *testing.T) {
+	h := newHarness(t)
+	newEntry := func(title string) string {
+		t.Helper()
+		entry := h.enterBacklog(BacklogEntered{Provenance: ProvenanceFound, Title: title})
+		outbox := h.NewID()
+		h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{Outbox: outbox, IdempotencyKey: "backlog:" + entry}})
+		h.commit(Draft{Type: TypeOutboxApproved, Subject: outbox, Payload: OutboxApproved{}})
+		return outbox
+	}
+
+	declined := newEntry("Decline")
+	h.commit(Draft{Type: TypeOutboxDeclined, Subject: declined, Payload: OutboxDeclined{Reason: "human declined"}})
+	got, _ := h.OutboxEntry(h.ctx, h.Repo, declined)
+	if got.State != "declined" || got.Attempts != 0 || got.Reason != "human declined" {
+		t.Fatalf("declined outbox = %+v", got)
+	}
+
+	withheld := newEntry("Compose")
+	h.commit(Draft{Type: TypeOutboxWithheld, Subject: withheld, Payload: OutboxWithheld{Reason: "superseded"}})
+	got, _ = h.OutboxEntry(h.ctx, h.Repo, withheld)
+	if got.State != "withheld" || got.Attempts != 0 || got.Reason != "superseded" {
+		t.Fatalf("locally withheld outbox = %+v", got)
+	}
+}
+
+func TestOutboxLifecycleRefusalsAppendNoEvent(t *testing.T) {
+	h := newHarness(t)
+	unknown := h.NewID()
+	for _, draft := range []Draft{
+		{Type: TypeOutboxApproved, Subject: unknown, Payload: OutboxApproved{}},
+		{Type: TypeOutboxDeclined, Subject: unknown, Payload: OutboxDeclined{}},
+		{Type: TypeOutboxWithheld, Subject: unknown, Payload: OutboxWithheld{}},
+		{Type: TypeOutboxDeliveryFailed, Subject: unknown, Payload: OutboxDeliveryFailed{}},
+		{Type: TypeOutboxRetried, Subject: unknown, Payload: OutboxRetried{}},
+		{Type: TypeOutboxFlushed, Subject: unknown, Payload: OutboxFlushed{}},
+	} {
+		before := len(h.eventsOf(unknown))
+		err := h.commitError(func(context.Context, *Tx) ([]Draft, error) { return []Draft{draft}, nil })
+		if err == nil {
+			t.Fatalf("%s unexpectedly succeeded", draft.Type)
+		}
+		if got := len(h.eventsOf(unknown)); got != before {
+			t.Fatalf("%s refusal appended %d events", draft.Type, got-before)
+		}
+	}
+
+	entry := h.enterBacklog(BacklogEntered{Provenance: ProvenanceIntake, Title: "Strict lifecycle"})
+	outbox := h.NewID()
+	h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{Outbox: outbox, IdempotencyKey: "backlog:" + entry}})
+	before := len(h.eventsOf(outbox))
+	err := h.commitError(func(context.Context, *Tx) ([]Draft, error) {
+		return []Draft{{Type: TypeOutboxApproved, Subject: outbox, Payload: map[string]any{"surprise": true}}}, nil
+	})
+	refusalMentions(t, "an unknown approval field", err, "unknown field")
+	if got := len(h.eventsOf(outbox)); got != before {
+		t.Fatalf("malformed approval appended %d events", got-before)
+	}
+}
+
+func TestV7MigratesExistingOutboxRowsLosslessly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wip.db")
+	h := newHarnessAt(t, path, register[:6], 6)
+	entry := h.enterBacklog(BacklogEntered{Provenance: ProvenanceIntake, Title: "Queued before v7"})
+	outbox := h.NewID()
+	h.commit(Draft{Type: TypeBacklogDelegated, Subject: entry, Payload: BacklogDelegated{Outbox: outbox, IdempotencyKey: "backlog:" + entry}})
+	before := h.rowsOf("outbox_entries", "")
+	log := h.rowsOf("events", "")
+
+	migrated, err := h.reopen(register, 7)
+	if err != nil {
+		t.Fatalf("migrate v6 to v7: %v", err)
+	}
+	wantSameRows(t, "outbox rows through v7", before, migrated.rowsOf("outbox_entries", ""))
+	wantSameRows(t, "event log through v7", log, migrated.rowsOf("events", ""))
 }
 
 func TestTrackerStatePushAdvancesAnApprovedEntryAndNeverRegresses(t *testing.T) {

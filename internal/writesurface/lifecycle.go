@@ -95,6 +95,10 @@ func Start(ctx context.Context, s *store.Store, actor store.Actor, repo, locator
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
 	return s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
 		var drafts []store.Draft
 		for _, node := range chain {
 			isTarget := node.ID == target.ID
@@ -112,7 +116,7 @@ func Start(ctx context.Context, s *store.Store, actor store.Actor, repo, locator
 			d := store.Draft{
 				Type:    lifecycleEvents["started"][fresh.Kind],
 				Subject: fresh.ID,
-				Payload: store.Transition{From: store.Planned, To: store.InProgress, Cascade: !isTarget},
+				Payload: store.Transition{From: store.Planned, To: store.InProgress, Cascade: !isTarget, TrackerPushLevel: level},
 			}
 			if len(drafts) > 0 {
 				d.Cause = len(drafts) - 1
@@ -145,6 +149,10 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 
 	req := store.Request{Actor: actor, Env: env}
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
 		fresh, err := tx.Node(ctx, n.ID)
 		if err != nil {
 			return nil, err
@@ -156,7 +164,7 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 		drafts := []store.Draft{{
 			Type:    lifecycleEvents[action][fresh.Kind],
 			Subject: fresh.ID,
-			Payload: store.Transition{From: from, To: to},
+			Payload: store.Transition{From: from, To: to, TrackerPushLevel: level},
 		}}
 		if action == "finished" && fresh.Kind == store.ScaleMatter {
 			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, true, ""); err != nil {

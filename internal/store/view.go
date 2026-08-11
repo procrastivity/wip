@@ -1193,6 +1193,28 @@ func (v View) Outbox(ctx context.Context, repo string) ([]OutboxEntry, error) {
 	return out, nil
 }
 
+// OutboxEntry returns one entry by identity within its Repo.
+func (v View) OutboxEntry(ctx context.Context, repo, id string) (OutboxEntry, error) {
+	if v.schemaVersion < 5 {
+		return OutboxEntry{}, fmt.Errorf("store: outbox reads require schema v5")
+	}
+	var e OutboxEntry
+	var payload string
+	err := v.q.QueryRowContext(ctx,
+		`SELECT id,repo,kind,state,subject,COALESCE(ref,''),idempotency_key,payload,reason,attempts
+		 FROM outbox_entries WHERE repo=? AND id=?`, repo, id).
+		Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref,
+			&e.IdempotencyKey, &payload, &e.Reason, &e.Attempts)
+	if err == sql.ErrNoRows {
+		return OutboxEntry{}, fmt.Errorf("store: no outbox entry %s in %s", id, repo)
+	}
+	if err != nil {
+		return OutboxEntry{}, fmt.Errorf("store: read outbox entry %s: %w", id, err)
+	}
+	e.Payload = json.RawMessage(payload)
+	return e, nil
+}
+
 // TrackerPushRecord is the last successful monotonic state write for one
 // provider-neutral reference.
 type TrackerPushRecord struct {
@@ -1204,20 +1226,34 @@ type TrackerPushRecord struct {
 
 // TrackerPushRecord returns the last successful state write for ref.
 func (v View) TrackerPushRecord(ctx context.Context, ref string) (TrackerPushRecord, error) {
+	r, found, err := v.FindTrackerPushRecord(ctx, ref)
+	if err != nil {
+		return TrackerPushRecord{}, err
+	}
+	if !found {
+		return TrackerPushRecord{}, fmt.Errorf("store: no tracker push record for %s", ref)
+	}
+	return r, nil
+}
+
+// FindTrackerPushRecord reads the last push record without making absence an
+// error. A reference with no successful state write is the normal first-push
+// case for the flush coordinator.
+func (v View) FindTrackerPushRecord(ctx context.Context, ref string) (TrackerPushRecord, bool, error) {
 	if v.schemaVersion < 5 {
-		return TrackerPushRecord{}, fmt.Errorf("store: tracker push records require schema v5")
+		return TrackerPushRecord{}, false, fmt.Errorf("store: tracker push records require schema v5")
 	}
 	var r TrackerPushRecord
 	err := v.q.QueryRowContext(ctx,
 		`SELECT ref,disposition,lease,outbox FROM tracker_push_records WHERE ref=?`, ref).
 		Scan(&r.Ref, &r.Disposition, &r.Lease, &r.Outbox)
 	if err == sql.ErrNoRows {
-		return TrackerPushRecord{}, fmt.Errorf("store: no tracker push record for %s", ref)
+		return TrackerPushRecord{}, false, nil
 	}
 	if err != nil {
-		return TrackerPushRecord{}, fmt.Errorf("store: read tracker push record for %s: %w", ref, err)
+		return TrackerPushRecord{}, false, fmt.Errorf("store: read tracker push record for %s: %w", ref, err)
 	}
-	return r, nil
+	return r, true, nil
 }
 
 // ArchivedMatters lists the sealed Matters of a Repo — the Archive (MODEL §9).

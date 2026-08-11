@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -40,7 +41,10 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		TypeMatterCanceled, TypeStageCanceled, TypeStepCanceled,
 		TypeMatterPaused, TypeStagePaused, TypeStepPaused,
 		TypeMatterResumed, TypeStageResumed, TypeStepResumed:
-		return applyTransition(ctx, tx, ev)
+		if err := applyTransition(ctx, tx, ev); err != nil {
+			return err
+		}
+		return projectTransitionCandidates(ctx, tx, ev)
 
 	// ---- content ---------------------------------------------------------
 	case TypeContentCreated, TypeContentAppended:
@@ -62,7 +66,10 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 
 	// ---- gate ------------------------------------------------------------
 	case TypeGateClosed:
-		return closeGate(ctx, tx, ev)
+		if err := closeGate(ctx, tx, ev); err != nil {
+			return err
+		}
+		return projectGateCandidates(ctx, tx, ev)
 
 	// ---- backlog ---------------------------------------------------------
 	case TypeBacklogEntered:
@@ -84,17 +91,38 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		}
 		return nil
 	case TypeReferenceAdded:
-		return addTrackerReference(ctx, tx, ev)
+		if err := addTrackerReference(ctx, tx, ev); err != nil {
+			return err
+		}
+		return projectReferenceCandidates(ctx, tx, ev)
 	case TypeReferenceRemoved:
-		return removeTrackerReference(ctx, tx, ev)
+		if err := removeTrackerReference(ctx, tx, ev); err != nil {
+			return err
+		}
+		return projectReferenceCandidates(ctx, tx, ev)
 	case TypeReferenceRebound:
-		return reboundTrackerReference(ctx, tx, ev)
+		if err := reboundTrackerReference(ctx, tx, ev); err != nil {
+			return err
+		}
+		return projectReferenceCandidates(ctx, tx, ev)
 
 	// ---- tracker ---------------------------------------------------------
 	case TypeTrackerItemCreated:
 		return recordTrackerItemCreated(ctx, tx, ev)
 	case TypeTrackerStatePushed:
 		return recordTrackerStatePush(ctx, tx, ev)
+	case TypeOutboxApproved:
+		return approveOutbox(ctx, tx, ev)
+	case TypeOutboxDeclined:
+		return declineOutbox(ctx, tx, ev)
+	case TypeOutboxWithheld:
+		return withholdOutbox(ctx, tx, ev)
+	case TypeOutboxDeliveryFailed:
+		return failOutbox(ctx, tx, ev)
+	case TypeOutboxRetried:
+		return retryOutbox(ctx, tx, ev)
+	case TypeOutboxFlushed:
+		return flushOutboxComment(ctx, tx, ev)
 
 	// ---- tiers -----------------------------------------------------------
 	case TypeRepoAttached:
@@ -693,6 +721,304 @@ func projectLegacyMatterReference(ctx context.Context, tx *sql.Tx, ev Event) err
 	return nil
 }
 
+// Tracker candidates are projections of the domain event that made them
+// relevant. Their deterministic identities let live projection and rebuild
+// reproduce the same outbox rows without a second event family.
+func projectTransitionCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p Transition
+	if err := decode(ev, &p); err != nil {
+		return err
+	}
+	if p.TrackerPushLevel == "" || p.TrackerPushLevel == TrackerPushOff {
+		return nil // legacy payload or an explicitly suppressed boundary
+	}
+	if _, err := ParseTrackerPushLevel(string(p.TrackerPushLevel)); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	v := View{q: tx, schemaVersion: latestVersion(register)}
+	n, err := v.Node(ctx, ev.Subject)
+	if err != nil {
+		return err
+	}
+	switch n.Kind {
+	case ScaleMatter:
+		switch ev.Type {
+		case TypeMatterStarted, TypeMatterCanceled:
+			return queueMatterStateCandidates(ctx, tx, ev, n.ID, nil)
+		case TypeMatterFinished:
+			sealed, err := trackerNodeSealed(ctx, v, n)
+			if err != nil || !sealed {
+				return err
+			}
+			return queueMatterStateCandidates(ctx, tx, ev, n.ID, nil)
+		}
+	case ScaleStage:
+		if ev.Type == TypeStageFinished && p.TrackerPushLevel == TrackerPushNarrated {
+			sealed, err := trackerNodeSealed(ctx, v, n)
+			if err != nil || !sealed {
+				return err
+			}
+			return queueStageComments(ctx, tx, ev, n)
+		}
+	}
+	return nil
+}
+
+func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p GateClosed
+	if err := decode(ev, &p); err != nil {
+		return err
+	}
+	if p.TrackerPushLevel == "" || p.TrackerPushLevel == TrackerPushOff {
+		return nil
+	}
+	if _, err := ParseTrackerPushLevel(string(p.TrackerPushLevel)); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	v := View{q: tx, schemaVersion: latestVersion(register)}
+	n, err := v.Node(ctx, ev.Subject)
+	if err != nil {
+		return err
+	}
+	if n.Kind == ScaleMatter {
+		sealed, err := trackerNodeSealed(ctx, v, n)
+		if err != nil {
+			return err
+		}
+		if sealed {
+			if err := queueMatterStateCandidates(ctx, tx, ev, n.ID, nil); err != nil {
+				return err
+			}
+		}
+	}
+	if p.TrackerPushLevel != TrackerPushNarrated {
+		return nil
+	}
+	var stages []Node
+	switch n.Kind {
+	case ScaleMatter:
+		rows, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
+			WHERE matter=? AND kind='stage' AND lifecycle='done' AND tombstone_event IS NULL
+			ORDER BY birth_event`, n.ID)
+		if err != nil {
+			return err
+		}
+		stages = rows
+	case ScaleStage:
+		stages = []Node{n}
+	default:
+		return nil
+	}
+	for _, stage := range stages {
+		sealed, err := trackerNodeSealed(ctx, v, stage)
+		if err != nil {
+			return err
+		}
+		if sealed {
+			if err := queueStageComments(ctx, tx, ev, stage); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func projectReferenceCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var level TrackerPushLevel
+	var refs []string
+	switch ev.Type {
+	case TypeReferenceAdded:
+		var p ReferenceAdded
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		level, refs = p.TrackerPushLevel, []string{p.Ref}
+	case TypeReferenceRemoved:
+		var p ReferenceRemoved
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		level, refs = p.TrackerPushLevel, []string{p.Ref}
+	case TypeReferenceRebound:
+		var p ReferenceRebound
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		level, refs = p.TrackerPushLevel, []string{p.From, p.To}
+	}
+	if level == "" || level == TrackerPushOff {
+		return nil
+	}
+	if _, err := ParseTrackerPushLevel(string(level)); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return queueMatterStateCandidates(ctx, tx, ev, ev.Subject, refs)
+}
+
+func queueMatterStateCandidates(ctx context.Context, tx *sql.Tx, ev Event, subject string, onlyRefs []string) error {
+	refs := onlyRefs
+	if refs == nil {
+		rows, err := tx.QueryContext(ctx, `SELECT ref FROM tracker_references
+			WHERE matter=? AND removed_event IS NULL ORDER BY birth_event,ref`, subject)
+		if err != nil {
+			return fmt.Errorf("store: read candidate references: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var ref string
+			if err := rows.Scan(&ref); err != nil {
+				return err
+			}
+			refs = append(refs, ref)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		disposition, found, err := trackerAggregate(ctx, tx, ref)
+		if err != nil {
+			return err
+		}
+		if !found { // removing the final Matter queues no cleanup transition
+			continue
+		}
+		payload, err := json.Marshal(struct {
+			Disposition TrackerDisposition `json:"disposition"`
+		}{disposition})
+		if err != nil {
+			return err
+		}
+		if err := insertTrackerCandidate(ctx, tx, ev, "state", subject, ref, string(payload), ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func queueStageComments(ctx context.Context, tx *sql.Tx, ev Event, stage Node) error {
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox_entries
+		WHERE kind='comment' AND subject=? AND json_extract(payload,'$.stage')=?`, stage.Matter, stage.ID).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil // a Stage closure narrates once; later config cannot replay it
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ref FROM tracker_references
+		WHERE matter=? AND removed_event IS NULL ORDER BY birth_event,ref`, stage.Matter)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	payload, err := json.Marshal(struct {
+		Stage  string `json:"stage"`
+		Title  string `json:"title"`
+		Action string `json:"action"`
+	}{stage.ID, stage.Title, "closed"})
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return err
+		}
+		if err := insertTrackerCandidate(ctx, tx, ev, "comment", stage.Matter, ref, string(payload), stage.ID); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, subject, ref, payload, discriminator string) error {
+	key := "tracker:" + ev.ID + ":" + kind + ":" + ref
+	if discriminator != "" {
+		key += ":" + discriminator
+	}
+	sum := sha256.Sum256([]byte(key))
+	var raw [16]byte
+	copy(raw[:], sum[:16])
+	id := encodeCrockford(raw)
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_entries
+		(id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
+		VALUES (?,?,?,'queued',?,?,?,?,?,?)`, id, ev.Repo, kind, subject, ref, key, payload, ev.ID, ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project %s tracker candidate: %w", ev.Type, err)
+	}
+	return nil
+}
+
+func trackerAggregate(ctx context.Context, tx *sql.Tx, ref string) (TrackerDisposition, bool, error) {
+	v := View{q: tx, schemaVersion: latestVersion(register)}
+	matters, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
+		WHERE id IN (SELECT matter FROM tracker_references WHERE ref=? AND removed_event IS NULL)
+		AND kind='matter' AND tombstone_event IS NULL ORDER BY birth_event`, ref)
+	if err != nil {
+		return "", false, err
+	}
+	if len(matters) == 0 {
+		return "", false, nil
+	}
+	sealedCount := 0
+	for _, matter := range matters {
+		if matter.Lifecycle == Canceled {
+			continue
+		}
+		sealed, err := trackerNodeSealed(ctx, v, matter)
+		if err != nil {
+			return "", false, err
+		}
+		if sealed {
+			sealedCount++
+			continue
+		}
+		return TrackerActive, true, nil
+	}
+	if sealedCount > 0 {
+		return TrackerCompleted, true, nil
+	}
+	return TrackerCanceled, true, nil
+}
+
+func trackerNodeSealed(ctx context.Context, v View, node Node) (bool, error) {
+	if node.Lifecycle != Done {
+		return false, nil
+	}
+	cur := node
+	for {
+		declared, err := v.GateDeclarations(ctx, cur.Repo)
+		if err != nil {
+			return false, err
+		}
+		closed, err := v.ClosedGates(ctx, cur.ID)
+		if err != nil {
+			return false, err
+		}
+		closedSet := make(map[string]bool, len(closed))
+		for _, gate := range closed {
+			closedSet[gate.Gate] = true
+		}
+		for _, gate := range declared {
+			if gate.Scale == cur.Kind && !closedSet[gate.Gate] {
+				return false, nil
+			}
+		}
+		if cur.Parent == "" {
+			return true, nil
+		}
+		cur, err = v.Node(ctx, cur.Parent)
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
 func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p TrackerStatePushed
 	if err := decodeStrict(ev, &p); err != nil {
@@ -702,7 +1028,7 @@ func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: %s has an invalid reference, disposition, or lease", ev.Type)
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE outbox_entries SET state='flushed',attempts=attempts+1,last_event=?
+		`UPDATE outbox_entries SET state='flushed',reason='',attempts=attempts+1,last_event=?
 		 WHERE id=? AND repo=? AND kind='state' AND state='approved' AND ref=?`,
 		ev.ID, ev.Subject, ev.Repo, p.Ref)
 	if err != nil {
@@ -751,7 +1077,7 @@ func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE outbox_entries SET state='flushed',attempts=attempts+1,last_event=?
+		`UPDATE outbox_entries SET state='flushed',reason='',attempts=attempts+1,last_event=?
 		 WHERE id=? AND repo=? AND kind='create' AND state IN ('queued','approved')`,
 		ev.ID, ev.Subject, ev.Repo)
 	if err != nil {
@@ -766,6 +1092,110 @@ func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
 		ev.ID, backlog, ev.Repo, ev.Subject)
 	if err != nil {
 		return fmt.Errorf("store: project %s stub: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func approveOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxApproved
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='approved',reason='',last_event=?
+		 WHERE id=? AND repo=? AND state='queued' AND attempts=0 AND reason=''`,
+		ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func declineOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxDeclined
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.Reason) == "" {
+		return fmt.Errorf("store: %s requires a reason", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='declined',reason=?,last_event=?
+		 WHERE id=? AND repo=? AND state IN ('queued','approved','withheld')`,
+		p.Reason, ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func withholdOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxWithheld
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.Reason) == "" {
+		return fmt.Errorf("store: %s requires a reason", ev.Type)
+	}
+	increment := 0
+	if p.Attempted {
+		increment = 1
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='withheld',reason=?,attempts=attempts+?,last_event=?
+		 WHERE id=? AND repo=? AND state='approved'`,
+		p.Reason, increment, ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func failOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxDeliveryFailed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.Reason) == "" {
+		return fmt.Errorf("store: %s requires a reason", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='queued',reason=?,attempts=attempts+1,last_event=?
+		 WHERE id=? AND repo=? AND state='approved'`,
+		p.Reason, ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func retryOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxRetried
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='approved',reason='',last_event=?
+		 WHERE id=? AND repo=?
+		   AND (state='withheld' OR (state='queued' AND attempts>0 AND reason<>''))`,
+		ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
+func flushOutboxComment(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p OutboxFlushed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='flushed',reason='',attempts=attempts+1,last_event=?
+		 WHERE id=? AND repo=? AND kind='comment' AND state='approved'`,
+		ev.ID, ev.Subject, ev.Repo)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	return exactlyRows(res, 1, ev)
 }

@@ -116,8 +116,15 @@ func ConfirmBacklogDelegation(ctx context.Context, s *store.Store, actor store.A
 	if ref == "" {
 		return wiperr.New("validation.missing-reference", "a creation confirmation needs a reference")
 	}
+	entry, err := s.OutboxEntry(ctx, repo, outbox)
+	if err != nil {
+		return err
+	}
+	if entry.Kind != "create" || entry.State != "approved" {
+		return wiperr.New("refusal.outbox-not-approved", fmt.Sprintf("refused — outbox entry %s is %s; creation confirmation requires approved", outbox, entry.State))
+	}
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	_, err := s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
+	_, err = s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
 		return []store.Draft{{
 			Type: store.TypeTrackerItemCreated, Subject: outbox,
 			Payload: store.TrackerItemCreated{Ref: ref},
