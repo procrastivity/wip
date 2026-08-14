@@ -13,6 +13,8 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/selftest"
+	"github.com/procrastivity/wip/internal/tracker"
+	githubtracker "github.com/procrastivity/wip/internal/tracker/github"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	batchverb "github.com/procrastivity/wip/internal/verbs/batch"
 	bindverb "github.com/procrastivity/wip/internal/verbs/bind"
@@ -46,6 +48,9 @@ import (
 // and every verb registered. It is the only place any verb package gets
 // imported — no ad hoc init() side effects live anywhere else.
 func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Command {
+	providers := tracker.NewRegistry()
+	providers.Register("github", githubtracker.Factory(githubtracker.Options{}))
+
 	root := &cobra.Command{
 		Use:   "wip",
 		Short: "wip — a personal, agent-friendly project-management CLI",
@@ -107,7 +112,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(lifecycleverb.PauseCommand(streams))
 	root.AddCommand(lifecycleverb.ResumeCommand(streams))
 	root.AddCommand(backlogverb.Command(streams))
-	root.AddCommand(outboxverb.Command(streams, nil))
+	root.AddCommand(outboxverb.Command(streams, providers))
 	root.AddCommand(batchverb.Command(streams))
 	root.AddCommand(runverb.Command(streams))
 	root.AddCommand(roleverb.Command(streams))

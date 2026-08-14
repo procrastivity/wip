@@ -65,8 +65,8 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 		t.Fatalf("decline: exit=%d payload=%+v stderr=%q", declined.exitCode, declinedEntry, declined.stderr)
 	}
 
-	// The stock binary deliberately has no provider adapter. Invoking flush
-	// refuses without changing durable approved work.
+	// No backend is configured. Invoking flush refuses without changing durable
+	// approved work.
 	flush := runIn(t, dir, dbEnv, "outbox", "flush", "--json")
 	if flush.exitCode == 0 || !strings.Contains(flush.stderr, "no provider seam configured") {
 		t.Fatalf("flush without seam: exit=%d stderr=%q", flush.exitCode, flush.stderr)
@@ -98,10 +98,34 @@ func TestManifestIncludesOutboxPlumbing(t *testing.T) {
 	if manifest.exitCode != 0 {
 		t.Fatalf("manifest: exit=%d stderr=%q", manifest.exitCode, manifest.stderr)
 	}
-	for _, name := range []string{"outbox list", "outbox level", "outbox approve", "outbox decline", "outbox retry", "outbox flush"} {
+	for _, name := range []string{"outbox list", "outbox level", "outbox backend", "outbox approve", "outbox decline", "outbox retry", "outbox flush"} {
 		if !strings.Contains(manifest.stdout, `"name":"`+name+`"`) {
 			t.Errorf("manifest is missing %q", name)
 		}
+	}
+}
+
+func TestOutboxBackendConfiguresRegisteredProvider(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	initial := runIn(t, dir, dbEnv, "outbox", "backend")
+	if initial.exitCode != 0 || initial.stdout != "none\n" {
+		t.Fatalf("initial backend: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
+	}
+	invalid := runIn(t, dir, dbEnv, "outbox", "backend", "gitlab")
+	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, `backend "gitlab" is not registered; available: github`) {
+		t.Fatalf("invalid backend: exit=%d stderr=%q", invalid.exitCode, invalid.stderr)
+	}
+	set := runIn(t, dir, dbEnv, "outbox", "backend", "github", "--json")
+	if set.exitCode != 0 || !strings.Contains(set.stdout, `"backend":"github"`) {
+		t.Fatalf("set backend: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
+	}
+	level := runIn(t, dir, dbEnv, "outbox", "level")
+	if level.exitCode != 0 || level.stdout != "boundary\n" {
+		t.Fatalf("backend default level: exit=%d stdout=%q stderr=%q", level.exitCode, level.stdout, level.stderr)
+	}
+	cleared := runIn(t, dir, dbEnv, "outbox", "backend", "none")
+	if cleared.exitCode != 0 || cleared.stdout != "none\n" {
+		t.Fatalf("clear backend: exit=%d stdout=%q stderr=%q", cleared.exitCode, cleared.stdout, cleared.stderr)
 	}
 }
 

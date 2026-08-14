@@ -1,12 +1,13 @@
 // Package outbox implements provider-neutral inspection and human lifecycle
-// actions. The flush command accepts an injected seam; the stock binary has no
-// concrete provider and therefore refuses flush until an adapter supplies one.
+// actions. Commands use an injected provider registry to resolve the configured
+// backend. The stock binary registers the GitHub provider in that registry.
 package outbox
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -19,13 +20,71 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the outbox command group. seam is deliberately injected;
-// nil means no provider adapter is configured.
-func Command(streams *iostreams.Streams, seam tracker.Seam) *cobra.Command {
+// Command constructs the outbox command group. providers is deliberately
+// injected at the CLI registration point.
+func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "outbox", Short: "inspect and disposition provider-neutral delivery work"}
-	cmd.AddCommand(listCommand(streams), levelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, seam))
+	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func backendCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "backend [none|name]",
+		Short: "read or set this repo's tracker backend",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		s, repo, err := openRepo(cmd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+
+		backend, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerBackendKey)
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 {
+			backend = strings.TrimSpace(args[0])
+			if backend == "none" {
+				backend = ""
+			}
+			if backend != "" {
+				known := false
+				for _, name := range providers.Names() {
+					if name == backend {
+						known = true
+						break
+					}
+				}
+				if !known {
+					return fmt.Errorf("tracker: backend %q is not registered; available: %s", backend, strings.Join(providers.Names(), ", "))
+				}
+			}
+			if err := s.SetConfig(cmd.Context(), repo.ID, store.TrackerBackendKey, backend); err != nil {
+				return err
+			}
+		}
+
+		if cliflags.FromContext(cmd.Context()).JSON {
+			b, err := json.Marshal(struct {
+				Backend string `json:"backend"`
+			}{backend})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, string(b))
+			return err
+		}
+		if backend == "" {
+			backend = "none"
+		}
+		_, err = fmt.Fprintln(streams.Out, backend)
+		return err
+	}
+	return plumbing(cmd)
 }
 
 func levelCommand(streams *iostreams.Streams) *cobra.Command {
@@ -194,7 +253,7 @@ func actionCommand(streams *iostreams.Streams, use, short string, fn action) *co
 	return plumbing(cmd)
 }
 
-func flushCommand(streams *iostreams.Streams, seam tracker.Seam) *cobra.Command {
+func flushCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "flush", Short: "flush approved work through the configured provider seam", Args: cobra.NoArgs}
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		s, repo, err := openRepo(cmd)
@@ -202,6 +261,17 @@ func flushCommand(streams *iostreams.Streams, seam tracker.Seam) *cobra.Command 
 			return err
 		}
 		defer func() { _ = s.Close() }()
+		backend, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerBackendKey)
+		if err != nil {
+			return err
+		}
+		if backend == "" {
+			return fmt.Errorf("tracker: no provider seam configured")
+		}
+		seam, err := providers.Resolve(backend, repo)
+		if err != nil {
+			return err
+		}
 		report, err := tracker.Flush(cmd.Context(), s, actor(cmd), repo.ID, seam)
 		if err != nil {
 			return err
