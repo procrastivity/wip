@@ -36,12 +36,102 @@ func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale s
 	if err != nil {
 		return err
 	}
+	for _, existing := range declared {
+		if existing.Gate == gate && existing.Scale != scale {
+			return wiperr.New("refusal.gate-scale-change", fmt.Sprintf(
+				"%s already binds to %s scale; declare a new gate name instead of changing it to %s",
+				gate, existing.Scale, scale))
+		}
+	}
 	if other, violates := guards.WouldViolate(declared, gate, scale); violates {
 		return wiperr.New("refusal.gate-order-violation",
 			guards.ViolationMessage(store.GateDeclaration{Gate: gate, Scale: scale}, other))
 	}
 
 	return s.DeclareGate(ctx, repo, gate, scale)
+}
+
+// RepairGateExemption restores one prospective exemption that a declaration
+// made before schema v8 could not snapshot. It accepts only a Done node at the
+// gate's bound scale whose other own and enclosing gates are already satisfied.
+// The repair is configuration and emits no event or false gate close.
+func RepairGateExemption(ctx context.Context, s *store.Store, repo, gate, locator string) (store.Node, error) {
+	n, err := ResolveNode(ctx, s.View, repo, locator)
+	if err != nil {
+		return store.Node{}, err
+	}
+	if n.Repo != repo {
+		return store.Node{}, wiperr.New("validation.unknown-locator", fmt.Sprintf("no node %s in this repo", locator))
+	}
+
+	declared, err := s.GateDeclarations(ctx, repo)
+	if err != nil {
+		return store.Node{}, err
+	}
+	var bound store.Scale
+	for _, d := range declared {
+		if d.Gate == gate {
+			bound = d.Scale
+			break
+		}
+	}
+	if bound == "" {
+		return store.Node{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+	}
+	if n.Kind != bound {
+		return store.Node{}, wiperr.New("refusal.gate-repair-scale", fmt.Sprintf(
+			"%s binds to %s scale and cannot exempt %s %s", gate, bound, n.Kind, locator))
+	}
+	if n.Lifecycle != store.Done {
+		return store.Node{}, wiperr.New("refusal.gate-repair-lifecycle", fmt.Sprintf(
+			"%s is %s; only Done nodes can receive a repaired gate exemption", locator, n.Lifecycle))
+	}
+
+	exempt, err := s.GateExempt(ctx, repo, n.ID, gate)
+	if err != nil {
+		return store.Node{}, err
+	}
+	if exempt {
+		return n, nil
+	}
+	satisfied, err := s.GateSatisfied(ctx, repo, n.ID, gate)
+	if err != nil {
+		return store.Node{}, err
+	}
+	if satisfied {
+		return store.Node{}, wiperr.New("refusal.gate-already-satisfied",
+			fmt.Sprintf("%s is already satisfied on %s", gate, locator))
+	}
+
+	cur := n
+	for {
+		for _, d := range declared {
+			if d.Scale != cur.Kind || (cur.ID == n.ID && d.Gate == gate) {
+				continue
+			}
+			ok, err := s.GateSatisfied(ctx, repo, cur.ID, d.Gate)
+			if err != nil {
+				return store.Node{}, err
+			}
+			if !ok {
+				return store.Node{}, wiperr.New("refusal.gate-repair-prerequisite", fmt.Sprintf(
+					"%s was not sealed before %s became operative: %s is open on %s",
+					locator, gate, d.Gate, cur.Locator))
+			}
+		}
+		if cur.Parent == "" {
+			break
+		}
+		cur, err = s.Node(ctx, cur.Parent)
+		if err != nil {
+			return store.Node{}, err
+		}
+	}
+
+	if err := s.RepairGateExemption(ctx, repo, gate, n.ID); err != nil {
+		return store.Node{}, err
+	}
+	return n, nil
 }
 
 // CloseGate closes a declared gate against a node. The recorded scale is
@@ -76,6 +166,14 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 	}
 	if !found {
 		return store.Node{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+	}
+	satisfied, err := s.GateSatisfied(ctx, repo, n.ID, gate)
+	if err != nil {
+		return store.Node{}, err
+	}
+	if satisfied {
+		return store.Node{}, wiperr.New("refusal.gate-already-satisfied",
+			fmt.Sprintf("%s is already satisfied on %s", gate, locator))
 	}
 
 	// Gate config drives role activation (D14), and ownership is the other

@@ -70,7 +70,7 @@ func (s *Store) SetTrackerPushLevel(ctx context.Context, repo, value string) (Tr
 	return level, nil
 }
 
-// Project config, and the one documented exception to "everything durable is a
+// Project config, and the documented exception to "everything durable is a
 // projection of the log."
 //
 // Gates are **declared up front**, per project, statically knowable and never
@@ -80,7 +80,7 @@ func (s *Store) SetTrackerPushLevel(ctx context.Context, repo, value string) (Tr
 // Matters earn): it binds to the Repo tier and lives in the store (D42, D54),
 // distinct from `chassis`'s tool config on disk.
 //
-// So these two tables are written directly, and Rebuild leaves them untouched.
+// These tables are written directly, and Rebuild leaves them untouched.
 // The seam is deliberate and narrow: config says how the project is *set up*,
 // the log says what *happened*, and a rebuild reconstructs only the latter.
 
@@ -110,7 +110,10 @@ func (v View) Config(ctx context.Context, repo, key string) (string, bool, error
 	return value, true, nil
 }
 
-// DeclareGate binds a gate to a scale for a Repo (D4, D12).
+// DeclareGate binds a gate to a scale for a Repo (D4, D12). At schema v8 and
+// later, the first declaration also exempts every node at that scale that was
+// already sealed under the prior declaration set. The declaration and its
+// snapshot land in one transaction and emit no event.
 //
 // The store holds gate state at any scale (see gate_state) because MODEL §9 puts
 // gate bindings and gate state at Matter, Stage and Step. That is a storage
@@ -130,11 +133,122 @@ func (s *Store) DeclareGate(ctx context.Context, repo, gate string, scale Scale)
 	if gate == "" {
 		return fmt.Errorf("store: a gate declaration needs a gate name")
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO gate_declarations (repo, gate, scale) VALUES (?, ?, ?)
-		 ON CONFLICT (repo, gate) DO UPDATE SET scale = excluded.scale`,
+	if s.version < 8 {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO gate_declarations (repo, gate, scale) VALUES (?, ?, ?)
+			 ON CONFLICT (repo, gate) DO UPDATE SET scale = excluded.scale`,
+			repo, gate, string(scale)); err != nil {
+			return fmt.Errorf("store: declare gate %s for %s: %w", gate, repo, err)
+		}
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin gate declaration %s for %s: %w", gate, repo, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existing Scale
+	err = tx.QueryRowContext(ctx,
+		`SELECT scale FROM gate_declarations WHERE repo=? AND gate=?`, repo, gate).Scan(&existing)
+	switch {
+	case err == nil && existing == scale:
+		return nil
+	case err == nil:
+		return fmt.Errorf("store: gate %s for %s already binds to %s scale; changing it to %s is refused",
+			gate, repo, existing, scale)
+	case err != sql.ErrNoRows:
+		return fmt.Errorf("store: read gate declaration %s for %s: %w", gate, repo, err)
+	}
+
+	exempt, err := sealedNodesAtScale(ctx, tx, repo, scale)
+	if err != nil {
+		return fmt.Errorf("store: snapshot gate declaration %s for %s: %w", gate, repo, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO gate_declarations (repo, gate, scale) VALUES (?, ?, ?)`,
 		repo, gate, string(scale)); err != nil {
 		return fmt.Errorf("store: declare gate %s for %s: %w", gate, repo, err)
 	}
+	for _, node := range exempt {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gate_exemptions (repo,gate,node) VALUES (?,?,?)`, repo, gate, node); err != nil {
+			return fmt.Errorf("store: exempt %s from gate %s for %s: %w", node, gate, repo, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit gate declaration %s for %s: %w", gate, repo, err)
+	}
 	return nil
+}
+
+// RepairGateExemption adds one exemption that a declaration made before schema
+// v8 could not snapshot. The write is project configuration, emits no event,
+// and is intentionally separate from DeclareGate so a repeated declaration
+// can never extend its original applicability boundary.
+//
+// The write surface owns the incident-repair preconditions. This store method
+// only makes the validated config write idempotent and preserves referential
+// integrity.
+func (s *Store) RepairGateExemption(ctx context.Context, repo, gate, node string) error {
+	if s.version < 8 {
+		return fmt.Errorf("store: gate exemptions require schema v8")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO gate_exemptions (repo,gate,node) VALUES (?,?,?)
+		 ON CONFLICT (repo,gate,node) DO NOTHING`, repo, gate, node); err != nil {
+		return fmt.Errorf("store: repair exemption for gate %s on %s: %w", gate, node, err)
+	}
+	return nil
+}
+
+// sealedNodesAtScale returns the live Done nodes whose own and enclosing gate
+// declarations are satisfied before a new declaration becomes operative.
+func sealedNodesAtScale(ctx context.Context, tx *sql.Tx, repo string, scale Scale) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE
+		candidates(id) AS (
+			SELECT id FROM nodes
+			WHERE repo=? AND kind=? AND lifecycle='done' AND tombstone_event IS NULL
+		),
+		ancestry(candidate,node) AS (
+			SELECT id,id FROM candidates
+			UNION ALL
+			SELECT a.candidate,n.parent
+			FROM ancestry a JOIN nodes n ON n.id=a.node
+			WHERE n.parent IS NOT NULL
+		)
+		SELECT c.id
+		FROM candidates c
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM ancestry a
+			JOIN nodes n ON n.id=a.node
+			JOIN gate_declarations d ON d.repo=? AND d.scale=n.kind
+			WHERE a.candidate=c.id
+			  AND NOT EXISTS (
+				SELECT 1 FROM gate_state s WHERE s.node=n.id AND s.gate=d.gate)
+			  AND NOT EXISTS (
+				SELECT 1 FROM gate_exemptions x
+				WHERE x.repo=? AND x.node=n.id AND x.gate=d.gate)
+		)
+		ORDER BY c.id`, repo, string(scale), repo, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

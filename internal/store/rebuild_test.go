@@ -17,8 +17,8 @@ import (
 //
 //   - a rebuild reproduces the maintained projection column for column, over a
 //     history that exercises every rule there is;
-//   - config and gate declarations are the documented exception and a rebuild
-//     leaves them alone (D4, D54);
+//   - config, gate declarations, and prospective gate exemptions are the
+//     documented exception and a rebuild leaves them alone (D4, D54);
 //   - the log itself is untouched by a rebuild;
 //   - a projection row cannot appear, move backwards, or be deleted except the way
 //     the shape says, and the substrate is what says so rather than this package;
@@ -512,13 +512,15 @@ func TestRebuildRestoresACorruptedProjection(t *testing.T) {
 	h.wantSameProjection("after rebuilding a corrupted projection", sound, h.snapshotProjection())
 }
 
-// TestRebuildLeavesConfigAndGateDeclarationsAlone is the documented exception.
+// TestRebuildLeavesGateConfigurationAlone is the documented exception.
 //
 // Declaring a gate is configuration and not something that happened (D4, D54), so
-// there is no event to fold and a rebuild that cleared these two tables would
-// destroy data the log cannot restore. The seam: config says how the project is
-// set up, the log says what happened, a rebuild reconstructs only the latter.
-func TestRebuildLeavesConfigAndGateDeclarationsAlone(t *testing.T) {
+// there is no event to fold. Prospective gate exemptions record the static
+// declaration boundary and are configuration for the same reason. A rebuild
+// that cleared these tables would destroy data the log cannot restore. The seam:
+// config says how the project is set up, the log says what happened, a rebuild
+// reconstructs only the latter.
+func TestRebuildLeavesGateConfigurationAlone(t *testing.T) {
 	h := newHarness(t)
 	richHistory(h)
 
@@ -530,9 +532,10 @@ func TestRebuildLeavesConfigAndGateDeclarationsAlone(t *testing.T) {
 	}
 	config := h.rowsOf("config", "")
 	declarations := h.rowsOf("gate_declarations", "")
-	if len(config) < 2 || len(declarations) < 2 {
-		t.Fatalf("the fixture wrote %d config rows and %d declarations; both must be non-trivial",
-			len(config), len(declarations))
+	exemptions := h.rowsOf("gate_exemptions", "")
+	if len(config) < 2 || len(declarations) < 2 || len(exemptions) == 0 {
+		t.Fatalf("the fixture wrote %d config rows, %d declarations, and %d exemptions; all must be non-trivial",
+			len(config), len(declarations), len(exemptions))
 	}
 
 	if err := h.Rebuild(h.ctx); err != nil {
@@ -542,7 +545,7 @@ func TestRebuildLeavesConfigAndGateDeclarationsAlone(t *testing.T) {
 	for _, table := range []struct {
 		name   string
 		before []map[string]string
-	}{{"config", config}, {"gate_declarations", declarations}} {
+	}{{"config", config}, {"gate_declarations", declarations}, {"gate_exemptions", exemptions}} {
 		after := h.rowsOf(table.name, "")
 		if len(after) != len(table.before) {
 			t.Errorf("%s holds %d rows after a rebuild, held %d", table.name, len(after), len(table.before))

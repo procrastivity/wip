@@ -996,16 +996,15 @@ func trackerNodeSealed(ctx context.Context, v View, node Node) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		closed, err := v.ClosedGates(ctx, cur.ID)
-		if err != nil {
-			return false, err
-		}
-		closedSet := make(map[string]bool, len(closed))
-		for _, gate := range closed {
-			closedSet[gate.Gate] = true
-		}
 		for _, gate := range declared {
-			if gate.Scale == cur.Kind && !closedSet[gate.Gate] {
+			if gate.Scale != cur.Kind {
+				continue
+			}
+			satisfied, err := v.GateSatisfied(ctx, cur.Repo, cur.ID, gate.Gate)
+			if err != nil {
+				return false, err
+			}
+			if !satisfied {
 				return false, nil
 			}
 		}

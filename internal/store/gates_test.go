@@ -213,9 +213,9 @@ func TestTheDogfoodDeclaresExactlyOneGate(t *testing.T) {
 // directions.
 //
 // Neither half requires the other: the store will hold a close for a gate nobody
-// declared (it is storage, and `guards` owns the precondition), and a declaration
-// takes effect against Matters that finished long before it existed. What binds
-// them is `archived_matters`, and only there.
+// declared (it is storage, and `guards` owns the precondition), while a later
+// declaration exempts Matters that were already sealed. What binds them is
+// `archived_matters`, and only there.
 func TestDeclaringAGateAndClosingOneAreSeparateFacts(t *testing.T) {
 	h := newHarness(t)
 
@@ -238,22 +238,125 @@ func TestDeclaringAGateAndClosingOneAreSeparateFacts(t *testing.T) {
 	}
 	h.wantArchive("declared after it was closed", matter)
 
-	// A second declaration un-seals it, with no event and no write to the
-	// projection: config is consulted by the predicate every time it is asked.
+	// A second declaration snapshots the already-sealed Matter. It writes no
+	// event and does not manufacture a gate close.
 	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
 		t.Fatalf("declare the second gate: %v", err)
 	}
-	h.wantArchive("a second matter-scale gate declared and open")
+	h.wantArchive("a second matter-scale gate declared prospectively", matter)
 	h.closeGate(matter, "reviewed-local", ScaleMatter)
 	h.wantArchive("both declared gates closed", matter)
 
-	// Re-declaring one of them at another scale un-seals it again — the predicate
-	// asks for matter-scale gates, and a gate that no longer binds to Matters is
-	// no longer one of them.
-	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleStep); err != nil {
-		t.Fatalf("re-declare the gate at Step scale: %v", err)
+	// A scale change would destroy the first declaration's static boundary.
+	refusalMentions(t, "re-declaring the gate at Step scale",
+		h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleStep), "changing it to step is refused")
+	h.wantArchive("after the refused scale change", matter)
+}
+
+func TestProspectiveDeclarationExemptsOnlyAlreadySealedNodes(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatalf("declare the prior gate: %v", err)
 	}
-	h.wantArchive("one of the two gates re-bound to Steps", matter)
+
+	sealed := h.matter("sealed-before", "Sealed before the new declaration")
+	h.start(sealed)
+	h.finish(sealed)
+	h.closeGate(sealed, "reviewed-local", ScaleMatter)
+
+	unsealed := h.matter("unsealed-before", "Done but unsealed before the new declaration")
+	h.start(unsealed)
+	h.finish(unsealed)
+
+	before, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleMatter); err != nil {
+		t.Fatalf("declare the prospective gate: %v", err)
+	}
+	after, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("the declaration appended %d events, want none", len(after)-len(before))
+	}
+
+	for _, tc := range []struct {
+		node string
+		want bool
+	}{
+		{sealed, true},
+		{unsealed, false},
+	} {
+		got, err := h.GateExempt(h.ctx, h.Repo, tc.node, "verified")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("GateExempt(%s, verified) = %v, want %v", tc.node, got, tc.want)
+		}
+	}
+	h.wantArchive("after the prospective declaration", sealed)
+
+	// Completing an old unsealed Matter after the boundary does not extend the
+	// snapshot, even when the same declaration is repeated.
+	h.closeGate(unsealed, "reviewed-local", ScaleMatter)
+	if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleMatter); err != nil {
+		t.Fatalf("repeat the same declaration: %v", err)
+	}
+	exempt, err := h.GateExempt(h.ctx, h.Repo, unsealed, "verified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exempt {
+		t.Error("same-scale redeclaration extended the original exemption snapshot")
+	}
+
+	// Work born after the boundary is subject to the gate too.
+	later := h.matter("born-later", "Created after the new declaration")
+	h.start(later)
+	h.finish(later)
+	h.closeGate(later, "reviewed-local", ScaleMatter)
+	h.wantArchive("with old and later unverified work", sealed)
+}
+
+func TestProspectiveDeclarationSnapshotsSealedNodesAtChildScale(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatalf("declare the enclosing gate: %v", err)
+	}
+
+	sealedMatter := h.matter("sealed-parent", "A sealed parent")
+	h.closeGate(sealedMatter, "reviewed-local", ScaleMatter)
+	sealedStep := h.step(sealedMatter, "step-01", "A sealed Step")
+	h.start(sealedStep)
+	h.finish(sealedStep)
+
+	openMatter := h.matter("open-parent", "A parent with its gate open")
+	openStep := h.step(openMatter, "step-01", "A locally complete but unsealed Step")
+	h.start(openStep)
+	h.finish(openStep)
+
+	if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleStep); err != nil {
+		t.Fatalf("declare the Step gate: %v", err)
+	}
+	for _, tc := range []struct {
+		node string
+		want bool
+	}{
+		{sealedStep, true},
+		{openStep, false},
+	} {
+		got, err := h.GateExempt(h.ctx, h.Repo, tc.node, "verified")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("GateExempt(%s, verified) = %v, want %v", tc.node, got, tc.want)
+		}
+	}
 }
 
 // TestAGateClosesAtTheScaleOfItsSubject holds the payload's scale to the node it

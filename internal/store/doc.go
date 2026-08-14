@@ -15,8 +15,9 @@
 //     maintained in the same transaction as the append and rebuildable from
 //     the log alone (Store.Rebuild).
 //   - The one documented exception is Repo-tier *config*, including gate
-//     declarations: declaring a gate is configuration, not an event (D4, D54),
-//     so those tables are primary data and Rebuild leaves them alone.
+//     declarations and their prospective exemptions. Declaring or repairing a
+//     gate boundary is configuration, not an event (D4, D54), so those tables
+//     are primary data and Rebuild leaves them alone.
 //
 // Two consequences are the whole point of the shape, and both are structural
 // rather than conventional:

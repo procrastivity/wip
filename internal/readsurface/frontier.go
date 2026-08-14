@@ -77,16 +77,12 @@ func gatesClosedAt(ctx context.Context, v store.View, repo string, scale store.S
 	if len(names) == 0 {
 		return true, nil // D62: an empty declaration set completes at Done.
 	}
-	closed, err := v.ClosedGates(ctx, node)
-	if err != nil {
-		return false, err
-	}
-	isClosed := make(map[string]bool, len(closed))
-	for _, c := range closed {
-		isClosed[c.Gate] = true
-	}
 	for _, name := range names {
-		if !isClosed[name] {
+		satisfied, err := v.GateSatisfied(ctx, repo, node, name)
+		if err != nil {
+			return false, err
+		}
+		if !satisfied {
 			return false, nil
 		}
 	}

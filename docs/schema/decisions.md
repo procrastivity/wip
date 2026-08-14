@@ -153,14 +153,14 @@ correctly-attributed cascade in the log as wrong. Two Matters to amend, not one.
   moves a Matter into archived state," but D55 makes *sealed* a predicate over
   lifecycle and gates rather than a state or a frame, and there is no `*.sealed`
   event to project. `archived_matters` computes it: Done, with every
-  matter-scale gate its Repo declares closed against it. Finish and gate-close
-  stay order-independent, which is what a predicate expresses and a state would
-  not.
+  matter-scale gate its Repo declares satisfied by a close or a prospective
+  declaration exemption. Finish and gate-close stay order-independent, which is
+  what a predicate expresses and a state would not.
 - **Gate declarations and project config are the one non-projection exception.**
-  Declaring a gate is configuration (D4, D54) and emits no event, so there is
-  nothing to fold and `Rebuild` must leave those two tables alone. The seam:
-  config says how the project is set up, the log says what happened, a rebuild
-  reconstructs only the latter.
+  Declaring a gate and recording its prospective exemptions are configuration
+  (D4, D54) and emit no event. There is nothing to fold, so `Rebuild` must leave
+  those three tables alone. The seam: config says how the project is set up, the
+  log says what happened, a rebuild reconstructs only the latter.
 - **Content rows are segments.** Create-once kinds (brief, workplan, body) are
   constrained to exactly one live segment by a partial unique index; findings
   accumulate one segment per `content.appended`, and a read concatenates them in
@@ -427,10 +427,10 @@ rather than over three samples, D51 stated as what a reorder does *not* move, an
 divergence above that *contradicted* the Brief's own text is now folded into it:
 the taxonomy as a table rather than an open token column, one `nodes` table
 discriminated by `kind`, Archive as a predicate and a view rather than a state,
-`edges_in_force` as the second view, config and gate declarations (and the
-taxonomy table) as the exceptions to "every durable table is a projection", the
-actor-in-cascade resolution, and "stage equivalents" as a real bar rather than
-four `INSERT`s. Four more went in because a Matter reading only the Brief would
+`edges_in_force` as the second view, config, gate declarations, gate exemptions,
+and the taxonomy table as the exceptions to "every durable table is a projection",
+the actor-in-cascade resolution, and "stage equivalents" as a real bar rather
+than four `INSERT`s. Four more went in because a Matter reading only the Brief would
 otherwise get them wrong: the write path (`Commit`/Drafts/`Cause`/`ErrNoEvent`,
 and that `Tx` cannot write), that lifecycle payloads carry both states and a
 transition that could not have happened is refused at write time, that the two

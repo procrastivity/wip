@@ -1002,13 +1002,12 @@ func TestDeclareGateValidatesItsScale(t *testing.T) {
 		}
 	}
 
-	// A gate is one row per (repo, gate): re-declaring moves its scale rather than
-	// leaving two answers behind.
-	if err := h.DeclareGate(h.ctx, h.Repo, "matter-gate", ScaleStep); err != nil {
-		t.Fatalf("re-declare a gate at another scale: %v", err)
-	}
-	h.wantRow("a re-declared gate", "gate_declarations", "repo = ? AND gate = 'matter-gate'",
-		[]any{h.Repo}, map[string]any{"repo": h.Repo, "gate": "matter-gate", "scale": ScaleStep})
+	// The first declaration fixes the prospective applicability boundary. A
+	// different policy needs a new gate name rather than a scale change.
+	refusalMentions(t, "re-declaring a gate at another scale",
+		h.DeclareGate(h.ctx, h.Repo, "matter-gate", ScaleStep), "changing it to step is refused")
+	h.wantRow("the original gate binding", "gate_declarations", "repo = ? AND gate = 'matter-gate'",
+		[]any{h.Repo}, map[string]any{"repo": h.Repo, "gate": "matter-gate", "scale": ScaleMatter})
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,13 +1031,12 @@ func TestAMatterSealsWhenItIsDoneWithItsDeclaredGatesClosed(t *testing.T) {
 	h.finish(matter)
 	h.wantArchive("a Matter Done whose Repo declares no gate", matter)
 
-	// A declaration is configuration and takes effect immediately, because sealing
-	// is computed and not stored: declaring a gate un-seals a Matter that has not
-	// closed it, which a stored state could not express.
+	// The declaration is prospective. The Matter was already sealed, so the
+	// declaration snapshots an exemption instead of unsealing completed work.
 	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
 		t.Fatalf("declare the gate: %v", err)
 	}
-	h.wantArchive("a Matter Done with a matter-scale gate open")
+	h.wantArchive("a Matter sealed before the declaration", matter)
 
 	h.closeGate(matter, "reviewed-local", ScaleMatter)
 	h.wantArchive("a Matter Done with its gate closed", matter)

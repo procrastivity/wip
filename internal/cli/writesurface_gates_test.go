@@ -61,6 +61,131 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	}
 }
 
+func TestGateDeclare_IsProspectiveAndRefusesScaleChanges(t *testing.T) {
+	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
+	dir := newGitRepo(t, "widget")
+	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
+		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Already sealed", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	if r := runIn(t, dir, dbEnv, "gate", "declare", "verified", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("declare prospective gate: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	s := openTestStore(t, dbEnvPath(dbEnv))
+	repo := repoIDFromWorkingDir(t, s, dir)
+	exempt, err := s.GateExempt(context.Background(), repo, m.ID, "verified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exempt {
+		t.Fatal("the already-sealed Matter has no prospective gate exemption")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	closeResult := runIn(t, dir, dbEnv, "gate", "close", "verified", m.Locator, "--json")
+	if closeResult.exitCode != 3 {
+		t.Fatalf("close exempt gate: exit=%d, want 3; stderr=%q", closeResult.exitCode, closeResult.stderr)
+	}
+	var closeEnvelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(closeResult.stderr), &closeEnvelope); err != nil {
+		t.Fatalf("decode close refusal: %v", err)
+	}
+	if closeEnvelope.Error.Code != "refusal.gate-already-satisfied" {
+		t.Errorf("close refusal code = %q, want refusal.gate-already-satisfied", closeEnvelope.Error.Code)
+	}
+
+	change := runIn(t, dir, dbEnv, "gate", "declare", "verified", "--scale", "step", "--json")
+	if change.exitCode != 3 {
+		t.Fatalf("change gate scale: exit=%d, want 3; stderr=%q", change.exitCode, change.stderr)
+	}
+	var changeEnvelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(change.stderr), &changeEnvelope); err != nil {
+		t.Fatalf("decode scale-change refusal: %v", err)
+	}
+	if changeEnvelope.Error.Code != "refusal.gate-scale-change" {
+		t.Errorf("scale-change refusal code = %q, want refusal.gate-scale-change", changeEnvelope.Error.Code)
+	}
+}
+
+func TestGateRepair_AddsLegacyExemptionWithoutAnEvent(t *testing.T) {
+	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
+	dir := newGitRepo(t, "widget")
+	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
+		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, gate := range []string{"reviewed-local", "verified"} {
+		if r := runIn(t, dir, dbEnv, "gate", "declare", gate, "--scale", "matter"); r.exitCode != 0 {
+			t.Fatalf("declare %s: exit=%d stderr=%q", gate, r.exitCode, r.stderr)
+		}
+	}
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Legacy sealed", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
+		t.Fatalf("close reviewed-local: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	s := openTestStore(t, dbEnvPath(dbEnv))
+	before, err := s.Events(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := runIn(t, dir, dbEnv, "gate", "repair", "verified", m.Locator, "--json")
+	if r.exitCode != 0 {
+		t.Fatalf("repair verified: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	var got struct {
+		Gate  string `json:"gate"`
+		Node  string `json:"node"`
+		Scale string `json:"scale"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
+		t.Fatalf("decode repair output: %v", err)
+	}
+	if got.Gate != "verified" || got.Node != m.ID || got.Scale != "matter" {
+		t.Fatalf("repair output = %+v", got)
+	}
+
+	s = openTestStore(t, dbEnvPath(dbEnv))
+	after, err := s.Events(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("gate repair appended %d events, want none", len(after)-len(before))
+	}
+	repo := repoIDFromWorkingDir(t, s, dir)
+	exempt, err := s.GateExempt(context.Background(), repo, m.ID, "verified")
+	if err != nil || !exempt {
+		t.Fatalf("repaired exemption = %v, err=%v", exempt, err)
+	}
+}
+
 func TestGateClose_OneEventRightSubjectAndScale(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
 	dir := newGitRepo(t, "widget")

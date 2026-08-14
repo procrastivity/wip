@@ -411,6 +411,41 @@ func (v View) GateDeclarations(ctx context.Context, repo string) ([]GateDeclarat
 	return out, nil
 }
 
+// GateExempt reports whether a prospective declaration snapshot satisfies one
+// gate for one node without a gate.closed event.
+func (v View) GateExempt(ctx context.Context, repo, node, gate string) (bool, error) {
+	if v.schemaVersion < 8 {
+		return false, nil
+	}
+	var exempt bool
+	if err := v.q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM gate_exemptions WHERE repo=? AND node=? AND gate=?)`,
+		repo, node, gate).Scan(&exempt); err != nil {
+		return false, fmt.Errorf("store: read gate exemption %s on %s: %w", gate, node, err)
+	}
+	return exempt, nil
+}
+
+// GateSatisfied reports whether a gate has a projected close or a prospective
+// declaration exemption for one node.
+func (v View) GateSatisfied(ctx context.Context, repo, node, gate string) (bool, error) {
+	var satisfied bool
+	if v.schemaVersion < 8 {
+		if err := v.q.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM gate_state WHERE node=? AND gate=?)`, node, gate).Scan(&satisfied); err != nil {
+			return false, fmt.Errorf("store: read gate satisfaction %s on %s: %w", gate, node, err)
+		}
+		return satisfied, nil
+	}
+	if err := v.q.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM gate_state WHERE node=? AND gate=?)
+		OR EXISTS(SELECT 1 FROM gate_exemptions WHERE repo=? AND node=? AND gate=?)`,
+		node, gate, repo, node, gate).Scan(&satisfied); err != nil {
+		return false, fmt.Errorf("store: read gate satisfaction %s on %s: %w", gate, node, err)
+	}
+	return satisfied, nil
+}
+
 // ---------------------------------------------------------------------------
 // Cursor, tiers, batch, dispatch, backlog, archive
 // ---------------------------------------------------------------------------

@@ -584,16 +584,15 @@ func (p *pass) matterSealed(ctx context.Context, matter store.Node) (bool, error
 	if err != nil {
 		return false, err
 	}
-	closed, err := p.s.ClosedGates(ctx, matter.ID)
-	if err != nil {
-		return false, err
-	}
-	isClosed := map[string]bool{}
-	for _, g := range closed {
-		isClosed[g.Gate] = true
-	}
 	for _, d := range declared {
-		if d.Scale == store.ScaleMatter && !isClosed[d.Gate] {
+		if d.Scale != store.ScaleMatter {
+			continue
+		}
+		satisfied, err := p.s.GateSatisfied(ctx, matter.Repo, matter.ID, d.Gate)
+		if err != nil {
+			return false, err
+		}
+		if !satisfied {
 			return false, nil
 		}
 	}

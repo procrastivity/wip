@@ -21,19 +21,15 @@ func sealSweepDraft(ctx context.Context, tx *store.Tx, matterID string, willFini
 	if err != nil {
 		return store.Draft{}, false, err
 	}
-	closed, err := tx.ClosedGates(ctx, matter.ID)
-	if err != nil {
-		return store.Draft{}, false, err
-	}
-	closedNames := make(map[string]bool, len(closed)+1)
-	for _, gate := range closed {
-		closedNames[gate.Gate] = true
-	}
-	if closingGate != "" {
-		closedNames[closingGate] = true
-	}
 	for _, declaration := range declarations {
-		if declaration.Scale == store.ScaleMatter && !closedNames[declaration.Gate] {
+		if declaration.Scale != store.ScaleMatter || declaration.Gate == closingGate {
+			continue
+		}
+		satisfied, err := tx.GateSatisfied(ctx, matter.Repo, matter.ID, declaration.Gate)
+		if err != nil {
+			return store.Draft{}, false, err
+		}
+		if !satisfied {
 			return store.Draft{}, false, nil
 		}
 	}

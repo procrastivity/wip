@@ -1,4 +1,5 @@
-// Package gate implements `wip gate declare` and `wip gate close`. Per
+// Package gate implements `wip gate declare`, `wip gate repair`, and `wip gate
+// close`. Per
 // `vocabulary` step-02, there is no bespoke `review` verb — every gate
 // close, including a local review, goes through this command.
 package gate
@@ -19,13 +20,13 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip gate` parent command and its two verbs.
+// Command constructs the `wip gate` parent command and its verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gate",
-		Short: "declare and close gates (MODEL §2.3)",
+		Short: "declare, repair, and close gates (MODEL §2.3)",
 	}
-	cmd.AddCommand(declareCommand(streams), closeCommand(streams))
+	cmd.AddCommand(declareCommand(streams), repairCommand(streams), closeCommand(streams))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -45,6 +46,43 @@ func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {
 		return nil, store.Repo{}, err
 	}
 	return s, repo, nil
+}
+
+func repairCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "repair <gate-name> <locator>",
+		Short: "repair a missed prospective exemption without closing the gate",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			n, err := writesurface.RepairGateExemption(cmd.Context(), s, repo.ID, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				b, err := json.Marshal(struct {
+					Gate  string `json:"gate"`
+					Node  string `json:"node"`
+					Scale string `json:"scale"`
+				}{Gate: args[0], Node: n.ID, Scale: string(n.Kind)})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+			_, err = fmt.Fprintf(streams.Out, "repaired %s exemption on %s\n", args[0], args[1])
+			return err
+		},
+	}
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
 }
 
 func declareCommand(streams *iostreams.Streams) *cobra.Command {
