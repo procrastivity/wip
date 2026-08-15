@@ -10,6 +10,7 @@ package readsurface
 
 import (
 	"context"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 )
@@ -170,6 +171,81 @@ func CollapseReady(ctx context.Context, v store.View, ready []store.Node) ([]sto
 		}
 	}
 	return out, nil
+}
+
+// CollapseFinished narrows a finished list to the sealed frontier, symmetric
+// to CollapseReady: any Sealed entry with an ancestor (walked via
+// Node.Parent) that is also Sealed and in the list is dropped, so a sealed
+// Matter absorbs its own sealed subtree and appears alone. A partly sealed
+// Stage stays expanded automatically — its unsealed children are never
+// dropped, since the map only marks Sealed entries and an unsealed child
+// never matches. Canceled nodes never appear here at all (status renders
+// only InProgress/Done/Planned, MODEL §2.3), so no collapsing policy is
+// needed for them. Preserve input order (D51: presentation-only). exempt
+// names node IDs never dropped regardless — the cursor node and its
+// ancestors, so collapsing never erases the one orientation mark `status`
+// draws (a cursor on a sealed node is already dangling per D67, but dangling
+// is shown, not hidden); nil means no exemptions.
+func CollapseFinished(ctx context.Context, v store.View, finished []Finished, exempt map[string]bool) ([]Finished, error) {
+	sealedByID := make(map[string]bool, len(finished))
+	for _, f := range finished {
+		sealedByID[f.Node.ID] = f.Sealed
+	}
+	var out []Finished
+	for _, f := range finished {
+		drop := false
+		if f.Sealed && !exempt[f.Node.ID] {
+			for cur := f.Node; cur.Parent != ""; {
+				parent, err := v.Node(ctx, cur.Parent)
+				if err != nil {
+					return nil, err
+				}
+				if sealedByID[parent.ID] {
+					drop = true
+					break
+				}
+				cur = parent
+			}
+		}
+		if !drop {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// SealedAt is the sealed-time proxy: there is no `*.sealed` event because
+// sealed is the predicate above, not a state, so "when" is the max of (a)
+// the node's own scale-correct `*.finished` event time and (b) the latest
+// ClosedAt among its closed gates. Either alone can be the later one —
+// finish-then-gate-close and gate-close-then-finish are both legal orders
+// (D62's order-independence). The bool result is false only when neither
+// exists, which should not happen for a node this package already reports
+// Sealed, but the caller decides what to do with that.
+func SealedAt(ctx context.Context, v store.View, n store.Node) (time.Time, bool, error) {
+	var finishedType string
+	switch n.Kind {
+	case store.ScaleMatter:
+		finishedType = store.TypeMatterFinished
+	case store.ScaleStage:
+		finishedType = store.TypeStageFinished
+	case store.ScaleStep:
+		finishedType = store.TypeStepFinished
+	}
+	at, ok, err := v.LastEventAt(ctx, n.ID, []string{finishedType})
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	gates, err := v.ClosedGates(ctx, n.ID)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	for _, g := range gates {
+		if !ok || g.ClosedAt.After(at) {
+			at, ok = g.ClosedAt, true
+		}
+	}
+	return at, ok, nil
 }
 
 // Finished is one Done node (MODEL §1's "finished" third), marked sealed vs.

@@ -25,6 +25,7 @@ import (
 
 // Command constructs the `wip status` verb.
 func Command(streams *iostreams.Streams) *cobra.Command {
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "show what's in progress, finished, and next to start",
@@ -59,7 +60,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				}
 			}
 
-			content, err := contentByRepo(cmd.Context(), s, view)
+			content, err := contentByRepo(cmd.Context(), s, view, readsurface.ContentOptions{All: all, Cursor: cursorNode})
 			if err != nil {
 				return err
 			}
@@ -70,6 +71,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			return renderHuman(cmd.Context(), streams, s.View, view, content, cursorNode)
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "show every finished node: expand sealed subtrees and include old sealed matters")
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -77,14 +79,14 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 // contentByRepo computes read-surface's founding-question content for every
 // Repo the tier-scoped view is about to render — the single current Repo, or
 // every Repo on the host in the host-wide case.
-func contentByRepo(ctx context.Context, s *store.Store, view tiers.StatusView) (map[string]readsurface.RepoContent, error) {
+func contentByRepo(ctx context.Context, s *store.Store, view tiers.StatusView, opts readsurface.ContentOptions) (map[string]readsurface.RepoContent, error) {
 	out := map[string]readsurface.RepoContent{}
 	repos := view.Repos
 	if !view.HostWide {
 		repos = []tiers.RepoStatus{view.Repo}
 	}
 	for _, rs := range repos {
-		c, err := readsurface.Content(ctx, s.View, rs.Repo.ID)
+		c, err := readsurface.Content(ctx, s.View, rs.Repo.ID, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -134,6 +136,9 @@ type contentJSON struct {
 	Finished   []finishedJSON `json:"finished"`
 	Ready      []nodeJSON     `json:"ready"`
 	Blocked    []blockedJSON  `json:"blocked"`
+	// HiddenSealedMatters mirrors RepoContent.HiddenSealedMatters: sealed
+	// Matters the default (non `--all`) view hid for recency.
+	HiddenSealedMatters int `json:"hiddenSealedMatters,omitempty"`
 }
 
 type repoJSON struct {
@@ -190,6 +195,7 @@ func toContentJSON(ctx context.Context, v store.View, c readsurface.RepoContent,
 		}
 		out.Blocked = append(out.Blocked, bj)
 	}
+	out.HiddenSealedMatters = c.HiddenSealedMatters
 	return out, nil
 }
 
@@ -298,7 +304,16 @@ func renderRepo(ctx context.Context, streams *iostreams.Streams, v store.View, r
 		lines func() ([]string, error)
 	}{
 		{"in progress", func() ([]string, error) { return nodeLines(ctx, v, c.InProgress, cursorNode) }},
-		{"finished", func() ([]string, error) { return finishedLines(ctx, v, c.Finished, cursorNode) }},
+		{"finished", func() ([]string, error) {
+			lines, err := finishedLines(ctx, v, c.Finished, cursorNode)
+			if err != nil {
+				return nil, err
+			}
+			if c.HiddenSealedMatters > 0 {
+				lines = append(lines, fmt.Sprintf("  … %d more sealed matter(s) · wip status --all", c.HiddenSealedMatters))
+			}
+			return lines, nil
+		}},
 		{"next to start", func() ([]string, error) { return nodeLines(ctx, v, c.Ready, cursorNode) }},
 		{"blocked", func() ([]string, error) { return blockedLines(ctx, v, c.Blocked, cursorNode) }},
 	}

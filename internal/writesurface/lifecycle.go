@@ -131,12 +131,13 @@ func Start(ctx context.Context, s *store.Store, actor store.Actor, repo, locator
 }
 
 // simpleTransition is Finish/Cancel/Pause/Resume's shared shape: one node,
-// one event, no cascade.
-func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, repo, locator, action string, from, to store.Lifecycle) (store.Node, error) {
-	return simpleTransitionEnv(ctx, s, actor, store.Env{Repo: repo}, locator, action, from, to)
+// one event, no cascade. reason is set only by Cancel; every other caller
+// passes "".
+func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, repo, locator, action string, from, to store.Lifecycle, reason string) (store.Node, error) {
+	return simpleTransitionEnv(ctx, s, actor, store.Env{Repo: repo}, locator, action, from, to, reason)
 }
 
-func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator, action string, from, to store.Lifecycle) (store.Node, error) {
+func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator, action string, from, to store.Lifecycle, reason string) (store.Node, error) {
 	repo := env.Repo
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
@@ -164,7 +165,7 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 		drafts := []store.Draft{{
 			Type:    lifecycleEvents[action][fresh.Kind],
 			Subject: fresh.ID,
-			Payload: store.Transition{From: from, To: to, TrackerPushLevel: level},
+			Payload: store.Transition{From: from, To: to, TrackerPushLevel: level, Reason: reason},
 		}}
 		if action == "finished" && fresh.Kind == store.ScaleMatter {
 			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, true, ""); err != nil {
@@ -183,26 +184,28 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 
 // Finish moves a node from InProgress to Done.
 func Finish(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string) (store.Node, error) {
-	return simpleTransition(ctx, s, actor, repo, locator, "finished", store.InProgress, store.Done)
+	return simpleTransition(ctx, s, actor, repo, locator, "finished", store.InProgress, store.Done, "")
 }
 
 // FinishWithEnv is Finish with the caller's full Env, so a sealing Matter
 // finish can sweep its anonymous Batch with correct event dimensions.
 func FinishWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (store.Node, error) {
-	return simpleTransitionEnv(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done)
+	return simpleTransitionEnv(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done, "")
 }
 
-// Cancel moves a node from InProgress to Canceled.
-func Cancel(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string) (store.Node, error) {
-	return simpleTransition(ctx, s, actor, repo, locator, "canceled", store.InProgress, store.Canceled)
+// Cancel moves a node from InProgress to Canceled. reason is optional and
+// records why the work ended without sealing; empty leaves the payload
+// byte-identical to the pre-reason shape (`omitempty`).
+func Cancel(ctx context.Context, s *store.Store, actor store.Actor, repo, locator, reason string) (store.Node, error) {
+	return simpleTransition(ctx, s, actor, repo, locator, "canceled", store.InProgress, store.Canceled, reason)
 }
 
 // Pause moves a node from InProgress to Paused.
 func Pause(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string) (store.Node, error) {
-	return simpleTransition(ctx, s, actor, repo, locator, "paused", store.InProgress, store.Paused)
+	return simpleTransition(ctx, s, actor, repo, locator, "paused", store.InProgress, store.Paused, "")
 }
 
 // Resume moves a node from Paused back to InProgress.
 func Resume(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string) (store.Node, error) {
-	return simpleTransition(ctx, s, actor, repo, locator, "resumed", store.Paused, store.InProgress)
+	return simpleTransition(ctx, s, actor, repo, locator, "resumed", store.Paused, store.InProgress, "")
 }

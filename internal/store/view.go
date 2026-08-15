@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -1314,6 +1316,36 @@ func (v View) ArchivedMatters(ctx context.Context, repo string) ([]Node, error) 
 // id is the order (D44, D51).
 func (v View) Events(ctx context.Context) ([]Event, error) {
 	return v.eventList(ctx, `SELECT `+eventColumns+` FROM events ORDER BY id`)
+}
+
+// LastEventAt returns the occurred_at of the latest event about one subject
+// whose type is among the given types, and whether one exists. A pure read of
+// the log; latest means highest id, because the id is the order (D44).
+func (v View) LastEventAt(ctx context.Context, subject string, types []string) (time.Time, bool, error) {
+	if len(types) == 0 {
+		return time.Time{}, false, nil
+	}
+	placeholders := strings.Repeat(",?", len(types))[1:]
+	args := make([]any, 0, len(types)+1)
+	args = append(args, subject)
+	for _, t := range types {
+		args = append(args, t)
+	}
+	var at string
+	err := v.q.QueryRowContext(ctx,
+		`SELECT occurred_at FROM events WHERE subject = ? AND type IN (`+placeholders+`)
+		 ORDER BY id DESC LIMIT 1`, args...).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: read the last event time of %s: %w", subject, err)
+	}
+	ts, err := time.Parse(timestampLayout, at)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: event about %s carries an unreadable timestamp %q: %w", subject, at, err)
+	}
+	return ts.UTC(), true, nil
 }
 
 // EventsOfSubject returns every event about one entity, in order. It resolves by
