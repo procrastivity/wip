@@ -126,6 +126,25 @@ set. `TestNext_DanglingCursor_Sealed` also pins D67's other half — the read
 never moves the cursor itself — by asserting the `cursor.moved` count is
 unchanged after a `Next` call that discovers a dangling target.
 
+**Amendment, 2026-08-15 — the sixth result is a choice, not a defect.** The
+name "dangling" reads as something gone wrong; the cursor's target ending
+(sealed, canceled, or removed) is just the ordinary moment its work is done.
+`readsurface.Kind`'s sixth value is renamed `ChooseNext` (`View.EndedReason`
+for the old `DanglingReason`; the JSON `kind` moves from `"dangling"` to
+`"choose-next"`, a soft break accepted rather than carried forward), and its
+view now also lists in-progress work alongside the ready candidates — the
+same repo-scoped fetch `noCursorView` already made, factored once into
+`chooseNextView` so the two never diverge. `wip next --clear` joins `--set`
+as the other explicit answer to "what's next": it clears the cursor with the
+same `cursor.moved` (empty `Node`) the schema already supported, is a no-op
+success when the cursor is already clear, and is mutually exclusive with
+`--set` at the flag level. Separately, `readsurface.EndedCursor` gives
+`finish`, `gate close`, and `cancel` a best-effort, strictly post-commit,
+read-only hand-off line naming a ready sibling step when one exists — these
+write verbs still never move or clear the cursor themselves; D67 stands. The
+hand-off is a suggestion printed alongside the write's own result, not a
+repair.
+
 ## Session's two-pass derivation for D59's discount rule
 
 "Neither extends a working period nor bridges an idle gap" (D59, for
