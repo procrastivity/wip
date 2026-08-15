@@ -23,4 +23,6 @@ one's decisions as *their* input. When in doubt, start with steps and
 findings; prose can be added when it is earned, but a Matter is never
 blocked on prose nobody needs. The working cadence within any shape is
 the same: `wip start` → `wip next --set` → do the work → `wip finding
-add` for each decision the diff cannot show → `wip finish`.
+add` for each decision the diff cannot show → `wip finish` → `wip next`
+to see what's next, then `wip next --set` it or `wip next --clear` if it
+is genuinely undecided — surface the choice, never invent one.

@@ -2,8 +2,8 @@ package readsurface
 
 // Tests for step-04: `next` resolving each of vocabulary's five drafted
 // output shapes — including the no-cursor and everything-sealed cases — plus
-// D67's dangling-cursor extension, and the invariant that a read verb
-// repairs nothing (a dangling cursor is reported, never moved).
+// D67's choose-next extension, and the invariant that a read verb repairs
+// nothing (an ended cursor is reported, never moved).
 
 import (
 	"testing"
@@ -187,10 +187,10 @@ func TestNext_InProgressNoCursor(t *testing.T) {
 	}
 }
 
-// TestNext_DanglingCursor_Sealed is D67: the cursor's target has itself
-// become sealed since it was set — reported as a fact, and the cursor is
-// never moved by a read.
-func TestNext_DanglingCursor_Sealed(t *testing.T) {
+// TestNext_ChooseNext_Sealed is D67: the cursor's target has itself become
+// sealed since it was set — reported as a fact, and the cursor is never
+// moved by a read.
+func TestNext_ChooseNext_Sealed(t *testing.T) {
 	f := newFixture(t)
 	f.declareGate("reviewed-local", store.ScaleMatter)
 	m := f.matter("m", "A Matter")
@@ -207,11 +207,11 @@ func TestNext_DanglingCursor_Sealed(t *testing.T) {
 	f.closeGate(m, "reviewed-local", store.ScaleMatter)
 
 	view := nextFor(t, f, cur)
-	if view.Kind != Dangling {
-		t.Fatalf("Kind = %v, want Dangling", view.Kind)
+	if view.Kind != ChooseNext {
+		t.Fatalf("Kind = %v, want ChooseNext", view.Kind)
 	}
-	if view.DanglingReason != "sealed" {
-		t.Errorf("DanglingReason = %q, want %q", view.DanglingReason, "sealed")
+	if view.EndedReason != "sealed" {
+		t.Errorf("EndedReason = %q, want %q", view.EndedReason, "sealed")
 	}
 	if len(view.Candidates) != 1 || view.Candidates[0].ID != other {
 		t.Errorf("Candidates = %+v, want [other]", view.Candidates)
@@ -223,9 +223,9 @@ func TestNext_DanglingCursor_Sealed(t *testing.T) {
 	}
 }
 
-// TestNext_DanglingCursor_Canceled and TestNext_DanglingCursor_Removed cover
-// D67's other two dangling reasons.
-func TestNext_DanglingCursor_Canceled(t *testing.T) {
+// TestNext_ChooseNext_Canceled and TestNext_ChooseNext_Removed cover D67's
+// other two ended-cursor reasons.
+func TestNext_ChooseNext_Canceled(t *testing.T) {
 	f := newFixture(t)
 	m := f.matter("m", "Abandoned after the cursor was set")
 	f.start(m)
@@ -236,12 +236,12 @@ func TestNext_DanglingCursor_Canceled(t *testing.T) {
 	f.cancel(m)
 
 	view := nextFor(t, f, cur)
-	if view.Kind != Dangling || view.DanglingReason != "canceled" {
-		t.Errorf("Kind/Reason = %v/%q, want Dangling/canceled", view.Kind, view.DanglingReason)
+	if view.Kind != ChooseNext || view.EndedReason != "canceled" {
+		t.Errorf("Kind/Reason = %v/%q, want ChooseNext/canceled", view.Kind, view.EndedReason)
 	}
 }
 
-func TestNext_DanglingCursor_Removed(t *testing.T) {
+func TestNext_ChooseNext_Removed(t *testing.T) {
 	f := newFixture(t)
 	m := f.matter("m", "Host Matter")
 	step := f.step(m, "step-01", "Removed after the cursor was set")
@@ -252,8 +252,39 @@ func TestNext_DanglingCursor_Removed(t *testing.T) {
 	f.remove(step)
 
 	view := nextFor(t, f, cur)
-	if view.Kind != Dangling || view.DanglingReason != "removed" {
-		t.Errorf("Kind/Reason = %v/%q, want Dangling/removed", view.Kind, view.DanglingReason)
+	if view.Kind != ChooseNext || view.EndedReason != "removed" {
+		t.Errorf("Kind/Reason = %v/%q, want ChooseNext/removed", view.Kind, view.EndedReason)
+	}
+}
+
+// TestNext_ChooseNext_ListsInProgress checks the choose-next reframing's own
+// addition: alongside the ready candidates, the view also lists work already
+// under way — the same repo-scoped fetch noCursorView makes, factored once
+// into chooseNextView.
+func TestNext_ChooseNext_ListsInProgress(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("m", "Sealed after the cursor was set")
+	other := f.matter("other", "Started with no plan — in progress, not ready")
+	f.start(m)
+	f.start(other)
+
+	cur := f.current()
+	if _, err := SetCursorForTest(f, cur, m); err != nil {
+		t.Fatal(err)
+	}
+	f.finish(m)
+	f.closeGate(m, "reviewed-local", store.ScaleMatter)
+
+	view := nextFor(t, f, cur)
+	if view.Kind != ChooseNext {
+		t.Fatalf("Kind = %v, want ChooseNext", view.Kind)
+	}
+	if len(view.Candidates) != 0 {
+		t.Errorf("Candidates = %+v, want none (other is In Progress, not Planned)", view.Candidates)
+	}
+	if len(view.InProgress) != 1 || view.InProgress[0].ID != other {
+		t.Errorf("InProgress = %+v, want [other]", view.InProgress)
 	}
 }
 

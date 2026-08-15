@@ -184,8 +184,9 @@ func CollapseReady(ctx context.Context, v store.View, ready []store.Node) ([]sto
 // needed for them. Preserve input order (D51: presentation-only). exempt
 // names node IDs never dropped regardless — the cursor node and its
 // ancestors, so collapsing never erases the one orientation mark `status`
-// draws (a cursor on a sealed node is already dangling per D67, but dangling
-// is shown, not hidden); nil means no exemptions.
+// draws (a cursor on a sealed node has ended per D67's choose-next
+// reframing, but an ended cursor is shown, not hidden); nil means no
+// exemptions.
 func CollapseFinished(ctx context.Context, v store.View, finished []Finished, exempt map[string]bool) ([]Finished, error) {
 	sealedByID := make(map[string]bool, len(finished))
 	for _, f := range finished {

@@ -53,8 +53,8 @@ type RepoContent struct {
 
 // cursorExemptions names the cursor node and its live ancestors — the rows
 // collapsing and recency-hiding must leave alone so the cursor mark (and the
-// Matter row standing above it) stays visible. A dangling cursor (a node the
-// store no longer resolves) yields no exemptions rather than an error:
+// Matter row standing above it) stays visible. A cursor the store no longer
+// resolves (D67's "removed" case) yields no exemptions rather than an error:
 // orientation is best-effort, never a status failure.
 func cursorExemptions(ctx context.Context, v store.View, cursor string) (map[string]bool, error) {
 	if cursor == "" {

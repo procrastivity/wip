@@ -1,8 +1,10 @@
 package readsurface
 
 // Step-04: `wip next` — the cursor fused with the frontier, producing
-// exactly vocabulary's five drafted outputs plus the dangling-cursor case
-// D67 makes first-class. `next` needs a resolved current Clone + Worktree
+// exactly vocabulary's five drafted outputs plus the choose-next case D67
+// makes first-class (reframed from "dangling": the cursor's work ending is
+// not a defect, it is the forward-looking moment `wip next --set` or `wip
+// next --clear` resolves). `next` needs a resolved current Clone + Worktree
 // (unlike `status`, it does not inherit `tiers`'s host-wide carve-out) and
 // composes over Frontier/FinishedNodes/LocallyComplete/Sealed — the same
 // logic `status` (step-03) consumes, so the two verbs never diverge on what
@@ -14,9 +16,8 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
-// Kind discriminates NextView's five ratified shapes plus the dangling-
-// cursor extension D67 makes first-class — six results, never a guess among
-// them.
+// Kind discriminates NextView's five ratified shapes plus the choose-next
+// extension D67 makes first-class — six results, never a guess among them.
 type Kind int
 
 const (
@@ -41,10 +42,13 @@ const (
 	// started with no plan, before any `wip next --set`). Reported as its own
 	// shape so output 5 is never reused for a state it does not describe.
 	InProgressNoCursor
-	// Dangling is D67's first-class result: the cursor's target is
-	// tombstoned, Canceled, or sealed. next reports the fact and the
-	// unblocked candidates, and never moves the cursor itself.
-	Dangling
+	// ChooseNext is D67's first-class result, reframed from "dangling": the
+	// cursor's target is tombstoned, Canceled, or sealed — its work is done,
+	// and what comes next is a forward-looking choice, not a repair. next
+	// reports the fact plus the unblocked candidates and the in-progress
+	// work, and never moves the cursor itself; `wip next --set` or `wip next
+	// --clear` (an explicit "leave it open") are the two ways to answer.
+	ChooseNext
 )
 
 // View is what `next` renders. Only the fields its Kind calls for are
@@ -52,7 +56,7 @@ const (
 type View struct {
 	Kind Kind
 
-	// BareMatter / Positioned / Dangling's own target.
+	// BareMatter / Positioned / ChooseNext's own target.
 	Node    store.Node
 	Address string
 	Stage   *StagePosition // Positioned only, and only when a Stage groups the Step
@@ -62,12 +66,12 @@ type View struct {
 	Unmet []store.Node
 	Met   []store.Node
 
-	// Dangling's own reason: "sealed", "canceled", or "removed" — the last
+	// ChooseNext's own reason: "sealed", "canceled", or "removed" — the last
 	// naming a tombstoned target, since a removed node cannot be resolved by
 	// identity into anything more specific than "gone".
-	DanglingReason string
+	EndedReason string
 
-	// NoCursor / Dangling's candidate list — the ready frontier, repo-scoped.
+	// NoCursor / ChooseNext's candidate list — the ready frontier, repo-scoped.
 	Candidates []store.Node
 
 	// NothingUnblocked's list: what's still waiting, and on what.
@@ -76,8 +80,9 @@ type View struct {
 	// EverythingSealed's nudge.
 	BacklogCount int
 
-	// InProgressNoCursor's list: what is actively In Progress, repo-scoped —
-	// distinct from Candidates, which is always the ready frontier.
+	// InProgressNoCursor's and ChooseNext's list: what is actively In
+	// Progress, repo-scoped — distinct from Candidates, which is always the
+	// ready frontier.
 	InProgress []store.Node
 }
 
@@ -121,21 +126,38 @@ func next(ctx context.Context, v store.View, cur Current) (View, error) {
 	target, err := v.Node(ctx, node)
 	if err != nil {
 		// Tombstoned or otherwise unresolvable: the target is gone (D44), and
-		// that is exactly the dangling case, not an error next propagates.
-		return View{Kind: Dangling, DanglingReason: "removed", Candidates: readyInRepo}, nil
+		// that is exactly the choose-next case, not an error next propagates.
+		return chooseNextView(ctx, v, repo, store.Node{}, "removed", readyInRepo)
 	}
 	if target.Lifecycle == store.Canceled {
-		return View{Kind: Dangling, Node: target, DanglingReason: "canceled", Candidates: readyInRepo}, nil
+		return chooseNextView(ctx, v, repo, target, "canceled", readyInRepo)
 	}
 	sealed, err := Sealed(ctx, v, target)
 	if err != nil {
 		return View{}, err
 	}
 	if sealed {
-		return View{Kind: Dangling, Node: target, DanglingReason: "sealed", Candidates: readyInRepo}, nil
+		return chooseNextView(ctx, v, repo, target, "sealed", readyInRepo)
 	}
 
 	return positionedView(ctx, v, target)
+}
+
+// chooseNextView composes ChooseNext's shared shape for next()'s three
+// ended-cursor returns (removed, canceled, sealed) — factored once so they
+// never diverge on what "the choice" includes: the ready frontier the caller
+// already computed, plus in-progress work fetched and repo-filtered the same
+// way noCursorView does it, so a choose-next report never omits work already
+// under way just because nothing new is Planned.
+func chooseNextView(ctx context.Context, v store.View, repo string, node store.Node, reason string, candidates []store.Node) (View, error) {
+	inProgress, err := v.InProgress(ctx)
+	if err != nil {
+		return View{}, err
+	}
+	return View{
+		Kind: ChooseNext, Node: node, EndedReason: reason,
+		Candidates: candidates, InProgress: filterByRepo(inProgress, repo),
+	}, nil
 }
 
 func noCursorView(ctx context.Context, v store.View, repo string, ready []store.Node, blocked []Blocked) (View, error) {
@@ -270,4 +292,47 @@ func setCursor(ctx context.Context, s *store.Store, actor store.Actor, cur Curre
 		return store.Node{}, err
 	}
 	return target, nil
+}
+
+// ClearCursor implements `wip next --clear`: the explicit "leave what's next
+// undecided" write D67's choose-next reframing offers beside `--set` —
+// attention is allowed to be nowhere on purpose (D38), and this is how a
+// caller says so out loud rather than just letting a stale cursor sit. It
+// resolves Current from dir and clears the cursor for the current Clone +
+// Worktree, mirroring SetCursor minus locator resolution: there is no target
+// to resolve when the write is "point at nothing."
+func ClearCursor(ctx context.Context, s *store.Store, actor store.Actor, dir string) (previous string, err error) {
+	cur, err := ResolveCurrent(ctx, s, actor, dir)
+	if err != nil {
+		return "", err
+	}
+	return clearCursor(ctx, s, actor, cur)
+}
+
+// clearCursor is ClearCursor's write path against an already-resolved
+// Current — factored out for the same test-seam reason setCursor is.
+// Clearing an already-clear cursor is a no-op success: there is nothing to
+// move and no cursor.moved to add, so the commit is skipped entirely rather
+// than emitting a vacuous event (previous == "" is itself the "already
+// clear" signal a caller can render on).
+func clearCursor(ctx context.Context, s *store.Store, actor store.Actor, cur Current) (previous string, err error) {
+	node, set, err := Cursor(ctx, s.View, cur)
+	if err != nil {
+		return "", err
+	}
+	if !set {
+		return "", nil
+	}
+
+	req := store.Request{Actor: actor, Env: cur.Env()}
+	if _, err := s.Commit(ctx, req, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeCursorMoved,
+			Subject: cur.Worktree.ID,
+			Payload: store.CursorMoved{Node: "", Previous: node},
+		}}, nil
+	}); err != nil {
+		return "", err
+	}
+	return node, nil
 }

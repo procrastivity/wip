@@ -14,12 +14,40 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/readsurface"
 	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
+
+// cursorEndedJSON is the `cursorEnded` field a JSON payload gains when a
+// write ends the cursor's own work (finish, cancel, gate close) — the same
+// shape gate's closeCommand builds independently, since the two packages
+// share no JSON types by convention (each verb owns its own wire shape).
+type cursorEndedJSON struct {
+	Reason    string `json:"reason"`
+	Target    string `json:"target,omitempty"`
+	Suggested string `json:"suggested,omitempty"`
+}
+
+// handoff computes the best-effort hand-off line and JSON fragment after a
+// write that may have ended the cursor's work, strictly post-commit and
+// read-only (D67: the write itself never moves the cursor). ok is false —
+// and both other returns are zero — whenever there is nothing to report;
+// callers render nothing in that case, human or JSON.
+func handoff(ctx context.Context, v store.View, clone, worktree string) (line string, j *cursorEndedJSON, ok bool) {
+	ended, l, targetAddr, ok := readsurface.Handoff(ctx, v, clone, worktree)
+	if !ok {
+		return "", nil, false
+	}
+	c := cursorEndedJSON{Reason: ended.Reason, Target: targetAddr}
+	if ended.Suggested != nil {
+		c.Suggested = ended.Suggested.Locator
+	}
+	return l, &c, true
+}
 
 func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {
 	dir, err := os.Getwd()
@@ -139,18 +167,25 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 			if err != nil {
 				return err
 			}
+			line, ce, ok := handoff(cmd.Context(), s.View, cur.Clone.ID, cur.Worktree.ID)
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					ID        string `json:"id"`
-					Lifecycle string `json:"lifecycle"`
-				}{n.ID, string(n.Lifecycle)})
+					ID          string           `json:"id"`
+					Lifecycle   string           `json:"lifecycle"`
+					CursorEnded *cursorEndedJSON `json:"cursorEnded,omitempty"`
+				}{n.ID, string(n.Lifecycle), ce})
 				if err != nil {
 					return err
 				}
 				_, err = fmt.Fprintln(streams.Out, string(b))
 				return err
 			}
-			_, err = fmt.Fprintf(streams.Out, "%s %s\n", verbWord, args[0])
+			if _, err := fmt.Fprintf(streams.Out, "%s %s\n", verbWord, args[0]); err != nil {
+				return err
+			}
+			if ok {
+				_, err = fmt.Fprintln(streams.Out, line)
+			}
 			return err
 		}}
 		surface.Annotate(cmd, surface.Plumbing)
@@ -186,18 +221,39 @@ func CancelCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Best-effort hand-off, resolved fresh here rather than threaded
+			// through openRepo: cancel is the one lifecycle verb that never
+			// needed a resolved Current for its own write, and a failure to
+			// resolve one now (e.g. no known Worktree) means no hand-off,
+			// never a cancel failure (D67: read-only, post-commit).
+			var line string
+			var ce *cursorEndedJSON
+			var ok bool
+			if dir, derr := os.Getwd(); derr == nil {
+				if cur, cerr := render.ResolveCurrent(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir); cerr == nil {
+					line, ce, ok = handoff(cmd.Context(), s.View, cur.Clone.ID, cur.Worktree.ID)
+				}
+			}
+
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					ID        string `json:"id"`
-					Lifecycle string `json:"lifecycle"`
-				}{ID: node.ID, Lifecycle: string(node.Lifecycle)})
+					ID          string           `json:"id"`
+					Lifecycle   string           `json:"lifecycle"`
+					CursorEnded *cursorEndedJSON `json:"cursorEnded,omitempty"`
+				}{ID: node.ID, Lifecycle: string(node.Lifecycle), CursorEnded: ce})
 				if err != nil {
 					return err
 				}
 				_, err = fmt.Fprintln(streams.Out, string(b))
 				return err
 			}
-			_, err = fmt.Fprintf(streams.Out, "%s %s\n", "canceled", args[0])
+			if _, err := fmt.Fprintf(streams.Out, "%s %s\n", "canceled", args[0]); err != nil {
+				return err
+			}
+			if ok {
+				_, err = fmt.Fprintln(streams.Out, line)
+			}
 			return err
 		},
 	}

@@ -5,6 +5,7 @@
 package gate
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,12 +14,25 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/readsurface"
 	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
+
+// cursorEndedJSON is the `cursorEnded` field a JSON `gate close` payload
+// gains when the close ended the cursor's own work — including via
+// descendant sealing at Matter scale, since readsurface.EndedCursor
+// evaluates the cursor's *target* state, not whether it was this close's own
+// subject. Mirrors lifecycle's own cursorEndedJSON; the two packages share
+// no JSON types by convention.
+type cursorEndedJSON struct {
+	Reason    string `json:"reason"`
+	Target    string `json:"target,omitempty"`
+	Suggested string `json:"suggested,omitempty"`
+}
 
 // Command constructs the `wip gate` parent command and its verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
@@ -148,22 +162,50 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Best-effort hand-off, strictly post-commit and read-only
+			// (D67): a Matter-scale close can seal Done descendants,
+			// including the cursor's own target, even when the cursor never
+			// pointed at args[1] — readsurface.Handoff evaluates the
+			// cursor's target state fresh, not this close's own subject.
+			line, ce, ok := gateHandoff(cmd.Context(), s.View, cur.Clone.ID, cur.Worktree.ID)
+
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					Gate  string `json:"gate"`
-					Node  string `json:"node"`
-					Scale string `json:"scale"`
-				}{Gate: args[0], Node: n.ID, Scale: string(n.Kind)})
+					Gate        string           `json:"gate"`
+					Node        string           `json:"node"`
+					Scale       string           `json:"scale"`
+					CursorEnded *cursorEndedJSON `json:"cursorEnded,omitempty"`
+				}{Gate: args[0], Node: n.ID, Scale: string(n.Kind), CursorEnded: ce})
 				if err != nil {
 					return err
 				}
 				_, err = fmt.Fprintln(streams.Out, string(b))
 				return err
 			}
-			_, err = fmt.Fprintf(streams.Out, "closed %s on %s\n", args[0], args[1])
+			if _, err := fmt.Fprintf(streams.Out, "closed %s on %s\n", args[0], args[1]); err != nil {
+				return err
+			}
+			if ok {
+				_, err = fmt.Fprintln(streams.Out, line)
+			}
 			return err
 		},
 	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+// gateHandoff wraps readsurface.Handoff into this package's own
+// cursorEndedJSON shape, the same conversion lifecycle's own handoff does.
+func gateHandoff(ctx context.Context, v store.View, clone, worktree string) (line string, j *cursorEndedJSON, ok bool) {
+	ended, l, targetAddr, ok := readsurface.Handoff(ctx, v, clone, worktree)
+	if !ok {
+		return "", nil, false
+	}
+	c := cursorEndedJSON{Reason: ended.Reason, Target: targetAddr}
+	if ended.Suggested != nil {
+		c.Suggested = ended.Suggested.Locator
+	}
+	return l, &c, true
 }

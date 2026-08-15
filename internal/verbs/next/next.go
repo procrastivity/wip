@@ -1,7 +1,9 @@
-// Package next implements `wip next` and `wip next --set <locator>` —
-// read-surface's fusion of the personal cursor with the durable unblocked
-// frontier (MODEL §1), producing vocabulary's five drafted outputs plus the
-// dangling-cursor case D67 makes first-class.
+// Package next implements `wip next`, `wip next --set <locator>` and `wip
+// next --clear` — read-surface's fusion of the personal cursor with the
+// durable unblocked frontier (MODEL §1), producing vocabulary's five
+// drafted outputs plus the choose-next case D67 makes first-class:
+// forward-looking, never a defect, and answered by naming a target
+// (`--set`) or explicitly leaving it open (`--clear`).
 package next
 
 import (
@@ -23,6 +25,7 @@ import (
 // Command constructs `wip next`.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	var set string
+	var clearCursor bool
 	cmd := &cobra.Command{
 		Use:   "next",
 		Short: "the cursor fused with the unblocked frontier — what to work on next",
@@ -47,6 +50,13 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				}
 				return renderSet(cmd.Context(), streams, s.View, flags.JSON, node)
 			}
+			if clearCursor {
+				previous, err := readsurface.ClearCursor(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
+				if err != nil {
+					return err
+				}
+				return renderClear(streams, flags.JSON, previous)
+			}
 
 			actor := store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole)
 
@@ -70,6 +80,8 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&set, "set", "", "move the cursor to <locator>, emitting cursor.moved")
+	cmd.Flags().BoolVar(&clearCursor, "clear", false, "clear the cursor — leave what's next undecided")
+	cmd.MarkFlagsMutuallyExclusive("set", "clear")
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -94,8 +106,28 @@ func renderSet(ctx context.Context, streams *iostreams.Streams, v store.View, js
 	return err
 }
 
+// renderClear renders `wip next --clear` — the explicit "leave it open"
+// write. previous is "" both when there was no cursor to clear (a no-op
+// success, readsurface.ClearCursor's contract) and, in JSON mode, omitted
+// entirely rather than printed as an empty string.
+func renderClear(streams *iostreams.Streams, jsonMode bool, previous string) error {
+	if jsonMode {
+		b, err := json.Marshal(struct {
+			Cleared  bool   `json:"cleared"`
+			Previous string `json:"previous,omitempty"`
+		}{Cleared: true, Previous: previous})
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(streams.Out, string(b))
+		return err
+	}
+	_, err := fmt.Fprintln(streams.Out, "cursor cleared — everything open")
+	return err
+}
+
 // ---------------------------------------------------------------------------
-// Human rendering — vocabulary's five drafted outputs, plus the dangling case.
+// Human rendering — vocabulary's five drafted outputs, plus the choose-next case.
 // ---------------------------------------------------------------------------
 
 func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View) error {
@@ -171,30 +203,41 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 		}
 		return nil
 
-	case readsurface.Dangling:
-		reason := view.DanglingReason
-		target := "a node"
-		if view.Node.ID != "" {
+	case readsurface.ChooseNext:
+		if view.EndedReason == "removed" {
+			if _, err := fmt.Fprintln(streams.Out, "the cursor's target is removed — choose what's next"); err != nil {
+				return err
+			}
+		} else {
 			addr, _, err := readsurface.Address(ctx, v, view.Node)
 			if err != nil {
 				return err
 			}
-			target = addr
-		}
-		if _, err := fmt.Fprintf(streams.Out, "cursor points at %s, which is %s — pick a new one\n", target, reason); err != nil {
-			return err
+			if _, err := fmt.Fprintf(streams.Out, "%s is %s — choose what's next\n", addr, view.EndedReason); err != nil {
+				return err
+			}
 		}
 		if len(view.Candidates) == 0 {
-			_, err := fmt.Fprintln(streams.Out, "  nothing unblocked")
-			return err
+			if _, err := fmt.Fprintln(streams.Out, "  nothing unblocked"); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(streams.Out, "%d unblocked:\n", len(view.Candidates)); err != nil {
+				return err
+			}
+			if err := printCandidates(ctx, streams, v, view.Candidates); err != nil {
+				return err
+			}
 		}
-		if _, err := fmt.Fprintf(streams.Out, "%d unblocked:\n", len(view.Candidates)); err != nil {
-			return err
+		if len(view.InProgress) > 0 {
+			if _, err := fmt.Fprintf(streams.Out, "%d in progress:\n", len(view.InProgress)); err != nil {
+				return err
+			}
+			if err := printCandidates(ctx, streams, v, view.InProgress); err != nil {
+				return err
+			}
 		}
-		if err := printCandidates(ctx, streams, v, view.Candidates); err != nil {
-			return err
-		}
-		_, err := fmt.Fprintln(streams.Out, "pick one: wip next --set <locator>")
+		_, err := fmt.Fprintln(streams.Out, "set the cursor: wip next --set <locator> — or leave it open: wip next --clear")
 		return err
 
 	default:
@@ -295,7 +338,7 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 		readsurface.NoCursor:           "no-cursor",
 		readsurface.EverythingSealed:   "everything-sealed",
 		readsurface.InProgressNoCursor: "in-progress-no-cursor",
-		readsurface.Dangling:           "dangling",
+		readsurface.ChooseNext:         "choose-next",
 	}[view.Kind]
 
 	payload := struct {
@@ -309,10 +352,10 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 		Blocked []blockedJ `json:"blocked,omitempty"`
 		Backlog int        `json:"backlogUnprocessed,omitempty"`
 		InProg  []nodeJSON `json:"inProgress,omitempty"`
-	}{Kind: kind, Reason: view.DanglingReason, Backlog: view.BacklogCount}
+	}{Kind: kind, Reason: view.EndedReason, Backlog: view.BacklogCount}
 
 	if view.Kind == readsurface.BareMatter || view.Kind == readsurface.Positioned ||
-		(view.Kind == readsurface.Dangling && view.Node.ID != "") {
+		(view.Kind == readsurface.ChooseNext && view.Node.ID != "") {
 		n, err := toNodeJSON(ctx, v, view.Node)
 		if err != nil {
 			return err
