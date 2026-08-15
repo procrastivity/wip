@@ -164,10 +164,46 @@ func FinishCommand(streams *iostreams.Streams) *cobra.Command {
 		writesurface.FinishWithEnv, "finished")(streams)
 }
 
-// CancelCommand constructs `wip cancel <locator>`.
+// CancelCommand constructs `wip cancel <locator>`. It cannot use
+// transitionCommand — writesurface.Cancel carries the extra optional
+// `reason` param transitionCommand's move signature has no room for — so its
+// body mirrors transitionCommand's exactly, plus the flag.
 func CancelCommand(streams *iostreams.Streams) *cobra.Command {
-	return transitionCommand("cancel <locator>", "move a matter, stage or step from In Progress to Canceled",
-		writesurface.Cancel, "canceled")(streams)
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "cancel <locator>",
+		Short: "move a matter, stage or step from In Progress to Canceled",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			node, err := writesurface.Cancel(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], reason)
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				b, err := json.Marshal(struct {
+					ID        string `json:"id"`
+					Lifecycle string `json:"lifecycle"`
+				}{ID: node.ID, Lifecycle: string(node.Lifecycle)})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+			_, err = fmt.Fprintf(streams.Out, "%s %s\n", "canceled", args[0])
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "why this work was canceled")
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
 }
 
 // PauseCommand constructs `wip pause <locator>`.

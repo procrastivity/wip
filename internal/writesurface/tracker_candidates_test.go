@@ -166,14 +166,14 @@ func TestSharedReferenceAggregationAndFinalUnbind(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, "shared-a"); err != nil {
+	if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, "shared-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries := trackerEntries(t, f.s, f.env.Repo)
 	if got := dispositionOf(t, entries[len(entries)-1]); got != store.TrackerActive {
 		t.Fatalf("one cancellation with another active = %s", got)
 	}
-	if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, "shared-b"); err != nil {
+	if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, "shared-b", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries = trackerEntries(t, f.s, f.env.Repo)
@@ -382,7 +382,7 @@ func TestBindQueuesCurrentStateForEveryMatterDisposition(t *testing.T) {
 			if _, err := Start(ctx, s, store.ActorHuman, repo, locator); err != nil {
 				return err
 			}
-			_, err := Cancel(ctx, s, store.ActorHuman, repo, locator)
+			_, err := Cancel(ctx, s, store.ActorHuman, repo, locator, "")
 			return err
 		}},
 		{name: "sealed", want: store.TrackerCompleted, move: func(ctx context.Context, s *store.Store, repo, locator string) error {
@@ -437,7 +437,7 @@ func TestSharedReferenceTerminalAggregation(t *testing.T) {
 					t.Fatal(err)
 				}
 				if test.cancelLast && i == 1 {
-					if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, locator); err != nil {
+					if _, err := Cancel(ctx, f.s, store.ActorHuman, f.env.Repo, locator, ""); err != nil {
 						t.Fatal(err)
 					}
 				} else if _, err := Finish(ctx, f.s, store.ActorHuman, f.env.Repo, locator); err != nil {

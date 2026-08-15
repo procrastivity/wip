@@ -6,6 +6,7 @@ package readsurface
 
 import (
 	"testing"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 )
@@ -330,6 +331,176 @@ func TestFrontier_RemovedEdgeDoesNotBlock(t *testing.T) {
 	}
 	if !sawSecond {
 		t.Errorf("ready = %+v, want %s among it once its edge is removed", ready, second)
+	}
+}
+
+// TestCollapseFinished_FullySealedMatterCollapsesToOneRow: a sealed Matter
+// with a sealed Step child (no gates declared, so Done alone seals both)
+// stands for its whole subtree.
+func TestCollapseFinished_FullySealedMatterCollapsesToOneRow(t *testing.T) {
+	f := newFixture(t)
+	m := f.matter("m", "A Matter")
+	step := f.step(m, "step-01", "A Step")
+	f.start(m)
+	f.start(step)
+	f.finish(step)
+	f.finish(m)
+
+	finished, err := FinishedNodes(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapsed, err := CollapseFinished(ctx, f.View, finished, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collapsed) != 1 || collapsed[0].Node.ID != m {
+		t.Errorf("collapsed = %+v, want just the sealed Matter %s", collapsed, m)
+	}
+}
+
+// TestCollapseFinished_SealedStageInOpenMatterShowsBareRow: the Matter is
+// still In Progress (not Done, so it's not in the finished list at all), but
+// its Stage is sealed and absorbs its own sealed Step.
+func TestCollapseFinished_SealedStageInOpenMatterShowsBareRow(t *testing.T) {
+	f := newFixture(t)
+	m := f.matter("m", "A Matter")
+	stage := f.stage(m, "stage-a", "A Stage")
+	step := f.step(stage, "step-01", "A Step")
+	f.start(m)
+	f.start(stage)
+	f.start(step)
+	f.finish(step)
+	f.finish(stage)
+
+	finished, err := FinishedNodes(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapsed, err := CollapseFinished(ctx, f.View, finished, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collapsed) != 1 || collapsed[0].Node.ID != stage {
+		t.Errorf("collapsed = %+v, want just the sealed Stage %s (its Step dropped, the open Matter never in the finished list)", collapsed, stage)
+	}
+}
+
+// TestCollapseFinished_PartlySealedStageStaysExpanded: one Step under the
+// Stage is sealed (its own declared gate closed) and gets dropped, but its
+// sibling is Done and only locally complete (own gate still open) — an
+// unsealed entry is never dropped, so it stays beside the Stage row.
+func TestCollapseFinished_PartlySealedStageStaysExpanded(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-step", store.ScaleStep)
+	m := f.matter("m", "A Matter")
+	stage := f.stage(m, "stage-a", "A Stage")
+	sealedStep := f.step(stage, "step-01", "Sealed step")
+	openStep := f.step(stage, "step-02", "Still awaiting its own gate")
+	f.start(m)
+	f.start(stage)
+	f.start(sealedStep)
+	f.finish(sealedStep)
+	f.closeGate(sealedStep, "reviewed-step", store.ScaleStep)
+	f.start(openStep)
+	f.finish(openStep)
+	f.finish(stage)
+
+	finished, err := FinishedNodes(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapsed, err := CollapseFinished(ctx, f.View, finished, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, c := range collapsed {
+		ids[c.Node.ID] = true
+	}
+	if !ids[stage] {
+		t.Errorf("collapsed = %+v, want the Stage %s present", collapsed, stage)
+	}
+	if ids[sealedStep] {
+		t.Errorf("collapsed = %+v, want the sealed Step %s dropped (its sealed ancestor Stage is in the list)", collapsed, sealedStep)
+	}
+	if !ids[openStep] {
+		t.Errorf("collapsed = %+v, want the unsealed Step %s to stay — it is never dropped", collapsed, openStep)
+	}
+}
+
+// TestCollapseFinished_AwaitingGateChildStillSurfaces: a Done child whose own
+// enclosing Matter gate is still open is locally complete but never sealed,
+// so it is never dropped and always surfaces.
+func TestCollapseFinished_AwaitingGateChildStillSurfaces(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("m", "A Matter")
+	step := f.step(m, "step-01", "A Step")
+	f.start(m)
+	f.start(step)
+	f.finish(step)
+
+	finished, err := FinishedNodes(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapsed, err := CollapseFinished(ctx, f.View, finished, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collapsed) != 1 || collapsed[0].Node.ID != step || collapsed[0].Sealed {
+		t.Errorf("collapsed = %+v, want the awaiting-gate Step %s present and not sealed", collapsed, step)
+	}
+}
+
+// TestSealedAt_LaterOfFinishAndGateClose covers both orders: finish then
+// gate-close, and gate-close then finish (order-independence, D62).
+func TestSealedAt_LaterOfFinishAndGateClose(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("m", "Finish then gate-close")
+	f.start(m)
+	finishEv := f.finish(m)
+	time.Sleep(2 * time.Millisecond)
+	gateEv := f.closeGate(m, "reviewed-local", store.ScaleMatter)
+
+	n, err := f.Node(ctx, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok, err := SealedAt(ctx, f.View, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("SealedAt ok = false, want true")
+	}
+	if !at.Equal(gateEv.OccurredAt) {
+		t.Errorf("SealedAt = %v, want the later gate-close time %v (finish was %v)", at, gateEv.OccurredAt, finishEv.OccurredAt)
+	}
+
+	f2 := newFixture(t)
+	f2.declareGate("reviewed-local", store.ScaleMatter)
+	m2 := f2.matter("m", "Gate-close then finish")
+	f2.start(m2)
+	gateEv2 := f2.closeGate(m2, "reviewed-local", store.ScaleMatter)
+	time.Sleep(2 * time.Millisecond)
+	finishEv2 := f2.finish(m2)
+
+	n2, err := f2.Node(ctx, m2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at2, ok, err := SealedAt(ctx, f2.View, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("SealedAt ok = false, want true")
+	}
+	if !at2.Equal(finishEv2.OccurredAt) {
+		t.Errorf("SealedAt = %v, want the later finish time %v (gate-close was %v)", at2, finishEv2.OccurredAt, gateEv2.OccurredAt)
 	}
 }
 

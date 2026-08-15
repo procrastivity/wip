@@ -37,6 +37,10 @@ type Transition struct {
 	// TrackerPushLevel snapshots candidate policy at the causal boundary so a
 	// rebuild never consults mutable current configuration.
 	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
+	// Reason is set only by cancel, recording why the work ended without
+	// sealing. `omitempty` keeps every reasonless transition payload
+	// byte-identical to the old shape.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ContentWritten is the payload of content.created and content.appended. The
