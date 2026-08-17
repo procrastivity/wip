@@ -9,6 +9,8 @@ package install
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
+	"github.com/procrastivity/wip/internal/harness/registry"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
@@ -32,12 +35,22 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 	cmd := &cobra.Command{
 		Use:   "install <harness>",
 		Short: "render and install wip's self-projection into an agent harness",
-		Args:  cobra.ExactArgs(1),
+		Long: "render and install wip's self-projection into an agent harness.\n\n" +
+			"Available harnesses: " + strings.Join(registry.Names, ", ") + ".",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				_, err := fmt.Fprintf(streams.Out, "available harnesses: %s\nusage: wip install <harness>\n", strings.Join(registry.Names, ", "))
+				return err
+			}
 			harnessName := args[0]
-			if harnessName != claudecode.Name && harnessName != codex.Name && harnessName != pi.Name && harnessName != opencode.Name {
+			if !slices.Contains(registry.Names, harnessName) {
+				quoted := make([]string, len(registry.Names))
+				for i, name := range registry.Names {
+					quoted[i] = fmt.Sprintf("%q", name)
+				}
 				return wiperr.New("validation.unknown-harness",
-					fmt.Sprintf("unknown harness %q — only %q, %q, %q, or %q is supported", harnessName, claudecode.Name, codex.Name, pi.Name, opencode.Name))
+					fmt.Sprintf("unknown harness %q — only %s is supported", harnessName, strings.Join(quoted, ", or ")))
 			}
 
 			flags := cliflags.FromContext(cmd.Context())
