@@ -54,6 +54,12 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				_, err = fmt.Fprintln(streams.Out, string(b))
 				return err
 			}
+			if level, err := s.EffectiveTrackerPushLevel(cmd.Context(), repo.ID); err != nil {
+				return err
+			} else if level == store.TrackerPushOff {
+				_, err = fmt.Fprintf(streams.Out, "bound %s to %s; reference recorded and inert: no tracker update will be sent\n", args[0], args[1])
+				return err
+			}
 			_, err = fmt.Fprintf(streams.Out, "bound %s to %s\n", args[0], args[1])
 			return err
 		},

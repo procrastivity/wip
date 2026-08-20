@@ -59,6 +59,13 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 			}
 
 			findings, err := guards.Run(cmd.Context(), s, dir,
+				func(ctx context.Context, s *store.Store, _ string) ([]guards.Finding, error) {
+					repo := report.Repo
+					if !report.Known {
+						repo = report.OfferRepo
+					}
+					return guards.CheckInertTrackerBindings(ctx, s, repo.ID)
+				},
 				guards.CheckCycles,
 				guards.CheckGateOrder,
 				trackedwip.CheckTrackedWipDir,
@@ -150,14 +157,21 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 	return cmd
 }
 
-// findingsError signals doctor's own exit posture — 0 clean, 1 with one or
-// more findings (chassis's "user-facing failure" code; no severity levels,
-// guards.md's resolved "no severity levels; a flat findings list" call) —
+// findingsError signals doctor's own exit posture — 0 with no failing
+// findings, 1 with one or more failing findings (chassis's "user-facing
+// failure" code). The inert-tracker-binding advisory remains in the same flat
+// output list but does not make doctor fail —
 // distinct from the refusal exit code (3) the render precondition uses at
 // its own call site for the tracked-`.wip/` condition specifically.
 func findingsError(findings []guards.Finding) error {
-	if len(findings) == 0 {
+	failing := 0
+	for _, finding := range findings {
+		if finding.Code != guards.InertTrackerBindingCode {
+			failing++
+		}
+	}
+	if failing == 0 {
 		return nil
 	}
-	return wiperr.New("doctor.findings-present", fmt.Sprintf("%d finding(s) reported; see above", len(findings)))
+	return wiperr.New("doctor.findings-present", fmt.Sprintf("%d finding(s) reported; see above", failing))
 }
