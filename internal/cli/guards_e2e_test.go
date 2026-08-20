@@ -58,6 +58,102 @@ func TestGuards_Doctor_CleanRepoExitsZeroWithEmptyFindings(t *testing.T) {
 	}
 }
 
+func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Recorded work", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	r := runIn(t, dir, dbEnv, "doctor", "--json")
+	if r.exitCode != 0 {
+		t.Fatalf("doctor exit code = %d, want 0 (advisory only); stderr=%q", r.exitCode, r.stderr)
+	}
+	if r.stderr != "" {
+		t.Errorf("stderr = %q, want empty for an advisory-only doctor run", r.stderr)
+	}
+	payload := mustJSON[findingsPayload](t, r.stdout)
+	if len(payload.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one inert-binding advisory", payload.Findings)
+	}
+	var rawPayload struct {
+		Findings []map[string]json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &rawPayload); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if got := len(rawPayload.Findings[0]); got != 2 {
+		t.Errorf("advisory JSON fields = %v, want only code and message", rawPayload.Findings[0])
+	}
+	if got := payload.Findings[0].Code; got != "advisory.inert-tracker-binding" {
+		t.Errorf("finding code = %q, want advisory.inert-tracker-binding", got)
+	}
+	wantMessage := "tracker reference BDS-132 on matter recorded-work is recorded as provenance only; wip will not push tracker updates"
+	if got := payload.Findings[0].Message; got != wantMessage {
+		t.Errorf("finding message = %q, want %q", got, wantMessage)
+	}
+	if r := runIn(t, dir, dbEnv, "unbind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+		t.Fatalf("unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	r = runIn(t, dir, dbEnv, "doctor", "--json")
+	if r.exitCode != 0 {
+		t.Fatalf("doctor after unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	payload = mustJSON[findingsPayload](t, r.stdout)
+	if len(payload.Findings) != 0 {
+		t.Errorf("findings after unbind = %+v, want none", payload.Findings)
+	}
+	if r := runIn(t, dir, dbEnv, "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+		t.Fatalf("rebind after unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	if r := runIn(t, dir, dbEnv, "outbox", "level", "boundary"); r.exitCode != 0 {
+		t.Fatalf("outbox level boundary: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	r = runIn(t, dir, dbEnv, "doctor", "--json")
+	if r.exitCode != 0 {
+		t.Fatalf("doctor with effective pushes: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	payload = mustJSON[findingsPayload](t, r.stdout)
+	for _, finding := range payload.Findings {
+		if finding.Code == "advisory.inert-tracker-binding" {
+			t.Errorf("findings = %+v, want no inert-binding advisory when pushes are effective", payload.Findings)
+		}
+	}
+
+	if r := runIn(t, dir, dbEnv, "outbox", "level", "off"); r.exitCode != 0 {
+		t.Fatalf("outbox level off: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	s := openTestStore(t, dbEnvPath(dbEnv))
+	repo := repoIDFromWorkingDir(t, s, dir)
+	if err := s.DeclareGate(context.Background(), repo, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatalf("DeclareGate reviewed-local (direct): %v", err)
+	}
+	if err := s.DeclareGate(context.Background(), repo, "ci-green", store.ScaleStep); err != nil {
+		t.Fatalf("DeclareGate ci-green (direct): %v", err)
+	}
+	r = runIn(t, dir, dbEnv, "doctor", "--json")
+	if r.exitCode != 1 {
+		t.Fatalf("doctor with advisory and failure: exit=%d, want 1; stderr=%q", r.exitCode, r.stderr)
+	}
+	payload = mustJSON[findingsPayload](t, r.stdout)
+	wantCodes := map[string]bool{
+		"advisory.inert-tracker-binding": false,
+		"refusal.gate-order-violation":   false,
+	}
+	for _, finding := range payload.Findings {
+		if _, ok := wantCodes[finding.Code]; ok {
+			wantCodes[finding.Code] = true
+		}
+	}
+	for code, found := range wantCodes {
+		if !found {
+			t.Errorf("findings = %+v, want %s", payload.Findings, code)
+		}
+	}
+}
+
 func TestGuards_GateDeclare_RefusesGateOrderViolation(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 

@@ -6,6 +6,7 @@ package cli_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -355,5 +356,80 @@ func TestBindUnbindRebind_MatterReferenceSetOneEventEach(t *testing.T) {
 	refs, err = s.TrackerReferences(context.Background(), m.ID)
 	if err != nil || len(refs) != 0 {
 		t.Fatalf("tracker refs after unbind = %v (err %v), want none", refs, err)
+	}
+}
+
+func TestBindHumanOutputDisclosesInertReferenceOnlyWhenTrackerPushesAreOff(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(t *testing.T, dir string, dbEnv []string)
+		want      string
+	}{
+		{
+			name: "off by default without a backend",
+			want: "bound %s to https://tracker.example.com/issue/42; reference recorded and inert: no tracker update will be sent\n",
+		},
+		{
+			name: "configured backend enables boundary pushing",
+			configure: func(t *testing.T, dir string, dbEnv []string) {
+				t.Helper()
+				if r := runIn(t, dir, dbEnv, "outbox", "backend", "github"); r.exitCode != 0 {
+					t.Fatalf("configure tracker backend: exit=%d stderr=%q", r.exitCode, r.stderr)
+				}
+			},
+			want: "bound %s to https://tracker.example.com/issue/42\n",
+		},
+		{
+			name: "explicit off overrides a configured backend",
+			configure: func(t *testing.T, dir string, dbEnv []string) {
+				t.Helper()
+				if r := runIn(t, dir, dbEnv, "outbox", "backend", "github"); r.exitCode != 0 {
+					t.Fatalf("configure tracker backend: exit=%d stderr=%q", r.exitCode, r.stderr)
+				}
+				if r := runIn(t, dir, dbEnv, "outbox", "level", "off"); r.exitCode != 0 {
+					t.Fatalf("turn tracker pushing off: exit=%d stderr=%q", r.exitCode, r.stderr)
+				}
+			},
+			want: "bound %s to https://tracker.example.com/issue/42; reference recorded and inert: no tracker update will be sent\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
+			dir := newGitRepo(t, "widget")
+			if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
+				t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
+			}
+			m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Bind me", "--json").stdout)
+			if test.configure != nil {
+				test.configure(t, dir, dbEnv)
+			}
+
+			r := runIn(t, dir, dbEnv, "bind", m.ID, "https://tracker.example.com/issue/42")
+			if r.exitCode != 0 {
+				t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
+			}
+			if want := fmt.Sprintf(test.want, m.ID); r.stdout != want {
+				t.Errorf("bind stdout = %q, want %q", r.stdout, want)
+			}
+		})
+	}
+}
+
+func TestBindJSONOutputIsUnchangedWhenTrackerPushesAreOff(t *testing.T) {
+	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
+	dir := newGitRepo(t, "widget")
+	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
+		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Bind me", "--json").stdout)
+
+	r := runIn(t, dir, dbEnv, "bind", m.ID, "https://tracker.example.com/issue/42", "--json")
+	if r.exitCode != 0 {
+		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if want := fmt.Sprintf("{\"node\":%q,\"ref\":\"https://tracker.example.com/issue/42\"}\n", m.ID); r.stdout != want {
+		t.Errorf("bind JSON stdout = %q, want %q", r.stdout, want)
 	}
 }
