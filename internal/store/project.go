@@ -111,6 +111,8 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return recordTrackerItemCreated(ctx, tx, ev)
 	case TypeTrackerStatePushed:
 		return recordTrackerStatePush(ctx, tx, ev)
+	case TypeTrackerStateObserved:
+		return recordTrackerStateObserved(ctx, tx, ev)
 	case TypeOutboxApproved:
 		return approveOutbox(ctx, tx, ev)
 	case TypeOutboxDeclined:
@@ -1054,6 +1056,24 @@ func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
+func recordTrackerStateObserved(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p TrackerStateObserved
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Ref == "" || p.Lease == "" || (p.Disposition != TrackerActive && p.Disposition != TrackerCompleted && p.Disposition != TrackerCanceled) {
+		return fmt.Errorf("store: %s has an invalid reference, disposition, or lease", ev.Type)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE outbox_entries SET state='flushed',reason='',attempts=attempts+1,last_event=?
+		 WHERE id=? AND repo=? AND kind='state' AND state='approved' AND ref=?`,
+		ev.ID, ev.Subject, ev.Repo, p.Ref)
+	if err != nil {
+		return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
+}
+
 func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p TrackerItemCreated
 	if err := decodeStrict(ev, &p); err != nil {
@@ -1136,6 +1156,9 @@ func withholdOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if strings.TrimSpace(p.Reason) == "" {
 		return fmt.Errorf("store: %s requires a reason", ev.Type)
 	}
+	if p.Cause != "" && !validWithholdCause(p.Cause) {
+		return fmt.Errorf("store: %s has invalid cause %q", ev.Type, p.Cause)
+	}
 	increment := 0
 	if p.Attempted {
 		increment = 1
@@ -1148,6 +1171,17 @@ func withholdOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	return exactlyRows(res, 1, ev)
+}
+
+func validWithholdCause(cause WithholdCause) bool {
+	switch cause {
+	case CauseMalformedCandidate, CauseLocalRegression, CauseSuperseded,
+		CauseLeaseMismatch, CausePermanentRefusal, CauseMalformedProviderSuccess,
+		CauseUnknownOutcome:
+		return true
+	default:
+		return false
+	}
 }
 
 func failOutbox(ctx context.Context, tx *sql.Tx, ev Event) error {

@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -129,6 +130,41 @@ func (f *fixture) entry(id string) store.OutboxEntry {
 		f.t.Fatal(err)
 	}
 	return e
+}
+
+func (f *fixture) lastEvent(id string) store.Event {
+	f.t.Helper()
+	events, err := f.s.EventsOfSubject(f.ctx, id)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if len(events) == 0 {
+		f.t.Fatalf("outbox entry %s has no events", id)
+	}
+	return events[len(events)-1]
+}
+
+func (f *fixture) wantWithheld(id string, cause store.WithholdCause, attempted bool, reason string) {
+	f.t.Helper()
+	entry := f.entry(id)
+	wantAttempts := 0
+	if attempted {
+		wantAttempts = 1
+	}
+	if entry.State != "withheld" || entry.Attempts != wantAttempts || entry.Reason != reason {
+		f.t.Fatalf("withheld entry = %+v, want cause=%s attempted=%v reason=%q", entry, cause, attempted, reason)
+	}
+	event := f.lastEvent(id)
+	if event.Type != store.TypeOutboxWithheld {
+		f.t.Fatalf("last event = %s, want %s", event.Type, store.TypeOutboxWithheld)
+	}
+	var payload store.OutboxWithheld
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		f.t.Fatal(err)
+	}
+	if payload.Cause != cause || payload.Attempted != attempted || payload.Reason != reason {
+		f.t.Fatalf("withheld payload = %+v, want cause=%s attempted=%v reason=%q", payload, cause, attempted, reason)
+	}
 }
 
 func TestFlushContinuesAcrossEntriesAndRetriesCreationIdempotently(t *testing.T) {
@@ -276,6 +312,123 @@ func TestMalformedProviderSuccessIsPermanentlyVisible(t *testing.T) {
 	got := f.entry(entry.ID)
 	if got.State != "withheld" || got.Attempts != 1 {
 		t.Fatalf("malformed success = %+v", got)
+	}
+}
+
+func TestFlushRecordsEveryWithholdCause(t *testing.T) {
+	t.Run("malformed candidate", func(t *testing.T) {
+		f := newFixture(t)
+		entry := f.seedCandidate("state", "", `{"disposition":"active"}`)
+		if _, err := Flush(f.ctx, f.s, f.actor, f.repo, &fakeSeam{}); err != nil {
+			t.Fatal(err)
+		}
+		f.wantWithheld(entry.ID, store.CauseMalformedCandidate, false, "malformed state candidate")
+	})
+
+	t.Run("local regression", func(t *testing.T) {
+		f := newFixture(t)
+		completed := f.seedCandidate("state", "GH-local", `{"disposition":"completed"}`)
+		if _, err := Flush(f.ctx, f.s, f.actor, f.repo, &fakeSeam{results: map[string]Result{
+			completed.ID: {Outcome: Delivered, Lease: "lease-completed"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		entry := f.seedCandidate("state", "GH-local", `{"disposition":"active"}`)
+		if _, err := Flush(f.ctx, f.s, f.actor, f.repo, &fakeSeam{}); err != nil {
+			t.Fatal(err)
+		}
+		f.wantWithheld(entry.ID, store.CauseLocalRegression, false, "local regression: active cannot follow completed")
+	})
+
+	t.Run("superseded", func(t *testing.T) {
+		f := newFixture(t)
+		entry := f.seedCandidate("state", "GH-compose", `{"disposition":"active"}`)
+		newer := f.seedCandidate("state", "GH-compose", `{"disposition":"completed"}`)
+		if _, err := Flush(f.ctx, f.s, f.actor, f.repo, &fakeSeam{results: map[string]Result{
+			newer.ID: {Outcome: Delivered, Lease: "lease-newer"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		f.wantWithheld(entry.ID, store.CauseSuperseded, false, "superseded by newer approved state entry "+newer.ID)
+	})
+
+	providerRows := []struct {
+		name    string
+		result  Result
+		cause   store.WithholdCause
+		reason  string
+		kind    string
+		ref     string
+		payload string
+	}{
+		{name: "lease mismatch", result: Result{Outcome: LeaseMismatch, Reason: "observed state is closed"}, cause: store.CauseLeaseMismatch, reason: "observed state is closed", kind: "state", ref: "GH-drift", payload: `{"disposition":"active"}`},
+		{name: "permanent refusal", result: Result{Outcome: PermanentRefusal, Reason: "unsupported payload"}, cause: store.CausePermanentRefusal, reason: "unsupported payload", kind: "comment", ref: "GH-refusal", payload: `{}`},
+		{name: "malformed provider success", result: Result{Outcome: Delivered}, cause: store.CauseMalformedProviderSuccess, reason: "provider returned creation success without a reference", kind: "create", payload: `{}`},
+		{name: "unknown outcome", result: Result{Outcome: Outcome("surprise"), Reason: "ignored provider prose"}, cause: store.CauseUnknownOutcome, reason: "provider returned an unknown outcome", kind: "comment", ref: "GH-unknown", payload: `{}`},
+	}
+	for _, row := range providerRows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFixture(t)
+			var entry store.OutboxEntry
+			if row.kind == "create" {
+				entry = f.createEntry("Malformed provider success")
+			} else {
+				entry = f.seedCandidate(row.kind, row.ref, row.payload)
+			}
+			if _, err := Flush(f.ctx, f.s, f.actor, f.repo, &fakeSeam{results: map[string]Result{entry.ID: row.result}}); err != nil {
+				t.Fatal(err)
+			}
+			f.wantWithheld(entry.ID, row.cause, true, row.reason)
+		})
+	}
+}
+
+func TestConvergedEntriesUseKindSpecificSuccessMarkers(t *testing.T) {
+	f := newFixture(t)
+	state := f.seedCandidate("state", "GH-observed", `{"disposition":"completed"}`)
+	created := f.createEntry("Replayed creation")
+	comment := f.seedCandidate("comment", "GH-comment", `{"body":"replayed comment"}`)
+	seam := &fakeSeam{results: map[string]Result{
+		state.ID:   {Outcome: Converged, Lease: "observed-lease"},
+		created.ID: {Outcome: Converged, Ref: "GH-created"},
+		comment.ID: {Outcome: Converged},
+	}}
+
+	report, err := Flush(f.ctx, f.s, f.actor, f.repo, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Entries) != 3 {
+		t.Fatalf("report entries = %d, want 3", len(report.Entries))
+	}
+	for _, result := range report.Entries {
+		if result.State != "converged" {
+			t.Errorf("entry result for %s = %+v, want converged", result.ID, result)
+		}
+		if got := f.entry(result.ID); got.State != "flushed" || got.Attempts != 1 {
+			t.Errorf("durable converged entry %s = %+v", result.ID, got)
+		}
+	}
+
+	wantTypes := map[string]string{
+		state.ID:   store.TypeTrackerStateObserved,
+		created.ID: store.TypeTrackerItemCreated,
+		comment.ID: store.TypeOutboxFlushed,
+	}
+	for id, want := range wantTypes {
+		if got := f.lastEvent(id).Type; got != want {
+			t.Errorf("last event for %s = %s, want %s", id, got, want)
+		}
+	}
+	var observed store.TrackerStateObserved
+	if err := json.Unmarshal(f.lastEvent(state.ID).Payload, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed.Ref != state.Ref || observed.Disposition != store.TrackerCompleted || observed.Lease != "observed-lease" {
+		t.Fatalf("observed payload = %+v", observed)
+	}
+	if _, found, err := f.s.FindTrackerPushRecord(f.ctx, state.Ref); err != nil || found {
+		t.Fatalf("state observation claimed a push record: found=%v err=%v", found, err)
 	}
 }
 

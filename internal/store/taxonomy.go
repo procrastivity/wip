@@ -104,6 +104,7 @@ const (
 	// states never enter this family.
 	TypeTrackerItemCreated   = "tracker.item-created"
 	TypeTrackerStatePushed   = "tracker.state-pushed"
+	TypeTrackerStateObserved = "tracker.state-observed"
 	TypeOutboxApproved       = "outbox.approved"
 	TypeOutboxDeclined       = "outbox.declined"
 	TypeOutboxWithheld       = "outbox.withheld"
@@ -274,13 +275,20 @@ var V7Taxonomy = []EventType{
 	durable(TypeOutboxFlushed, FamilyTracker),
 }
 
+// V9Taxonomy records provider state that already matched a state candidate.
+// It is separate from v7 because numbered taxonomy migrations are immutable
+// once committed; v8 contains no taxonomy additions.
+var V9Taxonomy = []EventType{
+	durable(TypeTrackerStateObserved, FamilyTracker),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

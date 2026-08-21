@@ -45,6 +45,7 @@ var register = []migration{
 	{version: 6, name: "tracker-item-created", stmts: v6Statements()},
 	{version: 7, name: "outbox-lifecycle", stmts: v7Statements()},
 	{version: 8, name: "prospective-gate-declarations", stmts: v8Statements()},
+	{version: 9, name: "tracker-state-observed", stmts: v9Statements()},
 }
 
 // latestVersion is the highest migration this binary carries.
