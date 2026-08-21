@@ -29,12 +29,16 @@ func OutboxRetry(ctx context.Context, s *store.Store, actor store.Actor, repo, i
 }
 
 // WithholdOutbox records a local or provider refusal. attempted is true only
-// when a provider call returned the refusal.
-func WithholdOutbox(ctx context.Context, s *store.Store, actor store.Actor, repo, id, reason string, attempted bool) error {
+// when a provider call returned the refusal. cause is the stable discriminator;
+// reason remains operator-facing prose.
+func WithholdOutbox(ctx context.Context, s *store.Store, actor store.Actor, repo, id, reason string, attempted bool, cause store.WithholdCause) error {
 	if strings.TrimSpace(reason) == "" {
 		return wiperr.New("validation.missing-reason", "withholding an outbox entry needs a reason")
 	}
-	_, err := mutateOutbox(ctx, s, actor, repo, id, store.TypeOutboxWithheld, store.OutboxWithheld{Reason: reason, Attempted: attempted})
+	if cause == "" {
+		return wiperr.New("validation.missing-withhold-cause", "withholding an outbox entry needs a cause")
+	}
+	_, err := mutateOutbox(ctx, s, actor, repo, id, store.TypeOutboxWithheld, store.OutboxWithheld{Reason: reason, Attempted: attempted, Cause: cause})
 	return err
 }
 
@@ -63,6 +67,23 @@ func PushTrackerState(ctx context.Context, s *store.Store, actor store.Actor, re
 		return []store.Draft{{
 			Type: store.TypeTrackerStatePushed, Subject: id,
 			Payload: store.TrackerStatePushed{Ref: ref, Disposition: disposition, Lease: lease},
+		}}, nil
+	})
+	return err
+}
+
+// ObserveTrackerState records a state candidate that already held at the
+// provider. The observation flushes the entry without claiming an external
+// write or advancing wip's push record.
+func ObserveTrackerState(ctx context.Context, s *store.Store, actor store.Actor, repo, id, ref string, disposition store.TrackerDisposition, lease string) error {
+	if ref == "" || lease == "" {
+		return wiperr.New("validation.invalid-tracker-result", "an observed state needs a reference and lease")
+	}
+	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
+	_, err := s.Commit(ctx, req, func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type: store.TypeTrackerStateObserved, Subject: id,
+			Payload: store.TrackerStateObserved{Ref: ref, Disposition: disposition, Lease: lease},
 		}}, nil
 	})
 	return err

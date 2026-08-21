@@ -81,10 +81,7 @@ func (a *Adapter) Deliver(ctx context.Context, entry store.OutboxEntry) (tracker
 	case "comment":
 		return a.comment(ctx, entry)
 	case "state":
-		return tracker.Result{
-			Outcome: tracker.PermanentRefusal,
-			Reason:  "github tracker: issue state updates do not support the required atomic lease guard",
-		}, nil
+		return a.state(ctx, entry)
 	default:
 		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: unsupported outbox kind " + entry.Kind}, nil
 	}
@@ -107,7 +104,7 @@ func (a *Adapter) create(ctx context.Context, entry store.OutboxEntry) (tracker.
 		return resultForError(err)
 	}
 	if found {
-		return tracker.Result{Outcome: tracker.Delivered, Ref: ref}, nil
+		return tracker.Result{Outcome: tracker.Converged, Ref: ref}, nil
 	}
 
 	body := strings.TrimSpace(payload.Detail)
@@ -157,7 +154,7 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 		return resultForError(err)
 	}
 	if found {
-		return tracker.Result{Outcome: tracker.Delivered}, nil
+		return tracker.Result{Outcome: tracker.Converged}, nil
 	}
 	text := fmt.Sprintf("Stage %q %s.\n\n%s", payload.Title, payload.Action, marker)
 	if err := a.request(ctx, http.MethodPost, path, struct {
@@ -169,8 +166,121 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 }
 
 type issue struct {
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
+	Body        string `json:"body"`
+	HTMLURL     string `json:"html_url"`
+	State       string `json:"state"`
+	StateReason string `json:"state_reason"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type issueStateUpdate struct {
+	State       string `json:"state"`
+	StateReason string `json:"state_reason,omitempty"`
+}
+
+type statePayload struct {
+	Disposition store.TrackerDisposition `json:"disposition"`
+}
+
+func stateUpdate(disposition store.TrackerDisposition) (issueStateUpdate, error) {
+	switch disposition {
+	case store.TrackerActive:
+		return issueStateUpdate{State: "open"}, nil
+	case store.TrackerCompleted:
+		return issueStateUpdate{State: "closed", StateReason: "completed"}, nil
+	case store.TrackerCanceled:
+		return issueStateUpdate{State: "closed", StateReason: "not_planned"}, nil
+	default:
+		return issueStateUpdate{}, fmt.Errorf("github tracker: unsupported state disposition %q", disposition)
+	}
+}
+
+func (a *Adapter) readIssue(ctx context.Context, owner, name string, number int) (issue, error) {
+	var response issue
+	err := a.request(ctx, http.MethodGet, issuePath(owner, name, number), nil, &response)
+	return response, err
+}
+
+func (a *Adapter) writeIssueState(ctx context.Context, owner, name string, number int, update issueStateUpdate) (issue, error) {
+	var response issue
+	err := a.request(ctx, http.MethodPatch, issuePath(owner, name, number), update, &response)
+	return response, err
+}
+
+func (a *Adapter) state(ctx context.Context, entry store.OutboxEntry) (tracker.Result, error) {
+	var payload statePayload
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: malformed state payload"}, nil
+	}
+	update, err := stateUpdate(payload.Disposition)
+	if err != nil {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: err.Error()}, nil
+	}
+	owner, name, number, err := issueReference(entry.Ref)
+	if err != nil {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: err.Error()}, nil
+	}
+
+	observed, err := a.readIssue(ctx, owner, name, number)
+	if err != nil {
+		return resultForError(err)
+	}
+	if observed.UpdatedAt == "" || (observed.State != "open" && observed.State != "closed") {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: issue read returned malformed state or updated_at"}, nil
+	}
+
+	if entry.Lease == "" {
+		if observed.State != "open" {
+			return leaseMismatch(observed), nil
+		}
+		if payload.Disposition == store.TrackerActive {
+			return tracker.Result{Outcome: tracker.Converged, Lease: observed.UpdatedAt}, nil
+		}
+	} else {
+		// Never reopen a terminal issue. A terminal provider state is beyond an
+		// active candidate when the candidate carries a prior observation.
+		if payload.Disposition == store.TrackerActive && observed.State == "closed" {
+			return tracker.Result{Outcome: tracker.Converged, Lease: observed.UpdatedAt}, nil
+		}
+		if issueAtCandidate(observed, update) {
+			return tracker.Result{Outcome: tracker.Converged, Lease: observed.UpdatedAt}, nil
+		}
+		// A terminal state with a competing reason must not be overwritten,
+		// even when its lease still matches the prior observation.
+		if observed.State == "closed" || entry.Lease != observed.UpdatedAt {
+			return leaseMismatch(observed), nil
+		}
+	}
+
+	written, err := a.writeIssueState(ctx, owner, name, number, update)
+	if err != nil {
+		return resultForError(err)
+	}
+	if written.UpdatedAt == "" {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: state response has no updated_at lease"}, nil
+	}
+	if !issueAtCandidate(written, update) {
+		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: state response does not match requested state"}, nil
+	}
+	return tracker.Result{Outcome: tracker.Delivered, Lease: written.UpdatedAt}, nil
+}
+
+func issueAtCandidate(observed issue, candidate issueStateUpdate) bool {
+	if candidate.State == "open" {
+		return observed.State == "open"
+	}
+	return observed.State == candidate.State && observed.StateReason == candidate.StateReason
+}
+
+func leaseMismatch(observed issue) tracker.Result {
+	state := fmt.Sprintf("state %q", observed.State)
+	if observed.StateReason != "" {
+		state += fmt.Sprintf(" with state_reason %q", observed.StateReason)
+	}
+	return tracker.Result{
+		Outcome: tracker.LeaseMismatch,
+		Reason:  fmt.Sprintf("github tracker: lease mismatch: observed %s at updated_at %q", state, observed.UpdatedAt),
+	}
 }
 
 func (a *Adapter) findIssue(ctx context.Context, marker string) (string, bool, error) {
@@ -218,6 +328,10 @@ func (a *Adapter) findComment(ctx context.Context, path, marker string) (bool, e
 
 func (a *Adapter) issuesPath() string {
 	return "/repos/" + url.PathEscape(a.owner) + "/" + url.PathEscape(a.repo) + "/issues"
+}
+
+func issuePath(owner, name string, number int) string {
+	return fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(name), number)
 }
 
 func (a *Adapter) request(ctx context.Context, method, path string, input, output any) error {

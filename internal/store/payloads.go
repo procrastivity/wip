@@ -188,6 +188,15 @@ type TrackerStatePushed struct {
 	Lease       string             `json:"lease"`
 }
 
+// TrackerStateObserved records that a provider was already at the requested
+// disposition. The event subject is the outbox entry. Ref identifies the
+// external item, and Lease is the opaque token read with the observed state.
+type TrackerStateObserved struct {
+	Ref         string             `json:"ref"`
+	Disposition TrackerDisposition `json:"disposition"`
+	Lease       string             `json:"lease"`
+}
+
 // TrackerItemCreated records an unambiguous successful response for one
 // delegated creation entry. Ref remains in the event log after retirement.
 type TrackerItemCreated struct {
@@ -202,12 +211,29 @@ type OutboxDeclined struct {
 	Reason string `json:"reason"`
 }
 
+// WithholdCause is the machine-readable reason that an outbox entry cannot be
+// sent. Reason remains free prose for an operator.
+type WithholdCause string
+
+// The complete set of withholding causes.
+const (
+	CauseMalformedCandidate       WithholdCause = "malformed-candidate"
+	CauseLocalRegression          WithholdCause = "local-regression"
+	CauseSuperseded               WithholdCause = "superseded"
+	CauseLeaseMismatch            WithholdCause = "lease-mismatch"
+	CausePermanentRefusal         WithholdCause = "permanent-refusal"
+	CauseMalformedProviderSuccess WithholdCause = "malformed-provider-success"
+	CauseUnknownOutcome           WithholdCause = "unknown-outcome"
+)
+
 // OutboxWithheld records work that must remain visible and must not be sent.
 // Attempted distinguishes a local composition/monotonicity refusal from a
-// provider response; only a provider call increments Attempts.
+// provider response; only a provider call increments Attempts. Cause is
+// optional because events written before the discriminator do not carry it.
 type OutboxWithheld struct {
-	Reason    string `json:"reason"`
-	Attempted bool   `json:"attempted"`
+	Reason    string        `json:"reason"`
+	Attempted bool          `json:"attempted"`
+	Cause     WithholdCause `json:"cause,omitempty"`
 }
 
 // OutboxDeliveryFailed records a retryable provider response.

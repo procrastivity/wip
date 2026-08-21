@@ -15,10 +15,12 @@ import (
 // state name to the substrate.
 type Outcome string
 
-// Delivery outcomes distinguish success, retryable failure, lease drift, and
-// permanent refusal without exposing provider-specific state.
+// Delivery outcomes distinguish write success, observed convergence, retryable
+// failure, lease drift, and permanent refusal without exposing
+// provider-specific state.
 const (
 	Delivered        Outcome = "delivered"
+	Converged        Outcome = "converged"
 	RetryableFailure Outcome = "retryable-failure"
 	LeaseMismatch    Outcome = "lease-mismatch"
 	PermanentRefusal Outcome = "permanent-refusal"
@@ -86,7 +88,7 @@ func Flush(ctx context.Context, s *store.Store, actor store.Actor, repo string, 
 			if parseErr != nil {
 				reason += ": " + parseErr.Error()
 			}
-			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, false); err != nil {
+			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, false, store.CauseMalformedCandidate); err != nil {
 				return report, err
 			}
 			report.Entries = append(report.Entries, EntryResult{ID: entry.ID, State: "withheld", Reason: reason})
@@ -98,7 +100,7 @@ func Flush(ctx context.Context, s *store.Store, actor store.Actor, repo string, 
 		}
 		if found && regresses(record.Disposition, disposition) {
 			reason := fmt.Sprintf("local regression: %s cannot follow %s", disposition, record.Disposition)
-			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, false); err != nil {
+			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, false, store.CauseLocalRegression); err != nil {
 				return report, err
 			}
 			report.Entries = append(report.Entries, EntryResult{ID: entry.ID, State: "withheld", Reason: reason})
@@ -112,7 +114,7 @@ func Flush(ctx context.Context, s *store.Store, actor store.Actor, repo string, 
 		selected[newest.entry.ID] = true
 		for _, candidate := range candidates[:len(candidates)-1] {
 			reason := "superseded by newer approved state entry " + newest.entry.ID
-			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, candidate.entry.ID, reason, false); err != nil {
+			if err := writesurface.WithholdOutbox(ctx, s, actor, repo, candidate.entry.ID, reason, false, store.CauseSuperseded); err != nil {
 				return report, err
 			}
 			report.Entries = append(report.Entries, EntryResult{ID: candidate.entry.ID, State: "withheld", Reason: reason})
@@ -161,7 +163,11 @@ func regresses(previous, candidate store.TrackerDisposition) bool {
 func recordResult(ctx context.Context, s *store.Store, actor store.Actor, repo string, entry store.OutboxEntry, result Result) (string, string, error) {
 	reason := result.Reason
 	switch result.Outcome {
-	case Delivered:
+	case Delivered, Converged:
+		entryState := "flushed"
+		if result.Outcome == Converged {
+			entryState = "converged"
+		}
 		switch entry.Kind {
 		case "create":
 			if result.Ref == "" {
@@ -171,26 +177,32 @@ func recordResult(ctx context.Context, s *store.Store, actor store.Actor, repo s
 			if err := writesurface.ConfirmBacklogDelegation(ctx, s, actor, repo, entry.ID, result.Ref); err != nil {
 				return "", "", err
 			}
-			return "flushed", "", nil
+			return entryState, "", nil
 		case "state":
 			disposition, err := stateDisposition(entry.Payload)
 			if err != nil || result.Lease == "" || (result.Ref != "" && result.Ref != entry.Ref) {
 				reason = "provider returned malformed state success"
 				break
 			}
-			if err := writesurface.PushTrackerState(ctx, s, actor, repo, entry.ID, entry.Ref, disposition, result.Lease); err != nil {
-				return "", "", err
+			if result.Outcome == Converged {
+				if err := writesurface.ObserveTrackerState(ctx, s, actor, repo, entry.ID, entry.Ref, disposition, result.Lease); err != nil {
+					return "", "", err
+				}
+			} else {
+				if err := writesurface.PushTrackerState(ctx, s, actor, repo, entry.ID, entry.Ref, disposition, result.Lease); err != nil {
+					return "", "", err
+				}
 			}
-			return "flushed", "", nil
+			return entryState, "", nil
 		case "comment":
 			if err := writesurface.FlushOutboxComment(ctx, s, actor, repo, entry.ID); err != nil {
 				return "", "", err
 			}
-			return "flushed", "", nil
+			return entryState, "", nil
 		default:
 			reason = "provider returned success for an unknown outbox kind"
 		}
-		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true); err != nil {
+		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true, store.CauseMalformedProviderSuccess); err != nil {
 			return "", "", err
 		}
 		return "withheld", reason, nil
@@ -206,13 +218,17 @@ func recordResult(ctx context.Context, s *store.Store, actor store.Actor, repo s
 		if reason == "" {
 			reason = "provider refused the delivery"
 		}
-		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true); err != nil {
+		cause := store.CauseLeaseMismatch
+		if result.Outcome == PermanentRefusal {
+			cause = store.CausePermanentRefusal
+		}
+		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true, cause); err != nil {
 			return "", "", err
 		}
 		return "withheld", reason, nil
 	default:
 		reason = "provider returned an unknown outcome"
-		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true); err != nil {
+		if err := writesurface.WithholdOutbox(ctx, s, actor, repo, entry.ID, reason, true, store.CauseUnknownOutcome); err != nil {
 			return "", "", err
 		}
 		return "withheld", reason, nil

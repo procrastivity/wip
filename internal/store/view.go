@@ -1194,6 +1194,7 @@ type OutboxEntry struct {
 	State          string
 	Subject        string
 	Ref            string
+	Lease          string
 	IdempotencyKey string
 	Payload        json.RawMessage
 	Reason         string
@@ -1207,8 +1208,10 @@ func (v View) Outbox(ctx context.Context, repo string) ([]OutboxEntry, error) {
 		return nil, nil
 	}
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT id,repo,kind,state,subject,COALESCE(ref,''),idempotency_key,payload,reason,attempts
-		 FROM outbox_entries WHERE repo=? ORDER BY birth_event`, repo)
+		`SELECT o.id,o.repo,o.kind,o.state,o.subject,COALESCE(o.ref,''),
+		        CASE WHEN o.kind='state' THEN COALESCE((SELECT p.lease FROM tracker_push_records p WHERE p.ref=o.ref),'') ELSE '' END,
+		        o.idempotency_key,o.payload,o.reason,o.attempts
+		 FROM outbox_entries o WHERE o.repo=? ORDER BY o.birth_event`, repo)
 	if err != nil {
 		return nil, fmt.Errorf("store: read outbox of %s: %w", repo, err)
 	}
@@ -1217,7 +1220,7 @@ func (v View) Outbox(ctx context.Context, repo string) ([]OutboxEntry, error) {
 	for rows.Next() {
 		var e OutboxEntry
 		var payload string
-		if err := rows.Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref,
+		if err := rows.Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref, &e.Lease,
 			&e.IdempotencyKey, &payload, &e.Reason, &e.Attempts); err != nil {
 			return nil, fmt.Errorf("store: read outbox of %s: %w", repo, err)
 		}
@@ -1238,9 +1241,11 @@ func (v View) OutboxEntry(ctx context.Context, repo, id string) (OutboxEntry, er
 	var e OutboxEntry
 	var payload string
 	err := v.q.QueryRowContext(ctx,
-		`SELECT id,repo,kind,state,subject,COALESCE(ref,''),idempotency_key,payload,reason,attempts
-		 FROM outbox_entries WHERE repo=? AND id=?`, repo, id).
-		Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref,
+		`SELECT o.id,o.repo,o.kind,o.state,o.subject,COALESCE(o.ref,''),
+		        CASE WHEN o.kind='state' THEN COALESCE((SELECT p.lease FROM tracker_push_records p WHERE p.ref=o.ref),'') ELSE '' END,
+		        o.idempotency_key,o.payload,o.reason,o.attempts
+		 FROM outbox_entries o WHERE o.repo=? AND o.id=?`, repo, id).
+		Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref, &e.Lease,
 			&e.IdempotencyKey, &payload, &e.Reason, &e.Attempts)
 	if err == sql.ErrNoRows {
 		return OutboxEntry{}, fmt.Errorf("store: no outbox entry %s in %s", id, repo)

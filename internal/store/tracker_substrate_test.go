@@ -319,6 +319,18 @@ func TestOutboxLifecycleRefusalsAppendNoEvent(t *testing.T) {
 	if got := len(h.eventsOf(outbox)); got != before {
 		t.Fatalf("malformed approval appended %d events", got-before)
 	}
+
+	h.commit(Draft{Type: TypeOutboxApproved, Subject: outbox, Payload: OutboxApproved{}})
+	before = len(h.eventsOf(outbox))
+	err = h.commitError(func(context.Context, *Tx) ([]Draft, error) {
+		return []Draft{{Type: TypeOutboxWithheld, Subject: outbox, Payload: OutboxWithheld{
+			Reason: "not from the closed set", Cause: WithholdCause("invented-cause"),
+		}}}, nil
+	})
+	refusalMentions(t, "an unknown withholding cause", err, "invalid cause")
+	if got := len(h.eventsOf(outbox)); got != before {
+		t.Fatalf("unknown withholding cause appended %d events", got-before)
+	}
 }
 
 func TestV7MigratesExistingOutboxRowsLosslessly(t *testing.T) {
@@ -355,6 +367,10 @@ func TestTrackerStatePushAdvancesAnApprovedEntryAndNeverRegresses(t *testing.T) 
 	}
 
 	completed := insertApproved("GH-42")
+	withoutLease, err := h.OutboxEntry(h.ctx, h.Repo, completed)
+	if err != nil || withoutLease.Lease != "" {
+		t.Fatalf("first state entry lease = %q (err %v), want empty", withoutLease.Lease, err)
+	}
 	h.commit(Draft{Type: TypeTrackerStatePushed, Subject: completed, Payload: TrackerStatePushed{
 		Ref: "GH-42", Disposition: TrackerCompleted, Lease: "opaque-rev-1",
 	}})
@@ -375,6 +391,23 @@ func TestTrackerStatePushAdvancesAnApprovedEntryAndNeverRegresses(t *testing.T) 
 	}
 
 	regression := insertApproved("GH-42")
+	withLease, err := h.OutboxEntry(h.ctx, h.Repo, regression)
+	if err != nil || withLease.Lease != "opaque-rev-1" {
+		t.Fatalf("subsequent state entry lease = %q (err %v), want opaque-rev-1", withLease.Lease, err)
+	}
+	entries, err := h.Outbox(h.ctx, h.Repo)
+	if err != nil {
+		t.Fatalf("list outbox with leases: %v", err)
+	}
+	var listedLease string
+	for _, entry := range entries {
+		if entry.ID == regression {
+			listedLease = entry.Lease
+		}
+	}
+	if listedLease != "opaque-rev-1" {
+		t.Fatalf("listed subsequent state entry lease = %q, want opaque-rev-1", listedLease)
+	}
 	before := len(h.eventsOf(regression))
 	err = h.commitError(func(context.Context, *Tx) ([]Draft, error) {
 		return []Draft{{Type: TypeTrackerStatePushed, Subject: regression, Payload: TrackerStatePushed{
