@@ -170,6 +170,9 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 	} else if found {
 		return tracker.Result{Outcome: tracker.Converged}, nil
 	}
+	if _, err := a.readIssue(ctx, entry.Ref); err != nil {
+		return resultForError(err)
+	}
 	variables := map[string]any{"input": map[string]any{
 		"id": clientID, "issueId": entry.Ref,
 		"body": fmt.Sprintf("Stage %q %s.", payload.Title, payload.Action),
@@ -234,8 +237,11 @@ func (a *Adapter) findIssue(ctx context.Context, id string) (string, bool, error
 	}
 	item := data.Issues.Nodes[0]
 	ref := item.Identifier
-	if len(data.Issues.Nodes) != 1 || !strings.EqualFold(item.ID, id) || !validIdentifier(ref) || !strings.EqualFold(item.Team.ID, a.target) {
+	if len(data.Issues.Nodes) != 1 || !strings.EqualFold(item.ID, id) || !validIdentifier(ref) {
 		return "", false, permanentError("deduplicated issue has no unique valid identifier")
+	}
+	if !strings.EqualFold(item.Team.ID, a.target) {
+		return "", false, permanentError(fmt.Sprintf("deduplicated issue %q does not belong to target team", ref))
 	}
 	return ref, true, nil
 }
@@ -281,27 +287,43 @@ func workflowType(disposition store.TrackerDisposition) (string, error) {
 }
 
 func (a *Adapter) selectWorkflowState(ctx context.Context, stateType string) (workflowState, error) {
-	var data struct {
-		Team *struct {
-			States struct {
-				Nodes []workflowState `json:"nodes"`
-			} `json:"states"`
-		} `json:"team"`
-	}
-	err := a.request(ctx, "WorkflowStates", `query WorkflowStates($teamId: String!) {
-  team(id: $teamId) { states { nodes { id name type position archivedAt } } }
-}`, map[string]any{"teamId": a.target}, &data)
-	if err != nil {
-		return workflowState{}, err
-	}
-	if data.Team == nil {
-		return workflowState{}, permanentError("target team was not found")
-	}
 	var candidates []workflowState
-	for _, state := range data.Team.States.Nodes {
-		if state.Type == stateType && state.ArchivedAt == "" && validUUID(state.ID) {
-			candidates = append(candidates, state)
+	cursor := ""
+	for {
+		var data struct {
+			Team *struct {
+				States struct {
+					Nodes    []workflowState `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"states"`
+			} `json:"team"`
 		}
+		variables := map[string]any{"teamId": a.target}
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+		err := a.request(ctx, "WorkflowStates", `query WorkflowStates($teamId: String!, $after: String) {
+  team(id: $teamId) { states(first: 250, after: $after) { nodes { id name type position archivedAt } pageInfo { hasNextPage endCursor } } }
+}`, variables, &data)
+		if err != nil {
+			return workflowState{}, err
+		}
+		if data.Team == nil {
+			return workflowState{}, permanentError("target team was not found")
+		}
+		for _, state := range data.Team.States.Nodes {
+			if state.Type == stateType && state.ArchivedAt == "" && validUUID(state.ID) {
+				candidates = append(candidates, state)
+			}
+		}
+		page := data.Team.States.PageInfo
+		if !page.HasNextPage || strings.TrimSpace(page.EndCursor) == "" {
+			break
+		}
+		cursor = page.EndCursor
 	}
 	if len(candidates) == 0 {
 		return workflowState{}, permanentError(fmt.Sprintf("target team has no live %s workflow state", stateType))
@@ -384,10 +406,6 @@ func (a *Adapter) state(ctx context.Context, entry store.OutboxEntry) (tracker.R
 	if err != nil {
 		return refusal(err.Error()), nil
 	}
-	target, err := a.selectWorkflowState(ctx, desiredType)
-	if err != nil {
-		return resultForError(err)
-	}
 	observed, err := a.readIssue(ctx, entry.Ref)
 	if err != nil {
 		return resultForError(err)
@@ -408,6 +426,10 @@ func (a *Adapter) state(ctx context.Context, entry store.OutboxEntry) (tracker.R
 		if isTerminalType(observed.State.Type) || entry.Lease != observed.UpdatedAt {
 			return leaseMismatch(observed), nil
 		}
+	}
+	target, err := a.selectWorkflowState(ctx, desiredType)
+	if err != nil {
+		return resultForError(err)
 	}
 
 	var data struct {
@@ -433,8 +455,10 @@ func isBacklogType(stateType string) bool {
 	return stateType == "triage" || stateType == "backlog" || stateType == "unstarted"
 }
 
+// L9: every type that is neither backlog-like nor started competes as
+// terminal, including workflow types Linear has not defined yet.
 func isTerminalType(stateType string) bool {
-	return stateType == "completed" || stateType == "canceled" || stateType == "duplicate" || !isBacklogType(stateType) && stateType != "started"
+	return !isBacklogType(stateType) && stateType != "started"
 }
 
 func leaseMismatch(observed issue) tracker.Result {
@@ -553,13 +577,17 @@ func resultForError(err error) (tracker.Result, error) {
 		return tracker.Result{}, err
 	}
 	outcome := tracker.PermanentRefusal
+	permanentCode := false
 	for _, item := range api.errors {
 		if strings.EqualFold(strings.TrimSpace(item.Extensions.Code), "RATELIMITED") {
 			outcome = tracker.RetryableFailure
-			break
+		} else {
+			permanentCode = true
 		}
 	}
-	if api.status == http.StatusRequestTimeout || api.status == http.StatusTooManyRequests || api.status >= 500 || api.rateLimited {
+	// Exhausted rate-limit headers must not soften an explicit permanent
+	// GraphQL code (L6); they only decide otherwise-unclassified responses.
+	if api.status == http.StatusRequestTimeout || api.status == http.StatusTooManyRequests || api.status >= 500 || (api.rateLimited && !permanentCode) {
 		outcome = tracker.RetryableFailure
 	}
 	return tracker.Result{Outcome: outcome, Reason: api.Error()}, nil

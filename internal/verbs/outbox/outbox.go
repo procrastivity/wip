@@ -47,8 +47,10 @@ func targetCommand(streams *iostreams.Streams) *cobra.Command {
 			return err
 		}
 		if len(args) == 1 {
+			// The stored value stays raw: the target is an opaque
+			// provider token. Only the "none" sentinel is trimmed.
 			target = args[0]
-			if target == "none" {
+			if strings.TrimSpace(target) == "none" {
 				target = ""
 			}
 			if err := s.SetConfig(cmd.Context(), repo.ID, store.TrackerTargetKey, target); err != nil {
