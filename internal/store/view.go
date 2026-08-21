@@ -189,6 +189,41 @@ func (v View) TrackerReferences(ctx context.Context, matter string) ([]string, e
 	return refs, nil
 }
 
+// TrackerAggregate returns the expected provider-neutral disposition of one
+// shared tracker reference. A live bound Matter keeps the reference active.
+// When all bound Matters are terminal, at least one sealed Matter makes the
+// aggregate completed. An all-canceled set makes it canceled.
+func (v View) TrackerAggregate(ctx context.Context, ref string) (TrackerDisposition, bool, error) {
+	matters, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
+		WHERE id IN (SELECT matter FROM tracker_references WHERE ref=? AND removed_event IS NULL)
+		AND kind='matter' AND tombstone_event IS NULL ORDER BY birth_event`, ref)
+	if err != nil {
+		return "", false, err
+	}
+	if len(matters) == 0 {
+		return "", false, nil
+	}
+	sealedCount := 0
+	for _, matter := range matters {
+		if matter.Lifecycle == Canceled {
+			continue
+		}
+		sealed, err := trackerNodeSealed(ctx, v, matter)
+		if err != nil {
+			return "", false, err
+		}
+		if sealed {
+			sealedCount++
+			continue
+		}
+		return TrackerActive, true, nil
+	}
+	if sealedCount > 0 {
+		return TrackerCompleted, true, nil
+	}
+	return TrackerCanceled, true, nil
+}
+
 // inProgressSQL is the whole of MODEL §10 invariant 2 under this shape: one
 // indexed read of the maintained projection. No replay, no join, no fold.
 //

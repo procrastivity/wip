@@ -50,7 +50,13 @@ import (
 func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Command {
 	providers := tracker.NewRegistry()
 	providers.Register("github", githubtracker.Factory(githubtracker.Options{}))
+	return NewRootCommandWithProviders(streams, build, providers)
+}
 
+// NewRootCommandWithProviders builds the root with an injected tracker
+// registry. Production uses NewRootCommand. Tests and agent porcelain can
+// supply read-capable provider adapters without changing command behavior.
+func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Info, providers *tracker.Registry) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "wip",
 		Short: "wip — a personal, agent-friendly project-management CLI",
@@ -107,7 +113,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(stageverb.Command(streams))
 	root.AddCommand(stepverb.Command(streams))
 	root.AddCommand(lifecycleverb.StartCommand(streams))
-	root.AddCommand(lifecycleverb.FinishCommand(streams))
+	root.AddCommand(lifecycleverb.FinishCommand(streams, providers))
 	root.AddCommand(lifecycleverb.CancelCommand(streams))
 	root.AddCommand(lifecycleverb.PauseCommand(streams))
 	root.AddCommand(lifecycleverb.ResumeCommand(streams))
@@ -124,7 +130,7 @@ func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Com
 	root.AddCommand(contentverb.FindingCommand(streams))
 
 	// write-surface: gates-and-dependencies.
-	root.AddCommand(gateverb.Command(streams))
+	root.AddCommand(gateverb.Command(streams, providers))
 	root.AddCommand(dependverb.Command(streams))
 	root.AddCommand(bindverb.Command(streams))
 	root.AddCommand(bindverb.UnbindCommand(streams))

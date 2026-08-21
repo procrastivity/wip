@@ -6,20 +6,27 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
-// sealSweepDraft decides the seal consequence inside the same transaction as
-// the lifecycle or gate event that can make a Matter sealed. closingGate is
-// included because the gate event has not projected yet when decide runs.
-func sealSweepDraft(ctx context.Context, tx *store.Tx, matterID string, willFinish bool, closingGate string) (store.Draft, bool, error) {
+// SealTransition is the result of a write that can seal a Matter.
+// BecameSealed is true only when the write crossed the Matter's seal boundary.
+type SealTransition struct {
+	Node         store.Node
+	BecameSealed bool
+}
+
+// matterSealedProspectively evaluates a Matter's seal predicate from the
+// transaction's pre-event state. willFinish and closingGate supply the parts
+// of the event being decided that have not projected yet.
+func matterSealedProspectively(ctx context.Context, tx *store.Tx, matterID string, willFinish bool, closingGate string) (bool, error) {
 	matter, err := tx.Node(ctx, matterID)
 	if err != nil || matter.Kind != store.ScaleMatter {
-		return store.Draft{}, false, err
+		return false, err
 	}
 	if !willFinish && matter.Lifecycle != store.Done {
-		return store.Draft{}, false, nil
+		return false, nil
 	}
 	declarations, err := tx.GateDeclarations(ctx, matter.Repo)
 	if err != nil {
-		return store.Draft{}, false, err
+		return false, err
 	}
 	for _, declaration := range declarations {
 		if declaration.Scale != store.ScaleMatter || declaration.Gate == closingGate {
@@ -27,13 +34,19 @@ func sealSweepDraft(ctx context.Context, tx *store.Tx, matterID string, willFini
 		}
 		satisfied, err := tx.GateSatisfied(ctx, matter.Repo, matter.ID, declaration.Gate)
 		if err != nil {
-			return store.Draft{}, false, err
+			return false, err
 		}
 		if !satisfied {
-			return store.Draft{}, false, nil
+			return false, nil
 		}
 	}
-	batch, found, err := tx.AnonymousBatchForMatter(ctx, matter.ID)
+	return true, nil
+}
+
+// sealSweepDraft decides the anonymous-Batch consequence after the caller has
+// established that its event crosses the Matter's seal boundary.
+func sealSweepDraft(ctx context.Context, tx *store.Tx, matterID string) (store.Draft, bool, error) {
+	batch, found, err := tx.AnonymousBatchForMatter(ctx, matterID)
 	if err != nil || !found || batch.State != "live" {
 		return store.Draft{}, false, err
 	}

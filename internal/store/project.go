@@ -958,34 +958,7 @@ func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, sub
 
 func trackerAggregate(ctx context.Context, tx *sql.Tx, ref string) (TrackerDisposition, bool, error) {
 	v := View{q: tx, schemaVersion: latestVersion(register)}
-	matters, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
-		WHERE id IN (SELECT matter FROM tracker_references WHERE ref=? AND removed_event IS NULL)
-		AND kind='matter' AND tombstone_event IS NULL ORDER BY birth_event`, ref)
-	if err != nil {
-		return "", false, err
-	}
-	if len(matters) == 0 {
-		return "", false, nil
-	}
-	sealedCount := 0
-	for _, matter := range matters {
-		if matter.Lifecycle == Canceled {
-			continue
-		}
-		sealed, err := trackerNodeSealed(ctx, v, matter)
-		if err != nil {
-			return "", false, err
-		}
-		if sealed {
-			sealedCount++
-			continue
-		}
-		return TrackerActive, true, nil
-	}
-	if sealedCount > 0 {
-		return TrackerCompleted, true, nil
-	}
-	return TrackerCanceled, true, nil
+	return v.TrackerAggregate(ctx, ref)
 }
 
 func trackerNodeSealed(ctx context.Context, v View, node Node) (bool, error) {

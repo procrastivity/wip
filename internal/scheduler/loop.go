@@ -56,10 +56,14 @@ type StepSpec struct {
 // §8.1): handed an unplanned member Matter, it returns the Step list to be
 // born through verbs; nil Plan (or an empty list) means the Matter is worked
 // as its own smallest node (D2). Ask resolves HandleAsk; nil Ask halts.
+// PostSeal runs after a Matter finish commits. The hook must re-read the
+// Matter and return unless it is sealed. It is the injection point for
+// provider-neutral alignment reads and performs no scheduler write.
 type Hooks struct {
-	Work func(ctx context.Context, node store.Node) error
-	Plan func(ctx context.Context, matter store.Node) ([]StepSpec, error)
-	Ask  func(matter store.Node, reason store.RunSkipReason) Handling
+	Work     func(ctx context.Context, node store.Node) error
+	Plan     func(ctx context.Context, matter store.Node) ([]StepSpec, error)
+	Ask      func(matter store.Node, reason store.RunSkipReason) Handling
+	PostSeal func(ctx context.Context, matter store.Node)
 }
 
 // State is where one pass left the Run.
@@ -428,6 +432,9 @@ func (p *pass) finish(ctx context.Context, node store.Node, actor store.Actor) e
 			Payload: store.Transition{From: store.InProgress, To: store.Done},
 		}}, nil
 	})
+	if err == nil && node.Kind == store.ScaleMatter && p.hooks.PostSeal != nil {
+		p.hooks.PostSeal(ctx, node)
+	}
 	return err
 }
 

@@ -138,41 +138,53 @@ func RepairGateExemption(ctx context.Context, s *store.Store, repo, gate, locato
 // always the subject's own kind (D62) — never a second opinion from the
 // caller — and closing a gate the subject's Repo never declared is refused.
 func CloseGate(ctx context.Context, s *store.Store, actor store.Actor, repo, gate, locator string) (store.Node, error) {
-	return closeGateEnv(ctx, s, actor, store.Env{Repo: repo}, gate, locator)
+	result, err := closeGateEnv(ctx, s, actor, store.Env{Repo: repo}, gate, locator)
+	return result.Node, err
 }
 
 // CloseGateWithEnv is CloseGate with the caller's full Env, so a final Matter
 // gate can seal and sweep with correct event dimensions.
 func CloseGateWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (store.Node, error) {
+	result, err := CloseGateWithEnvResult(ctx, s, actor, env, gate, locator)
+	return result.Node, err
+}
+
+// CloseGateWithEnvResult is CloseGateWithEnv with an atomic indication that
+// this gate close crossed a Matter's seal boundary.
+func CloseGateWithEnvResult(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (SealTransition, error) {
 	return closeGateEnv(ctx, s, actor, env, gate, locator)
 }
 
-func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (store.Node, error) {
+func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (SealTransition, error) {
 	repo := env.Repo
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
 	declared, err := s.GateDeclarations(ctx, repo)
 	if err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
-	found := false
+	var bound store.Scale
 	for _, d := range declared {
 		if d.Gate == gate {
-			found = true
+			bound = d.Scale
 			break
 		}
 	}
-	if !found {
-		return store.Node{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+	if bound == "" {
+		return SealTransition{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+	}
+	if n.Kind != bound {
+		return SealTransition{}, wiperr.New("refusal.gate-scale", fmt.Sprintf(
+			"%s binds to %s scale and cannot close on %s %s", gate, bound, n.Kind, locator))
 	}
 	satisfied, err := s.GateSatisfied(ctx, repo, n.ID, gate)
 	if err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
 	if satisfied {
-		return store.Node{}, wiperr.New("refusal.gate-already-satisfied",
+		return SealTransition{}, wiperr.New("refusal.gate-already-satisfied",
 			fmt.Sprintf("%s is already satisfied on %s", gate, locator))
 	}
 
@@ -184,15 +196,16 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 	// structure.
 	if owner, owned := store.GateOwner(gate); owned {
 		if actor != owner.Actor() {
-			return store.Node{}, wiperr.New("refusal.gate-owner",
+			return SealTransition{}, wiperr.New("refusal.gate-owner",
 				fmt.Sprintf("%s is closed by its owning role %s (D14); spawn it and run under --as-role %s", gate, owner, owner))
 		}
 	} else if actor != store.ActorHuman {
-		return store.Node{}, wiperr.New("refusal.gate-owner",
+		return SealTransition{}, wiperr.New("refusal.gate-owner",
 			fmt.Sprintf("%s is human-owned; a role or system actor cannot close it", gate))
 	}
 
 	req := store.Request{Actor: actor, Env: env}
+	becameSealed := false
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
 		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
 		if err != nil {
@@ -202,13 +215,43 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 		if err != nil {
 			return nil, err
 		}
+		freshDeclarations, err := tx.GateDeclarations(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		var freshBound store.Scale
+		for _, declaration := range freshDeclarations {
+			if declaration.Gate == gate {
+				freshBound = declaration.Scale
+				break
+			}
+		}
+		if freshBound == "" {
+			return nil, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+		}
+		if fresh.Kind != freshBound {
+			return nil, wiperr.New("refusal.gate-scale", fmt.Sprintf(
+				"%s binds to %s scale and cannot close on %s %s", gate, freshBound, fresh.Kind, locator))
+		}
 		drafts := []store.Draft{{
 			Type:    store.TypeGateClosed,
 			Subject: fresh.ID,
 			Payload: store.GateClosed{Gate: gate, Scale: fresh.Kind, TrackerPushLevel: level},
 		}}
 		if fresh.Kind == store.ScaleMatter {
-			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, false, gate); err != nil {
+			wasSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, "")
+			if err != nil {
+				return nil, err
+			}
+			willBeSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, gate)
+			if err != nil {
+				return nil, err
+			}
+			becameSealed = !wasSealed && willBeSealed
+			if !becameSealed {
+				return drafts, nil
+			}
+			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID); err != nil {
 				return nil, err
 			} else if found {
 				sweep.Cause = 0
@@ -217,7 +260,11 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 		}
 		return drafts, nil
 	}); err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
-	return n, nil
+	fresh, err := s.Node(ctx, n.ID)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	return SealTransition{Node: fresh, BecameSealed: becameSealed}, nil
 }

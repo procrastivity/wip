@@ -19,6 +19,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
+	"github.com/procrastivity/wip/internal/tracker"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
@@ -146,7 +147,7 @@ func transitionCommand(use, short string, move func(context.Context, *store.Stor
 	}
 }
 
-func transitionCommandWithEnv(use, short string, move func(context.Context, *store.Store, store.Actor, store.Env, string) (store.Node, error), verbWord string) func(*iostreams.Streams) *cobra.Command {
+func transitionCommandWithEnv(use, short string, move func(context.Context, *store.Store, store.Actor, store.Env, string) (writesurface.SealTransition, error), verbWord string, coordinator *tracker.AlignmentCoordinator) func(*iostreams.Streams) *cobra.Command {
 	return func(streams *iostreams.Streams) *cobra.Command {
 		cmd := &cobra.Command{Use: use, Short: short, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
@@ -163,17 +164,27 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 			if err != nil {
 				return err
 			}
-			n, err := move(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
+			transition, err := move(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0])
 			if err != nil {
 				return err
+			}
+			n := transition.Node
+			var report tracker.AlignmentReport
+			if transition.BecameSealed {
+				report = coordinator.Check(cmd.Context(), s.View, n.ID)
+			}
+			var alignment *tracker.AlignmentReport
+			if report.Visible() {
+				alignment = &report
 			}
 			line, ce, ok := handoff(cmd.Context(), s.View, cur.Clone.ID, cur.Worktree.ID)
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					ID          string           `json:"id"`
-					Lifecycle   string           `json:"lifecycle"`
-					CursorEnded *cursorEndedJSON `json:"cursorEnded,omitempty"`
-				}{n.ID, string(n.Lifecycle), ce})
+					ID          string                   `json:"id"`
+					Lifecycle   string                   `json:"lifecycle"`
+					CursorEnded *cursorEndedJSON         `json:"cursorEnded,omitempty"`
+					Alignment   *tracker.AlignmentReport `json:"alignment,omitempty"`
+				}{ID: n.ID, Lifecycle: string(n.Lifecycle), CursorEnded: ce, Alignment: alignment})
 				if err != nil {
 					return err
 				}
@@ -182,6 +193,11 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 			}
 			if _, err := fmt.Fprintf(streams.Out, "%s %s\n", verbWord, args[0]); err != nil {
 				return err
+			}
+			for _, alignmentLine := range report.Lines() {
+				if _, err := fmt.Fprintln(streams.Out, alignmentLine); err != nil {
+					return err
+				}
 			}
 			if ok {
 				_, err = fmt.Fprintln(streams.Out, line)
@@ -194,9 +210,9 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 }
 
 // FinishCommand constructs `wip finish <locator>`.
-func FinishCommand(streams *iostreams.Streams) *cobra.Command {
+func FinishCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	return transitionCommandWithEnv("finish <locator>", "move a matter, stage or step from In Progress to Done",
-		writesurface.FinishWithEnv, "finished")(streams)
+		writesurface.FinishWithEnvResult, "finished", tracker.NewAlignmentCoordinator(providers))(streams)
 }
 
 // CancelCommand constructs `wip cancel <locator>`. It cannot use
