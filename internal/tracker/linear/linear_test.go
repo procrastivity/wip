@@ -161,7 +161,7 @@ func TestCreateRejectsAMismatchedReplayIdentity(t *testing.T) {
 	result, err := adapter.Deliver(context.Background(), store.OutboxEntry{
 		Kind: "create", IdempotencyKey: "key", Payload: json.RawMessage(`{"title":"Title"}`),
 	})
-	if err != nil || result.Outcome != tracker.PermanentRefusal || !strings.Contains(result.Reason, "unique valid identifier") {
+	if err != nil || result.Outcome != tracker.PermanentRefusal || !strings.Contains(result.Reason, "does not belong to target team") {
 		t.Fatalf("result = %+v, err = %v", result, err)
 	}
 }
@@ -179,6 +179,8 @@ func TestCommentUsesDeterministicUUIDAndReconcilesFailure(t *testing.T) {
 				return gqlData(map[string]any{"comments": map[string]any{"nodes": []any{map[string]any{"id": id}}}})
 			}
 			return gqlData(map[string]any{"comments": map[string]any{"nodes": []any{}}})
+		case "ReadIssue":
+			return issueResponse(workflowState{ID: startedState, Name: "Doing", Type: "started"}, "lease")
 		case "CreateComment":
 			mutations++
 			input := request.input(t)
@@ -220,6 +222,8 @@ func TestCommentConvergesOnSecondDeliveryWithoutAnotherMutation(t *testing.T) {
 				return gqlData(map[string]any{"comments": map[string]any{"nodes": []any{map[string]any{"id": observedID}}}})
 			}
 			return gqlData(map[string]any{"comments": map[string]any{"nodes": []any{}}})
+		case "ReadIssue":
+			return issueResponse(workflowState{ID: startedState, Name: "Doing", Type: "started"}, "lease")
 		case "CreateComment":
 			mutations++
 			input := request.input(t)
@@ -284,6 +288,8 @@ func TestGraphQLErrorsAndHTTPStatusesAreClassified(t *testing.T) {
 		{name: "HTTP 429", response: testResponse{status: http.StatusTooManyRequests, body: `{}`}, want: tracker.RetryableFailure},
 		{name: "HTTP 503", response: testResponse{status: http.StatusServiceUnavailable, body: `{}`}, want: tracker.RetryableFailure},
 		{name: "request limit header", response: testResponse{status: http.StatusBadRequest, body: `{}`, header: http.Header{"X-RateLimit-Requests-Remaining": {"0"}}}, want: tracker.RetryableFailure},
+		{name: "permanent code outranks retry-after header", response: withRetryAfter(gqlErrors(http.StatusOK, "AUTHENTICATION_ERROR", "bad token")), want: tracker.PermanentRefusal},
+		{name: "rate limit code with retry-after header", response: withRetryAfter(gqlErrors(http.StatusOK, "RATELIMITED", "slow down")), want: tracker.RetryableFailure},
 		{name: "authentication", response: gqlErrors(http.StatusOK, "AUTHENTICATION_ERROR", "bad token"), want: tracker.PermanentRefusal},
 		{name: "authorization", response: gqlErrors(http.StatusOK, "FORBIDDEN", "denied"), want: tracker.PermanentRefusal},
 		{name: "invalid input", response: gqlErrors(http.StatusOK, "BAD_USER_INPUT", "invalid"), want: tracker.PermanentRefusal},
@@ -382,6 +388,86 @@ func TestStateDeliveryImplementsTheLeaseMatrix(t *testing.T) {
 	}
 }
 
+func TestStateConvergenceNeedsNoWorkflowStateLookup(t *testing.T) {
+	var operations []string
+	adapter := newTestAdapter(t, func(t *testing.T, request gqlTestRequest) testResponse {
+		operations = append(operations, request.OperationName)
+		if request.OperationName != "ReadIssue" {
+			t.Fatalf("operation = %q; a converged issue must not resolve a workflow state", request.OperationName)
+		}
+		return issueResponse(workflowState{ID: completeState, Name: "Done", Type: "completed"}, "lease")
+	})
+	payload, _ := json.Marshal(statePayload{Disposition: store.TrackerCompleted})
+	result, err := adapter.Deliver(context.Background(), store.OutboxEntry{
+		Kind: "state", Ref: "BDS-124", Payload: payload,
+	})
+	if err != nil || result.Outcome != tracker.Converged || result.Lease != "lease" {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if !reflect.DeepEqual(operations, []string{"ReadIssue"}) {
+		t.Fatalf("operations = %v, want a single ReadIssue", operations)
+	}
+}
+
+func TestWorkflowStateSelectionPagesThroughAllStates(t *testing.T) {
+	pages := 0
+	adapter := newTestAdapter(t, func(t *testing.T, request gqlTestRequest) testResponse {
+		switch request.OperationName {
+		case "FindIssueByClientID":
+			return gqlData(map[string]any{"issues": map[string]any{"nodes": []any{}}})
+		case "WorkflowStates":
+			pages++
+			switch request.stringVariable("after") {
+			case "":
+				return gqlPage(true, "cursor-1", workflowState{ID: startedState2, Name: "Doing two", Type: "started", Position: 2})
+			case "cursor-1":
+				return gqlPage(false, "", workflowState{ID: startedState, Name: "Doing", Type: "started", Position: 1})
+			default:
+				t.Fatalf("after = %q", request.stringVariable("after"))
+				return testResponse{}
+			}
+		case "CreateIssue":
+			input := request.input(t)
+			if input["stateId"] != startedState {
+				t.Fatalf("stateId = %v, want the lowest-position state from page two", input["stateId"])
+			}
+			return gqlData(map[string]any{"issueCreate": map[string]any{"success": true, "issue": map[string]any{"identifier": "BDS-124"}}})
+		default:
+			t.Fatalf("operation = %q", request.OperationName)
+			return testResponse{}
+		}
+	})
+	result, err := adapter.Deliver(context.Background(), store.OutboxEntry{
+		Kind: "create", IdempotencyKey: "key", Payload: json.RawMessage(`{"title":"Title"}`),
+	})
+	if err != nil || result.Outcome != tracker.Delivered || pages != 2 {
+		t.Fatalf("result = %+v, err = %v, pages = %d", result, err, pages)
+	}
+}
+
+func TestCommentRefusesAnIssueOutsideTheTargetTeam(t *testing.T) {
+	adapter := newTestAdapter(t, func(t *testing.T, request gqlTestRequest) testResponse {
+		switch request.OperationName {
+		case "FindCommentByClientID":
+			return gqlData(map[string]any{"comments": map[string]any{"nodes": []any{}}})
+		case "ReadIssue":
+			item := issueMap(workflowState{ID: startedState, Name: "Doing", Type: "started"}, "lease")
+			item["team"] = map[string]any{"id": "99999999-9999-4999-8999-999999999999"}
+			return gqlData(map[string]any{"issue": item})
+		default:
+			t.Fatalf("operation = %q; a wrong-team issue must not receive a comment", request.OperationName)
+			return testResponse{}
+		}
+	})
+	result, err := adapter.Deliver(context.Background(), store.OutboxEntry{
+		Kind: "comment", Ref: "BDS-124", IdempotencyKey: "comment-key",
+		Payload: json.RawMessage(`{"title":"Provider API","action":"closed"}`),
+	})
+	if err != nil || result.Outcome != tracker.PermanentRefusal || !strings.Contains(result.Reason, "does not belong to target team") {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+}
+
 func TestReadStateMapsWorkflowTypes(t *testing.T) {
 	for _, test := range []struct {
 		stateType string
@@ -455,6 +541,18 @@ func TestValidationAndTokenPrecedenceRequireNoNetwork(t *testing.T) {
 	adapter, err = New(tracker.FactoryInput{Target: testTeam}, Options{Client: client})
 	if err != nil || adapter.token != "wip-token" {
 		t.Fatalf("adapter token = %q, err = %v", adapter.token, err)
+	}
+	t.Setenv("WIP_LINEAR_TOKEN", "")
+	adapter, err = New(tracker.FactoryInput{Target: testTeam}, Options{Client: client})
+	if err != nil || adapter.token != "linear-key" {
+		t.Fatalf("fallback token = %q, err = %v", adapter.token, err)
+	}
+	t.Setenv("LINEAR_API_KEY", "")
+	if _, err := New(tracker.FactoryInput{Target: testTeam}, Options{Client: client}); err == nil || !strings.Contains(err.Error(), "WIP_LINEAR_TOKEN or LINEAR_API_KEY") {
+		t.Fatalf("missing token: err = %v", err)
+	}
+	if called {
+		t.Fatal("construction made a request")
 	}
 }
 
@@ -556,6 +654,18 @@ func gqlErrors(status int, code, message string) testResponse {
 		"message": message, "extensions": map[string]any{"code": code},
 	}}})
 	return testResponse{status: status, body: string(encoded)}
+}
+
+func withRetryAfter(response testResponse) testResponse {
+	response.header = http.Header{"Retry-After": {"30"}}
+	return response
+}
+
+func gqlPage(hasNextPage bool, endCursor string, states ...workflowState) testResponse {
+	return gqlData(map[string]any{"team": map[string]any{"states": map[string]any{
+		"nodes":    states,
+		"pageInfo": map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+	}}})
 }
 
 func foundIssueResponse(id string) testResponse {

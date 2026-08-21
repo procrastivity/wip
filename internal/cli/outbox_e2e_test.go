@@ -169,9 +169,14 @@ func TestOutboxTargetIsOpaqueLazyConfigAndReachesFlushFactory(t *testing.T) {
 		t.Fatalf("target config queued %+v, err=%v", entries, err)
 	}
 
-	cleared := runWithProviders(t, providers, "outbox", "target", "none")
-	if cleared.exitCode != 0 || cleared.stdout != "none\n" {
-		t.Fatalf("clear target: exit=%d stdout=%q stderr=%q", cleared.exitCode, cleared.stdout, cleared.stderr)
+	for _, sentinel := range []string{"none", "  none  "} {
+		if r := runWithProviders(t, providers, "outbox", "target", target); r.exitCode != 0 {
+			t.Fatalf("re-set target: exit=%d stderr=%q", r.exitCode, r.stderr)
+		}
+		cleared := runWithProviders(t, providers, "outbox", "target", sentinel)
+		if cleared.exitCode != 0 || cleared.stdout != "none\n" {
+			t.Fatalf("clear target with %q: exit=%d stdout=%q stderr=%q", sentinel, cleared.exitCode, cleared.stdout, cleared.stderr)
+		}
 	}
 }
 
