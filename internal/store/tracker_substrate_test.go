@@ -66,6 +66,42 @@ func TestTrackerReferencesAreAMatterOwnedSet(t *testing.T) {
 	wantTrackerReferences(t, h, matter, "BB-4", "GH-5")
 }
 
+func TestTrackerAggregateReadsSharedReferenceLifecycle(t *testing.T) {
+	h := newHarness(t)
+	completed := h.matter("completed-share", "Completed share")
+	live := h.matter("live-share", "Live share")
+	const shared = "GH-shared"
+	for _, matter := range []string{completed, live} {
+		h.commit(Draft{Type: TypeReferenceAdded, Subject: matter, Payload: ReferenceAdded{Ref: shared}})
+	}
+	h.start(completed)
+	h.finish(completed)
+
+	if got, found, err := h.TrackerAggregate(h.ctx, shared); err != nil || !found || got != TrackerActive {
+		t.Fatalf("aggregate with another live Matter = %q, found=%t, err=%v; want active", got, found, err)
+	}
+
+	h.start(live)
+	h.cancel(live)
+	if got, found, err := h.TrackerAggregate(h.ctx, shared); err != nil || !found || got != TrackerCompleted {
+		t.Fatalf("aggregate with one sealed and one canceled Matter = %q, found=%t, err=%v; want completed", got, found, err)
+	}
+
+	allCanceled := h.matter("canceled-share", "Canceled share")
+	const canceledRef = "GH-canceled"
+	h.commit(Draft{Type: TypeReferenceAdded, Subject: allCanceled, Payload: ReferenceAdded{Ref: canceledRef}})
+	h.start(allCanceled)
+	h.cancel(allCanceled)
+	if got, found, err := h.TrackerAggregate(h.ctx, canceledRef); err != nil || !found || got != TrackerCanceled {
+		t.Fatalf("all-canceled aggregate = %q, found=%t, err=%v; want canceled", got, found, err)
+	}
+
+	h.commit(Draft{Type: TypeReferenceRemoved, Subject: allCanceled, Payload: ReferenceRemoved{Ref: canceledRef}})
+	if got, found, err := h.TrackerAggregate(h.ctx, canceledRef); err != nil || found || got != "" {
+		t.Fatalf("removed-only aggregate = %q, found=%t, err=%v; want absent", got, found, err)
+	}
+}
+
 func TestTrackerReferenceEventsRefuseChildrenWithoutAnEvent(t *testing.T) {
 	h := newHarness(t)
 	matter := h.matter("children-are-inert", "Children are inert")

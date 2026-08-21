@@ -12,6 +12,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/runlock"
 	"github.com/procrastivity/wip/internal/store"
+	"github.com/procrastivity/wip/internal/tracker"
 )
 
 // bracket opens the worktree's plain P1 dispatch the Orchestrator binds to.
@@ -109,6 +110,56 @@ func TestLoop_SequentialPassFinishesTheRun(t *testing.T) {
 	}
 	if len(stepFinishActors) != 2 || skips != 0 {
 		t.Errorf("finishes=%d skips=%d, want 2 and 0", len(stepFinishActors), skips)
+	}
+}
+
+type schedulerStateReader struct {
+	reads []string
+	state tracker.LiveState
+}
+
+func (*schedulerStateReader) Deliver(context.Context, store.OutboxEntry) (tracker.Result, error) {
+	return tracker.Result{}, nil
+}
+
+func (r *schedulerStateReader) ReadState(_ context.Context, ref string) (tracker.LiveState, error) {
+	r.reads = append(r.reads, ref)
+	return r.state, nil
+}
+
+func TestLoop_MatterFinishCallsAlignmentCoordinatorAfterCommit(t *testing.T) {
+	f := newFixture(t)
+	m := f.matter("post-seal", "Post seal")
+	f.commit(f.env(), func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{Type: store.TypeReferenceAdded, Subject: m, Payload: store.ReferenceAdded{Ref: "R-scheduler"}}}, nil
+	})
+	if err := f.SetConfig(ctx, f.Repo, store.TrackerBackendKey, "fake"); err != nil {
+		t.Fatal(err)
+	}
+	batch := f.namedBatch("post-seal-batch", m)
+	run := f.startRun(batch, "run-01", m)
+	f.bracket()
+
+	reader := &schedulerStateReader{state: tracker.LiveState{Class: tracker.LiveActive, Display: "In Progress", Lease: "lease"}}
+	providers := tracker.NewRegistry()
+	providers.Register("fake", func(store.Repo) (tracker.Seam, error) { return reader, nil })
+	coordinator := tracker.NewAlignmentCoordinator(providers)
+	var report tracker.AlignmentReport
+	orchestrate(t, f, run, 1, Policy{}, Hooks{
+		Work: func(context.Context, store.Node) error { return nil },
+		PostSeal: func(ctx context.Context, matter store.Node) {
+			report = coordinator.Check(ctx, f.View, matter.ID)
+		},
+	})
+	if len(reader.reads) != 1 || reader.reads[0] != "R-scheduler" {
+		t.Fatalf("scheduler alignment reads = %v, want R-scheduler once", reader.reads)
+	}
+	if len(report.Items) != 1 || report.Items[0].Classification != tracker.AlignmentBehind || report.Items[0].Expected != store.TrackerCompleted {
+		t.Fatalf("scheduler alignment report = %+v", report)
+	}
+	outbox, err := f.Outbox(ctx, f.Repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("alignment read changed outbox: %+v, err=%v", outbox, err)
 	}
 }
 

@@ -138,17 +138,23 @@ func simpleTransition(ctx context.Context, s *store.Store, actor store.Actor, re
 }
 
 func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator, action string, from, to store.Lifecycle, reason string) (store.Node, error) {
+	result, err := simpleTransitionEnvResult(ctx, s, actor, env, locator, action, from, to, reason)
+	return result.Node, err
+}
+
+func simpleTransitionEnvResult(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator, action string, from, to store.Lifecycle, reason string) (SealTransition, error) {
 	repo := env.Repo
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
 	if n.Lifecycle != from {
-		return store.Node{}, wiperr.New("refusal.invalid-transition",
+		return SealTransition{}, wiperr.New("refusal.invalid-transition",
 			fmt.Sprintf("%s is %s; %s requires %s", locator, n.Lifecycle, action, from))
 	}
 
 	req := store.Request{Actor: actor, Env: env}
+	becameSealed := false
 	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
 		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
 		if err != nil {
@@ -168,7 +174,19 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 			Payload: store.Transition{From: from, To: to, TrackerPushLevel: level, Reason: reason},
 		}}
 		if action == "finished" && fresh.Kind == store.ScaleMatter {
-			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID, true, ""); err != nil {
+			wasSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, "")
+			if err != nil {
+				return nil, err
+			}
+			willBeSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, true, "")
+			if err != nil {
+				return nil, err
+			}
+			becameSealed = !wasSealed && willBeSealed
+			if !becameSealed {
+				return drafts, nil
+			}
+			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID); err != nil {
 				return nil, err
 			} else if found {
 				sweep.Cause = 0
@@ -177,9 +195,13 @@ func simpleTransitionEnv(ctx context.Context, s *store.Store, actor store.Actor,
 		}
 		return drafts, nil
 	}); err != nil {
-		return store.Node{}, err
+		return SealTransition{}, err
 	}
-	return s.Node(ctx, n.ID)
+	fresh, err := s.Node(ctx, n.ID)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	return SealTransition{Node: fresh, BecameSealed: becameSealed}, nil
 }
 
 // Finish moves a node from InProgress to Done.
@@ -190,7 +212,14 @@ func Finish(ctx context.Context, s *store.Store, actor store.Actor, repo, locato
 // FinishWithEnv is Finish with the caller's full Env, so a sealing Matter
 // finish can sweep its anonymous Batch with correct event dimensions.
 func FinishWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (store.Node, error) {
-	return simpleTransitionEnv(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done, "")
+	result, err := FinishWithEnvResult(ctx, s, actor, env, locator)
+	return result.Node, err
+}
+
+// FinishWithEnvResult is FinishWithEnv with an atomic indication that this
+// finish crossed a Matter's seal boundary.
+func FinishWithEnvResult(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, locator string) (SealTransition, error) {
+	return simpleTransitionEnvResult(ctx, s, actor, env, locator, "finished", store.InProgress, store.Done, "")
 }
 
 // Cancel moves a node from InProgress to Canceled. reason is optional and

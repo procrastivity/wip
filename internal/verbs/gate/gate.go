@@ -19,6 +19,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
+	"github.com/procrastivity/wip/internal/tracker"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
@@ -35,12 +36,13 @@ type cursorEndedJSON struct {
 }
 
 // Command constructs the `wip gate` parent command and its verbs.
-func Command(streams *iostreams.Streams) *cobra.Command {
+func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
+	coordinator := tracker.NewAlignmentCoordinator(providers)
 	cmd := &cobra.Command{
 		Use:   "gate",
 		Short: "declare, repair, and close gates (MODEL §2.3)",
 	}
-	cmd.AddCommand(declareCommand(streams), repairCommand(streams), closeCommand(streams))
+	cmd.AddCommand(declareCommand(streams), repairCommand(streams), closeCommand(streams, coordinator))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -137,7 +139,7 @@ func declareCommand(streams *iostreams.Streams) *cobra.Command {
 	return cmd
 }
 
-func closeCommand(streams *iostreams.Streams) *cobra.Command {
+func closeCommand(streams *iostreams.Streams, coordinator *tracker.AlignmentCoordinator) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "close <gate-name> <locator>",
 		Short: "close a declared gate against a node",
@@ -158,9 +160,18 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 
-			n, err := writesurface.CloseGateWithEnv(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0], args[1])
+			transition, err := writesurface.CloseGateWithEnvResult(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), cur.Env(), args[0], args[1])
 			if err != nil {
 				return err
+			}
+			n := transition.Node
+			var report tracker.AlignmentReport
+			if transition.BecameSealed {
+				report = coordinator.Check(cmd.Context(), s.View, n.ID)
+			}
+			var alignment *tracker.AlignmentReport
+			if report.Visible() {
+				alignment = &report
 			}
 
 			// Best-effort hand-off, strictly post-commit and read-only
@@ -172,11 +183,12 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					Gate        string           `json:"gate"`
-					Node        string           `json:"node"`
-					Scale       string           `json:"scale"`
-					CursorEnded *cursorEndedJSON `json:"cursorEnded,omitempty"`
-				}{Gate: args[0], Node: n.ID, Scale: string(n.Kind), CursorEnded: ce})
+					Gate        string                   `json:"gate"`
+					Node        string                   `json:"node"`
+					Scale       string                   `json:"scale"`
+					CursorEnded *cursorEndedJSON         `json:"cursorEnded,omitempty"`
+					Alignment   *tracker.AlignmentReport `json:"alignment,omitempty"`
+				}{Gate: args[0], Node: n.ID, Scale: string(n.Kind), CursorEnded: ce, Alignment: alignment})
 				if err != nil {
 					return err
 				}
@@ -185,6 +197,11 @@ func closeCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			if _, err := fmt.Fprintf(streams.Out, "closed %s on %s\n", args[0], args[1]); err != nil {
 				return err
+			}
+			for _, alignmentLine := range report.Lines() {
+				if _, err := fmt.Fprintln(streams.Out, alignmentLine); err != nil {
+					return err
+				}
 			}
 			if ok {
 				_, err = fmt.Fprintln(streams.Out, line)

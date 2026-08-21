@@ -530,6 +530,116 @@ func TestIssueStateReadShape(t *testing.T) {
 	}
 }
 
+func TestReadStateMapsGitHubLifecycle(t *testing.T) {
+	const lease = "2026-08-20T12:34:56Z"
+	for _, test := range []struct {
+		name        string
+		state       string
+		stateReason string
+		wantClass   tracker.LiveClass
+		wantDisplay string
+	}{
+		{name: "open", state: "open", wantClass: tracker.LiveNonterminal, wantDisplay: "open"},
+		{name: "reopened", state: "open", stateReason: "reopened", wantClass: tracker.LiveNonterminal, wantDisplay: "open (reopened)"},
+		{name: "completed", state: "closed", stateReason: "completed", wantClass: tracker.LiveCompleted, wantDisplay: "closed (completed)"},
+		{name: "not planned", state: "closed", stateReason: "not_planned", wantClass: tracker.LiveCanceled, wantDisplay: "closed (not_planned)"},
+		{name: "other closed reason", state: "closed", stateReason: "duplicate", wantClass: tracker.LiveTerminal, wantDisplay: "closed (duplicate)"},
+		{name: "closed without reason", state: "closed", wantClass: tracker.LiveTerminal, wantDisplay: "closed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := newTestAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assertHeaders(t, r)
+				if r.Method != http.MethodGet || r.URL.Path != "/repos/acme/widget/issues/17" {
+					t.Fatalf("request = %s %s", r.Method, r.URL.String())
+				}
+				_ = json.NewEncoder(w).Encode(issue{
+					State: test.state, StateReason: test.stateReason, UpdatedAt: lease,
+				})
+			}))
+
+			got, err := adapter.ReadState(context.Background(), "https://github.com/acme/widget/issues/17")
+			want := tracker.LiveState{Class: test.wantClass, Display: test.wantDisplay, Lease: lease}
+			if err != nil || got != want {
+				t.Fatalf("ReadState() = %+v, %v; want %+v", got, err, want)
+			}
+		})
+	}
+}
+
+func TestReadStateRejectsMalformedSuccessfulResponses(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing state", body: `{"updated_at":"2026-08-20T12:34:56Z"}`},
+		{name: "unknown state", body: `{"state":"locked","updated_at":"2026-08-20T12:34:56Z"}`},
+		{name: "missing updated at", body: `{"state":"open"}`},
+		{name: "blank updated at", body: `{"state":"open","updated_at":"  "}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := newTestAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(test.body))
+			}))
+			got, err := adapter.ReadState(context.Background(), "https://github.com/acme/widget/issues/17")
+			if got != (tracker.LiveState{}) || err == nil || !strings.Contains(err.Error(), "malformed state or updated_at") {
+				t.Fatalf("ReadState() = %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestReadStateRejectsInvalidReferencesBeforeRequest(t *testing.T) {
+	for _, ref := range []string{
+		"not-an-issue",
+		"https://github.com/acme/widget/pull/17",
+		"https://github.com/acme/widget/issues/0",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			called := false
+			adapter := newTestAdapter(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+			got, err := adapter.ReadState(context.Background(), ref)
+			if got != (tracker.LiveState{}) || err == nil || called {
+				t.Fatalf("ReadState(%q) = %+v, %v; request called = %t", ref, got, err, called)
+			}
+		})
+	}
+}
+
+func TestReadStateReturnsTransportAndAPIErrors(t *testing.T) {
+	transportFailure := errors.New("connection reset")
+	t.Run("transport", func(t *testing.T) {
+		adapter := newTestAdapterWithTransport(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, transportFailure
+		}))
+		got, err := adapter.ReadState(context.Background(), "https://github.com/acme/widget/issues/17")
+		if got != (tracker.LiveState{}) || !errors.Is(err, transportFailure) {
+			t.Fatalf("ReadState() = %+v, %v; want transport error", got, err)
+		}
+	})
+
+	t.Run("malformed JSON", func(t *testing.T) {
+		adapter := newTestAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{`))
+		}))
+		got, err := adapter.ReadState(context.Background(), "https://github.com/acme/widget/issues/17")
+		if got != (tracker.LiveState{}) || err == nil || !strings.Contains(err.Error(), "decode response") {
+			t.Fatalf("ReadState() = %+v, %v", got, err)
+		}
+	})
+
+	for _, status := range []int{http.StatusUnprocessableEntity, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			adapter := newTestAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "provider response", status)
+			}))
+			got, err := adapter.ReadState(context.Background(), "https://github.com/acme/widget/issues/17")
+			if got != (tracker.LiveState{}) || err == nil || !strings.Contains(err.Error(), "HTTP "+strconv.Itoa(status)) {
+				t.Fatalf("ReadState() = %+v, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestIssueStateWriteShapes(t *testing.T) {
 	for _, test := range []struct {
 		name        string

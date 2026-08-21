@@ -45,6 +45,8 @@ type Adapter struct {
 	client  *http.Client
 }
 
+var _ tracker.StateReader = (*Adapter)(nil)
+
 // New constructs an adapter for the repository identified by repo.RemoteURL.
 func New(repo store.Repo, options Options) (*Adapter, error) {
 	owner, name, err := repository(repo.RemoteURL)
@@ -199,6 +201,41 @@ func (a *Adapter) readIssue(ctx context.Context, owner, name string, number int)
 	var response issue
 	err := a.request(ctx, http.MethodGet, issuePath(owner, name, number), nil, &response)
 	return response, err
+}
+
+// ReadState implements tracker.StateReader.
+func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState, error) {
+	owner, name, number, err := issueReference(ref)
+	if err != nil {
+		return tracker.LiveState{}, err
+	}
+	observed, err := a.readIssue(ctx, owner, name, number)
+	if err != nil {
+		return tracker.LiveState{}, err
+	}
+	if strings.TrimSpace(observed.UpdatedAt) == "" || (observed.State != "open" && observed.State != "closed") {
+		return tracker.LiveState{}, fmt.Errorf("github tracker: issue read returned malformed state or updated_at")
+	}
+
+	live := tracker.LiveState{
+		Class:   tracker.LiveNonterminal,
+		Display: observed.State,
+		Lease:   observed.UpdatedAt,
+	}
+	if observed.StateReason != "" {
+		live.Display += " (" + observed.StateReason + ")"
+	}
+	if observed.State == "closed" {
+		switch observed.StateReason {
+		case "completed":
+			live.Class = tracker.LiveCompleted
+		case "not_planned":
+			live.Class = tracker.LiveCanceled
+		default:
+			live.Class = tracker.LiveTerminal
+		}
+	}
+	return live, nil
 }
 
 func (a *Adapter) writeIssueState(ctx context.Context, owner, name string, number int, update issueStateUpdate) (issue, error) {
