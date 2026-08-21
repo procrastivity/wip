@@ -763,6 +763,20 @@ func TestRepositoryRemoteParsing(t *testing.T) {
 	}
 }
 
+func TestFactoryIgnoresProviderNeutralTarget(t *testing.T) {
+	seam, err := Factory(Options{Token: "test-token"})(tracker.FactoryInput{
+		Repo:   store.Repo{RemoteURL: "github.com/acme/widget"},
+		Target: "provider-owned-target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := seam.(*Adapter)
+	if !ok || adapter.owner != "acme" || adapter.repo != "widget" {
+		t.Fatalf("factory seam = %#v", seam)
+	}
+}
+
 func newTestAdapter(t *testing.T, handler http.Handler) *Adapter {
 	t.Helper()
 	return newTestAdapterWithTransport(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {

@@ -17,6 +17,7 @@ type fakeAlignmentView struct {
 	refs       []string
 	aggregates map[string]store.TrackerDisposition
 	backend    string
+	target     string
 	configKeys []string
 }
 
@@ -46,6 +47,9 @@ func (f *fakeAlignmentView) Config(_ context.Context, _, key string) (string, bo
 	if key == store.TrackerBackendKey && f.backend != "" {
 		return f.backend, true, nil
 	}
+	if key == store.TrackerTargetKey && f.target != "" {
+		return f.target, true, nil
+	}
 	return "", false, nil
 }
 
@@ -54,9 +58,10 @@ func (f *fakeAlignmentView) Repo(context.Context, string) (store.Repo, error) {
 }
 
 type fakeAlignmentReader struct {
-	states map[string]LiveState
-	errors map[string]error
-	reads  []string
+	states        map[string]LiveState
+	errors        map[string]error
+	reads         []string
+	factoryInputs []FactoryInput
 }
 
 func (*fakeAlignmentReader) Deliver(context.Context, store.OutboxEntry) (Result, error) {
@@ -70,7 +75,10 @@ func (f *fakeAlignmentReader) ReadState(_ context.Context, ref string) (LiveStat
 
 func coordinatorFixture(reader *fakeAlignmentReader) (*AlignmentCoordinator, *fakeAlignmentView) {
 	registry := NewRegistry()
-	registry.Register("fake", func(store.Repo) (Seam, error) { return reader, nil })
+	registry.Register("fake", func(input FactoryInput) (Seam, error) {
+		reader.factoryInputs = append(reader.factoryInputs, input)
+		return reader, nil
+	})
 	view := &fakeAlignmentView{
 		node: store.Node{ID: "matter-1", Kind: store.ScaleMatter, Repo: "repo-1", Lifecycle: store.Done},
 		refs: []string{"R-2", "R-1"},
@@ -79,6 +87,7 @@ func coordinatorFixture(reader *fakeAlignmentReader) (*AlignmentCoordinator, *fa
 			"R-1": store.TrackerCompleted,
 		},
 		backend: "fake",
+		target:  "team-1",
 	}
 	return NewAlignmentCoordinator(registry), view
 }
@@ -94,8 +103,11 @@ func TestAlignmentCoordinatorReadsEveryReferenceOnceInStableOrderWithPushOffIrre
 	if !reflect.DeepEqual(reader.reads, []string{"R-2", "R-1"}) {
 		t.Fatalf("reads = %v, want each active reference once in store order", reader.reads)
 	}
-	if !reflect.DeepEqual(view.configKeys, []string{store.TrackerBackendKey}) {
+	if !reflect.DeepEqual(view.configKeys, []string{store.TrackerBackendKey, store.TrackerTargetKey}) {
 		t.Fatalf("config reads = %v; push level must not suppress live reads", view.configKeys)
+	}
+	if len(reader.factoryInputs) != 1 || reader.factoryInputs[0].Repo.ID != view.node.Repo || reader.factoryInputs[0].Target != view.target {
+		t.Fatalf("factory inputs = %+v, want repo %q and target %q", reader.factoryInputs, view.node.Repo, view.target)
 	}
 	if len(report.Items) != 2 || report.Items[0].Classification != AlignmentAligned || report.Items[1].Classification != AlignmentBehind {
 		t.Fatalf("report = %+v", report)
@@ -158,7 +170,7 @@ func TestAlignmentCoordinatorDegradesBackendAndProviderFailures(t *testing.T) {
 		reader := &fakeAlignmentReader{states: map[string]LiveState{}}
 		_, view := coordinatorFixture(reader)
 		registry := NewRegistry()
-		registry.Register("fake", func(store.Repo) (Seam, error) { return nil, errors.New("missing credentials") })
+		registry.Register("fake", func(FactoryInput) (Seam, error) { return nil, errors.New("missing credentials") })
 		coordinator := NewAlignmentCoordinator(registry)
 		report := coordinator.Check(context.Background(), view, view.node.ID)
 		if len(report.Items) != 2 || report.Items[0].Classification != AlignmentUnavailable || !strings.Contains(report.Items[0].Reason, "missing credentials") || len(reader.reads) != 0 {

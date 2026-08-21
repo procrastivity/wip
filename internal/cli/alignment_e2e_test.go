@@ -62,7 +62,7 @@ func TestPostSealAlignmentThroughFinishAndFinalGate(t *testing.T) {
 		"R-gated":  {Class: tracker.LiveCompleted, Display: "Done", Lease: "lease-2"},
 	}}
 	providers := tracker.NewRegistry()
-	providers.Register("fake", func(store.Repo) (tracker.Seam, error) { return reader, nil })
+	providers.Register("fake", func(tracker.FactoryInput) (tracker.Seam, error) { return reader, nil })
 
 	for _, args := range [][]string{
 		{"init", "--json"},
@@ -133,7 +133,7 @@ func TestPostSealAlignmentReadsAtPushOffAndBackendNoneIsNonfatal(t *testing.T) {
 		"R-aligned": {Class: tracker.LiveCompleted, Display: "Done", Lease: "lease-done"},
 	}}
 	providers := tracker.NewRegistry()
-	providers.Register("fake", func(store.Repo) (tracker.Seam, error) { return reader, nil })
+	providers.Register("fake", func(tracker.FactoryInput) (tracker.Seam, error) { return reader, nil })
 
 	for _, args := range [][]string{
 		{"init", "--json"},
@@ -219,7 +219,7 @@ func TestRrulerReplayAlreadyDoneIssueProducesNoCloseOffer(t *testing.T) {
 		"BDS-132": {Class: tracker.LiveCompleted, Display: "Done", Lease: "2026-08-20T13:48:49Z"},
 	}}
 	providers := tracker.NewRegistry()
-	providers.Register("linear-fixture", func(store.Repo) (tracker.Seam, error) { return reader, nil })
+	providers.Register("linear-fixture", func(tracker.FactoryInput) (tracker.Seam, error) { return reader, nil })
 	for _, args := range [][]string{
 		{"init", "--json"},
 		{"outbox", "backend", "linear-fixture"},
