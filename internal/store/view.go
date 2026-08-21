@@ -190,9 +190,12 @@ func (v View) TrackerReferences(ctx context.Context, matter string) ([]string, e
 }
 
 // TrackerAggregate returns the expected provider-neutral disposition of one
-// shared tracker reference. A live bound Matter keeps the reference active.
-// When all bound Matters are terminal, at least one sealed Matter makes the
-// aggregate completed. An all-canceled set makes it canceled.
+// shared tracker reference. The bool reports whether the reference has live
+// local membership. An all-Planned set has membership but no deliverable
+// disposition, so it returns an empty disposition with true. After any Matter
+// leaves Planned, a nonterminal Matter keeps the reference active. When all
+// bound Matters are terminal, at least one sealed Matter makes the aggregate
+// completed. An all-canceled set makes it canceled.
 func (v View) TrackerAggregate(ctx context.Context, ref string) (TrackerDisposition, bool, error) {
 	matters, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
 		WHERE id IN (SELECT matter FROM tracker_references WHERE ref=? AND removed_event IS NULL)
@@ -202,6 +205,16 @@ func (v View) TrackerAggregate(ctx context.Context, ref string) (TrackerDisposit
 	}
 	if len(matters) == 0 {
 		return "", false, nil
+	}
+	allPlanned := true
+	for _, matter := range matters {
+		if matter.Lifecycle != Planned {
+			allPlanned = false
+			break
+		}
+	}
+	if allPlanned {
+		return "", true, nil
 	}
 	sealedCount := 0
 	for _, matter := range matters {

@@ -890,6 +890,9 @@ func queueMatterStateCandidates(ctx context.Context, tx *sql.Tx, ev Event, subje
 		if !found { // removing the final Matter queues no cleanup transition
 			continue
 		}
+		if disposition == "" { // an all-Planned reference has nothing to deliver
+			continue
+		}
 		payload, err := json.Marshal(struct {
 			Disposition TrackerDisposition `json:"disposition"`
 		}{disposition})

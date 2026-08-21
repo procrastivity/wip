@@ -74,6 +74,9 @@ func TestTrackerAggregateReadsSharedReferenceLifecycle(t *testing.T) {
 	for _, matter := range []string{completed, live} {
 		h.commit(Draft{Type: TypeReferenceAdded, Subject: matter, Payload: ReferenceAdded{Ref: shared}})
 	}
+	if got, found, err := h.TrackerAggregate(h.ctx, shared); err != nil || !found || got != "" {
+		t.Fatalf("all-Planned aggregate = %q, found=%t, err=%v; want membership without disposition", got, found, err)
+	}
 	h.start(completed)
 	h.finish(completed)
 
