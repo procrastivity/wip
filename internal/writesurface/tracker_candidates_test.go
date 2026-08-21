@@ -38,6 +38,9 @@ func TestMatterBoundariesQueueWithoutPrematureComposition(t *testing.T) {
 	if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, "candidate-boundaries", "T-1"); err != nil {
 		t.Fatal(err)
 	}
+	if entries := trackerEntries(t, f.s, f.env.Repo); len(entries) != 0 {
+		t.Fatalf("Planned bind queued candidates: %+v", entries)
+	}
 	if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, "candidate-boundaries"); err != nil {
 		t.Fatal(err)
 	}
@@ -45,15 +48,15 @@ func TestMatterBoundariesQueueWithoutPrematureComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := trackerEntries(t, f.s, f.env.Repo)
-	if len(entries) != 3 {
-		t.Fatalf("outbox entries = %d, want bind, start, and finish candidates", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("outbox entries = %d, want start and finish candidates", len(entries))
 	}
-	for i, want := range []store.TrackerDisposition{store.TrackerActive, store.TrackerActive, store.TrackerCompleted} {
+	for i, want := range []store.TrackerDisposition{store.TrackerActive, store.TrackerCompleted} {
 		if entries[i].Kind != "state" || entries[i].Subject != f.matter || entries[i].Ref != "T-1" || dispositionOf(t, entries[i]) != want {
 			t.Fatalf("candidate %d = %+v payload=%s, want state %s", i, entries[i], entries[i].Payload, want)
 		}
 	}
-	if entries[1].ID == entries[2].ID || entries[1].IdempotencyKey == entries[2].IdempotencyKey {
+	if entries[0].ID == entries[1].ID || entries[0].IdempotencyKey == entries[1].IdempotencyKey {
 		t.Fatal("two state boundaries collapsed before flush")
 	}
 }
@@ -193,6 +196,33 @@ func TestSharedReferenceAggregationAndFinalUnbind(t *testing.T) {
 	_ = b
 }
 
+func TestAllPlannedSharedReferenceQueuesOnFirstStart(t *testing.T) {
+	f := newBatchFixture(t, "planned-shared-a")
+	ctx := context.Background()
+	if _, err := f.s.SetTrackerPushLevel(ctx, f.env.Repo, "boundary"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := CreateMatter(ctx, f.s, store.ActorHuman, f.env.Repo, "Planned shared B", "planned-shared-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, locator := range []string{"planned-shared-a", b.Locator} {
+		if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, locator, "T-planned-shared"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries := trackerEntries(t, f.s, f.env.Repo); len(entries) != 0 {
+		t.Fatalf("all-Planned bindings queued candidates: %+v", entries)
+	}
+	if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, b.Locator); err != nil {
+		t.Fatal(err)
+	}
+	entries := trackerEntries(t, f.s, f.env.Repo)
+	if len(entries) != 1 || entries[0].Ref != "T-planned-shared" || dispositionOf(t, entries[0]) != store.TrackerActive {
+		t.Fatalf("first Matter start candidates = %+v, want one active shared-reference candidate", entries)
+	}
+}
+
 func TestCandidateRebuildUsesEventSnapshotNotCurrentConfig(t *testing.T) {
 	f := newBatchFixture(t, "rebuild-candidates")
 	ctx := context.Background()
@@ -264,6 +294,9 @@ func TestRebindQueuesDestinationAndEligibleSourceWithoutIntermediateState(t *tes
 		t.Fatal(err)
 	}
 	for _, locator := range []string{"rebind-a", "rebind-b"} {
+		if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, locator); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, locator, "T-source"); err != nil {
 			t.Fatal(err)
 		}
@@ -287,6 +320,27 @@ func TestRebindQueuesDestinationAndEligibleSourceWithoutIntermediateState(t *tes
 	refs, err := f.s.TrackerReferences(ctx, f.matter)
 	if err != nil || !reflect.DeepEqual(refs, []string{"T-destination"}) {
 		t.Fatalf("rebound references = %v, err=%v", refs, err)
+	}
+}
+
+func TestPlannedRebindQueuesNoStateCandidate(t *testing.T) {
+	f := newBatchFixture(t, "planned-rebind")
+	ctx := context.Background()
+	if _, err := f.s.SetTrackerPushLevel(ctx, f.env.Repo, "boundary"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, "planned-rebind", "T-planned-source"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Rebind(ctx, f.s, store.ActorHuman, f.env.Repo, "planned-rebind", "T-planned-source", "T-planned-destination"); err != nil {
+		t.Fatal(err)
+	}
+	if entries := trackerEntries(t, f.s, f.env.Repo); len(entries) != 0 {
+		t.Fatalf("Planned rebind queued candidates: %+v", entries)
+	}
+	refs, err := f.s.TrackerReferences(ctx, f.matter)
+	if err != nil || !reflect.DeepEqual(refs, []string{"T-planned-destination"}) {
+		t.Fatalf("Planned rebound references = %v, err=%v", refs, err)
 	}
 }
 
@@ -351,6 +405,9 @@ func TestCandidateIdentitySurvivesReopen(t *testing.T) {
 	if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, "reopen-candidates", "T-reopen"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, "reopen-candidates"); err != nil {
+		t.Fatal(err)
+	}
 	before := trackerEntries(t, f.s, f.env.Repo)
 	fixturePath := f.s.Path()
 	if err := f.s.Close(); err != nil {
@@ -373,7 +430,7 @@ func TestBindQueuesCurrentStateForEveryMatterDisposition(t *testing.T) {
 		move func(context.Context, *store.Store, string, string) error
 		want store.TrackerDisposition
 	}{
-		{name: "planned", want: store.TrackerActive},
+		{name: "planned"},
 		{name: "active", want: store.TrackerActive, move: func(ctx context.Context, s *store.Store, repo, locator string) error {
 			_, err := Start(ctx, s, store.ActorHuman, repo, locator)
 			return err
@@ -410,6 +467,12 @@ func TestBindQueuesCurrentStateForEveryMatterDisposition(t *testing.T) {
 				t.Fatal(err)
 			}
 			entries := trackerEntries(t, f.s, f.env.Repo)
+			if test.want == "" {
+				if len(entries) != 0 {
+					t.Fatalf("bind candidate = %+v, want none", entries)
+				}
+				return
+			}
 			if len(entries) != 1 || dispositionOf(t, entries[0]) != test.want {
 				t.Fatalf("bind candidate = %+v, want %s", entries, test.want)
 			}
