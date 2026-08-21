@@ -56,3 +56,30 @@ func TestTrackerPushLevelIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 		t.Fatalf("config change queued outbox = %+v, err=%v", entries, err)
 	}
 }
+
+func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+	h := newHarness(t)
+	before, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const target = "  provider-owned target  "
+	if err := h.SetConfig(h.ctx, h.Repo, TrackerTargetKey, target); err != nil {
+		t.Fatal(err)
+	}
+	got, present, err := h.Config(h.ctx, h.Repo, TrackerTargetKey)
+	if err != nil || !present || got != target {
+		t.Fatalf("tracker target = %q, present=%v, err=%v, want %q", got, present, err, target)
+	}
+	after, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("target config appended %d event(s)", len(after)-len(before))
+	}
+	entries, err := h.Outbox(h.ctx, h.Repo)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("target config queued outbox = %+v, err=%v", entries, err)
+	}
+}

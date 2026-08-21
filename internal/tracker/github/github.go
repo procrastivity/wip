@@ -31,8 +31,8 @@ type Options struct {
 
 // Factory returns the static registration factory for the GitHub backend.
 func Factory(options Options) tracker.Factory {
-	return func(repo store.Repo) (tracker.Seam, error) {
-		return New(repo, options)
+	return func(input tracker.FactoryInput) (tracker.Seam, error) {
+		return New(input.Repo, options)
 	}
 }
 

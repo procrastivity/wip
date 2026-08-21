@@ -146,11 +146,15 @@ func (c *AlignmentCoordinator) Check(ctx context.Context, v AlignmentView, matte
 	if !present || backend == "" || backend == "none" {
 		return unavailableForRefs(refs, "tracker backend is none")
 	}
+	target, _, err := v.Config(ctx, matter.Repo, store.TrackerTargetKey)
+	if err != nil {
+		return unavailableForRefs(refs, err.Error())
+	}
 	repo, err := v.Repo(ctx, matter.Repo)
 	if err != nil {
 		return unavailableForRefs(refs, err.Error())
 	}
-	seam, err := c.providers.Resolve(backend, repo)
+	seam, err := c.providers.Resolve(backend, FactoryInput{Repo: repo, Target: target})
 	if err != nil {
 		return unavailableForRefs(refs, err.Error())
 	}

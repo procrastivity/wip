@@ -24,6 +24,8 @@ const (
 	TrackerPushLevelKey = "tracker.push-level"
 	// TrackerBackendKey is the provider-neutral configured-backend marker.
 	TrackerBackendKey = "tracker.backend"
+	// TrackerTargetKey is the provider-neutral configured-target value.
+	TrackerTargetKey = "tracker.target"
 )
 
 // ParseTrackerPushLevel validates one push-level token.

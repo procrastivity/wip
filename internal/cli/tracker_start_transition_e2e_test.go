@@ -45,7 +45,7 @@ func setupStartTransitionCLI(t *testing.T, seam *startTransitionSeam) (*tracker.
 	dbPath := filepath.Join(t.TempDir(), "wip.db")
 	t.Setenv("WIP_DB_PATH", dbPath)
 	providers := tracker.NewRegistry()
-	providers.Register("guarded", func(store.Repo) (tracker.Seam, error) { return seam, nil })
+	providers.Register("guarded", func(tracker.FactoryInput) (tracker.Seam, error) { return seam, nil })
 	mustRunStartTransition(t, providers, "init", "--json")
 	return providers, dbPath
 }

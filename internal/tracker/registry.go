@@ -8,10 +8,17 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
-// Factory constructs one provider seam for a Repo. Provider packages expose a
-// Factory and the CLI registers it here without adding provider names to the
-// store's event or projection vocabulary.
-type Factory func(store.Repo) (Seam, error)
+// FactoryInput contains the provider-neutral values needed to construct one
+// provider seam.
+type FactoryInput struct {
+	Repo   store.Repo
+	Target string
+}
+
+// Factory constructs one provider seam. Provider packages expose a Factory
+// and the CLI registers it here without adding provider names to the store's
+// event or projection vocabulary.
+type Factory func(FactoryInput) (Seam, error)
 
 // Registry maps configured backend names to concrete provider factories.
 type Registry struct {
@@ -49,8 +56,8 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-// Resolve constructs the configured provider seam for repo.
-func (r *Registry) Resolve(name string, repo store.Repo) (Seam, error) {
+// Resolve constructs the configured provider seam from provider-neutral input.
+func (r *Registry) Resolve(name string, input FactoryInput) (Seam, error) {
 	if r == nil {
 		return nil, fmt.Errorf("tracker: backend %q is not registered", name)
 	}
@@ -58,5 +65,5 @@ func (r *Registry) Resolve(name string, repo store.Repo) (Seam, error) {
 	if !ok {
 		return nil, fmt.Errorf("tracker: backend %q is not registered", name)
 	}
-	return factory(repo)
+	return factory(input)
 }

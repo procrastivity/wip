@@ -142,7 +142,7 @@ func TestLoop_MatterFinishCallsAlignmentCoordinatorAfterCommit(t *testing.T) {
 
 	reader := &schedulerStateReader{state: tracker.LiveState{Class: tracker.LiveActive, Display: "In Progress", Lease: "lease"}}
 	providers := tracker.NewRegistry()
-	providers.Register("fake", func(store.Repo) (tracker.Seam, error) { return reader, nil })
+	providers.Register("fake", func(tracker.FactoryInput) (tracker.Seam, error) { return reader, nil })
 	coordinator := tracker.NewAlignmentCoordinator(providers)
 	var report tracker.AlignmentReport
 	orchestrate(t, f, run, 1, Policy{}, Hooks{

@@ -1,6 +1,6 @@
 // Package outbox implements provider-neutral inspection and human lifecycle
 // actions. Commands use an injected provider registry to resolve the configured
-// backend. The stock binary registers the GitHub provider in that registry.
+// backend. The stock binary registers the GitHub and Linear providers there.
 package outbox
 
 import (
@@ -24,9 +24,55 @@ import (
 // injected at the CLI registration point.
 func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "outbox", Short: "inspect and disposition provider-neutral delivery work"}
-	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
+	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), targetCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func targetCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "target [none|value]",
+		Short: "read or set this repo's tracker target",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		s, repo, err := openRepo(cmd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+
+		target, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerTargetKey)
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 {
+			target = args[0]
+			if target == "none" {
+				target = ""
+			}
+			if err := s.SetConfig(cmd.Context(), repo.ID, store.TrackerTargetKey, target); err != nil {
+				return err
+			}
+		}
+
+		if cliflags.FromContext(cmd.Context()).JSON {
+			b, err := json.Marshal(struct {
+				Target string `json:"target"`
+			}{target})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, string(b))
+			return err
+		}
+		if target == "" {
+			target = "none"
+		}
+		_, err = fmt.Fprintln(streams.Out, target)
+		return err
+	}
+	return plumbing(cmd)
 }
 
 func backendCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
@@ -268,7 +314,11 @@ func flushCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobr
 		if backend == "" {
 			return fmt.Errorf("tracker: no provider seam configured")
 		}
-		seam, err := providers.Resolve(backend, repo)
+		target, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerTargetKey)
+		if err != nil {
+			return err
+		}
+		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target})
 		if err != nil {
 			return err
 		}
