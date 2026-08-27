@@ -120,6 +120,57 @@ func TestMatterSummaryListsInForceBlockedByEdges(t *testing.T) {
 	}
 }
 
+// TestMatterSummaryCarriesSnapshotStamp is the orientation contract for
+// wip-authored generated files: matter.md names when it was rendered and
+// tells a reader that disagrees with `wip status` to run a named refresh.
+func TestMatterSummaryCarriesSnapshotStamp(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Fix the thing")
+
+	if _, err := Refresh(ctx, s, cur, store.ActorHuman, NoPrecondition); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	md, err := os.ReadFile(filepath.Join(GeneratedDir(cur.Root), locator, "matter.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(md)
+	if !strings.Contains(got, "rendered-at: ") {
+		t.Errorf("matter.md missing rendered-at:\n%s", got)
+	}
+	want := "run `wip refresh " + locator + "` and re-read"
+	if !strings.Contains(got, want) {
+		t.Errorf("matter.md missing named refresh instruction %q:\n%s", want, got)
+	}
+	if !strings.Contains(got, "snapshot from the last `wip refresh`") {
+		t.Errorf("matter.md missing snapshot notice:\n%s", got)
+	}
+}
+
+// TestRoadmapCarriesSnapshotNotice stamps the same recovery line on
+// roadmap.md, which is wip-authored. Brief and Workplan files stay
+// verbatim store content (see TestDepthPolicy_MatterGrainWorkplanRendersAsWorkplanFile).
+func TestRoadmapCarriesSnapshotNotice(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "A Feature")
+	stage(t, s, cur.Repo.ID, locator, "First Stage")
+
+	if _, err := Refresh(ctx, s, cur, store.ActorHuman, NoPrecondition); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	md, err := os.ReadFile(filepath.Join(GeneratedDir(cur.Root), locator, "roadmap.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(md)
+	want := "run `wip refresh " + locator + "` and re-read"
+	if !strings.Contains(got, want) {
+		t.Errorf("roadmap.md missing named refresh instruction %q:\n%s", want, got)
+	}
+}
+
 // TestWrite_GeneratedFilesAre0444 is step-04's Done: every file under
 // `.wip/generated/` is 0444 immediately after render, and a direct write
 // attempt against one fails at the OS level.

@@ -5,10 +5,20 @@ Step — rather than narrating it in chat. Use it to see what is unblocked
 (`wip next`), to check where things stand (`wip status`), and to record a
 write (create, amend, gate) through a verb rather than by editing a file
 directly: every write through a verb becomes an event for free, and every
-file this skill can see you generate is a projection, not a source. If a
-command below refuses with a permission-denied message pointing at
-`.wip/generated/`, that is the projection saying so — the fix is a verb
-call followed by `wip refresh`, never a file edit.
+file under `.wip/generated/` is a snapshot from the last `wip refresh`,
+not live state. If a command below refuses with a permission-denied
+message pointing at `.wip/generated/`, that is the snapshot saying so —
+the fix is a verb call followed by `wip refresh`, never a file edit.
+
+## Generated files are a snapshot
+
+Files under `.wip/generated/` are rewritten only by `wip refresh`. They
+lag every write until the next refresh. A bare `wip refresh` skips sealed
+Matters; those need `wip refresh <locator>`. Live facts come from
+`wip status`, `wip next`, and `wip session`. A session's first look at
+the work is `wip refresh` then `wip status`. If a generated file
+disagrees with those verbs, run `wip refresh` (or `wip refresh <locator>`
+if sealed) and re-read.
 
 ## How much shape a Matter earns
 

@@ -9,12 +9,12 @@ import (
 )
 
 // Precondition is a check run before any render-path write reaches disk —
-// step-09's hook. Refresh and Render both run it, unconditionally, before
-// EnsureLayout or any generated/scratch write. This Matter's only obligation
-// is that the call site exists and is unconditionally reached; the check
-// itself (is `.wip/` tracked by git in this repo?) is `guards`'s to supply
-// (`guards ← tiers, render-scratch`, HANDOFF §5) — guards wires its own
-// precondition in here once it lands, rather than opening a second hook.
+// step-09's hook. Refresh, Render, and Exit all run it, unconditionally,
+// before EnsureLayout or any generated/scratch write. This Matter's only
+// obligation is that the call site exists and is unconditionally reached; the
+// check itself (is `.wip/` tracked by git in this repo?) is `guards`'s to
+// supply (`guards ← tiers, render-scratch`, HANDOFF §5) — guards wires its
+// own precondition in here once it lands, rather than opening a second hook.
 type Precondition func(ctx context.Context, cur Current) error
 
 // NoPrecondition is the default: always passes. The verb layer
@@ -113,6 +113,30 @@ func Render(ctx context.Context, s *store.Store, cur Current, actor store.Actor,
 		Superseded: superseded,
 		Rendered:   []string{matter.Locator},
 	}, nil
+}
+
+// Exit writes one Matter's generated tree after it sealed, without opening
+// a dispatch and without emitting render.performed. Eager coverage will
+// skip this Matter from here on, so this is the last snapshot a subsequent
+// bare `wip refresh` would have taken. Seal is not a render pass of a
+// dispatch (D59); minting one here would be a side effect of finish or
+// gate close.
+func Exit(ctx context.Context, s *store.Store, cur Current, node store.Node, precondition Precondition) error {
+	if err := precondition(ctx, cur); err != nil {
+		return err
+	}
+	if err := EnsureLayout(cur.Root, cur.Clone.GitCommonDir); err != nil {
+		return err
+	}
+	matter := node
+	if node.Kind != store.ScaleMatter {
+		var err error
+		matter, err = s.Node(ctx, node.Matter)
+		if err != nil {
+			return err
+		}
+	}
+	return renderMatterTree(ctx, s, cur.Root, matter)
 }
 
 // recordRenderPerformed emits render.performed (step-03): exactly one per

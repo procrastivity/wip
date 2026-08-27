@@ -5,9 +5,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 )
+
+// snapshotNotice is the orientation line stamped on wip-authored generated
+// files (matter.md, roadmap.md). Brief and Workplan files stay verbatim
+// store content — a banner there would be a silent rewrite of prose.
+func snapshotNotice(locator string) string {
+	return fmt.Sprintf("This file is a snapshot from the last `wip refresh`, not live state. If it disagrees with `wip status`, run `wip refresh %s` and re-read.\n", locator)
+}
 
 // renderMatterTree implements step-03's rendered-depth policy: filenames and
 // depth are render policy, never storage (MODEL §3.1), so this is a policy
@@ -95,6 +103,7 @@ func renderMatterSummary(ctx context.Context, s *store.Store, dir string, matter
 	fmt.Fprintf(&b, "# %s\n\n", matter.Title)
 	fmt.Fprintf(&b, "locator: %s\n", matter.Locator)
 	fmt.Fprintf(&b, "lifecycle: %s\n", matter.Lifecycle)
+	fmt.Fprintf(&b, "rendered-at: %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
 
 	edges, err := s.BlockedBy(ctx, matter.ID)
 	if err != nil {
@@ -111,6 +120,9 @@ func renderMatterSummary(ctx context.Context, s *store.Store, dir string, matter
 		}
 		fmt.Fprintf(&b, "blocked-by: %s\n", strings.Join(blockers, ", "))
 	}
+
+	b.WriteByte('\n')
+	b.WriteString(snapshotNotice(matter.Locator))
 
 	gates, err := s.ClosedGates(ctx, matter.ID)
 	if err != nil {
@@ -145,6 +157,8 @@ func renderMatterSummary(ctx context.Context, s *store.Store, dir string, matter
 func renderRoadmap(ctx context.Context, s *store.Store, dir string, matter store.Node, children []store.Node) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Roadmap — %s\n\n", matter.Title)
+	b.WriteString(snapshotNotice(matter.Locator))
+	b.WriteByte('\n')
 	for _, child := range children {
 		if err := renderRoadmapEntry(ctx, s, &b, child, 0); err != nil {
 			return err

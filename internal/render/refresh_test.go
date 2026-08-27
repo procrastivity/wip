@@ -3,12 +3,15 @@ package render
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tiers"
+	"github.com/procrastivity/wip/internal/writesurface"
 )
 
 var errPreconditionRefused = errors.New("refused for test")
@@ -260,5 +263,130 @@ func TestPrecondition_RunsBeforeAnyWrite(t *testing.T) {
 	}
 	if fileExists(WipDir(cur.Root)) {
 		t.Errorf(".wip/ was created despite a failing precondition")
+	}
+}
+
+// TestExit_WritesSealedSnapshotWithoutDispatch is C1: after a Matter
+// seals, Exit writes its generated tree without opening a dispatch or
+// emitting render.performed — eager coverage will skip it from here on.
+func TestExit_WritesSealedSnapshotWithoutDispatch(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Done Work")
+	seal(t, s, cur.Repo.ID, locator)
+
+	if _, found, err := s.OpenDispatch(ctx, cur.Worktree.ID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("writesurface seal must not open a dispatch")
+	}
+
+	node, err := writesurface.ResolveNode(ctx, s.View, cur.Repo.ID, locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Exit(ctx, s, cur, node, NoPrecondition); err != nil {
+		t.Fatalf("Exit: %v", err)
+	}
+
+	md, err := os.ReadFile(filepath.Join(GeneratedDir(cur.Root), locator, "matter.md"))
+	if err != nil {
+		t.Fatalf("exit-render did not write matter.md: %v", err)
+	}
+	got := string(md)
+	if !strings.Contains(got, "lifecycle: done") {
+		t.Errorf("matter.md after Exit:\n%s", got)
+	}
+
+	if _, found, err := s.OpenDispatch(ctx, cur.Worktree.ID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("Exit opened a dispatch")
+	}
+
+	events, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Type == store.TypeRenderPerformed {
+			t.Fatalf("Exit emitted render.performed (%s)", ev.ID)
+		}
+	}
+}
+
+// TestExit_OverwritesPreSealSnapshot: a snapshot taken while the
+// Matter was still in progress is rewritten to done at exit-render, which
+// is the freeze C1 closes.
+func TestExit_OverwritesPreSealSnapshot(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Still Going")
+	if _, err := writesurface.Start(ctx, s, store.ActorHuman, cur.Repo.ID, locator); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := Refresh(ctx, s, cur, store.ActorHuman, NoPrecondition); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	path := filepath.Join(GeneratedDir(cur.Root), locator, "matter.md")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(before), "lifecycle: in-progress") {
+		t.Fatalf("pre-seal snapshot = %s, want in-progress", before)
+	}
+
+	if err := writesurface.DeclareGate(ctx, s, cur.Repo.ID, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatalf("DeclareGate: %v", err)
+	}
+	if _, err := writesurface.Finish(ctx, s, store.ActorHuman, cur.Repo.ID, locator); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if _, err := writesurface.CloseGate(ctx, s, store.ActorHuman, cur.Repo.ID, "reviewed-local", locator); err != nil {
+		t.Fatalf("CloseGate: %v", err)
+	}
+
+	stale, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stale), "lifecycle: in-progress") {
+		t.Fatal("writesurface seal must not itself rewrite the snapshot — that is Exit's job")
+	}
+
+	node, err := writesurface.ResolveNode(ctx, s.View, cur.Repo.ID, locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Exit(ctx, s, cur, node, NoPrecondition); err != nil {
+		t.Fatalf("Exit: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(after)
+	if !strings.Contains(got, "lifecycle: done") {
+		t.Errorf("after Exit:\n%s", got)
+	}
+	if !strings.Contains(got, "reviewed-local") {
+		t.Errorf("after Exit, want the closed gate named:\n%s", got)
+	}
+}
+
+func TestExit_PreconditionRunsBeforeAnyWrite(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Done Work")
+	seal(t, s, cur.Repo.ID, locator)
+	node, err := writesurface.ResolveNode(ctx, s.View, cur.Repo.ID, locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refused := func(_ context.Context, _ Current) error { return errPreconditionRefused }
+	if err := Exit(ctx, s, cur, node, refused); err == nil {
+		t.Fatal("expected the precondition's refusal to propagate")
+	}
+	if fileExists(filepath.Join(GeneratedDir(cur.Root), locator, "matter.md")) {
+		t.Error("Exit wrote matter.md despite a failing precondition")
 	}
 }

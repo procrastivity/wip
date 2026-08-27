@@ -82,8 +82,8 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 
 // TestRenderScratch_ClusterOfMattersEagerlySkipsSealed is step-05's Done,
 // through the real binary: eager `wip refresh` covers every not-sealed
-// Matter and skips a sealed one, which renders only via an explicit
-// `wip refresh <locator>`.
+// Matter and skips a sealed one. The sealing write itself exit-renders
+// (C1), so the sealed snapshot is already on disk before that skip.
 func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
@@ -103,22 +103,74 @@ func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 		t.Fatalf("gate close: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	if r := runIn(t, dir, dbEnv, "refresh", "--json"); r.exitCode != 0 {
-		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
+	// C1: the sealing write itself exit-renders, so the sealed Matter's
+	// snapshot is already on disk — and already says done — before any
+	// later refresh.
+	sealedFile := filepath.Join(dir, ".wip", "generated", sealed.Locator, "matter.md")
+	sealedMD, err := os.ReadFile(sealedFile)
+	if err != nil {
+		t.Fatalf("seal did not exit-render matter.md: %v", err)
+	}
+	if !strings.Contains(string(sealedMD), "lifecycle: done") {
+		t.Errorf("exit-render snapshot =\n%s", sealedMD)
+	}
+
+	eager := runIn(t, dir, dbEnv, "refresh", "--json")
+	if eager.exitCode != 0 {
+		t.Fatalf("refresh: exit=%d stderr=%q", eager.exitCode, eager.stderr)
+	}
+	eagerResult := mustJSON[refreshPayload](t, eager.stdout)
+	for _, loc := range eagerResult.Rendered {
+		if loc == sealed.Locator {
+			t.Error("eager refresh re-rendered the sealed matter; exit-render is the last snapshot")
+		}
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, ".wip", "generated", active.Locator, "matter.md")); err != nil {
 		t.Errorf("active matter was not rendered: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".wip", "generated", sealed.Locator, "matter.md")); err == nil {
-		t.Error("sealed matter was rendered eagerly; it should render only on explicit refresh")
-	}
 
 	if r := runIn(t, dir, dbEnv, "refresh", sealed.Locator, "--json"); r.exitCode != 0 {
 		t.Fatalf("refresh <sealed-locator>: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".wip", "generated", sealed.Locator, "matter.md")); err != nil {
+	if _, err := os.Stat(sealedFile); err != nil {
 		t.Errorf("sealed matter was not rendered on explicit refresh: %v", err)
+	}
+}
+
+// TestRenderScratch_FinishSealsExitRenders is C1's other sealing write:
+// when the last remaining gate is already closed, `wip finish` is what
+// crosses the seal boundary, and that finish must write the snapshot.
+func TestRenderScratch_FinishSealsExitRenders(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Gate First", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
+		t.Fatalf("gate close: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".wip", "generated", m.Locator, "matter.md")); err == nil {
+		t.Fatal("gate close must not exit-render before the Matter is sealed")
+	}
+	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	md, err := os.ReadFile(filepath.Join(dir, ".wip", "generated", m.Locator, "matter.md"))
+	if err != nil {
+		t.Fatalf("finish-seal did not exit-render matter.md: %v", err)
+	}
+	got := string(md)
+	if !strings.Contains(got, "lifecycle: done") {
+		t.Errorf("finish-seal snapshot =\n%s", got)
+	}
+	if !strings.Contains(got, "reviewed-local") {
+		t.Errorf("finish-seal snapshot missing closed gate:\n%s", got)
 	}
 }
 

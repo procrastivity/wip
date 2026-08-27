@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/procrastivity/wip/internal/cliflags"
+	"github.com/procrastivity/wip/internal/guards/trackedwip"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/readsurface"
 	"github.com/procrastivity/wip/internal/render"
@@ -172,6 +173,9 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 			var report tracker.AlignmentReport
 			if transition.BecameSealed {
 				report = coordinator.Check(cmd.Context(), s.View, n.ID)
+				if err := render.Exit(cmd.Context(), s, cur, n, trackedwip.RenderPrecondition); err != nil {
+					return err
+				}
 			}
 			var alignment *tracker.AlignmentReport
 			if report.Visible() {

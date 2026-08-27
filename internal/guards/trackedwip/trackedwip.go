@@ -3,9 +3,9 @@
 // the old design; tracked-ness, never mere presence, is the test (MODEL
 // §11). One function (IsWipTracked), two callers: CheckTrackedWipDir (the
 // `doctor` check) and RenderPrecondition, wired into `render-scratch`
-// step-09's already-exposed precondition hook (internal/render.Refresh/
-// Render) by internal/verbs/refresh, refusing before any write reaches
-// `.wip/generated/` or `.wip/work/`.
+// step-09's already-exposed precondition hook (internal/render.Refresh /
+// Render / Exit) by internal/verbs/refresh, finish, and gate close,
+// refusing before any write reaches `.wip/generated/` or `.wip/work/`.
 //
 // This lives in its own subpackage, separate from internal/guards' other
 // three checks, purely to avoid an import cycle: internal/render itself
