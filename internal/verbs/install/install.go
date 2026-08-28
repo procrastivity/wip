@@ -10,8 +10,10 @@
 // than aborting the whole run for one harness's refusal. Before writing to
 // any target, it refuses to overwrite a target tree that a human edited by
 // hand or that holds foreign, unstamped content
-// (internal/harness.RefuseHandEdited); --force overrides that refusal in
-// both modes.
+// (internal/harness.RefuseHandEdited); once a target clears that check, a
+// tree already byte-identical to what this binary would generate is
+// reported current rather than rewritten; --force skips both checks and
+// overwrites unconditionally, in both modes.
 package install
 
 import (
@@ -45,7 +47,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 		Long: "render and install wip's self-projection into an agent harness.\n\n" +
 			"With no harness name, wip install detects every harness available on this host and installs into each one, reporting a result per harness. Naming a harness installs (or reinstalls) only that one.\n\n" +
 			"Available harnesses: " + strings.Join(registry.Names, ", ") + ".\n\n" +
-			"Refuses to overwrite a target that was hand-edited or holds unstamped content; pass --force to overwrite it anyway, in either mode.",
+			"Refuses to overwrite a target that was hand-edited or holds unstamped content; pass --force to overwrite it anyway, in either mode. A tree that already matches what this binary would write is reported as current and left untouched; --force rewrites it anyway.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
@@ -85,6 +87,18 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				if err := harness.RefuseHandEdited(harnessName, installDir); err != nil {
 					return err
 				}
+
+				files, err := h.Generate(m)
+				if err != nil {
+					return err
+				}
+				current, err := harness.IsCurrent(installDir, files)
+				if err != nil {
+					return err
+				}
+				if current {
+					return writeTargetedResult(streams, flags, harnessName, installDir, "current")
+				}
 			}
 
 			dir, err := h.Install(m)
@@ -92,26 +106,41 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				return err
 			}
 
-			if flags.JSON {
-				payload := struct {
-					Harness string `json:"harness"`
-					Dir     string `json:"dir"`
-				}{Harness: harnessName, Dir: dir}
-				b, err := json.Marshal(payload)
-				if err != nil {
-					return err
-				}
-				_, err = fmt.Fprintln(streams.Out, string(b))
-				return err
-			}
-
-			_, err = fmt.Fprintf(streams.Out, "installed %s skill at %s\n", harnessName, dir)
-			return err
+			return writeTargetedResult(streams, flags, harnessName, dir, "installed")
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite a target tree even if it was hand-edited or not written by wip install")
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+// writeTargetedResult renders the targeted (single-harness) mode's outcome
+// to streams.Out: under --json, {"harness","dir","status"}; in human mode,
+// "installed <name> skill at <dir>" when status is "installed", or "<name>
+// skill at <dir> is already current" when status is "current".
+func writeTargetedResult(streams *iostreams.Streams, flags cliflags.Flags, harnessName, dir, status string) error {
+	if flags.JSON {
+		payload := struct {
+			Harness string `json:"harness"`
+			Dir     string `json:"dir"`
+			Status  string `json:"status"`
+		}{Harness: harnessName, Dir: dir, Status: status}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(streams.Out, string(b))
+		return err
+	}
+
+	var line string
+	if status == "current" {
+		line = fmt.Sprintf("%s skill at %s is already current", harnessName, dir)
+	} else {
+		line = fmt.Sprintf("installed %s skill at %s", harnessName, dir)
+	}
+	_, err := fmt.Fprintln(streams.Out, line)
+	return err
 }
 
 // harnessResult is one row of the bare-invocation report: what happened
@@ -135,8 +164,10 @@ type harnessResultError struct {
 // installAll is the bare `wip install` (no harness argument) path: it
 // walks registry.All in order, installing into every harness Available
 // reports present on this host and recording one result per harness —
-// installed, skipped (not detected), or refused (hand-edited or unstamped
-// content, without --force). A refusal on one harness does not stop the
+// installed, current (the tree on disk already matches what this binary
+// would generate, so nothing is written), skipped (not detected), or
+// refused (hand-edited or unstamped content, without --force). A refusal
+// on one harness does not stop the
 // run; any other error (an I/O failure reading or writing a harness's
 // install dir) does, since that is not a policy decision this loop can
 // route around. After printing every result, it returns a single
@@ -169,6 +200,19 @@ func installAll(streams *iostreams.Streams, flags cliflags.Flags, m manifest.Man
 					continue
 				}
 				return err
+			}
+
+			files, err := h.Generate(m)
+			if err != nil {
+				return err
+			}
+			current, err := harness.IsCurrent(installDir, files)
+			if err != nil {
+				return err
+			}
+			if current {
+				results = append(results, harnessResult{Harness: h.Name, Status: "current", Dir: installDir})
+				continue
 			}
 		}
 
@@ -214,6 +258,9 @@ func writeInstallAllResults(streams *iostreams.Streams, flags cliflags.Flags, re
 		case "installed":
 			anyDetected = true
 			line = fmt.Sprintf("installed %s skill at %s", r.Harness, r.Dir)
+		case "current":
+			anyDetected = true
+			line = fmt.Sprintf("current %s skill at %s", r.Harness, r.Dir)
 		case "refused":
 			anyDetected = true
 			// The refusal message already opens with "refused — "; the

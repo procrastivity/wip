@@ -21,6 +21,7 @@ import (
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
+	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
@@ -425,5 +426,253 @@ func TestCommand_BareNoHarnessDetected(t *testing.T) {
 	}
 	if lines[5] != "no harness detected on this host; install one explicitly: wip install <harness>" {
 		t.Fatalf("hint line = %q", lines[5])
+	}
+}
+
+func TestCommand_BareSecondRunReportsCurrent(t *testing.T) {
+	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+
+	root := &cobra.Command{Use: "wip"}
+	build := buildinfo.Info{Version: "1.0.0"}
+
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first.SetArgs([]string{})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first (bare) install: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second.SetArgs([]string{})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second (bare) install: %v, want nil", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	}
+	wantPrefix := []string{
+		"current claude-code skill at ",
+		"skipped codex — not detected",
+		"skipped devin — not detected",
+		"skipped pi — not detected",
+		"current opencode skill at ",
+	}
+	for i, want := range wantPrefix {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Fatalf("line %d = %q, want prefix %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestCommand_BareSecondRunReportsCurrent_JSON(t *testing.T) {
+	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+
+	root := &cobra.Command{Use: "wip"}
+	build := buildinfo.Info{Version: "1.0.0"}
+
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first.SetArgs([]string{})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first (bare) install: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second.SetContext(cliflags.WithFlags(context.Background(), cliflags.Flags{JSON: true}))
+	second.SetArgs([]string{})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second (bare, json) install: %v, want nil", err)
+	}
+
+	type resultRow struct {
+		Harness string `json:"harness"`
+		Status  string `json:"status"`
+		Dir     string `json:"dir"`
+		Reason  string `json:"reason"`
+	}
+	var payload struct {
+		Results []resultRow `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &payload); err != nil {
+		t.Fatalf("decoding JSON output: %v (stdout=%q)", err, out.String())
+	}
+
+	want := map[string]string{
+		claudecode.Name: "current",
+		codex.Name:      "skipped",
+		devin.Name:      "skipped",
+		pi.Name:         "skipped",
+		opencode.Name:   "current",
+	}
+	for _, r := range payload.Results {
+		wantStatus, ok := want[r.Harness]
+		if !ok {
+			t.Fatalf("unexpected harness %q in results", r.Harness)
+		}
+		if r.Status != wantStatus {
+			t.Fatalf("harness %q status = %q, want %q", r.Harness, r.Status, wantStatus)
+		}
+		if r.Status == "current" && r.Dir == "" {
+			t.Fatalf("harness %q current but has no dir", r.Harness)
+		}
+	}
+}
+
+func TestCommand_BareSecondRunForceReinstalls(t *testing.T) {
+	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+
+	root := &cobra.Command{Use: "wip"}
+	build := buildinfo.Info{Version: "1.0.0"}
+
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first.SetArgs([]string{})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first (bare) install: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second.SetArgs([]string{"--force"})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second (bare, --force) install: %v, want nil", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	}
+	wantPrefix := []string{
+		"installed claude-code skill at ",
+		"skipped codex — not detected",
+		"skipped devin — not detected",
+		"skipped pi — not detected",
+		"installed opencode skill at ",
+	}
+	for i, want := range wantPrefix {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Fatalf("line %d = %q, want prefix %q", i, lines[i], want)
+		}
+	}
+}
+
+// TestCommand_BareManifestChangeReportsInstalledNotCurrent installs once,
+// then registers a new plumbing verb on root — changing what the current
+// binary would generate (its rendered verb list) without touching anything
+// on disk — and checks that a second bare run detects the binary drift and
+// reinstalls, rather than reporting current.
+func TestCommand_BareManifestChangeReportsInstalledNotCurrent(t *testing.T) {
+	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+
+	root := &cobra.Command{Use: "wip"}
+	build := buildinfo.Info{Version: "1.0.0"}
+
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first.SetArgs([]string{})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first (bare) install: %v", err)
+	}
+
+	// Register a new plumbing verb on root after the first install — the
+	// manifest a second run builds now differs from what was stamped.
+	newVerb := &cobra.Command{
+		Use:   "newly-added",
+		Short: "a verb added since the last install",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(newVerb, surface.Plumbing)
+	root.AddCommand(newVerb)
+
+	out := &bytes.Buffer{}
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second.SetArgs([]string{})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second (bare) install after manifest change: %v, want nil", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	}
+	wantPrefix := []string{
+		"installed claude-code skill at ",
+		"skipped codex — not detected",
+		"skipped devin — not detected",
+		"skipped pi — not detected",
+		"installed opencode skill at ",
+	}
+	for i, want := range wantPrefix {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Fatalf("line %d = %q, want prefix %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestCommand_TargetedSecondRunReportsCurrent(t *testing.T) {
+	tempSkillsDir := t.TempDir()
+	t.Setenv(claudecode.SkillsDirEnv, tempSkillsDir)
+
+	root := &cobra.Command{Use: "wip"}
+	build := buildinfo.Info{Version: "1.0.0"}
+
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first.SetArgs([]string{"claude-code"})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	installDir, err := claudecode.InstallDir()
+	if err != nil {
+		t.Fatalf("InstallDir: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second.SetArgs([]string{"claude-code"})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second install: %v, want nil", err)
+	}
+
+	want := "claude-code skill at " + installDir + " is already current\n"
+	if out.String() != want {
+		t.Fatalf("second install output = %q, want %q", out.String(), want)
+	}
+
+	jsonOut := &bytes.Buffer{}
+	third := Command(&iostreams.Streams{Out: jsonOut, Err: &bytes.Buffer{}}, build, root)
+	third.SetContext(cliflags.WithFlags(context.Background(), cliflags.Flags{JSON: true}))
+	third.SetArgs([]string{"claude-code"})
+	if err := third.Execute(); err != nil {
+		t.Fatalf("third (json) install: %v, want nil", err)
+	}
+
+	var payload struct {
+		Harness string `json:"harness"`
+		Dir     string `json:"dir"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut.String())), &payload); err != nil {
+		t.Fatalf("decoding JSON output: %v (stdout=%q)", err, jsonOut.String())
+	}
+	if payload.Status != "current" {
+		t.Fatalf("status = %q, want %q", payload.Status, "current")
+	}
+	if payload.Harness != "claude-code" {
+		t.Fatalf("harness = %q, want %q", payload.Harness, "claude-code")
+	}
+	if payload.Dir != installDir {
+		t.Fatalf("dir = %q, want %q", payload.Dir, installDir)
+	}
+
+	forceOut := &bytes.Buffer{}
+	fourth := Command(&iostreams.Streams{Out: forceOut, Err: &bytes.Buffer{}}, build, root)
+	fourth.SetArgs([]string{"claude-code", "--force"})
+	if err := fourth.Execute(); err != nil {
+		t.Fatalf("fourth (--force) install: %v, want nil", err)
+	}
+	wantForce := "installed claude-code skill at " + installDir + "\n"
+	if forceOut.String() != wantForce {
+		t.Fatalf("--force install output = %q, want %q", forceOut.String(), wantForce)
 	}
 }

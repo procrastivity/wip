@@ -692,8 +692,9 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	}
 
 	// A second bare run over the now-installed, untouched trees is the
-	// quiet upgrade path (no drift from the stamp) and must still
-	// succeed, reporting "installed" again rather than refusing.
+	// quiet upgrade path: the trees are byte-identical to what this binary
+	// would write, so it must still succeed, reporting "current" rather
+	// than rewriting them or refusing.
 	jr := run(t, env, "install", "--json")
 	if jr.exitCode != 0 {
 		t.Fatalf("second (json) install exit code = %d, want 0; stderr=%q", jr.exitCode, jr.stderr)
@@ -713,11 +714,11 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 		t.Fatalf("results = %+v, want 5", payload.Results)
 	}
 	wantStatus := map[string]string{
-		"claude-code": "installed",
+		"claude-code": "current",
 		"codex":       "skipped",
 		"devin":       "skipped",
 		"pi":          "skipped",
-		"opencode":    "installed",
+		"opencode":    "current",
 	}
 	for _, res := range payload.Results {
 		want, ok := wantStatus[res.Harness]
@@ -729,9 +730,9 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 			t.Errorf("harness %q status = %q, want %q", res.Harness, res.Status, want)
 		}
 		switch res.Status {
-		case "installed":
+		case "installed", "current":
 			if res.Dir == "" {
-				t.Errorf("harness %q installed with empty dir", res.Harness)
+				t.Errorf("harness %q status %q with empty dir", res.Harness, res.Status)
 			}
 		case "skipped":
 			if res.Reason != "not detected" {
@@ -769,8 +770,8 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 	if human.exitCode != 3 {
 		t.Fatalf("exit code = %d, want 3 (refusal); stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
 	}
-	if !strings.Contains(human.stdout, "installed opencode skill at ") {
-		t.Errorf("stdout = %q, want an installed line for the clean harness", human.stdout)
+	if !strings.Contains(human.stdout, "current opencode skill at ") {
+		t.Errorf("stdout = %q, want a current line for the clean, already-installed harness", human.stdout)
 	}
 	if !strings.Contains(human.stdout, "refused claude-code — ") {
 		t.Errorf("stdout = %q, want a refused line for the hand-edited harness", human.stdout)
@@ -803,8 +804,8 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 				t.Errorf("claude-code result = %+v, want refused with code refusal.unstamped-harness-target", res)
 			}
 		case "opencode":
-			if res.Status != "installed" || res.Dir == "" {
-				t.Errorf("opencode result = %+v, want installed with a dir", res)
+			if res.Status != "current" || res.Dir == "" {
+				t.Errorf("opencode result = %+v, want current with a dir", res)
 			}
 		}
 	}
@@ -834,6 +835,73 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 	}
 	if strings.Contains(string(restored), "hand-edited") {
 		t.Errorf("SKILL.md still contains hand-edited content after --force install: %s", restored)
+	}
+}
+
+func TestInstall_Bare_RepeatRunReportsCurrentThenForceReinstalls(t *testing.T) {
+	claudeDir := t.TempDir()
+	opencodeDir := t.TempDir()
+	env := []string{
+		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_OPENCODE_SKILLS_DIR=" + opencodeDir,
+	}
+
+	first := run(t, env, "install")
+	if first.exitCode != 0 {
+		t.Fatalf("first install exit code = %d, want 0; stderr=%q", first.exitCode, first.stderr)
+	}
+	for _, want := range []string{"installed claude-code skill at ", "installed opencode skill at "} {
+		if !strings.Contains(first.stdout, want) {
+			t.Errorf("first install stdout = %q, want it to contain %q", first.stdout, want)
+		}
+	}
+
+	stampPath := filepath.Join(claudeDir, "wip", ".wip-manifest-stamp.json")
+	before, err := os.ReadFile(stampPath)
+	if err != nil {
+		t.Fatalf("read stamp file after first install: %v", err)
+	}
+
+	repeat := run(t, env, "install")
+	if repeat.exitCode != 0 {
+		t.Fatalf("repeat install exit code = %d, want 0; stderr=%q", repeat.exitCode, repeat.stderr)
+	}
+	lines := strings.Split(strings.TrimRight(repeat.stdout, "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("repeat install stdout lines = %d, want 5: %q", len(lines), repeat.stdout)
+	}
+	for _, harnessName := range []string{"claude-code", "opencode"} {
+		found := false
+		for _, line := range lines {
+			if strings.HasPrefix(line, "current "+harnessName+" skill at ") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("repeat install stdout = %q, want a line starting with %q", repeat.stdout, "current "+harnessName+" skill at ")
+		}
+	}
+
+	after, err := os.ReadFile(stampPath)
+	if err != nil {
+		t.Fatalf("read stamp file after repeat install: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("stamp file content changed across a current-reporting repeat install:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	forced := run(t, env, "install", "--force")
+	if forced.exitCode != 0 {
+		t.Fatalf("--force install exit code = %d, want 0; stderr=%q", forced.exitCode, forced.stderr)
+	}
+	for _, want := range []string{"installed claude-code skill at ", "installed opencode skill at "} {
+		if !strings.Contains(forced.stdout, want) {
+			t.Errorf("--force install stdout = %q, want it to contain %q", forced.stdout, want)
+		}
 	}
 }
 
@@ -912,6 +980,68 @@ func TestInstall_Targeted_RefusesHandEditedThenForceOverwrites(t *testing.T) {
 	}
 	if strings.Contains(string(restored), "hand-edited") {
 		t.Errorf("SKILL.md still contains hand-edited content after --force install: %s", restored)
+	}
+}
+
+func TestInstall_Targeted_RepeatRunReportsCurrent(t *testing.T) {
+	skillsDir := t.TempDir()
+	env := []string{"WIP_PI_SKILLS_DIR=" + skillsDir}
+
+	first := run(t, env, "install", "pi", "--json")
+	if first.exitCode != 0 {
+		t.Fatalf("first install exit code = %d, want 0; stderr=%q", first.exitCode, first.stderr)
+	}
+	var firstPayload struct {
+		Dir    string `json:"dir"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(first.stdout), &firstPayload); err != nil {
+		t.Fatalf("first install stdout is not JSON: %v (stdout=%q)", err, first.stdout)
+	}
+	if firstPayload.Status != "installed" {
+		t.Fatalf("first install status = %q, want %q", firstPayload.Status, "installed")
+	}
+
+	second := run(t, env, "install", "pi", "--json")
+	if second.exitCode != 0 {
+		t.Fatalf("second install exit code = %d, want 0; stderr=%q", second.exitCode, second.stderr)
+	}
+	var secondPayload struct {
+		Dir    string `json:"dir"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(second.stdout), &secondPayload); err != nil {
+		t.Fatalf("second install stdout is not JSON: %v (stdout=%q)", err, second.stdout)
+	}
+	if secondPayload.Status != "current" {
+		t.Fatalf("second install status = %q, want %q", secondPayload.Status, "current")
+	}
+	if secondPayload.Dir != firstPayload.Dir {
+		t.Fatalf("second install dir = %q, want it to match the first install's dir %q", secondPayload.Dir, firstPayload.Dir)
+	}
+
+	human := run(t, env, "install", "pi")
+	if human.exitCode != 0 {
+		t.Fatalf("human install exit code = %d, want 0; stderr=%q", human.exitCode, human.stderr)
+	}
+	wantHuman := fmt.Sprintf("pi skill at %s is already current\n", firstPayload.Dir)
+	if human.stdout != wantHuman {
+		t.Fatalf("human install stdout = %q, want %q", human.stdout, wantHuman)
+	}
+
+	forced := run(t, env, "install", "pi", "--force", "--json")
+	if forced.exitCode != 0 {
+		t.Fatalf("--force install exit code = %d, want 0; stderr=%q", forced.exitCode, forced.stderr)
+	}
+	var forcedPayload struct {
+		Dir    string `json:"dir"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(forced.stdout), &forcedPayload); err != nil {
+		t.Fatalf("--force install stdout is not JSON: %v (stdout=%q)", err, forced.stdout)
+	}
+	if forcedPayload.Status != "installed" {
+		t.Fatalf("--force install status = %q, want %q", forcedPayload.Status, "installed")
 	}
 }
 
