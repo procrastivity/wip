@@ -61,7 +61,10 @@ func BacklogPlan(ctx context.Context, s *store.Store, actor store.Actor, repo, e
 	}
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		if err := requireEnteredBacklogEntry(ctx, tx.View, repo, entryID, "planned"); err != nil {
+			return nil, err
+		}
 		return []store.Draft{{
 			Type:    store.TypeBacklogPlanned,
 			Subject: entryID,
@@ -82,7 +85,10 @@ func BacklogDecline(ctx context.Context, s *store.Store, actor store.Actor, repo
 	}
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		if err := requireEnteredBacklogEntry(ctx, tx.View, repo, entryID, "declined"); err != nil {
+			return nil, err
+		}
 		return []store.Draft{{
 			Type:    store.TypeBacklogDeclined,
 			Subject: entryID,
@@ -98,7 +104,10 @@ func BacklogDecline(ctx context.Context, s *store.Store, actor store.Actor, repo
 // entry identity is the stable idempotency boundary across all later retries.
 func BacklogDelegate(ctx context.Context, s *store.Store, actor store.Actor, repo, entryID string) (store.BacklogEntry, error) {
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
-	if _, err := s.Commit(ctx, req, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		if err := requireEnteredBacklogEntry(ctx, tx.View, repo, entryID, "delegated"); err != nil {
+			return nil, err
+		}
 		return []store.Draft{{
 			Type:    store.TypeBacklogDelegated,
 			Subject: entryID,
@@ -108,6 +117,29 @@ func BacklogDelegate(ctx context.Context, s *store.Store, actor store.Actor, rep
 		return store.BacklogEntry{}, err
 	}
 	return backlogEntryByID(ctx, s, repo, entryID)
+}
+
+// requireEnteredBacklogEntry is the shared precondition of the three backlog
+// exits. It runs inside the commit's transaction, so the state it reads is the
+// state the projection will check; it turns "touched 0 projection rows" into a
+// validation error that names the entry and its state. exit is the past
+// participle of the verb ("planned", "declined", "delegated") used in the message.
+func requireEnteredBacklogEntry(ctx context.Context, v store.View, repo, entryID, exit string) error {
+	entries, err := v.Backlog(ctx, repo)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.ID != entryID {
+			continue
+		}
+		if e.State != "entered" {
+			return wiperr.New("validation.backlog-not-entered",
+				fmt.Sprintf("backlog entry %s is %s; only an entered entry can be %s", entryID, e.State, exit))
+		}
+		return nil
+	}
+	return wiperr.New("validation.unknown-backlog-entry", fmt.Sprintf("no backlog entry %s in this repo", entryID))
 }
 
 // ConfirmBacklogDelegation records the provider seam's successful creation
