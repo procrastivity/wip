@@ -79,5 +79,6 @@ tracker.state-pushed {"ref":".../-/work_items/4","disposition":"completed","leas
 
 ## Seal
 
-User closed `reviewed-local` and finished the Matter on 2026-08-28. The
-Matter is sealed.
+The user accepted the implementation and this evidence on 2026-08-28. This
+repo declares no `reviewed-local` gate, so the Matter sealed on `wip finish`.
+PR: https://github.com/procrastivity/wip/pull/71
