@@ -101,7 +101,7 @@ func TestManifestIncludesOutboxPlumbing(t *testing.T) {
 	if manifest.exitCode != 0 {
 		t.Fatalf("manifest: exit=%d stderr=%q", manifest.exitCode, manifest.stderr)
 	}
-	for _, name := range []string{"outbox list", "outbox level", "outbox backend", "outbox target", "outbox canceled-label", "outbox approve", "outbox decline", "outbox retry", "outbox flush"} {
+	for _, name := range []string{"outbox list", "outbox level", "outbox backlog-push", "outbox backend", "outbox target", "outbox canceled-label", "outbox approve", "outbox decline", "outbox retry", "outbox flush"} {
 		if !strings.Contains(manifest.stdout, `"name":"`+name+`"`) {
 			t.Errorf("manifest is missing %q", name)
 		}

@@ -24,7 +24,7 @@ import (
 // injected at the CLI registration point.
 func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "outbox", Short: "inspect and disposition provider-neutral delivery work"}
-	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), targetCommand(streams), canceledLabelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
+	cmd.AddCommand(listCommand(streams), levelCommand(streams), backlogPushCommand(streams), backendCommand(streams, providers), targetCommand(streams), canceledLabelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -215,6 +215,59 @@ func levelCommand(streams *iostreams.Streams) *cobra.Command {
 			return err
 		}
 		_, err = fmt.Fprintln(streams.Out, level)
+		return err
+	}
+	return plumbing(cmd)
+}
+
+// backlogPushWarning is printed when auto is set with no tracker backend. The
+// value is still written: a queued create with no seam would only fail at flush,
+// so backlog add treats auto without a backend as manual (workplan D4).
+const backlogPushWarning = "warning: tracker.backlog-push is auto but no tracker backend is configured; backlog add will behave as manual until one is set"
+
+func backlogPushCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "backlog-push [manual|auto]",
+		Short: "read or set this repo's automatic backlog delegation",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		s, repo, err := openRepo(cmd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+		var mode store.TrackerBacklogPush
+		if len(args) == 1 {
+			mode, err = s.SetTrackerBacklogPush(cmd.Context(), repo.ID, args[0])
+		} else {
+			mode, err = s.EffectiveTrackerBacklogPush(cmd.Context(), repo.ID)
+		}
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 && mode == store.TrackerBacklogPushAuto {
+			backend, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerBackendKey)
+			if err != nil {
+				return err
+			}
+			if backend == "" {
+				if _, err := fmt.Fprintln(streams.Err, backlogPushWarning); err != nil {
+					return err
+				}
+			}
+		}
+		if cliflags.FromContext(cmd.Context()).JSON {
+			b, err := json.Marshal(struct {
+				BacklogPush store.TrackerBacklogPush `json:"backlogPush"`
+			}{mode})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, string(b))
+			return err
+		}
+		_, err = fmt.Fprintln(streams.Out, mode)
 		return err
 	}
 	return plumbing(cmd)
