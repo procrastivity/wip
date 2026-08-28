@@ -79,5 +79,5 @@ tracker.state-pushed {"ref":".../-/work_items/4","disposition":"completed","leas
 
 ## Seal
 
-Pending: `reviewed-local` closes after user acceptance of the implementation
-and this evidence.
+User closed `reviewed-local` and finished the Matter on 2026-08-28. The
+Matter is sealed.
