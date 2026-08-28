@@ -88,6 +88,10 @@ func addCommand(streams *iostreams.Streams) *cobra.Command {
 				_, err = fmt.Fprintln(streams.Out, string(b))
 				return err
 			}
+			if entry.State == "delegated" {
+				_, err = fmt.Fprintf(streams.Out, "entered backlog item %s (%s); delegated — outbox %s queued, awaiting approve\n", entry.ID, entry.Provenance, entry.Outbox)
+				return err
+			}
 			_, err = fmt.Fprintf(streams.Out, "entered backlog item %s (%s)\n", entry.ID, entry.Provenance)
 			return err
 		},
