@@ -74,11 +74,13 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 
-			where := "the main worktree"
 			if result.Worktree.Name != "" {
-				where = fmt.Sprintf("worktree %q", result.Worktree.Name)
+				// A linked worktree is attached to the Clone it belongs to; it
+				// does not become one. The main worktree is the Clone itself.
+				_, err = fmt.Fprintf(streams.Out, "attached worktree %q to clone %q (repo %s)\n", result.Worktree.Name, result.Clone.Label, result.Repo.ID)
+				return err
 			}
-			_, err = fmt.Fprintf(streams.Out, "attached %s as clone %q (repo %s)\n", where, result.Clone.Label, result.Repo.ID)
+			_, err = fmt.Fprintf(streams.Out, "attached the main worktree as clone %q (repo %s)\n", result.Clone.Label, result.Repo.ID)
 			return err
 		},
 	}
