@@ -45,6 +45,13 @@ const SkillsDirEnv = "WIP_PI_SKILLS_DIR"
 
 var userHomeDir = os.UserHomeDir
 
+// rootDir returns Pi's own root config directory under home, ~/.pi — the
+// directory both SkillsDir and Available key off of. (Pi's skills live two
+// levels down, at root/agent/skills.)
+func rootDir(home string) string {
+	return filepath.Join(home, ".pi")
+}
+
 // SkillsDir returns the directory Pi loads Agent Skills from,
 // ~/.pi/agent/skills, per arch doc §4 and install-target-pi/step-01's
 // finding.
@@ -56,7 +63,29 @@ func SkillsDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pi: locating home directory: %w", err)
 	}
-	return filepath.Join(home, ".pi", "agent", "skills"), nil
+	return filepath.Join(rootDir(home), "agent", "skills"), nil
+}
+
+// Available reports whether this harness appears to be present on this
+// host: its root config directory (~/.pi) exists, or — when SkillsDirEnv
+// overrides SkillsDir — that override directory exists. The root, not the
+// skills subdirectory, is the signal: a fresh harness install may not have
+// created its skills directory yet. Presence on PATH is not consulted; the
+// config root is what `wip install` writes into. A home-dir lookup failure
+// counts as not available rather than an error — the bare `wip install`
+// run treats an unavailable harness as a skip, and a probe should never
+// abort that run.
+func Available() bool {
+	dir := os.Getenv(SkillsDirEnv)
+	if dir == "" {
+		home, err := userHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = rootDir(home)
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
 }
 
 // InstallDir returns the directory the generated skill is written to and

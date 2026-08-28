@@ -27,6 +27,7 @@ import (
 	"github.com/procrastivity/wip/internal/harness/devin"
 	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
+	"github.com/procrastivity/wip/internal/harness/registry"
 	"github.com/procrastivity/wip/internal/manifest"
 )
 
@@ -72,6 +73,25 @@ func CheckStaleDevinHarnessArtifact(root *cobra.Command, build buildinfo.Info) (
 // against what `wip install opencode` last stamped.
 func CheckStaleOpencodeHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
 	return checkStaleHarnessArtifact(root, build, opencode.Name, opencode.InstallDir, opencode.Generate)
+}
+
+// CheckStaleHarnessArtifacts is CheckStaleHarnessArtifact generalized over
+// every registered harness (registry.All), in that table's order —
+// claude-code, codex, devin, pi, opencode — concatenating each harness's
+// findings rather than reporting only the first drifted one. It replaces
+// the five separate per-harness closures doctor previously registered with
+// guards.Run; the five single-harness functions above remain for their own
+// tests and for any caller wanting one harness's drift in isolation.
+func CheckStaleHarnessArtifacts(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
+	var findings []Finding
+	for _, h := range registry.All {
+		fs, err := checkStaleHarnessArtifact(root, build, h.Name, h.InstallDir, h.Generate)
+		if err != nil {
+			return nil, err
+		}
+		findings = append(findings, fs...)
+	}
+	return findings, nil
 }
 
 func checkStaleHarnessArtifact(

@@ -1,6 +1,7 @@
 package opencode_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,5 +124,19 @@ func TestInstallDir_IsSkillsDirSlashWip(t *testing.T) {
 	}
 	if dir != "/tmp/example-skills-dir/wip" {
 		t.Fatalf("InstallDir = %q, want %q", dir, "/tmp/example-skills-dir/wip")
+	}
+}
+
+func TestAvailable_OverrideExisting(t *testing.T) {
+	t.Setenv(opencode.SkillsDirEnv, t.TempDir())
+	if !opencode.Available() {
+		t.Error("Available() = false, want true for an existing override directory")
+	}
+}
+
+func TestAvailable_OverrideMissing(t *testing.T) {
+	t.Setenv(opencode.SkillsDirEnv, filepath.Join(t.TempDir(), "missing"))
+	if opencode.Available() {
+		t.Error("Available() = true, want false for a missing override directory")
 	}
 }

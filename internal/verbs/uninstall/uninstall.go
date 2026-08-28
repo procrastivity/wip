@@ -13,11 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/procrastivity/wip/internal/cliflags"
-	"github.com/procrastivity/wip/internal/harness/claudecode"
-	"github.com/procrastivity/wip/internal/harness/codex"
-	"github.com/procrastivity/wip/internal/harness/devin"
-	"github.com/procrastivity/wip/internal/harness/opencode"
-	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/harness/registry"
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/surface"
@@ -49,20 +44,10 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 
 			flags := cliflags.FromContext(cmd.Context())
 
-			var dir string
-			var err error
-			switch harnessName {
-			case claudecode.Name:
-				dir, err = claudecode.Uninstall()
-			case codex.Name:
-				dir, err = codex.Uninstall()
-			case devin.Name:
-				dir, err = devin.Uninstall()
-			case pi.Name:
-				dir, err = pi.Uninstall()
-			case opencode.Name:
-				dir, err = opencode.Uninstall()
-			}
+			// harnessName was already validated against registry.Names
+			// above, so Lookup is guaranteed to find it here.
+			h, _ := registry.Lookup(harnessName)
+			dir, err := h.Uninstall()
 			if err != nil {
 				return err
 			}

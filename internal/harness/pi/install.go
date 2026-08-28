@@ -2,7 +2,6 @@ package pi
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -12,10 +11,12 @@ import (
 
 // Install renders m's plumbing-verb subset into InstallDir() and stamps the
 // result with tool.version, schemaVersion, and a per-file checksum. It
-// always overwrites whatever it finds — regenerating a previously-stamped
-// tree is the normal upgrade path; refusing on unstamped content is
-// uninstall's job, since that is the one place a human-authored artifact is
-// at risk of being silently destroyed.
+// always overwrites whatever it finds and writes the stamp unconditionally
+// — refusing to overwrite a hand-edited or unstamped target is the
+// `wip install` verb's job (internal/harness.RefuseHandEdited), not this
+// function's, kept out of Install so every harness stays policy-free and
+// so a caller that has already decided to overwrite (the verb after
+// --force) needs no second flag here.
 func Install(m manifest.Manifest) (string, error) {
 	files, err := Generate(m)
 	if err != nil {
@@ -76,7 +77,7 @@ func Uninstall() (string, error) {
 			fmt.Sprintf("refused — %s has no install stamp; it was not written by `wip install %s` and will not be removed automatically", dir, Name))
 	}
 
-	actual, err := checksumTree(dir)
+	actual, err := manifest.ChecksumTree(dir)
 	if err != nil {
 		return "", err
 	}
@@ -89,37 +90,4 @@ func Uninstall() (string, error) {
 		return "", fmt.Errorf("pi: removing %q: %w", dir, err)
 	}
 	return dir, nil
-}
-
-// checksumTree hashes every file under dir except the stamp itself, keyed
-// by path relative to dir — the same shape manifest.Drift compares against
-// a Stamp's Files map.
-func checksumTree(dir string) (map[string]string, error) {
-	sums := map[string]string{}
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		relSlash := filepath.ToSlash(rel)
-		if relSlash == manifest.StampFileName {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		sums[relSlash] = manifest.Checksum(data)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("pi: hashing installed tree %q: %w", dir, err)
-	}
-	return sums, nil
 }

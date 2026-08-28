@@ -46,6 +46,12 @@ const SkillsDirEnv = "WIP_CLAUDE_SKILLS_DIR"
 
 var userHomeDir = os.UserHomeDir
 
+// rootDir returns Claude Code's own root config directory under home,
+// ~/.claude — the directory both SkillsDir and Available key off of.
+func rootDir(home string) string {
+	return filepath.Join(home, ".claude")
+}
+
 // SkillsDir returns the directory Claude Code loads skills from,
 // ~/.claude/skills, per arch doc §4.
 func SkillsDir() (string, error) {
@@ -56,7 +62,29 @@ func SkillsDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("claudecode: locating home directory: %w", err)
 	}
-	return filepath.Join(home, ".claude", "skills"), nil
+	return filepath.Join(rootDir(home), "skills"), nil
+}
+
+// Available reports whether this harness appears to be present on this
+// host: its root config directory (~/.claude) exists, or — when SkillsDirEnv
+// overrides SkillsDir — that override directory exists. The root, not the
+// skills subdirectory, is the signal: a fresh harness install may not have
+// created its skills directory yet. Presence on PATH is not consulted; the
+// config root is what `wip install` writes into. A home-dir lookup failure
+// counts as not available rather than an error — the bare `wip install`
+// run treats an unavailable harness as a skip, and a probe should never
+// abort that run.
+func Available() bool {
+	dir := os.Getenv(SkillsDirEnv)
+	if dir == "" {
+		home, err := userHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = rootDir(home)
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
 }
 
 // InstallDir returns the directory the generated skill is written to and

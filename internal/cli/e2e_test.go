@@ -643,6 +643,289 @@ func TestInstall_UnknownHarness(t *testing.T) {
 	}
 }
 
+// absentSkillsDir returns a path that does not exist, suitable for
+// pointing a harness's WIP_*_SKILLS_DIR override at a harness that must
+// read as not available.
+func absentSkillsDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "absent")
+}
+
+func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
+	claudeDir := t.TempDir()
+	opencodeDir := t.TempDir()
+	env := []string{
+		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_OPENCODE_SKILLS_DIR=" + opencodeDir,
+	}
+
+	r := run(t, env, "install")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	lines := strings.Split(strings.TrimRight(r.stdout, "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("stdout lines = %d, want 5: %q", len(lines), r.stdout)
+	}
+	wantPrefixes := []string{
+		"installed claude-code skill at ",
+		"skipped codex — not detected",
+		"skipped devin — not detected",
+		"skipped pi — not detected",
+		"installed opencode skill at ",
+	}
+	for i, want := range wantPrefixes {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Errorf("line %d = %q, want prefix %q", i, lines[i], want)
+		}
+	}
+
+	for _, dir := range []string{filepath.Join(claudeDir, "wip"), filepath.Join(opencodeDir, "wip")} {
+		for _, want := range []string{"SKILL.md", ".wip-manifest-stamp.json"} {
+			if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+				t.Errorf("expected generated file %q missing in %s: %v", want, dir, err)
+			}
+		}
+	}
+
+	// A second bare run over the now-installed, untouched trees is the
+	// quiet upgrade path (no drift from the stamp) and must still
+	// succeed, reporting "installed" again rather than refusing.
+	jr := run(t, env, "install", "--json")
+	if jr.exitCode != 0 {
+		t.Fatalf("second (json) install exit code = %d, want 0; stderr=%q", jr.exitCode, jr.stderr)
+	}
+	var payload struct {
+		Results []struct {
+			Harness string `json:"harness"`
+			Status  string `json:"status"`
+			Dir     string `json:"dir"`
+			Reason  string `json:"reason"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(jr.stdout), &payload); err != nil {
+		t.Fatalf("stdout is not one JSON value: %v (stdout=%q)", err, jr.stdout)
+	}
+	if len(payload.Results) != 5 {
+		t.Fatalf("results = %+v, want 5", payload.Results)
+	}
+	wantStatus := map[string]string{
+		"claude-code": "installed",
+		"codex":       "skipped",
+		"devin":       "skipped",
+		"pi":          "skipped",
+		"opencode":    "installed",
+	}
+	for _, res := range payload.Results {
+		want, ok := wantStatus[res.Harness]
+		if !ok {
+			t.Errorf("unexpected harness %q in results", res.Harness)
+			continue
+		}
+		if res.Status != want {
+			t.Errorf("harness %q status = %q, want %q", res.Harness, res.Status, want)
+		}
+		switch res.Status {
+		case "installed":
+			if res.Dir == "" {
+				t.Errorf("harness %q installed with empty dir", res.Harness)
+			}
+		case "skipped":
+			if res.Reason != "not detected" {
+				t.Errorf("harness %q reason = %q, want %q", res.Harness, res.Reason, "not detected")
+			}
+		}
+	}
+}
+
+func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
+	claudeDir := t.TempDir()
+	opencodeDir := t.TempDir()
+	env := []string{
+		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_OPENCODE_SKILLS_DIR=" + opencodeDir,
+	}
+
+	if r := run(t, env, "install"); r.exitCode != 0 {
+		t.Fatalf("initial install exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+
+	skillPath := filepath.Join(claudeDir, "wip", "SKILL.md")
+	orig, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read installed SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(skillPath, append(orig, []byte("\nhand-edited\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	human := run(t, env, "install")
+	if human.exitCode != 3 {
+		t.Fatalf("exit code = %d, want 3 (refusal); stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+	if !strings.Contains(human.stdout, "installed opencode skill at ") {
+		t.Errorf("stdout = %q, want an installed line for the clean harness", human.stdout)
+	}
+	if !strings.Contains(human.stdout, "refused claude-code — ") {
+		t.Errorf("stdout = %q, want a refused line for the hand-edited harness", human.stdout)
+	}
+
+	jr := run(t, env, "install", "--json")
+	if jr.exitCode != 3 {
+		t.Fatalf("json exit code = %d, want 3 (refusal); stdout=%q stderr=%q", jr.exitCode, jr.stdout, jr.stderr)
+	}
+	var payload struct {
+		Results []struct {
+			Harness string `json:"harness"`
+			Status  string `json:"status"`
+			Dir     string `json:"dir"`
+			Error   *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(jr.stdout), &payload); err != nil {
+		t.Fatalf("stdout is not one JSON value: %v (stdout=%q)", err, jr.stdout)
+	}
+	seen := map[string]bool{}
+	for _, res := range payload.Results {
+		seen[res.Harness] = true
+		switch res.Harness {
+		case "claude-code":
+			if res.Status != "refused" || res.Error == nil || res.Error.Code != "refusal.unstamped-harness-target" {
+				t.Errorf("claude-code result = %+v, want refused with code refusal.unstamped-harness-target", res)
+			}
+		case "opencode":
+			if res.Status != "installed" || res.Dir == "" {
+				t.Errorf("opencode result = %+v, want installed with a dir", res)
+			}
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("results = %+v, want all 5 harnesses represented", payload.Results)
+	}
+
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(jr.stderr), &envelope); err != nil {
+		t.Fatalf("stderr is not the --json error envelope: %v (stderr=%q)", err, jr.stderr)
+	}
+	if envelope.Error.Code != "refusal.unstamped-harness-target" {
+		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.unstamped-harness-target")
+	}
+
+	force := run(t, env, "install", "--force")
+	if force.exitCode != 0 {
+		t.Fatalf("--force install exit code = %d, want 0; stderr=%q", force.exitCode, force.stderr)
+	}
+	restored, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read restored SKILL.md: %v", err)
+	}
+	if strings.Contains(string(restored), "hand-edited") {
+		t.Errorf("SKILL.md still contains hand-edited content after --force install: %s", restored)
+	}
+}
+
+func TestInstall_Bare_NoHarnessDetected(t *testing.T) {
+	env := []string{
+		"WIP_CLAUDE_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_OPENCODE_SKILLS_DIR=" + absentSkillsDir(t),
+	}
+
+	r := run(t, env, "install")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	lines := strings.Split(strings.TrimRight(r.stdout, "\n"), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("stdout lines = %d, want 6 (5 skipped + hint): %q", len(lines), r.stdout)
+	}
+	for i, name := range []string{"claude-code", "codex", "devin", "pi", "opencode"} {
+		want := fmt.Sprintf("skipped %s — not detected", name)
+		if lines[i] != want {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want)
+		}
+	}
+	wantHint := "no harness detected on this host; install one explicitly: wip install <harness>"
+	if lines[5] != wantHint {
+		t.Errorf("hint line = %q, want %q", lines[5], wantHint)
+	}
+}
+
+func TestInstall_Targeted_RefusesHandEditedThenForceOverwrites(t *testing.T) {
+	skillsDir := t.TempDir()
+	env := []string{"WIP_PI_SKILLS_DIR=" + skillsDir}
+
+	if r := run(t, env, "install", "pi", "--json"); r.exitCode != 0 {
+		t.Fatalf("install exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+
+	skillPath := filepath.Join(skillsDir, "wip", "SKILL.md")
+	orig, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read installed SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(skillPath, append(orig, []byte("\nhand-edited\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := run(t, env, "install", "pi", "--json")
+	if refused.exitCode != 3 {
+		t.Fatalf("exit code = %d, want 3 (refusal); stdout=%q stderr=%q", refused.exitCode, refused.stdout, refused.stderr)
+	}
+	if refused.stdout != "" {
+		t.Fatalf("stdout = %q, want empty on failure", refused.stdout)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(refused.stderr), &envelope); err != nil {
+		t.Fatalf("stderr is not the --json error envelope: %v (stderr=%q)", err, refused.stderr)
+	}
+	if envelope.Error.Code != "refusal.unstamped-harness-target" {
+		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.unstamped-harness-target")
+	}
+
+	forced := run(t, env, "install", "pi", "--force", "--json")
+	if forced.exitCode != 0 {
+		t.Fatalf("force install exit code = %d, want 0; stderr=%q", forced.exitCode, forced.stderr)
+	}
+	restored, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read restored SKILL.md: %v", err)
+	}
+	if strings.Contains(string(restored), "hand-edited") {
+		t.Errorf("SKILL.md still contains hand-edited content after --force install: %s", restored)
+	}
+}
+
+func TestUninstall_Bare_StillLists(t *testing.T) {
+	r := run(t, nil, "uninstall")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "available harnesses: claude-code, codex, devin, pi, opencode\nusage: wip uninstall <harness>\n"
+	if r.stdout != want {
+		t.Fatalf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
 func TestVersion_VerboseWritesOnlyToStderr(t *testing.T) {
 	r := run(t, nil, "version", "-v")
 	if r.exitCode != 0 {
