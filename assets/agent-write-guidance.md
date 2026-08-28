@@ -4,6 +4,15 @@ edit. `.wip/generated/` is a snapshot from the last `wip refresh`, not live
 state. If it disagrees with `wip status` or `wip next`, run `wip refresh`
 (or `wip refresh <locator>` if sealed) and re-read.
 
+When a verb refuses with "this clone is unknown to wip", wip has never been
+set up in this repo. Stop and report that to the user, then offer `wip
+init`. That command is a write, so when you are in a read-only mode, ask
+the user to run it rather than running it yourself. Do not answer the
+question by reading wip's source, its database, or another repo's `.wip/`;
+`--help` and this skill are the whole reference. A linked worktree of a
+clone wip already knows is a different case: run `wip init` there to
+attach it.
+
 Treat tracker bindings as provenance, not integration. `wip bind` records a
 tracker reference. It does not connect wip to the tracker or prove tracker
 state. Never report a tracker's status without a read from that tracker.
