@@ -33,7 +33,13 @@ func targetCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "target [none|value]",
 		Short: "read or set this repo's tracker target",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "read or set this repo's tracker target.\n\n" +
+			"With no argument, prints the stored target, or none. With an argument, stores it raw; the value is an opaque provider token that only the configured backend interprets. Pass none to clear it.\n\n" +
+			"github: ignores the target. The owner and repository come from the clone's remote URL. Token: WIP_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN.\n\n" +
+			"gitlab: ignores the target. The project comes from the clone's remote URL. Token: WIP_GITLAB_TOKEN, GITLAB_TOKEN, or the glab CLI's config.yml (GLAB_CONFIG_DIR, else XDG_CONFIG_HOME/glab-cli, else ~/.config/glab-cli).\n\n" +
+			"linear: requires the target, a team UUID. Token: WIP_LINEAR_TOKEN or LINEAR_API_KEY.\n\n" +
+			"Setting a target contacts no tracker; the backend reads it at wip outbox flush.",
+		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		s, repo, err := openRepo(cmd)
