@@ -26,6 +26,10 @@ const (
 	TrackerBackendKey = "tracker.backend"
 	// TrackerTargetKey is the provider-neutral configured-target value.
 	TrackerTargetKey = "tracker.target"
+	// TrackerCanceledLabelKey is the provider-neutral configured label a
+	// provider may apply when it pushes a canceled disposition. Empty means
+	// no label. Providers without a use for it ignore the value.
+	TrackerCanceledLabelKey = "tracker.canceled-label"
 )
 
 // ParseTrackerPushLevel validates one push-level token.

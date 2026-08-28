@@ -24,7 +24,7 @@ import (
 // injected at the CLI registration point.
 func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "outbox", Short: "inspect and disposition provider-neutral delivery work"}
-	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), targetCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
+	cmd.AddCommand(listCommand(streams), levelCommand(streams), backendCommand(streams, providers), targetCommand(streams), canceledLabelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -72,6 +72,54 @@ func targetCommand(streams *iostreams.Streams) *cobra.Command {
 			target = "none"
 		}
 		_, err = fmt.Fprintln(streams.Out, target)
+		return err
+	}
+	return plumbing(cmd)
+}
+
+func canceledLabelCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "canceled-label [none|label]",
+		Short: "read or set this repo's tracker canceled label",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		s, repo, err := openRepo(cmd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+
+		label, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerCanceledLabelKey)
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 {
+			// Unlike target, the stored value is trimmed: the GitLab provider matches
+			// the label name exactly against the project's labels.
+			label = strings.TrimSpace(args[0])
+			if label == "none" {
+				label = ""
+			}
+			if err := s.SetConfig(cmd.Context(), repo.ID, store.TrackerCanceledLabelKey, label); err != nil {
+				return err
+			}
+		}
+
+		if cliflags.FromContext(cmd.Context()).JSON {
+			b, err := json.Marshal(struct {
+				CanceledLabel string `json:"canceledLabel"`
+			}{label})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, string(b))
+			return err
+		}
+		if label == "" {
+			label = "none"
+		}
+		_, err = fmt.Fprintln(streams.Out, label)
 		return err
 	}
 	return plumbing(cmd)
@@ -320,7 +368,11 @@ func flushCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobr
 		if err != nil {
 			return err
 		}
-		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target})
+		canceledLabel, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerCanceledLabelKey)
+		if err != nil {
+			return err
+		}
+		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel})
 		if err != nil {
 			return err
 		}
