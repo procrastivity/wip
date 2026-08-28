@@ -15,6 +15,7 @@ import (
 	"github.com/procrastivity/wip/internal/selftest"
 	"github.com/procrastivity/wip/internal/tracker"
 	githubtracker "github.com/procrastivity/wip/internal/tracker/github"
+	gitlabtracker "github.com/procrastivity/wip/internal/tracker/gitlab"
 	lineartracker "github.com/procrastivity/wip/internal/tracker/linear"
 	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	batchverb "github.com/procrastivity/wip/internal/verbs/batch"
@@ -51,6 +52,7 @@ import (
 func NewRootCommand(streams *iostreams.Streams, build buildinfo.Info) *cobra.Command {
 	providers := tracker.NewRegistry()
 	providers.Register("github", githubtracker.Factory(githubtracker.Options{}))
+	providers.Register("gitlab", gitlabtracker.Factory(gitlabtracker.Options{}))
 	providers.Register("linear", lineartracker.Factory(lineartracker.Options{}))
 	return NewRootCommandWithProviders(streams, build, providers)
 }
