@@ -81,7 +81,7 @@ func TestRefuseHandEdited_UnstampedForeignContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
+	_ = asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
 }
 
 func TestRefuseHandEdited_ChangedFile(t *testing.T) {
@@ -92,7 +92,7 @@ func TestRefuseHandEdited_ChangedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
+	_ = asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
 }
 
 func TestRefuseHandEdited_AddedFile(t *testing.T) {
@@ -103,7 +103,7 @@ func TestRefuseHandEdited_AddedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
+	_ = asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
 }
 
 func TestRefuseHandEdited_DeletedFile(t *testing.T) {
@@ -117,7 +117,7 @@ func TestRefuseHandEdited_DeletedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
+	_ = asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
 }
 
 func TestRefuseHandEdited_OnlyStampFileRemains(t *testing.T) {
@@ -131,5 +131,5 @@ func TestRefuseHandEdited_OnlyStampFileRemains(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
+	_ = asRefusal(t, harness.RefuseHandEdited("some-harness", dir))
 }
