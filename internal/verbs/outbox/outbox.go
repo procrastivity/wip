@@ -1,6 +1,6 @@
 // Package outbox implements provider-neutral inspection and human lifecycle
 // actions. Commands use an injected provider registry to resolve the configured
-// backend. The stock binary registers the GitHub and Linear providers there.
+// backend. The stock binary registers the GitHub, GitLab and Linear providers there.
 package outbox
 
 import (
@@ -125,9 +125,17 @@ func canceledLabelCommand(streams *iostreams.Streams) *cobra.Command {
 	return plumbing(cmd)
 }
 
+// backendUse renders the usage line from the injected registry so --help
+// enumerates every registered backend. The list is never a literal: it is
+// built from Registry.Names() in the order Names() returns, so adding a
+// provider in the CLI registration point updates help for free.
+func backendUse(providers *tracker.Registry) string {
+	return "backend [" + strings.Join(append([]string{"none"}, providers.Names()...), "|") + "]"
+}
+
 func backendCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "backend [none|name]",
+		Use:   backendUse(providers),
 		Short: "read or set this repo's tracker backend",
 		Args:  cobra.MaximumNArgs(1),
 	}
