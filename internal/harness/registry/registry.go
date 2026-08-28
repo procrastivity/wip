@@ -11,10 +11,11 @@ package registry
 import (
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/devin"
 	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 )
 
 // Names lists every harness wip can project itself into. claude-code
 // leads as the reference install; the rest follow alphabetically.
-var Names = []string{claudecode.Name, codex.Name, pi.Name, opencode.Name}
+var Names = []string{claudecode.Name, codex.Name, devin.Name, pi.Name, opencode.Name}
