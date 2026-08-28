@@ -29,6 +29,9 @@ import (
 // deliberate, small duplication of that convention rather than an import of
 // it — the same convention tiers/errors.go and readsurface.go each keep their
 // own unknownClone() rather than share one).
+//
+// The unknown-*worktree* refusal is the exception: it needs the clone label
+// and worktree name, so tiers.UnknownWorktree is shared rather than copied.
 type Current struct {
 	Repo     store.Repo
 	Clone    store.Clone
@@ -73,7 +76,10 @@ func ResolveCurrent(ctx context.Context, s *store.Store, actor store.Actor, dir 
 		return Current{}, err
 	}
 	if !found {
-		return Current{}, unknownClone()
+		// Known Clone, un-init'd worktree: the same second gap
+		// readsurface.ResolveCurrent names, refused with the same shared
+		// tiers helper so both surfaces say the same thing.
+		return Current{}, tiers.UnknownWorktree(wtName, clone.Label)
 	}
 	root, err := WorktreeRoot(ctx, dir)
 	if err != nil {

@@ -109,6 +109,14 @@ identical either way (`wip init` here), so reusing the one drafted message
 rather than inventing a second refusal reads correctly from the user's side
 even though the two internal causes differ.
 
+**Amended (Matter `unknown-worktree-refusal`, 2026-08-28).** Dogfooding a
+linked worktree showed the shared message does *not* read correctly: `wip
+doctor` in the same directory reports the clone as known, and `wip refresh`
+one command later calls it unknown. The second gap now raises its own
+`refusal.unknown-worktree` (`tiers.UnknownWorktree`), naming the worktree
+and the clone label and telling the user to run `wip init` here to attach
+it. The first gap keeps `refusal.unknown-clone` unchanged.
+
 ## The dangling cursor is a sixth `next` result, not a variant of the five
 
 D67 calls a dangling cursor (target tombstoned, Canceled, or sealed) "a

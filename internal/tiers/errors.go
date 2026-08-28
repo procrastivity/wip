@@ -1,6 +1,10 @@
 package tiers
 
-import "github.com/procrastivity/wip/internal/wiperr"
+import (
+	"fmt"
+
+	"github.com/procrastivity/wip/internal/wiperr"
+)
 
 // unknownClone is vocabulary's ratified unknown-clone refusal
 // (workplans/vocabulary.md step-10), reused verbatim: "running against an
@@ -16,4 +20,22 @@ import "github.com/procrastivity/wip/internal/wiperr"
 func unknownClone() error {
 	return wiperr.New("refusal.unknown-clone",
 		"refused — this clone is unknown to wip; run `wip init` here first")
+}
+
+// UnknownWorktree is the refusal for the second gap the read-surface decisions
+// record: the Clone resolved (its common-dir is known), but the location the
+// verb ran from — a linked worktree, or in a degenerate store the main
+// worktree itself — has no Worktree row, because `wip init` was never run
+// there (tiers Brief, worked example 2: that second init births only the
+// Worktree row). It names both tiers so the remedy is unambiguous; a bare
+// "this clone is unknown" would contradict what `wip doctor` says one
+// directory over. worktreeName is git's own name for the linked worktree, or
+// empty for the main worktree.
+func UnknownWorktree(worktreeName, cloneLabel string) error {
+	where := fmt.Sprintf("worktree %q", worktreeName)
+	if worktreeName == "" {
+		where = "the main worktree"
+	}
+	return wiperr.New("refusal.unknown-worktree",
+		fmt.Sprintf("refused — %s of clone %q is unknown to wip; run `wip init` here to attach it", where, cloneLabel))
 }
