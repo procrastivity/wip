@@ -87,7 +87,12 @@ func canceledLabelCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "canceled-label [none|label]",
 		Short: "read or set this repo's tracker canceled label",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "read or set this repo's tracker canceled label.\n\n" +
+			"With no argument, prints the stored label, or none. With an argument, stores the trimmed label name. Pass none to clear it.\n\n" +
+			"gitlab: when a canceled Matter flushes, the issue is closed and this label is added. The label must already exist on the project; wip never creates it, and a missing label ends the flush with a permanent refusal. When reading, a closed issue with this label reads as canceled and a closed issue without it reads as completed, so with no label a canceled Matter reads back as completed.\n\n" +
+			"github and linear: ignore the label. GitHub closes with state_reason not_planned; Linear moves the issue to a canceled workflow state.\n\n" +
+			"Setting a label contacts no tracker; the backend reads it at wip outbox flush.",
+		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		s, repo, err := openRepo(cmd)
@@ -243,7 +248,12 @@ func backlogPushCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backlog-push [manual|auto]",
 		Short: "read or set this repo's automatic backlog delegation",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "read or set this repo's automatic backlog delegation.\n\n" +
+			"With no argument, prints the effective mode. With an argument, stores manual or auto. The default is manual, even when a tracker backend is configured.\n\n" +
+			"manual: wip backlog add only enters the entry. wip backlog delegate is the explicit exit that queues a tracker item.\n\n" +
+			"auto: wip backlog add also delegates the entry in the same commit, queuing one outbox create per new entry. auto with no tracker backend behaves as manual until one is set.\n\n" +
+			"Either way nothing reaches the tracker until a person runs wip outbox approve and wip outbox flush.",
+		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		s, repo, err := openRepo(cmd)
