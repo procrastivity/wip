@@ -171,7 +171,7 @@ per MODEL §11, directing to `wip init`, with no relink offer attempted.
 
 ```
 $ wip doctor --json
-{"error":{"code":"refusal.unknown-clone","message":"refused — this clone is unknown to wip; run `wip init` here first"}}
+{"error":{"code":"refusal.unknown-clone","message":"refused — this clone is unknown to wip; run `wip init` here first (a write; if you cannot run it, ask the user)"}}
 $ echo $?
 3
 ```

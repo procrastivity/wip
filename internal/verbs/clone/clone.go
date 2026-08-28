@@ -109,7 +109,7 @@ func resolveTargetRepo(ctx context.Context, s *store.Store, dir, repoLocator str
 	}
 	if !found {
 		return store.Repo{}, wiperr.New("refusal.unknown-clone",
-			"refused — this clone is unknown to wip; run `wip init` here first, or pass --repo")
+			"refused — this clone is unknown to wip; pass --repo, or run `wip init` here first (a write; if you cannot run it, ask the user)")
 	}
 	return s.Repo(ctx, clone.Repo)
 }

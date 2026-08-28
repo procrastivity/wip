@@ -93,5 +93,5 @@ func ResolveCurrent(ctx context.Context, s *store.Store, actor store.Actor, dir 
 // `tiers`'s and `readsurface`'s own errors.go raise, for the same reason.
 func unknownClone() error {
 	return wiperr.New("refusal.unknown-clone",
-		"refused — this clone is unknown to wip; run `wip init` here first")
+		"refused — this clone is unknown to wip; run `wip init` here first (a write; if you cannot run it, ask the user)")
 }
