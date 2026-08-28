@@ -18,6 +18,13 @@ import (
 // BacklogAdd enters a new entry. `deferred` provenance records origin node +
 // why (MODEL §4), so origin is required for it; `found`'s origin is optional
 // evidence, and `intake` carries none.
+//
+// When the Repo's tracker.backlog-push is auto and a tracker backend is
+// configured, the same commit also delegates the entry: a backlog.delegated
+// draft follows backlog.entered, so the entry lands delegated with one queued
+// create (workplan D1, D2). The setting is read here, at write time, never in
+// the projection, so a rebuild does not depend on current config. auto with no
+// backend behaves as manual (D4); approval and flush stay human (D5).
 func BacklogAdd(ctx context.Context, s *store.Store, actor store.Actor, repo string, provenance store.Provenance, title, detail, originLocator string) (store.BacklogEntry, error) {
 	switch provenance {
 	case store.ProvenanceIntake, store.ProvenanceFound, store.ProvenanceDeferred:
@@ -40,17 +47,48 @@ func BacklogAdd(ctx context.Context, s *store.Store, actor store.Actor, repo str
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
 	var id string
-	if _, err := s.Commit(ctx, req, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
 		id = tx.NewID()
-		return []store.Draft{{
+		drafts := []store.Draft{{
 			Type:    store.TypeBacklogEntered,
 			Subject: id,
 			Payload: store.BacklogEntered{Provenance: provenance, Title: title, Detail: detail, OriginNode: originNode},
-		}}, nil
+		}}
+		push, err := autoDelegateOnAdd(ctx, tx.View, repo)
+		if err != nil {
+			return nil, err
+		}
+		if push {
+			drafts = append(drafts, store.Draft{
+				Type:    store.TypeBacklogDelegated,
+				Subject: id,
+				Payload: store.BacklogDelegated{Outbox: tx.NewID(), IdempotencyKey: "backlog:" + id},
+			})
+		}
+		return drafts, nil
 	}); err != nil {
 		return store.BacklogEntry{}, err
 	}
 	return backlogEntryByID(ctx, s, repo, id)
+}
+
+// autoDelegateOnAdd reports whether a new entry should be delegated in the
+// same commit that enters it: tracker.backlog-push is auto AND a tracker
+// backend is configured. Without a backend a queued create would only fail at
+// flush, so auto degrades to manual (workplan D4).
+func autoDelegateOnAdd(ctx context.Context, v store.View, repo string) (bool, error) {
+	mode, err := v.EffectiveTrackerBacklogPush(ctx, repo)
+	if err != nil {
+		return false, err
+	}
+	if mode != store.TrackerBacklogPushAuto {
+		return false, nil
+	}
+	backend, _, err := v.Config(ctx, repo, store.TrackerBackendKey)
+	if err != nil {
+		return false, err
+	}
+	return backend != "", nil
 }
 
 // BacklogPlan promotes an entry into a Matter — the exit that consumes it.
