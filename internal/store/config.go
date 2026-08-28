@@ -76,6 +76,62 @@ func (s *Store) SetTrackerPushLevel(ctx context.Context, repo, value string) (Tr
 	return level, nil
 }
 
+// TrackerBacklogPush controls whether `wip backlog add` also delegates the new
+// entry through the outbox. It is Repo-tier configuration, not domain history.
+type TrackerBacklogPush string
+
+const (
+	// TrackerBacklogPushManual leaves a new entry entered; `wip backlog delegate`
+	// is the explicit exit.
+	TrackerBacklogPushManual TrackerBacklogPush = "manual"
+	// TrackerBacklogPushAuto delegates every new entry as it is added. Approval
+	// and flush stay human either way.
+	TrackerBacklogPushAuto TrackerBacklogPush = "auto"
+)
+
+// TrackerBacklogPushKey is the explicit Repo-tier backlog-push config key.
+const TrackerBacklogPushKey = "tracker.backlog-push"
+
+// ParseTrackerBacklogPush validates one backlog-push token.
+func ParseTrackerBacklogPush(value string) (TrackerBacklogPush, error) {
+	mode := TrackerBacklogPush(value)
+	switch mode {
+	case TrackerBacklogPushManual, TrackerBacklogPushAuto:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("store: %q is not a tracker backlog-push mode; expected manual or auto", value)
+	}
+}
+
+// EffectiveTrackerBacklogPush resolves the explicit Repo value, else manual.
+// Unlike EffectiveTrackerPushLevel, a configured backend does not change the
+// default: the local backlog holds found things not yet worth a tracker item,
+// so pushing every entry is opt-in even when a tracker is wired up.
+func (v View) EffectiveTrackerBacklogPush(ctx context.Context, repo string) (TrackerBacklogPush, error) {
+	value, present, err := v.Config(ctx, repo, TrackerBacklogPushKey)
+	if err != nil {
+		return "", err
+	}
+	if present {
+		return ParseTrackerBacklogPush(value)
+	}
+	return TrackerBacklogPushManual, nil
+}
+
+// SetTrackerBacklogPush validates and writes the explicit Repo-tier mode.
+// Configuration changes are lazy: this direct config write emits no event and
+// delegates no existing entry.
+func (s *Store) SetTrackerBacklogPush(ctx context.Context, repo, value string) (TrackerBacklogPush, error) {
+	mode, err := ParseTrackerBacklogPush(value)
+	if err != nil {
+		return "", err
+	}
+	if err := s.SetConfig(ctx, repo, TrackerBacklogPushKey, string(mode)); err != nil {
+		return "", err
+	}
+	return mode, nil
+}
+
 // Project config, and the documented exception to "everything durable is a
 // projection of the log."
 //
