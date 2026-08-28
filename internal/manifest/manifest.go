@@ -1,9 +1,10 @@
 // Package manifest builds wip's machine-readable declaration of itself
 // (manifest-install Brief, "What the manifest is"): the flat JSON object
 // `wip manifest --json` emits — tool identity, every registered verb
-// regardless of kind, and the shipped-asset list with checksums. It reads
-// chassis's single verb-registration point (the built root command) and
-// chassis's asset-resolution chain; it adds no second registry of either.
+// regardless of kind, the shipped-asset list with checksums, and the
+// registered tracker backend names. It reads chassis's single
+// verb-registration point (the built root command) and chassis's
+// asset-resolution chain; it adds no second registry of either.
 package manifest
 
 import (
@@ -18,8 +19,10 @@ import (
 
 // SchemaVersion is the manifest JSON shape's own version — a separate
 // integer from Tool.Version. It bumps only when this Step's own JSON shape
-// changes, never for an ordinary verb or asset addition (Brief, "What the
-// manifest is").
+// changes incompatibly, never for an ordinary verb or asset addition (Brief,
+// "What the manifest is") and never for an additive top-level field such as
+// trackers — every harness bakes this integer into its generated SKILL.md, so
+// a bump would flag drift on every install.
 const SchemaVersion = 1
 
 // Tool identifies the binary that produced the manifest. Its three fields
@@ -66,6 +69,25 @@ type Manifest struct {
 	SchemaVersion int     `json:"schemaVersion"`
 	Verbs         []Verb  `json:"verbs"`
 	Assets        []Asset `json:"assets"`
+
+	// Trackers lists the tracker backend names the binary registered
+	// (tracker.Registry.Names(), sorted). It is the same list `wip outbox
+	// backend --help` enumerates; the manifest carries it so an agent can
+	// answer "which trackers can wip use" without reading source. Always
+	// present — an empty list marshals as [] rather than null.
+	Trackers []string `json:"trackers"`
+}
+
+// Option adjusts what Build records beyond the verb walk and asset tree.
+type Option func(*Manifest)
+
+// WithTrackers records the registered tracker backend names. Callers pass
+// tracker.Registry.Names(); Build copies the slice so a later mutation of
+// the caller's slice cannot reach the manifest.
+func WithTrackers(names []string) Option {
+	return func(m *Manifest) {
+		m.Trackers = append(make([]string, 0, len(names)), names...)
+	}
 }
 
 // Build walks root's registered command tree (chassis's single registration
@@ -73,7 +95,7 @@ type Manifest struct {
 // describe. root must already carry every verb it will ever carry for this
 // process — callers pass the fully-constructed root command, not one still
 // being assembled.
-func Build(root *cobra.Command, build buildinfo.Info) (Manifest, error) {
+func Build(root *cobra.Command, build buildinfo.Info, opts ...Option) (Manifest, error) {
 	verbs, err := walkVerbs(root)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("manifest: walking verb registry: %w", err)
@@ -84,7 +106,7 @@ func Build(root *cobra.Command, build buildinfo.Info) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("manifest: walking shipped assets: %w", err)
 	}
 
-	return Manifest{
+	m := Manifest{
 		Tool: Tool{
 			Name:    root.Name(),
 			Version: build.Version,
@@ -94,5 +116,10 @@ func Build(root *cobra.Command, build buildinfo.Info) (Manifest, error) {
 		SchemaVersion: SchemaVersion,
 		Verbs:         verbs,
 		Assets:        assets,
-	}, nil
+		Trackers:      []string{},
+	}
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return m, nil
 }
