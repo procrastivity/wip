@@ -19,7 +19,7 @@ import (
 // denser of its two drafted forms — for both.
 func unknownClone() error {
 	return wiperr.New("refusal.unknown-clone",
-		"refused — this clone is unknown to wip; run `wip init` here first")
+		"refused — this clone is unknown to wip; run `wip init` here first (a write; if you cannot run it, ask the user)")
 }
 
 // UnknownWorktree is the refusal for the second gap the read-surface decisions

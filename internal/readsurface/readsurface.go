@@ -26,5 +26,5 @@ import "github.com/procrastivity/wip/internal/wiperr"
 // host-wide carve-out rather than this package's own.
 func unknownClone() error {
 	return wiperr.New("refusal.unknown-clone",
-		"refused — this clone is unknown to wip; run `wip init` here first")
+		"refused — this clone is unknown to wip; run `wip init` here first (a write; if you cannot run it, ask the user)")
 }

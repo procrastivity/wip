@@ -35,7 +35,7 @@ func CurrentRepo(ctx context.Context, s *store.Store, dir string) (store.Repo, e
 	}
 	if !found {
 		return store.Repo{}, wiperr.New("refusal.unknown-clone",
-			"refused — this clone is unknown to wip; run `wip init` here first")
+			"refused — this clone is unknown to wip; run `wip init` here first (a write; if you cannot run it, ask the user)")
 	}
 	return s.Repo(ctx, clone.Repo)
 }
