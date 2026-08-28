@@ -23,6 +23,7 @@ import (
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
+	"github.com/procrastivity/wip/internal/tracker"
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
@@ -33,7 +34,7 @@ func TestCommand_UnknownHarnessPrecedesManifestBuild(t *testing.T) {
 		RunE: func(*cobra.Command, []string) error { return nil },
 	})
 
-	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, buildinfo.Info{}, root)
+	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, buildinfo.Info{}, root, tracker.NewRegistry())
 	cmd.SetArgs([]string{"some-unknown-harness"})
 	err := cmd.Execute()
 
@@ -50,7 +51,7 @@ func TestCommand_HelpListsHarnesses(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 
 	out := &bytes.Buffer{}
-	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, buildinfo.Info{}, root)
+	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, buildinfo.Info{}, root, tracker.NewRegistry())
 	cmd.SetOut(out)
 	cmd.SetArgs([]string{"--help"})
 	if err := cmd.Execute(); err != nil {
@@ -71,7 +72,7 @@ func TestCommand_Force(t *testing.T) {
 
 	// A plain install writes a stamped tree.
 	out := &bytes.Buffer{}
-	first := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{"claude-code"})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first install: %v", err)
@@ -88,7 +89,7 @@ func TestCommand_Force(t *testing.T) {
 
 	// A re-install without --force refuses, and leaves the hand edit in
 	// place.
-	second := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetArgs([]string{"claude-code"})
 	err = second.Execute()
 
@@ -109,7 +110,7 @@ func TestCommand_Force(t *testing.T) {
 	}
 
 	// --force overrides the refusal and restores the generated content.
-	third := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	third := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	third.SetArgs([]string{"claude-code", "--force"})
 	if err := third.Execute(); err != nil {
 		t.Fatalf("forced re-install: %v", err)
@@ -126,7 +127,7 @@ func TestCommand_Force(t *testing.T) {
 
 func TestCommand_ForceIsARegisteredFlag(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
-	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, buildinfo.Info{}, root)
+	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, buildinfo.Info{}, root, tracker.NewRegistry())
 
 	flag := cmd.Flags().Lookup("force")
 	if flag == nil {
@@ -187,7 +188,7 @@ func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
 	build := buildinfo.Info{Version: "1.0.0"}
 
 	out := &bytes.Buffer{}
-	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() = %v, want nil", err)
@@ -236,7 +237,7 @@ func TestCommand_BareInstallsEveryDetectedHarness_JSON(t *testing.T) {
 	build := buildinfo.Info{Version: "1.0.0"}
 
 	out := &bytes.Buffer{}
-	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	// --json is a persistent flag bound at the real root
 	// (internal/cli/root.go) and threaded down via cliflags context; this
 	// test builds the install command standalone, so it sets that context
@@ -306,7 +307,7 @@ func TestCommand_BareRefusesHandEditedAmongDetected(t *testing.T) {
 
 	// Install pi once so it has a stamped tree, then hand-edit it so the
 	// next bare run refuses it.
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{"pi"})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("priming pi install: %v", err)
@@ -321,7 +322,7 @@ func TestCommand_BareRefusesHandEditedAmongDetected(t *testing.T) {
 	}
 
 	out := &bytes.Buffer{}
-	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	cmd.SetArgs([]string{})
 	err = cmd.Execute()
 
@@ -362,7 +363,7 @@ func TestCommand_BareForceOverridesHandEditedAmongDetected(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{"pi"})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("priming pi install: %v", err)
@@ -376,7 +377,7 @@ func TestCommand_BareForceOverridesHandEditedAmongDetected(t *testing.T) {
 		t.Fatalf("hand-editing pi SKILL.md: %v", err)
 	}
 
-	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	cmd := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	cmd.SetArgs([]string{"--force"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() with --force = %v, want nil", err)
@@ -406,7 +407,7 @@ func TestCommand_BareNoHarnessDetected(t *testing.T) {
 	build := buildinfo.Info{Version: "1.0.0"}
 
 	out := &bytes.Buffer{}
-	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	cmd := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() = %v, want nil", err)
@@ -440,14 +441,14 @@ func TestCommand_BareSecondRunReportsCurrent(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first (bare) install: %v", err)
 	}
 
 	out := &bytes.Buffer{}
-	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetArgs([]string{})
 	if err := second.Execute(); err != nil {
 		t.Fatalf("second (bare) install: %v, want nil", err)
@@ -478,14 +479,14 @@ func TestCommand_BareSecondRunReportsCurrent_JSON(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first (bare) install: %v", err)
 	}
 
 	out := &bytes.Buffer{}
-	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetContext(cliflags.WithFlags(context.Background(), cliflags.Flags{JSON: true}))
 	second.SetArgs([]string{})
 	if err := second.Execute(); err != nil {
@@ -533,14 +534,14 @@ func TestCommand_BareSecondRunForceReinstalls(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first (bare) install: %v", err)
 	}
 
 	out := &bytes.Buffer{}
-	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetArgs([]string{"--force"})
 	if err := second.Execute(); err != nil {
 		t.Fatalf("second (bare, --force) install: %v, want nil", err)
@@ -576,7 +577,7 @@ func TestCommand_BareManifestChangeReportsInstalledNotCurrent(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first (bare) install: %v", err)
@@ -593,7 +594,7 @@ func TestCommand_BareManifestChangeReportsInstalledNotCurrent(t *testing.T) {
 	root.AddCommand(newVerb)
 
 	out := &bytes.Buffer{}
-	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetArgs([]string{})
 	if err := second.Execute(); err != nil {
 		t.Fatalf("second (bare) install after manifest change: %v, want nil", err)
@@ -625,7 +626,7 @@ func TestCommand_TargetedSecondRunReportsCurrent(t *testing.T) {
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
 
-	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root)
+	first := Command(&iostreams.Streams{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	first.SetArgs([]string{"claude-code"})
 	if err := first.Execute(); err != nil {
 		t.Fatalf("first install: %v", err)
@@ -637,7 +638,7 @@ func TestCommand_TargetedSecondRunReportsCurrent(t *testing.T) {
 	}
 
 	out := &bytes.Buffer{}
-	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root)
+	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	second.SetArgs([]string{"claude-code"})
 	if err := second.Execute(); err != nil {
 		t.Fatalf("second install: %v, want nil", err)
@@ -649,7 +650,7 @@ func TestCommand_TargetedSecondRunReportsCurrent(t *testing.T) {
 	}
 
 	jsonOut := &bytes.Buffer{}
-	third := Command(&iostreams.Streams{Out: jsonOut, Err: &bytes.Buffer{}}, build, root)
+	third := Command(&iostreams.Streams{Out: jsonOut, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	third.SetContext(cliflags.WithFlags(context.Background(), cliflags.Flags{JSON: true}))
 	third.SetArgs([]string{"claude-code"})
 	if err := third.Execute(); err != nil {
@@ -675,7 +676,7 @@ func TestCommand_TargetedSecondRunReportsCurrent(t *testing.T) {
 	}
 
 	forceOut := &bytes.Buffer{}
-	fourth := Command(&iostreams.Streams{Out: forceOut, Err: &bytes.Buffer{}}, build, root)
+	fourth := Command(&iostreams.Streams{Out: forceOut, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())
 	fourth.SetArgs([]string{"claude-code", "--force"})
 	if err := fourth.Execute(); err != nil {
 		t.Fatalf("fourth (--force) install: %v, want nil", err)

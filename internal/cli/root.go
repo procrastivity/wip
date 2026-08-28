@@ -97,8 +97,8 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip role spawn` behind it")
 
 	root.AddCommand(versionverb.Command(streams, build))
-	root.AddCommand(manifestverb.Command(streams, build, root))
-	root.AddCommand(installverb.Command(streams, build, root))
+	root.AddCommand(manifestverb.Command(streams, build, root, providers))
+	root.AddCommand(installverb.Command(streams, build, root, providers))
 	root.AddCommand(uninstallverb.Command(streams))
 	root.AddCommand(initverb.Command(streams))
 	root.AddCommand(cloneverb.Command(streams))

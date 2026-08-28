@@ -32,6 +32,7 @@ import (
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
+	"github.com/procrastivity/wip/internal/tracker"
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
@@ -39,7 +40,7 @@ import (
 // *cobra.Command NewRootCommand is assembling, captured by reference so the
 // manifest it builds at RunE time reflects every verb ultimately
 // registered on it (see internal/verbs/manifest for the same pattern).
-func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Command) *cobra.Command {
+func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Command, providers *tracker.Registry) *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "install <harness>",
@@ -53,7 +54,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 			flags := cliflags.FromContext(cmd.Context())
 
 			if len(args) == 0 {
-				m, err := manifest.Build(root, build)
+				m, err := manifest.Build(root, build, manifest.WithTrackers(providers.Names()))
 				if err != nil {
 					return err
 				}
@@ -70,7 +71,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 					fmt.Sprintf("unknown harness %q — only %s is supported", harnessName, strings.Join(quoted, ", or ")))
 			}
 
-			m, err := manifest.Build(root, build)
+			m, err := manifest.Build(root, build, manifest.WithTrackers(providers.Names()))
 			if err != nil {
 				return err
 			}
