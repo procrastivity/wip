@@ -261,8 +261,8 @@ func TestOutboxBackendConfiguresRegisteredProvider(t *testing.T) {
 	if initial.exitCode != 0 || initial.stdout != "none\n" {
 		t.Fatalf("initial backend: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
-	invalid := runIn(t, dir, dbEnv, "outbox", "backend", "gitlab")
-	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, `backend "gitlab" is not registered; available: github, linear`) {
+	invalid := runIn(t, dir, dbEnv, "outbox", "backend", "jira")
+	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, `backend "jira" is not registered; available: github, gitlab, linear`) {
 		t.Fatalf("invalid backend: exit=%d stderr=%q", invalid.exitCode, invalid.stderr)
 	}
 	set := runIn(t, dir, dbEnv, "outbox", "backend", "github", "--json")
