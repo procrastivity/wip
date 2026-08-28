@@ -79,6 +79,9 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 					return guards.CheckStalePiHarnessArtifact(root, build)
 				},
 				func(_ context.Context, _ *store.Store, _ string) ([]guards.Finding, error) {
+					return guards.CheckStaleDevinHarnessArtifact(root, build)
+				},
+				func(_ context.Context, _ *store.Store, _ string) ([]guards.Finding, error) {
 					return guards.CheckStaleOpencodeHarnessArtifact(root, build)
 				},
 			)

@@ -15,6 +15,7 @@ import (
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness/devin"
 	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/harness/registry"
@@ -55,6 +56,8 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				dir, err = claudecode.Uninstall()
 			case codex.Name:
 				dir, err = codex.Uninstall()
+			case devin.Name:
+				dir, err = devin.Uninstall()
 			case pi.Name:
 				dir, err = pi.Uninstall()
 			case opencode.Name:
