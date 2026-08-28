@@ -66,8 +66,11 @@ func ResolveCurrent(ctx context.Context, s *store.Store, actor store.Actor, dir 
 		// A known Clone whose current location has never itself been
 		// init'd (`tiers` Brief: a second `wip init`, run inside a linked
 		// worktree of an already-known Clone, is what creates its Worktree
-		// row). The remedy is the same one the clone-unknown case names.
-		return Current{}, unknownClone()
+		// row). The remedy is `wip init` in this worktree, which births only
+		// the Worktree row — so the refusal names the worktree and the clone
+		// rather than calling the clone unknown (read-surface decisions, "wip next
+		// --set needs a resolved Worktree", amended 2026-08-28).
+		return Current{}, tiers.UnknownWorktree(wtName, clone.Label)
 	}
 	return Current{Repo: repo, Clone: clone, Worktree: wt}, nil
 }
