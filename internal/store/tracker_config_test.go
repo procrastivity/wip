@@ -83,3 +83,30 @@ func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 		t.Fatalf("target config queued outbox = %+v, err=%v", entries, err)
 	}
 }
+
+func TestTrackerCanceledLabelIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+	h := newHarness(t)
+	before, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const label = "  wf::canceled  "
+	if err := h.SetConfig(h.ctx, h.Repo, TrackerCanceledLabelKey, label); err != nil {
+		t.Fatal(err)
+	}
+	got, present, err := h.Config(h.ctx, h.Repo, TrackerCanceledLabelKey)
+	if err != nil || !present || got != label {
+		t.Fatalf("tracker canceled label = %q, present=%v, err=%v, want %q", got, present, err, label)
+	}
+	after, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("canceled label config appended %d event(s)", len(after)-len(before))
+	}
+	entries, err := h.Outbox(h.ctx, h.Repo)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("canceled label config queued outbox = %+v, err=%v", entries, err)
+	}
+}

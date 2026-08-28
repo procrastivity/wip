@@ -13,6 +13,9 @@ import (
 type FactoryInput struct {
 	Repo   store.Repo
 	Target string
+	// CanceledLabel is the opaque Repo-tier tracker.canceled-label value.
+	// Empty means no label was configured.
+	CanceledLabel string
 }
 
 // Factory constructs one provider seam. Provider packages expose a Factory

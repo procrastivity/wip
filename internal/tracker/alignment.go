@@ -150,11 +150,15 @@ func (c *AlignmentCoordinator) Check(ctx context.Context, v AlignmentView, matte
 	if err != nil {
 		return unavailableForRefs(refs, err.Error())
 	}
+	canceledLabel, _, err := v.Config(ctx, matter.Repo, store.TrackerCanceledLabelKey)
+	if err != nil {
+		return unavailableForRefs(refs, err.Error())
+	}
 	repo, err := v.Repo(ctx, matter.Repo)
 	if err != nil {
 		return unavailableForRefs(refs, err.Error())
 	}
-	seam, err := c.providers.Resolve(backend, FactoryInput{Repo: repo, Target: target})
+	seam, err := c.providers.Resolve(backend, FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel})
 	if err != nil {
 		return unavailableForRefs(refs, err.Error())
 	}

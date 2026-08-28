@@ -25,7 +25,7 @@ func TestRegistryResolvesNamesInStableOrder(t *testing.T) {
 	if got := registry.Names(); !reflect.DeepEqual(got, []string{"first", "second"}) {
 		t.Fatalf("names = %v", got)
 	}
-	input := FactoryInput{Repo: store.Repo{ID: "repo-1"}, Target: "target-1"}
+	input := FactoryInput{Repo: store.Repo{ID: "repo-1"}, Target: "target-1", CanceledLabel: "label-1"}
 	if _, err := registry.Resolve("first", input); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
