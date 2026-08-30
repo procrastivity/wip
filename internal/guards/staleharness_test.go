@@ -7,6 +7,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/guards"
+	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
@@ -115,6 +116,54 @@ func TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T)
 	findings, err = guards.CheckStaleHarnessArtifact(root, build)
 	if err != nil {
 		t.Fatalf("CheckStaleHarnessArtifact after re-install: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	}
+}
+
+// TestCheckStaleAmpHarnessArtifact_FlagsDriftThenClearsOnReinstall checks
+// the same drift-then-reinstall shape against the Amp harness.
+func TestCheckStaleAmpHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
+	t.Setenv(amp.SkillsDirEnv, t.TempDir())
+	build := buildinfo.Info{Version: "1.0.0"}
+	root := fakeRoot()
+
+	m, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := amp.Install(m); err != nil {
+		t.Fatalf("amp.Install: %v", err)
+	}
+
+	extra := &cobra.Command{
+		Use:   "gizmo",
+		Short: "a second synthetic plumbing verb, added after install",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(extra, surface.Plumbing)
+	root.AddCommand(extra)
+
+	findings, err := guards.CheckStaleAmpHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStaleAmpHarnessArtifact: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
+	}
+
+	m2, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := amp.Install(m2); err != nil {
+		t.Fatalf("amp.Install (re-install): %v", err)
+	}
+
+	findings, err = guards.CheckStaleAmpHarnessArtifact(root, build)
+	if err != nil {
+		t.Fatalf("CheckStaleAmpHarnessArtifact after re-install: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)

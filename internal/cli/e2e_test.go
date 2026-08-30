@@ -44,8 +44,8 @@ type result struct {
 }
 
 // hermeticEnv is the process environment plus the caller's overrides, with
-// WIP_CLAUDE_SKILLS_DIR, WIP_CODEX_SKILLS_DIR, WIP_DEVIN_SKILLS_DIR,
-// WIP_PI_SKILLS_DIR, and WIP_OPENCODE_SKILLS_DIR each defaulted to their own
+// WIP_CLAUDE_SKILLS_DIR, WIP_AMP_SKILLS_DIR, WIP_CODEX_SKILLS_DIR,
+// WIP_DEVIN_SKILLS_DIR, WIP_PI_SKILLS_DIR, and WIP_OPENCODE_SKILLS_DIR each defaulted to their own
 // per-test temp dir when the caller does not set them — the suite must never
 // read this host's real skill installs (found live: a ~/.claude/skills/wip
 // stamped by an older build failed doctor inside tests that never mentioned
@@ -56,7 +56,7 @@ type result struct {
 func hermeticEnv(t *testing.T, env []string) []string {
 	t.Helper()
 	out := append(os.Environ(), env...)
-	for _, name := range []string{"WIP_CLAUDE_SKILLS_DIR", "WIP_CODEX_SKILLS_DIR", "WIP_DEVIN_SKILLS_DIR", "WIP_PI_SKILLS_DIR", "WIP_OPENCODE_SKILLS_DIR"} {
+	for _, name := range []string{"WIP_CLAUDE_SKILLS_DIR", "WIP_AMP_SKILLS_DIR", "WIP_CODEX_SKILLS_DIR", "WIP_DEVIN_SKILLS_DIR", "WIP_PI_SKILLS_DIR", "WIP_OPENCODE_SKILLS_DIR"} {
 		set := false
 		for _, e := range env {
 			if strings.HasPrefix(e, name+"=") {
@@ -437,6 +437,44 @@ func TestInstallUninstall_ClaudeCode_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestInstallUninstall_Amp_RoundTrip(t *testing.T) {
+	skillsDir := t.TempDir()
+	env := []string{"WIP_AMP_SKILLS_DIR=" + skillsDir}
+
+	installResult := run(t, env, "install", "amp", "--json")
+	if installResult.exitCode != 0 {
+		t.Fatalf("install exit code = %d, want 0; stderr=%q", installResult.exitCode, installResult.stderr)
+	}
+	var installPayload struct {
+		Harness string `json:"harness"`
+		Dir     string `json:"dir"`
+	}
+	if err := json.Unmarshal([]byte(installResult.stdout), &installPayload); err != nil {
+		t.Fatalf("install stdout is not JSON: %v (stdout=%q)", err, installResult.stdout)
+	}
+	if installPayload.Harness != "amp" {
+		t.Errorf("installed harness = %q, want %q", installPayload.Harness, "amp")
+	}
+
+	dir := installPayload.Dir
+	for _, want := range []string{"SKILL.md", ".wip-manifest-stamp.json"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Errorf("expected generated file %q missing: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "plugin.json")); !os.IsNotExist(err) {
+		t.Errorf("amp install wrote .claude-plugin/plugin.json, want none — that mechanism is claude-code's own")
+	}
+
+	uninstallResult := run(t, env, "uninstall", "amp", "--json")
+	if uninstallResult.exitCode != 0 {
+		t.Fatalf("uninstall exit code = %d, want 0; stderr=%q", uninstallResult.exitCode, uninstallResult.stderr)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("install dir still exists after uninstall: err=%v", err)
+	}
+}
+
 func TestInstallUninstall_Codex_RoundTrip(t *testing.T) {
 	skillsDir := t.TempDir()
 	env := []string{"WIP_CODEX_SKILLS_DIR=" + skillsDir}
@@ -656,6 +694,7 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	opencodeDir := t.TempDir()
 	env := []string{
 		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_AMP_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
@@ -667,11 +706,12 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
 	}
 	lines := strings.Split(strings.TrimRight(r.stdout, "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("stdout lines = %d, want 5: %q", len(lines), r.stdout)
+	if len(lines) != 6 {
+		t.Fatalf("stdout lines = %d, want 6: %q", len(lines), r.stdout)
 	}
 	wantPrefixes := []string{
 		"installed claude-code skill at ",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -710,11 +750,12 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	if err := json.Unmarshal([]byte(jr.stdout), &payload); err != nil {
 		t.Fatalf("stdout is not one JSON value: %v (stdout=%q)", err, jr.stdout)
 	}
-	if len(payload.Results) != 5 {
-		t.Fatalf("results = %+v, want 5", payload.Results)
+	if len(payload.Results) != 6 {
+		t.Fatalf("results = %+v, want 6", payload.Results)
 	}
 	wantStatus := map[string]string{
 		"claude-code": "current",
+		"amp":         "skipped",
 		"codex":       "skipped",
 		"devin":       "skipped",
 		"pi":          "skipped",
@@ -747,6 +788,7 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 	opencodeDir := t.TempDir()
 	env := []string{
 		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_AMP_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
@@ -809,8 +851,8 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 5 {
-		t.Errorf("results = %+v, want all 5 harnesses represented", payload.Results)
+	if len(seen) != 6 {
+		t.Errorf("results = %+v, want all 6 harnesses represented", payload.Results)
 	}
 
 	var envelope struct {
@@ -843,6 +885,7 @@ func TestInstall_Bare_RepeatRunReportsCurrentThenForceReinstalls(t *testing.T) {
 	opencodeDir := t.TempDir()
 	env := []string{
 		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
+		"WIP_AMP_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
@@ -870,8 +913,8 @@ func TestInstall_Bare_RepeatRunReportsCurrentThenForceReinstalls(t *testing.T) {
 		t.Fatalf("repeat install exit code = %d, want 0; stderr=%q", repeat.exitCode, repeat.stderr)
 	}
 	lines := strings.Split(strings.TrimRight(repeat.stdout, "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("repeat install stdout lines = %d, want 5: %q", len(lines), repeat.stdout)
+	if len(lines) != 6 {
+		t.Fatalf("repeat install stdout lines = %d, want 6: %q", len(lines), repeat.stdout)
 	}
 	for _, harnessName := range []string{"claude-code", "opencode"} {
 		found := false
@@ -908,6 +951,7 @@ func TestInstall_Bare_RepeatRunReportsCurrentThenForceReinstalls(t *testing.T) {
 func TestInstall_Bare_NoHarnessDetected(t *testing.T) {
 	env := []string{
 		"WIP_CLAUDE_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_AMP_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
@@ -919,18 +963,18 @@ func TestInstall_Bare_NoHarnessDetected(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
 	}
 	lines := strings.Split(strings.TrimRight(r.stdout, "\n"), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("stdout lines = %d, want 6 (5 skipped + hint): %q", len(lines), r.stdout)
+	if len(lines) != 7 {
+		t.Fatalf("stdout lines = %d, want 7 (6 skipped + hint): %q", len(lines), r.stdout)
 	}
-	for i, name := range []string{"claude-code", "codex", "devin", "pi", "opencode"} {
+	for i, name := range []string{"claude-code", "amp", "codex", "devin", "pi", "opencode"} {
 		want := fmt.Sprintf("skipped %s — not detected", name)
 		if lines[i] != want {
 			t.Errorf("line %d = %q, want %q", i, lines[i], want)
 		}
 	}
 	wantHint := "no harness detected on this host; install one explicitly: wip install <harness>"
-	if lines[5] != wantHint {
-		t.Errorf("hint line = %q, want %q", lines[5], wantHint)
+	if lines[6] != wantHint {
+		t.Errorf("hint line = %q, want %q", lines[6], wantHint)
 	}
 }
 
@@ -1050,7 +1094,7 @@ func TestUninstall_Bare_StillLists(t *testing.T) {
 	if r.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
 	}
-	want := "available harnesses: claude-code, codex, devin, pi, opencode\nusage: wip uninstall <harness>\n"
+	want := "available harnesses: claude-code, amp, codex, devin, pi, opencode\nusage: wip uninstall <harness>\n"
 	if r.stdout != want {
 		t.Fatalf("stdout = %q, want %q", r.stdout, want)
 	}

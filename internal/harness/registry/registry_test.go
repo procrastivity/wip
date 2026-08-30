@@ -3,6 +3,7 @@ package registry_test
 import (
 	"testing"
 
+	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
@@ -12,7 +13,7 @@ import (
 )
 
 func TestAll_OrderAndCompleteness(t *testing.T) {
-	want := []string{claudecode.Name, codex.Name, devin.Name, pi.Name, opencode.Name}
+	want := []string{claudecode.Name, amp.Name, codex.Name, devin.Name, pi.Name, opencode.Name}
 	if len(registry.All) != len(want) {
 		t.Fatalf("len(All) = %d, want %d", len(registry.All), len(want))
 	}

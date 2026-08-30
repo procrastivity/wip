@@ -10,6 +10,7 @@
 package registry
 
 import (
+	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
@@ -43,6 +44,14 @@ var All = []Harness{
 		Install:    claudecode.Install,
 		Uninstall:  claudecode.Uninstall,
 		Available:  claudecode.Available,
+	},
+	{
+		Name:       amp.Name,
+		InstallDir: amp.InstallDir,
+		Generate:   amp.Generate,
+		Install:    amp.Install,
+		Uninstall:  amp.Uninstall,
+		Available:  amp.Available,
 	},
 	{
 		Name:       codex.Name,

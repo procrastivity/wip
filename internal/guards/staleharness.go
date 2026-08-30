@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/procrastivity/wip/internal/buildinfo"
+	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
@@ -45,6 +46,13 @@ const staleHarnessCode = "advisory.stale-harness-artifact"
 // not a finding — there is nothing to have drifted from.
 func CheckStaleHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
 	return checkStaleHarnessArtifact(root, build, claudecode.Name, claudecode.InstallDir, claudecode.Generate)
+}
+
+// CheckStaleAmpHarnessArtifact is CheckStaleHarnessArtifact's Amp
+// counterpart: the same drift comparison against what `wip install amp`
+// last stamped.
+func CheckStaleAmpHarnessArtifact(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
+	return checkStaleHarnessArtifact(root, build, amp.Name, amp.InstallDir, amp.Generate)
 }
 
 // CheckStaleCodexHarnessArtifact is CheckStaleHarnessArtifact's codex
@@ -77,10 +85,10 @@ func CheckStaleOpencodeHarnessArtifact(root *cobra.Command, build buildinfo.Info
 
 // CheckStaleHarnessArtifacts is CheckStaleHarnessArtifact generalized over
 // every registered harness (registry.All), in that table's order —
-// claude-code, codex, devin, pi, opencode — concatenating each harness's
-// findings rather than reporting only the first drifted one. It replaces
-// the five separate per-harness closures doctor previously registered with
-// guards.Run; the five single-harness functions above remain for their own
+// claude-code, amp, codex, devin, pi, opencode — concatenating each
+// harness's findings rather than reporting only the first drifted one. It
+// replaces the separate per-harness closures doctor previously registered
+// with guards.Run; the single-harness functions above remain for their own
 // tests and for any caller wanting one harness's drift in isolation.
 func CheckStaleHarnessArtifacts(root *cobra.Command, build buildinfo.Info) ([]Finding, error) {
 	var findings []Finding

@@ -32,7 +32,7 @@ func TestCommand_NoArgsListsHarnesses(t *testing.T) {
 		t.Fatalf("Execute() = %v, want nil (bare invocation lists targets)", err)
 	}
 
-	want := "available harnesses: claude-code, codex, devin, pi, opencode\nusage: wip uninstall <harness>\n"
+	want := "available harnesses: claude-code, amp, codex, devin, pi, opencode\nusage: wip uninstall <harness>\n"
 	if out.String() != want {
 		t.Fatalf("output = %q, want %q", out.String(), want)
 	}
@@ -47,7 +47,7 @@ func TestCommand_HelpListsHarnesses(t *testing.T) {
 		t.Fatalf("Execute() = %v, want nil", err)
 	}
 
-	if !strings.Contains(out.String(), "Available harnesses: claude-code, codex, devin, pi, opencode.") {
+	if !strings.Contains(out.String(), "Available harnesses: claude-code, amp, codex, devin, pi, opencode.") {
 		t.Fatalf("--help output does not list the harnesses:\n%s", out.String())
 	}
 }

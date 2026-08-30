@@ -14,6 +14,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/cliflags"
+	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
@@ -56,7 +57,7 @@ func TestCommand_HelpListsHarnesses(t *testing.T) {
 		t.Fatalf("Execute() = %v, want nil", err)
 	}
 
-	if !strings.Contains(out.String(), "Available harnesses: claude-code, codex, devin, pi, opencode.") {
+	if !strings.Contains(out.String(), "Available harnesses: claude-code, amp, codex, devin, pi, opencode.") {
 		t.Fatalf("--help output does not list the harnesses:\n%s", out.String())
 	}
 }
@@ -146,8 +147,8 @@ func absentSkillsDir(t *testing.T) string {
 
 // setAllSkillsDirs pins every harness's WIP_*_SKILLS_DIR override for the
 // duration of the test, so the bare `wip install` path never probes this
-// host's real ~/.claude, ~/.codex, ~/.config/devin, ~/.pi, or
-// ~/.config/opencode. available lists the harness names that should be
+// host's real ~/.claude, ~/.config/amp, ~/.codex, ~/.config/devin, ~/.pi,
+// or ~/.config/opencode. available lists the harness names that should be
 // detected — Available() requires the directory itself to exist, so those
 // harnesses get a directory made with t.TempDir(); the rest get a sibling
 // path that is never created.
@@ -164,6 +165,7 @@ func setAllSkillsDirs(t *testing.T, available ...string) {
 
 	envFor := map[string]string{
 		claudecode.Name: claudecode.SkillsDirEnv,
+		amp.Name:        amp.SkillsDirEnv,
 		codex.Name:      codex.SkillsDirEnv,
 		devin.Name:      devin.SkillsDirEnv,
 		pi.Name:         pi.SkillsDirEnv,
@@ -192,12 +194,13 @@ func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("output has %d lines, want 6:\n%s", len(lines), out.String())
 	}
 
 	wantPrefix := []string{
 		"installed claude-code skill at ",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -262,12 +265,13 @@ func TestCommand_BareInstallsEveryDetectedHarness_JSON(t *testing.T) {
 		t.Fatalf("decoding JSON output: %v (stdout=%q)", err, out.String())
 	}
 
-	if len(payload.Results) != 5 {
-		t.Fatalf("got %d results, want 5: %+v", len(payload.Results), payload.Results)
+	if len(payload.Results) != 6 {
+		t.Fatalf("got %d results, want 6: %+v", len(payload.Results), payload.Results)
 	}
 
 	want := map[string]string{
 		claudecode.Name: "installed",
+		amp.Name:        "skipped",
 		codex.Name:      "skipped",
 		devin.Name:      "skipped",
 		pi.Name:         "skipped",
@@ -333,14 +337,14 @@ func TestCommand_BareRefusesHandEditedAmongDetected(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("output has %d lines, want 6:\n%s", len(lines), out.String())
 	}
 	if !strings.HasPrefix(lines[0], "installed claude-code skill at ") {
 		t.Fatalf("line 0 = %q, want the claude-code install line", lines[0])
 	}
-	if !strings.HasPrefix(lines[3], "refused pi — ") {
-		t.Fatalf("line 3 = %q, want a refused-pi line", lines[3])
+	if !strings.HasPrefix(lines[4], "refused pi — ") {
+		t.Fatalf("line 4 = %q, want a refused-pi line", lines[4])
 	}
 
 	edited, err := os.ReadFile(piSkillMD)
@@ -409,11 +413,12 @@ func TestCommand_BareNoHarnessDetected(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("output has %d lines, want 6 (5 skips + hint):\n%s", len(lines), out.String())
+	if len(lines) != 7 {
+		t.Fatalf("output has %d lines, want 7 (6 skips + hint):\n%s", len(lines), out.String())
 	}
 	wantPrefixes := []string{
 		"skipped claude-code — not detected",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -424,8 +429,8 @@ func TestCommand_BareNoHarnessDetected(t *testing.T) {
 			t.Fatalf("line %d = %q, want %q", i, lines[i], want)
 		}
 	}
-	if lines[5] != "no harness detected on this host; install one explicitly: wip install <harness>" {
-		t.Fatalf("hint line = %q", lines[5])
+	if lines[6] != "no harness detected on this host; install one explicitly: wip install <harness>" {
+		t.Fatalf("hint line = %q", lines[6])
 	}
 }
 
@@ -449,11 +454,12 @@ func TestCommand_BareSecondRunReportsCurrent(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("output has %d lines, want 6:\n%s", len(lines), out.String())
 	}
 	wantPrefix := []string{
 		"current claude-code skill at ",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -501,6 +507,7 @@ func TestCommand_BareSecondRunReportsCurrent_JSON(t *testing.T) {
 
 	want := map[string]string{
 		claudecode.Name: "current",
+		amp.Name:        "skipped",
 		codex.Name:      "skipped",
 		devin.Name:      "skipped",
 		pi.Name:         "skipped",
@@ -540,11 +547,12 @@ func TestCommand_BareSecondRunForceReinstalls(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("output has %d lines, want 6:\n%s", len(lines), out.String())
 	}
 	wantPrefix := []string{
 		"installed claude-code skill at ",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -592,11 +600,12 @@ func TestCommand_BareManifestChangeReportsInstalledNotCurrent(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("output has %d lines, want 5:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("output has %d lines, want 6:\n%s", len(lines), out.String())
 	}
 	wantPrefix := []string{
 		"installed claude-code skill at ",
+		"skipped amp — not detected",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
