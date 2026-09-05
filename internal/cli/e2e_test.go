@@ -691,10 +691,11 @@ func absentSkillsDir(t *testing.T) string {
 
 func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	claudeDir := t.TempDir()
+	ampDir := t.TempDir()
 	opencodeDir := t.TempDir()
 	env := []string{
 		"WIP_CLAUDE_SKILLS_DIR=" + claudeDir,
-		"WIP_AMP_SKILLS_DIR=" + absentSkillsDir(t),
+		"WIP_AMP_SKILLS_DIR=" + ampDir,
 		"WIP_CODEX_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_DEVIN_SKILLS_DIR=" + absentSkillsDir(t),
 		"WIP_PI_SKILLS_DIR=" + absentSkillsDir(t),
@@ -711,7 +712,7 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	}
 	wantPrefixes := []string{
 		"installed claude-code skill at ",
-		"skipped amp — not detected",
+		"installed amp skill at ",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -723,7 +724,7 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 		}
 	}
 
-	for _, dir := range []string{filepath.Join(claudeDir, "wip"), filepath.Join(opencodeDir, "wip")} {
+	for _, dir := range []string{filepath.Join(claudeDir, "wip"), filepath.Join(ampDir, "wip"), filepath.Join(opencodeDir, "wip")} {
 		for _, want := range []string{"SKILL.md", ".wip-manifest-stamp.json"} {
 			if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
 				t.Errorf("expected generated file %q missing in %s: %v", want, dir, err)
@@ -755,7 +756,7 @@ func TestInstall_Bare_InstallsDetectedHarnessesAndSkipsAbsent(t *testing.T) {
 	}
 	wantStatus := map[string]string{
 		"claude-code": "current",
-		"amp":         "skipped",
+		"amp":         "current",
 		"codex":       "skipped",
 		"devin":       "skipped",
 		"pi":          "skipped",

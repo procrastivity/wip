@@ -182,7 +182,7 @@ func setAllSkillsDirs(t *testing.T, available ...string) {
 }
 
 func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
-	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+	setAllSkillsDirs(t, claudecode.Name, amp.Name, opencode.Name)
 
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
@@ -201,7 +201,7 @@ func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
 
 	wantPrefix := []string{
 		"installed claude-code skill at ",
-		"skipped amp — not detected",
+		"installed amp skill at ",
 		"skipped codex — not detected",
 		"skipped devin — not detected",
 		"skipped pi — not detected",
@@ -221,7 +221,11 @@ func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opencode.InstallDir: %v", err)
 	}
-	for _, dir := range []string{claudeDir, opencodeDir} {
+	ampDir, err := amp.InstallDir()
+	if err != nil {
+		t.Fatalf("amp.InstallDir: %v", err)
+	}
+	for _, dir := range []string{claudeDir, ampDir, opencodeDir} {
 		for _, file := range []string{"SKILL.md", manifest.StampFileName} {
 			if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
 				t.Fatalf("stat %s in %s: %v", file, dir, err)
@@ -231,7 +235,7 @@ func TestCommand_BareInstallsEveryDetectedHarness(t *testing.T) {
 }
 
 func TestCommand_BareInstallsEveryDetectedHarness_JSON(t *testing.T) {
-	setAllSkillsDirs(t, claudecode.Name, opencode.Name)
+	setAllSkillsDirs(t, claudecode.Name, amp.Name, opencode.Name)
 
 	root := &cobra.Command{Use: "wip"}
 	build := buildinfo.Info{Version: "1.0.0"}
@@ -272,7 +276,7 @@ func TestCommand_BareInstallsEveryDetectedHarness_JSON(t *testing.T) {
 
 	want := map[string]string{
 		claudecode.Name: "installed",
-		amp.Name:        "skipped",
+		amp.Name:        "installed",
 		codex.Name:      "skipped",
 		devin.Name:      "skipped",
 		pi.Name:         "skipped",

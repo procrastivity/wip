@@ -1,6 +1,7 @@
 package guards_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
+	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
@@ -168,6 +170,47 @@ func TestCheckStaleAmpHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
 	}
+}
+
+func TestCheckStaleHarnessArtifacts_IncludesAmp(t *testing.T) {
+	t.Setenv(claudecode.SkillsDirEnv, t.TempDir())
+	t.Setenv(amp.SkillsDirEnv, t.TempDir())
+	t.Setenv(codex.SkillsDirEnv, t.TempDir())
+	t.Setenv(devin.SkillsDirEnv, t.TempDir())
+	t.Setenv(pi.SkillsDirEnv, t.TempDir())
+	t.Setenv(opencode.SkillsDirEnv, t.TempDir())
+	build := buildinfo.Info{Version: "1.0.0"}
+	root := fakeRoot()
+
+	m, err := manifest.Build(root, build)
+	if err != nil {
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	if _, err := amp.Install(m); err != nil {
+		t.Fatalf("amp.Install: %v", err)
+	}
+
+	extra := &cobra.Command{
+		Use:   "gizmo",
+		Short: "a second synthetic plumbing verb, added after install",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(extra, surface.Plumbing)
+	root.AddCommand(extra)
+
+	findings, err := guards.CheckStaleHarnessArtifacts(root, build)
+	if err != nil {
+		t.Fatalf("CheckStaleHarnessArtifacts: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("findings = none, want Amp drift through the aggregate doctor check")
+	}
+	for _, finding := range findings {
+		if strings.Contains(finding.Message, "amp harness artifact") {
+			return
+		}
+	}
+	t.Fatalf("findings = %+v, want one that names the Amp harness", findings)
 }
 
 // TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall is

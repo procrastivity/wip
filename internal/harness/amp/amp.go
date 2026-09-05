@@ -13,6 +13,7 @@ package amp
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -43,7 +44,10 @@ const guidanceAsset = "agent-write-guidance.md"
 // SkillsDirEnv patterns), never read for any other purpose.
 const SkillsDirEnv = "WIP_AMP_SKILLS_DIR"
 
-var userHomeDir = os.UserHomeDir
+var (
+	userHomeDir = os.UserHomeDir
+	lookPath    = exec.LookPath
+)
 
 // rootDir returns Amp's own root config directory under home,
 // ~/.config/amp — the directory Available keys off of. Amp's global skill
@@ -66,25 +70,25 @@ func SkillsDir() (string, error) {
 }
 
 // Available reports whether this harness appears to be present on this
-// host: its root config directory (~/.config/amp) exists, or — when
-// SkillsDirEnv overrides SkillsDir — that override directory exists. The
-// root, not the skills subdirectory, is the signal: a fresh harness install
-// may not have created its skills directory yet. Presence on PATH is not
-// consulted; the config root is what `wip install` writes into. A home-dir
-// lookup failure counts as not available rather than an error — the bare
-// `wip install` run treats an unavailable harness as a skip, and a probe
-// should never abort that run.
+// host: its root config directory (~/.config/amp) exists or the amp
+// executable is on PATH. The shared ~/.config/agents/skills directory is
+// not a presence signal because other Agent Skills consumers use it too.
+// When SkillsDirEnv overrides SkillsDir, the override directory is the test
+// seam and sole signal. Probe failures count as unavailable rather than
+// errors so a bare `wip install` can skip this harness without aborting.
 func Available() bool {
-	dir := os.Getenv(SkillsDirEnv)
-	if dir == "" {
-		home, err := userHomeDir()
-		if err != nil {
-			return false
-		}
-		dir = rootDir(home)
+	if dir := os.Getenv(SkillsDirEnv); dir != "" {
+		info, err := os.Stat(dir)
+		return err == nil && info.IsDir()
 	}
-	info, err := os.Stat(dir)
-	return err == nil && info.IsDir()
+
+	if home, err := userHomeDir(); err == nil {
+		if info, err := os.Stat(rootDir(home)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	_, err := lookPath(Name)
+	return err == nil
 }
 
 // InstallDir returns the directory the generated skill is written to and
