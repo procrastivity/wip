@@ -1,6 +1,7 @@
 package amp_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,5 +139,16 @@ func TestAvailable_OverrideMissing(t *testing.T) {
 	t.Setenv(amp.SkillsDirEnv, filepath.Join(t.TempDir(), "missing"))
 	if amp.Available() {
 		t.Error("Available() = true, want false for a missing override directory")
+	}
+}
+
+func TestAvailable_OverrideRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "skills")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(amp.SkillsDirEnv, path)
+	if amp.Available() {
+		t.Error("Available() = true, want false for a regular-file override")
 	}
 }
