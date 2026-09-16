@@ -10,6 +10,8 @@
 package registry
 
 import (
+	"fmt"
+
 	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
@@ -92,9 +94,22 @@ var All = []Harness{
 // this rather than walking All themselves.
 var Names = namesOf(All)
 
+// namesOf panics on a duplicate Name (C4.2: registration panics on
+// duplicates, because a row in All is static program construction, not
+// user input). It runs once, as Names's own initializer, so the panic
+// surfaces at program startup rather than letting two rows silently
+// collapse into one name that install, uninstall, and doctor would then
+// read inconsistently. Rejected: returning an error instead — nothing at
+// this call site could act on it, and the guard is cheap enough to pay
+// unconditionally for the next harness row.
 func namesOf(all []Harness) []string {
 	names := make([]string, len(all))
+	seen := make(map[string]struct{}, len(all))
 	for i, h := range all {
+		if _, dup := seen[h.Name]; dup {
+			panic(fmt.Sprintf("registry: duplicate harness name %q in All", h.Name))
+		}
+		seen[h.Name] = struct{}{}
 		names[i] = h.Name
 	}
 	return names
