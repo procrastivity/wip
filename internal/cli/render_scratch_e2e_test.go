@@ -26,12 +26,12 @@ type refreshPayload struct {
 func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Durable Work", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "brief", m.ID, "--file", writeTempFile(t, "# Brief\n\nwhy this exists\n"), "--json"); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Durable Work", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "brief", m.ID, "--file", writeTempFile(t, "# Brief\n\nwhy this exists\n"), "--json"); r.exitCode != 0 {
 		t.Fatalf("brief: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	first := runIn(t, dir, dbEnv, "refresh", "--json")
+	first := runIn(t, dir, dbEnv, "plumbing", "refresh", "--json")
 	if first.exitCode != 0 {
 		t.Fatalf("first refresh: exit=%d stderr=%q", first.exitCode, first.stderr)
 	}
@@ -44,7 +44,7 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 		t.Fatalf("brief.md was not rendered: %v", err)
 	}
 
-	if r := runIn(t, dir, dbEnv, "dispatch", "close", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "dispatch", "close", "--json"); r.exitCode != 0 {
 		t.Fatalf("dispatch close: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -52,7 +52,7 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 		t.Fatalf("removing .wip/: %v", err)
 	}
 
-	second := runIn(t, dir, dbEnv, "refresh", "--json")
+	second := runIn(t, dir, dbEnv, "plumbing", "refresh", "--json")
 	if second.exitCode != 0 {
 		t.Fatalf("second refresh: exit=%d stderr=%q", second.exitCode, second.stderr)
 	}
@@ -87,19 +87,19 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	active := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Active One", "--json").stdout)
-	sealed := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Sealed One", "--json").stdout)
+	active := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Active One", "--json").stdout)
+	sealed := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Sealed One", "--json").stdout)
 
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "start", sealed.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", sealed.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", sealed.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", sealed.Locator); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", sealed.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", sealed.Locator); r.exitCode != 0 {
 		t.Fatalf("gate close: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -115,7 +115,7 @@ func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 		t.Errorf("exit-render snapshot =\n%s", sealedMD)
 	}
 
-	eager := runIn(t, dir, dbEnv, "refresh", "--json")
+	eager := runIn(t, dir, dbEnv, "plumbing", "refresh", "--json")
 	if eager.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", eager.exitCode, eager.stderr)
 	}
@@ -130,7 +130,7 @@ func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 		t.Errorf("active matter was not rendered: %v", err)
 	}
 
-	if r := runIn(t, dir, dbEnv, "refresh", sealed.Locator, "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh", sealed.Locator, "--json"); r.exitCode != 0 {
 		t.Fatalf("refresh <sealed-locator>: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if _, err := os.Stat(sealedFile); err != nil {
@@ -144,20 +144,20 @@ func TestRenderScratch_ClusterOfMattersEagerlySkipsSealed(t *testing.T) {
 func TestRenderScratch_FinishSealsExitRenders(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Gate First", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Gate First", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
 		t.Fatalf("gate close: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".wip", "generated", m.Locator, "matter.md")); err == nil {
 		t.Fatal("gate close must not exit-render before the Matter is sealed")
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 

@@ -102,7 +102,7 @@ type Outcome struct {
 //
 // driver is who invoked the pass (the spawner of the Orchestrator role);
 // env is the acting tier context, whose Worktree must hold an open plain
-// bracket (`wip refresh`) for the Orchestrator role to bind to (D59). The
+// bracket (`wip plumbing refresh`) for the Orchestrator role to bind to (D59). The
 // pass holds the Run's advisory lock for its whole duration — the
 // coordinator holds it while dispatch-capable (S2) — and releases it on
 // return, whatever the outcome.
@@ -176,7 +176,7 @@ func (p *pass) execute(ctx context.Context) (Outcome, error) {
 	}
 	if !found {
 		return p.out, wiperr.New("validation.no-open-dispatch",
-			"no open dispatch on this worktree for the Orchestrator to bind to; run `wip refresh` first")
+			"no open dispatch on this worktree for the Orchestrator to bind to; run `wip plumbing refresh` first")
 	}
 	p.orchestrator, err = p.spawnRole(ctx, p.driver, bracket.ID, store.RoleOrchestrator)
 	if err != nil {

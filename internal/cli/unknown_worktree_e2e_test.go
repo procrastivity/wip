@@ -43,7 +43,7 @@ func TestUnknownWorktree_LinkedWorktreeOfKnownCloneRefusesByName(t *testing.T) {
 	wtDir := filepath.Join(filepath.Dir(dir), "widget-feature")
 	gitIn(t, dir, "worktree", "add", "-q", "-b", "feature", wtDir)
 
-	r := runIn(t, wtDir, dbEnv, "refresh")
+	r := runIn(t, wtDir, dbEnv, "plumbing", "refresh")
 	if r.exitCode != 3 {
 		t.Fatalf("refresh exit code = %d, want 3 (refusal); stderr=%q", r.exitCode, r.stderr)
 	}
@@ -59,11 +59,11 @@ func TestUnknownWorktree_LinkedWorktreeOfKnownCloneRefusesByName(t *testing.T) {
 	if strings.Contains(r.stderr, "this clone is unknown") {
 		t.Errorf("refresh stderr = %q, want it to NOT contain %q", r.stderr, "this clone is unknown")
 	}
-	if !strings.HasPrefix(r.stderr, "wip: refresh: ") {
-		t.Errorf("refresh stderr = %q, want prefix %q", r.stderr, "wip: refresh: ")
+	if !strings.HasPrefix(r.stderr, "wip: plumbing refresh: ") {
+		t.Errorf("refresh stderr = %q, want prefix %q", r.stderr, "wip: plumbing refresh: ")
 	}
 
-	wantRefusal(t, "refresh --json", runIn(t, wtDir, dbEnv, "refresh", "--json"),
+	wantRefusal(t, "refresh --json", runIn(t, wtDir, dbEnv, "plumbing", "refresh", "--json"),
 		"refusal.unknown-worktree", `worktree "widget-feature"`, `clone "widget"`)
 
 	wantRefusal(t, "next --json", runIn(t, wtDir, dbEnv, "next", "--json"),
@@ -85,7 +85,7 @@ func TestUnknownWorktree_LinkedWorktreeOfKnownCloneRefusesByName(t *testing.T) {
 		t.Errorf("init stdout = %q, want it to contain %q", initResult.stdout, "widget-feature")
 	}
 
-	refreshAfterInit := runIn(t, wtDir, dbEnv, "refresh")
+	refreshAfterInit := runIn(t, wtDir, dbEnv, "plumbing", "refresh")
 	if refreshAfterInit.exitCode != 0 {
 		t.Fatalf("refresh (after init) exit code = %d, want 0; stderr=%q", refreshAfterInit.exitCode, refreshAfterInit.stderr)
 	}
@@ -98,7 +98,7 @@ func TestUnknownWorktree_LinkedWorktreeOfKnownCloneRefusesByName(t *testing.T) {
 		t.Fatalf("next (after init) exit code = %d, want 0; stderr=%q", nextAfterInit.exitCode, nextAfterInit.stderr)
 	}
 
-	mainRefresh := runIn(t, dir, dbEnv, "refresh")
+	mainRefresh := runIn(t, dir, dbEnv, "plumbing", "refresh")
 	if mainRefresh.exitCode != 0 {
 		t.Fatalf("refresh (main worktree) exit code = %d, want 0; stderr=%q", mainRefresh.exitCode, mainRefresh.stderr)
 	}
@@ -108,13 +108,13 @@ func TestUnknownWorktree_NeverSeenRepoStillRefusesAsUnknownClone(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
 	dir := newGitRepo(t, "never-init")
 
-	wantRefusal(t, "refresh --json", runIn(t, dir, dbEnv, "refresh", "--json"),
+	wantRefusal(t, "refresh --json", runIn(t, dir, dbEnv, "plumbing", "refresh", "--json"),
 		"refusal.unknown-clone", "this clone is unknown to wip", "run `wip init` here first")
 
 	wantRefusal(t, "next --json", runIn(t, dir, dbEnv, "next", "--json"),
 		"refusal.unknown-clone", "this clone is unknown to wip")
 
-	r := runIn(t, dir, dbEnv, "refresh")
+	r := runIn(t, dir, dbEnv, "plumbing", "refresh")
 	if strings.Contains(r.stderr, "worktree") {
 		t.Errorf("refresh stderr = %q, want it to NOT contain %q", r.stderr, "worktree")
 	}

@@ -123,7 +123,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				if _, err := fmt.Fprintf(streams.Out, "this clone is unknown, but its remote matches known repo %s\n", report.OfferRepo.ID); err != nil {
 					return err
 				}
-				if _, err := fmt.Fprintln(streams.Out, "  relink: wip clone relink <clone-locator>   (this clone moved)"); err != nil {
+				if _, err := fmt.Fprintln(streams.Out, "  relink: wip plumbing clone relink <clone-locator>   (this clone moved)"); err != nil {
 					return err
 				}
 				if _, err := fmt.Fprintln(streams.Out, "  new clone: wip init                        (a separate clone of the same repo)"); err != nil {

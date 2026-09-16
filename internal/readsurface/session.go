@@ -1,6 +1,6 @@
 package readsurface
 
-// Step-05: `wip session` — a derived view over the event log covering a
+// Step-05: `wip plumbing session` — a derived view over the event log covering a
 // contiguous working period (MODEL §2.4), the temporal tense the founding
 // questions add: what was done recently. Never persisted, creates or closes
 // nothing, drives no behaviour, and gates nothing (D17): every call recomputes

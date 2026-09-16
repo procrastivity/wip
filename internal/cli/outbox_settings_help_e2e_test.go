@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-// `wip outbox canceled-label --help` and `wip outbox backlog-push --help` must
-// each state the setting's effect, so an agent can configure a tracker from
-// --help alone (tracker-config-discoverability step-03).
+// `wip plumbing outbox canceled-label --help` and `wip plumbing outbox
+// backlog-push --help` must each state the setting's effect, so an agent
+// can configure a tracker from --help alone
+// (tracker-config-discoverability step-03).
 func TestOutboxSettingsHelpStateEachEffect(t *testing.T) {
 	cases := []struct {
 		verb  string
@@ -21,14 +22,14 @@ func TestOutboxSettingsHelpStateEachEffect(t *testing.T) {
 		}},
 		{"backlog-push", []string{
 			"The default is manual, even when a tracker backend is configured.",
-			"auto: wip backlog add also delegates the entry in the same commit",
+			"auto: wip plumbing backlog add also delegates the entry in the same commit",
 			"auto with no tracker backend behaves as manual",
-			"wip outbox approve and wip outbox flush",
+			"wip plumbing outbox approve and wip plumbing outbox flush",
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.verb, func(t *testing.T) {
-			r := run(t, nil, "outbox", tc.verb, "--help")
+			r := run(t, nil, "plumbing", "outbox", tc.verb, "--help")
 			if r.exitCode != 0 {
 				t.Fatalf("help: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 			}

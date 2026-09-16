@@ -10,15 +10,15 @@ import (
 )
 
 // DefaultStaleBound is the staleness window past which an open dispatch is no
-// longer reused: a `wip refresh` that finds one this old supersedes it rather
+// longer reused: a `wip plumbing refresh` that finds one this old supersedes it rather
 // than treating it as still live (step-02/step-07, D59's resolved "closed"
-// call, path (b)), and `wip clean` reaps one this old as a crash orphan
+// call, path (b)), and `wip plumbing clean` reaps one this old as a crash orphan
 // (path (c)) rather than leaving it parked indefinitely. One value serves
-// both, and the blob-orphan reap in `wip clean` (D68) reuses it too — a
+// both, and the blob-orphan reap in `wip plumbing clean` (D68) reuses it too — a
 // single documented bound rather than three independent guesses.
 const DefaultStaleBound = 24 * time.Hour
 
-// OpenOrReuse implements step-02's dual-purpose `wip refresh`: mint a fresh
+// OpenOrReuse implements step-02's dual-purpose `wip plumbing refresh`: mint a fresh
 // dispatch when this worktree has none open, or when the one it has has gone
 // stale (supersede it first, D59 path (b)); otherwise reuse the open one
 // without minting a new id.
@@ -68,7 +68,7 @@ func openNewDispatch(ctx context.Context, s *store.Store, cur Current, actor sto
 	return s.Dispatch(ctx, dispatchID)
 }
 
-// CloseExplicit implements D59's path (a): the explicit `wip dispatch close`
+// CloseExplicit implements D59's path (a): the explicit `wip plumbing dispatch close`
 // verb, `reason = completed` — the agent-porcelain contract's last act
 // (agent-path).
 func CloseExplicit(ctx context.Context, s *store.Store, cur Current, actor store.Actor) (store.Dispatch, error) {
@@ -78,7 +78,7 @@ func CloseExplicit(ctx context.Context, s *store.Store, cur Current, actor store
 	}
 	if !found {
 		return store.Dispatch{}, wiperr.New("validation.no-open-dispatch",
-			"no open dispatch on this worktree; run `wip refresh` first")
+			"no open dispatch on this worktree; run `wip plumbing refresh` first")
 	}
 	if err := closeAndSweep(ctx, s, cur, actor, existing.ID, store.CloseCompleted); err != nil {
 		return store.Dispatch{}, err

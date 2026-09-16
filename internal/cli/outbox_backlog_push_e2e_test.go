@@ -12,30 +12,30 @@ import (
 func TestOutboxBacklogPushTextJSONWarningAndLazyConfig(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	initial := runIn(t, dir, dbEnv, "outbox", "backlog-push")
+	initial := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push")
 	if initial.exitCode != 0 || initial.stdout != "manual\n" || initial.stderr != "" {
 		t.Fatalf("initial backlog-push: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
 
-	initialJSON := runIn(t, dir, dbEnv, "outbox", "backlog-push", "--json")
+	initialJSON := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "--json")
 	if initialJSON.exitCode != 0 || mustJSON[struct {
 		BacklogPush string `json:"backlogPush"`
 	}](t, initialJSON.stdout).BacklogPush != "manual" {
 		t.Fatalf("initial backlog-push JSON: exit=%d stdout=%q stderr=%q", initialJSON.exitCode, initialJSON.stdout, initialJSON.stderr)
 	}
 
-	setAuto := runIn(t, dir, dbEnv, "outbox", "backlog-push", "auto")
+	setAuto := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "auto")
 	if setAuto.exitCode != 0 || setAuto.stdout != "auto\n" ||
 		!strings.Contains(setAuto.stderr, "tracker.backlog-push is auto but no tracker backend is configured") {
 		t.Fatalf("set auto: exit=%d stdout=%q stderr=%q", setAuto.exitCode, setAuto.stdout, setAuto.stderr)
 	}
 
-	readAuto := runIn(t, dir, dbEnv, "outbox", "backlog-push", "--json")
+	readAuto := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "--json")
 	if readAuto.exitCode != 0 || !strings.Contains(readAuto.stdout, `"backlogPush":"auto"`) || readAuto.stderr != "" {
 		t.Fatalf("read auto: exit=%d stdout=%q stderr=%q", readAuto.exitCode, readAuto.stdout, readAuto.stderr)
 	}
 
-	setAutoJSON := runIn(t, dir, dbEnv, "outbox", "backlog-push", "auto", "--json")
+	setAutoJSON := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "auto", "--json")
 	if setAutoJSON.exitCode != 0 || mustJSON[struct {
 		BacklogPush string `json:"backlogPush"`
 	}](t, setAutoJSON.stdout).BacklogPush != "auto" ||
@@ -43,12 +43,12 @@ func TestOutboxBacklogPushTextJSONWarningAndLazyConfig(t *testing.T) {
 		t.Fatalf("set auto JSON: exit=%d stdout=%q stderr=%q", setAutoJSON.exitCode, setAutoJSON.stdout, setAutoJSON.stderr)
 	}
 
-	setManual := runIn(t, dir, dbEnv, "outbox", "backlog-push", "manual")
+	setManual := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "manual")
 	if setManual.exitCode != 0 || setManual.stdout != "manual\n" || setManual.stderr != "" {
 		t.Fatalf("set manual: exit=%d stdout=%q stderr=%q", setManual.exitCode, setManual.stdout, setManual.stderr)
 	}
 
-	invalid := runIn(t, dir, dbEnv, "outbox", "backlog-push", "always")
+	invalid := runIn(t, dir, dbEnv, "plumbing", "outbox", "backlog-push", "always")
 	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, "expected manual or auto") {
 		t.Fatalf("invalid backlog-push: exit=%d stderr=%q", invalid.exitCode, invalid.stderr)
 	}

@@ -10,7 +10,7 @@ package writesurface
 // Documented gap (D58): the workplan also calls for Start to emit
 // `batch.joined` on a node's first start inside an open dispatch. Not
 // implemented here — there is no verb yet that opens a dispatch
-// (`render-scratch`'s `wip refresh`), and the `dispatches` table `schema`
+// (`render-scratch`'s `wip plumbing refresh`), and the `dispatches` table `schema`
 // shipped carries no `batch` column at all, so "the dispatch's batch" has no
 // answer to give. See docs/write-surface/decisions.md; `render-scratch` or
 // `orchestration`, whichever wires dispatch-opening first, is the Matter

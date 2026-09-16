@@ -67,7 +67,7 @@ func (p *pass) executeResume(ctx context.Context) (Outcome, error) {
 	}
 	if !found {
 		return p.out, wiperr.New("validation.no-open-dispatch",
-			"no open dispatch on this worktree for the Orchestrator to bind to; run `wip refresh` first")
+			"no open dispatch on this worktree for the Orchestrator to bind to; run `wip plumbing refresh` first")
 	}
 	p.orchestrator, err = p.spawnRole(ctx, p.driver, bracket.ID, store.RoleOrchestrator)
 	if err != nil {

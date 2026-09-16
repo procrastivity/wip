@@ -111,8 +111,8 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 	}))
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "linear"},
-		{"outbox", "target", linearCLITeam},
+		{"plumbing", "outbox", "backend", "linear"},
+		{"plumbing", "outbox", "target", linearCLITeam},
 	} {
 		if result := runWithProviders(t, providers, args...); result.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
@@ -121,17 +121,17 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 
 	added := mustJSON[struct {
 		ID string `json:"id"`
-	}](t, runWithProviders(t, providers, "backlog", "add", "--title", "Reconcile CLI create", "--provenance", "intake", "--json").stdout)
+	}](t, runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "Reconcile CLI create", "--provenance", "intake", "--json").stdout)
 	delegated := mustJSON[struct {
 		Outbox string `json:"outbox"`
-	}](t, runWithProviders(t, providers, "backlog", "delegate", added.ID, "--json").stdout)
+	}](t, runWithProviders(t, providers, "plumbing", "backlog", "delegate", added.ID, "--json").stdout)
 	if delegated.Outbox == "" {
 		t.Fatal("delegation returned no outbox identity")
 	}
-	if result := runWithProviders(t, providers, "outbox", "approve", delegated.Outbox); result.exitCode != 0 {
+	if result := runWithProviders(t, providers, "plumbing", "outbox", "approve", delegated.Outbox); result.exitCode != 0 {
 		t.Fatalf("approve: exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
 	}
-	flushed := mustJSON[tracker.Report](t, runWithProviders(t, providers, "outbox", "flush", "--json").stdout)
+	flushed := mustJSON[tracker.Report](t, runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(flushed.Entries) != 1 || flushed.Entries[0].ID != delegated.Outbox || flushed.Entries[0].State != "converged" {
 		t.Fatalf("flush report = %+v", flushed)
 	}
@@ -140,10 +140,10 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 	if !reflect.DeepEqual(operations, wantOperations) || lookups != 2 || mutations != 1 {
 		t.Fatalf("Linear calls = %v, lookups=%d mutations=%d", operations, lookups, mutations)
 	}
-	if result := runWithProviders(t, providers, "outbox", "backend"); result.exitCode != 0 || result.stdout != "linear\n" {
+	if result := runWithProviders(t, providers, "plumbing", "outbox", "backend"); result.exitCode != 0 || result.stdout != "linear\n" {
 		t.Fatalf("durable backend = exit %d, stdout %q, stderr %q", result.exitCode, result.stdout, result.stderr)
 	}
-	if result := runWithProviders(t, providers, "outbox", "target"); result.exitCode != 0 || result.stdout != linearCLITeam+"\n" {
+	if result := runWithProviders(t, providers, "plumbing", "outbox", "target"); result.exitCode != 0 || result.stdout != linearCLITeam+"\n" {
 		t.Fatalf("durable target = exit %d, stdout %q, stderr %q", result.exitCode, result.stdout, result.stderr)
 	}
 

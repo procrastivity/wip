@@ -10,11 +10,11 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
-// CleanResult reports what `wip clean` reaped (step-07/step-12).
+// CleanResult reports what `wip plumbing clean` reaped (step-07/step-12).
 type CleanResult struct {
 	// ReapedDispatches is every dispatch this call closed with reason
 	// `reaped` — a crash orphan: it was still open past staleBound with no
-	// subsequent `wip refresh` ever superseding it.
+	// subsequent `wip plumbing refresh` ever superseding it.
 	ReapedDispatches []string
 	// SweptDirectories is every `.wip/work/<dispatch-id>/` directory this
 	// call removed — including plain disk/store desync leftovers (a dispatch
@@ -25,11 +25,11 @@ type CleanResult struct {
 	ReapedBlobs []string
 }
 
-// Clean implements step-07's `wip clean`: it scans this worktree's own
+// Clean implements step-07's `wip plumbing clean`: it scans this worktree's own
 // `.wip/work/` for scratch directories whose dispatch is not open (a leftover
 // from a close whose sweep did not finish — pure disk/store desync, reaped
 // immediately, no new event) or is open but stale past staleBound (the crash
-// case PLAN 1.4 names: a process died before any subsequent `wip refresh`
+// case PLAN 1.4 names: a process died before any subsequent `wip plumbing refresh`
 // could supersede it) — closed here with reason `reaped` and swept. It also
 // reaps orphaned blobs (D68) past the same bound.
 func Clean(ctx context.Context, s *store.Store, cur Current, actor store.Actor, now time.Time, staleBound time.Duration) (CleanResult, error) {

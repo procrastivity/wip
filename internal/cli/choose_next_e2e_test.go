@@ -16,7 +16,7 @@ import (
 // `wip next` reading as no-cursor afterward.
 func TestNext_Clear_HumanThenNoCursor(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Clear me", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Clear me", "--json").stdout)
 
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set: exit=%d stderr=%q", r.exitCode, r.stderr)
@@ -44,7 +44,7 @@ func TestNext_Clear_HumanThenNoCursor(t *testing.T) {
 // success with an empty (omitted) previous.
 func TestNext_ClearJSON_CarriesPreviousThenNoOps(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Clear me", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Clear me", "--json").stdout)
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -96,14 +96,14 @@ func TestNext_SetAndClearTogether_Refuses(t *testing.T) {
 // below) that both `--set` and `--clear` are offered as the way out.
 func TestNext_ChooseNextJSON_SealedTarget(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Sealed target", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Sealed target", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -140,18 +140,18 @@ func TestNext_ChooseNextJSON_SealedTarget(t *testing.T) {
 // prints the successor line and carries `cursorEnded` in JSON mode.
 func TestFinish_PrintsSuccessorHandoffAndJSONCarriesCursorEnded(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Successor hand-off", "--json").stdout)
-	step1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", "First", "--json").stdout)
-	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", "Second", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Successor hand-off", "--json").stdout)
+	step1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "First", "--json").stdout)
+	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "Second", "--json").stdout)
 
-	if r := runIn(t, dir, dbEnv, "start", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
 		t.Fatalf("start step-01 (cascades the matter): exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set step-01: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	human := runIn(t, dir, dbEnv, "finish", m.Locator+"/"+step1.Locator)
+	human := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator+"/"+step1.Locator)
 	if human.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", human.exitCode, human.stderr)
 	}
@@ -164,16 +164,16 @@ func TestFinish_PrintsSuccessorHandoffAndJSONCarriesCursorEnded(t *testing.T) {
 
 	// A second Matter for the JSON assertion — step1 above is already Done
 	// and cannot be finished twice.
-	m2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Successor hand-off (JSON)", "--json").stdout)
-	step2a := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m2.Locator, "--title", "First", "--json").stdout)
-	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m2.Locator, "--title", "Second", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m2.Locator+"/"+step2a.Locator); r.exitCode != 0 {
+	m2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Successor hand-off (JSON)", "--json").stdout)
+	step2a := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m2.Locator, "--title", "First", "--json").stdout)
+	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m2.Locator, "--title", "Second", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m2.Locator+"/"+step2a.Locator); r.exitCode != 0 {
 		t.Fatalf("start step-01 (m2): exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if r := runIn(t, dir, dbEnv, "next", "--set", m2.Locator+"/"+step2a.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set step-01 (m2): exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	j := runIn(t, dir, dbEnv, "finish", m2.Locator+"/"+step2a.Locator, "--json")
+	j := runIn(t, dir, dbEnv, "plumbing", "finish", m2.Locator+"/"+step2a.Locator, "--json")
 	if j.exitCode != 0 {
 		t.Fatalf("finish --json: exit=%d stderr=%q", j.exitCode, j.stderr)
 	}
@@ -204,26 +204,26 @@ func TestFinish_PrintsSuccessorHandoffAndJSONCarriesCursorEnded(t *testing.T) {
 // own state fresh rather than comparing subjects.
 func TestGateClose_DescendantSealing_PrintsHandoff(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Descendant sealing", "--json").stdout)
-	step1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", "First", "--json").stdout)
-	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", "Second", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Descendant sealing", "--json").stdout)
+	step1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "First", "--json").stdout)
+	_ = mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "Second", "--json").stdout)
 
-	if r := runIn(t, dir, dbEnv, "start", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
 		t.Fatalf("start step-01: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set step-01: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator+"/"+step1.Locator); r.exitCode != 0 {
 		t.Fatalf("finish step-01: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
 	// step-01 is Done but not yet sealed — the Matter's own gate is still
 	// open — so this close is what actually ends the cursor's work.
-	closed := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.Locator)
+	closed := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", m.Locator)
 	if closed.exitCode != 0 {
 		t.Fatalf("gate close: exit=%d stderr=%q", closed.exitCode, closed.stderr)
 	}
@@ -237,15 +237,15 @@ func TestGateClose_DescendantSealing_PrintsHandoff(t *testing.T) {
 // situation the way sealed is here), so the generic line is what prints.
 func TestCancel_PrintsGenericHandoff(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Abandoned", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Abandoned", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	if r := runIn(t, dir, dbEnv, "next", "--set", m.Locator); r.exitCode != 0 {
 		t.Fatalf("next --set: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	cancel := runIn(t, dir, dbEnv, "cancel", m.Locator)
+	cancel := runIn(t, dir, dbEnv, "plumbing", "cancel", m.Locator)
 	if cancel.exitCode != 0 {
 		t.Fatalf("cancel: exit=%d stderr=%q", cancel.exitCode, cancel.stderr)
 	}

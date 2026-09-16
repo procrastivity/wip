@@ -1,4 +1,4 @@
-// Package refresh implements `wip refresh [locator]` — render-scratch's
+// Package refresh implements `wip plumbing refresh [locator]` — render-scratch's
 // dual-purpose dispatch-open/re-render verb (step-02). With no locator it
 // runs the eager path (step-05); with one, the on-demand path a sealed
 // Matter needs to render at all.
@@ -20,7 +20,7 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs `wip refresh [locator]`.
+// Command constructs `wip plumbing refresh [locator]`.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "refresh [locator]",

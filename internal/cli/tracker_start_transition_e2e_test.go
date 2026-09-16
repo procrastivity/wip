@@ -61,7 +61,7 @@ func mustRunStartTransition(t *testing.T, providers *tracker.Registry, args ...s
 
 func startTransitionOutbox(t *testing.T, providers *tracker.Registry) []outboxPayload {
 	t.Helper()
-	r := mustRunStartTransition(t, providers, "outbox", "list", "--json")
+	r := mustRunStartTransition(t, providers, "plumbing", "outbox", "list", "--json")
 	var payload struct {
 		Entries []outboxPayload `json:"entries"`
 	}
@@ -94,21 +94,21 @@ func TestMatterStartTransitionDeliversBehindTrackerEndToEnd(t *testing.T) {
 	seam := &startTransitionSeam{result: tracker.Result{Outcome: tracker.Delivered, Lease: "lease-after-start"}}
 	providers, dbPath := setupStartTransitionCLI(t, seam)
 
-	mustRunStartTransition(t, providers, "outbox", "backend", "guarded")
-	if r := mustRunStartTransition(t, providers, "outbox", "level"); r.stdout != "boundary\n" {
+	mustRunStartTransition(t, providers, "plumbing", "outbox", "backend", "guarded")
+	if r := mustRunStartTransition(t, providers, "plumbing", "outbox", "level"); r.stdout != "boundary\n" {
 		t.Fatalf("configured backend level = %q, want boundary", r.stdout)
 	}
 	matter := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-		"matter", "create", "--title", "Deliver start", "--locator", "deliver-start", "--json").stdout)
-	mustRunStartTransition(t, providers, "bind", matter.Locator, ref, "--json")
+		"plumbing", "matter", "create", "--title", "Deliver start", "--locator", "deliver-start", "--json").stdout)
+	mustRunStartTransition(t, providers, "plumbing", "bind", matter.Locator, ref, "--json")
 	if entries := startTransitionOutbox(t, providers); len(entries) != 0 {
 		t.Fatalf("Planned bind queued outbox entries: %+v", entries)
 	}
 
-	mustRunStartTransition(t, providers, "start", matter.Locator, "--json")
+	mustRunStartTransition(t, providers, "plumbing", "start", matter.Locator, "--json")
 	entry := wantActiveStartEntry(t, startTransitionOutbox(t, providers), matter.ID, ref)
-	mustRunStartTransition(t, providers, "outbox", "approve", entry.ID, "--json")
-	flush := mustJSON[tracker.Report](t, mustRunStartTransition(t, providers, "outbox", "flush", "--json").stdout)
+	mustRunStartTransition(t, providers, "plumbing", "outbox", "approve", entry.ID, "--json")
+	flush := mustJSON[tracker.Report](t, mustRunStartTransition(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(flush.Entries) != 1 || flush.Entries[0].ID != entry.ID || flush.Entries[0].State != "flushed" {
 		t.Fatalf("flush report = %+v, want one delivered entry", flush)
 	}
@@ -143,17 +143,17 @@ func TestMatterStartTransitionConvergesWhenForgeIsAhead(t *testing.T) {
 	seam := &startTransitionSeam{result: tracker.Result{Outcome: tracker.Converged, Lease: "lease-observed-ahead"}}
 	providers, dbPath := setupStartTransitionCLI(t, seam)
 
-	mustRunStartTransition(t, providers, "outbox", "backend", "guarded")
+	mustRunStartTransition(t, providers, "plumbing", "outbox", "backend", "guarded")
 	matter := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-		"matter", "create", "--title", "Forge ahead", "--locator", "forge-ahead", "--json").stdout)
-	mustRunStartTransition(t, providers, "bind", matter.Locator, ref, "--json")
+		"plumbing", "matter", "create", "--title", "Forge ahead", "--locator", "forge-ahead", "--json").stdout)
+	mustRunStartTransition(t, providers, "plumbing", "bind", matter.Locator, ref, "--json")
 	if entries := startTransitionOutbox(t, providers); len(entries) != 0 {
 		t.Fatalf("Planned bind queued outbox entries: %+v", entries)
 	}
-	mustRunStartTransition(t, providers, "start", matter.Locator, "--json")
+	mustRunStartTransition(t, providers, "plumbing", "start", matter.Locator, "--json")
 	entry := wantActiveStartEntry(t, startTransitionOutbox(t, providers), matter.ID, ref)
-	mustRunStartTransition(t, providers, "outbox", "approve", entry.ID, "--json")
-	flush := mustJSON[tracker.Report](t, mustRunStartTransition(t, providers, "outbox", "flush", "--json").stdout)
+	mustRunStartTransition(t, providers, "plumbing", "outbox", "approve", entry.ID, "--json")
+	flush := mustJSON[tracker.Report](t, mustRunStartTransition(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(flush.Entries) != 1 || flush.Entries[0].ID != entry.ID || flush.Entries[0].State != "converged" {
 		t.Fatalf("flush report = %+v, want one converged entry", flush)
 	}
@@ -186,13 +186,13 @@ func TestMatterStartTransitionRespectsInertPushLevels(t *testing.T) {
 	t.Run("no backend defaults off", func(t *testing.T) {
 		seam := &startTransitionSeam{}
 		providers, _ := setupStartTransitionCLI(t, seam)
-		if r := mustRunStartTransition(t, providers, "outbox", "level"); r.stdout != "off\n" {
+		if r := mustRunStartTransition(t, providers, "plumbing", "outbox", "level"); r.stdout != "off\n" {
 			t.Fatalf("unset backend level = %q, want off", r.stdout)
 		}
 		matter := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-			"matter", "create", "--title", "No backend", "--locator", "no-backend-start", "--json").stdout)
-		mustRunStartTransition(t, providers, "bind", matter.Locator, "T-no-backend", "--json")
-		mustRunStartTransition(t, providers, "start", matter.Locator, "--json")
+			"plumbing", "matter", "create", "--title", "No backend", "--locator", "no-backend-start", "--json").stdout)
+		mustRunStartTransition(t, providers, "plumbing", "bind", matter.Locator, "T-no-backend", "--json")
+		mustRunStartTransition(t, providers, "plumbing", "start", matter.Locator, "--json")
 		if entries := startTransitionOutbox(t, providers); len(entries) != 0 {
 			t.Fatalf("no-backend bind/start queued entries: %+v", entries)
 		}
@@ -204,12 +204,12 @@ func TestMatterStartTransitionRespectsInertPushLevels(t *testing.T) {
 	t.Run("explicit off overrides backend", func(t *testing.T) {
 		seam := &startTransitionSeam{}
 		providers, _ := setupStartTransitionCLI(t, seam)
-		mustRunStartTransition(t, providers, "outbox", "backend", "guarded")
-		mustRunStartTransition(t, providers, "outbox", "level", "off")
+		mustRunStartTransition(t, providers, "plumbing", "outbox", "backend", "guarded")
+		mustRunStartTransition(t, providers, "plumbing", "outbox", "level", "off")
 		matter := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-			"matter", "create", "--title", "Explicit off", "--locator", "explicit-off-start", "--json").stdout)
-		mustRunStartTransition(t, providers, "bind", matter.Locator, "T-explicit-off", "--json")
-		mustRunStartTransition(t, providers, "start", matter.Locator, "--json")
+			"plumbing", "matter", "create", "--title", "Explicit off", "--locator", "explicit-off-start", "--json").stdout)
+		mustRunStartTransition(t, providers, "plumbing", "bind", matter.Locator, "T-explicit-off", "--json")
+		mustRunStartTransition(t, providers, "plumbing", "start", matter.Locator, "--json")
 		if entries := startTransitionOutbox(t, providers); len(entries) != 0 {
 			t.Fatalf("explicit-off bind/start queued entries: %+v", entries)
 		}
@@ -222,13 +222,13 @@ func TestMatterStartTransitionRespectsInertPushLevels(t *testing.T) {
 func TestMatterStartTransitionQueuesOnDescendantCascade(t *testing.T) {
 	seam := &startTransitionSeam{}
 	providers, _ := setupStartTransitionCLI(t, seam)
-	mustRunStartTransition(t, providers, "outbox", "backend", "guarded")
+	mustRunStartTransition(t, providers, "plumbing", "outbox", "backend", "guarded")
 	matter := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-		"matter", "create", "--title", "Cascade start", "--locator", "cascade-start", "--json").stdout)
-	mustRunStartTransition(t, providers, "bind", matter.Locator, "T-cascade", "--json")
+		"plumbing", "matter", "create", "--title", "Cascade start", "--locator", "cascade-start", "--json").stdout)
+	mustRunStartTransition(t, providers, "plumbing", "bind", matter.Locator, "T-cascade", "--json")
 	step := mustJSON[nodePayload](t, mustRunStartTransition(t, providers,
-		"step", "create", matter.Locator, "--title", "Begin work", "--json").stdout)
+		"plumbing", "step", "create", matter.Locator, "--title", "Begin work", "--json").stdout)
 
-	mustRunStartTransition(t, providers, "start", step.ID, "--json")
+	mustRunStartTransition(t, providers, "plumbing", "start", step.ID, "--json")
 	wantActiveStartEntry(t, startTransitionOutbox(t, providers), matter.ID, "T-cascade")
 }

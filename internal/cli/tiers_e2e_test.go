@@ -174,7 +174,7 @@ func TestTiers_Label_RefusesULIDShapedLabel(t *testing.T) {
 		t.Fatalf("init exit code = %d; stderr=%q", r.exitCode, r.stderr)
 	}
 
-	r := runIn(t, dir, dbEnv, "label", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "label", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json")
 	if r.exitCode != 1 {
 		t.Fatalf("label exit code = %d, want 1 (validation failure); stderr=%q", r.exitCode, r.stderr)
 	}
@@ -199,7 +199,7 @@ func TestTiers_CloneList(t *testing.T) {
 		t.Fatalf("init exit code = %d; stderr=%q", r.exitCode, r.stderr)
 	}
 
-	r := runIn(t, dir, dbEnv, "clone", "list", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "clone", "list", "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("clone list exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
 	}

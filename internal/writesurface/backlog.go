@@ -1,9 +1,9 @@
 package writesurface
 
-// Stage birth-and-amendment, step-05: backlog intake. `wip backlog add`
-// emits `backlog.entered`; `wip backlog plan` emits `backlog.planned`; `wip
+// Stage birth-and-amendment, step-05: backlog intake. `wip plumbing backlog add`
+// emits `backlog.entered`; `wip plumbing backlog plan` emits `backlog.planned`; `wip
 // backlog decline` emits `backlog.declined` — the P1 decline exit, which
-// must stay distinguishable from not-yet-acted-upon (MODEL §4). `wip backlog
+// must stay distinguishable from not-yet-acted-upon (MODEL §4). `wip plumbing backlog
 // list` is read-only and emits no event; it is a straight store read and has
 // no business-logic function here.
 

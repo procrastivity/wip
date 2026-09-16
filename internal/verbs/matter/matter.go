@@ -1,4 +1,4 @@
-// Package matter implements `wip matter create` — write-surface's birth verb
+// Package matter implements `wip plumbing matter create` — write-surface's birth verb
 // for the addressable root (MODEL §1, D2).
 package matter
 
@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip matter` parent command and its `create` verb.
+// Command constructs the `wip plumbing matter` parent command and its `create` verb.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "matter",

@@ -23,7 +23,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command is the `wip run` verb group: list, show, stand-down.
+// Command is the `wip plumbing run` verb group: list, show, stand-down.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{Use: "run", Short: "inspect Runs and stand down an interrupted Run"}
 	cmd.AddCommand(listCommand(streams), showCommand(streams), standDownCommand(streams))

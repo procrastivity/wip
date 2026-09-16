@@ -69,7 +69,7 @@ func startRunDirect(t *testing.T, s *store.Store, env store.Env, batch, locator 
 
 func createMatter(t *testing.T, dir string, env []string, title string) nodePayload {
 	t.Helper()
-	r := runIn(t, dir, env, "matter", "create", "--title", title, "--json")
+	r := runIn(t, dir, env, "plumbing", "matter", "create", "--title", title, "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("matter create %q: exit=%d stderr=%q", title, r.exitCode, r.stderr)
 	}
@@ -78,14 +78,14 @@ func createMatter(t *testing.T, dir string, env []string, title string) nodePayl
 
 func joinBatch(t *testing.T, dir string, env []string, batchName, matterLocator string) {
 	t.Helper()
-	if r := runIn(t, dir, env, "batch", "join", batchName, matterLocator); r.exitCode != 0 {
+	if r := runIn(t, dir, env, "plumbing", "batch", "join", batchName, matterLocator); r.exitCode != 0 {
 		t.Fatalf("batch join %s: exit=%d stderr=%q", matterLocator, r.exitCode, r.stderr)
 	}
 }
 
 func addDependency(t *testing.T, dir string, env []string, blocked, blocker string) {
 	t.Helper()
-	if r := runIn(t, dir, env, "depend", "add", blocked, "--blocked-by", blocker); r.exitCode != 0 {
+	if r := runIn(t, dir, env, "plumbing", "depend", "add", blocked, "--blocked-by", blocker); r.exitCode != 0 {
 		t.Fatalf("depend add %s <- %s: exit=%d stderr=%q", blocked, blocker, r.exitCode, r.stderr)
 	}
 }
@@ -114,7 +114,7 @@ func (w *noopHooks) work(_ context.Context, n store.Node) error {
 // with C and D's work only ever starting after A is Done (D24, D63, D64).
 func TestOrchestrator_MultiMemberBatch_OrderDerivesFromEdgesAlone(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -125,7 +125,7 @@ func TestOrchestrator_MultiMemberBatch_OrderDerivesFromEdgesAlone(t *testing.T) 
 	addDependency(t, dir, dbEnv, c.Locator, a.Locator)
 	addDependency(t, dir, dbEnv, d.Locator, a.Locator)
 
-	if r := runIn(t, dir, dbEnv, "batch", "create", "case-d", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "case-d", "--json"); r.exitCode != 0 {
 		t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	for _, m := range []nodePayload{a, b, c, d} {
@@ -185,7 +185,7 @@ func TestOrchestrator_MultiMemberBatch_OrderDerivesFromEdgesAlone(t *testing.T) 
 	}
 
 	// The result reads back through the real CLI surface too.
-	show := runIn(t, dir, dbEnv, "run", "show", run.ID, "--json")
+	show := runIn(t, dir, dbEnv, "plumbing", "run", "show", run.ID, "--json")
 	if show.exitCode != 0 {
 		t.Fatalf("run show: exit=%d stderr=%q", show.exitCode, show.stderr)
 	}
@@ -230,14 +230,14 @@ func TestOrchestrator_CapRespected_IncludingCapOne(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, dbEnv := setupRepo(t)
-			if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+			if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 				t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 			}
 			var members []nodePayload
 			for _, title := range []string{"one", "two", "three"} {
 				members = append(members, createMatter(t, dir, dbEnv, title))
 			}
-			if r := runIn(t, dir, dbEnv, "batch", "create", "cap-batch", "--json"); r.exitCode != 0 {
+			if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "cap-batch", "--json"); r.exitCode != 0 {
 				t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 			}
 			var ids []string
@@ -302,7 +302,7 @@ func TestOrchestrator_CapRespected_IncludingCapOne(t *testing.T) {
 func TestOrchestrator_SkipReachableAndEvented(t *testing.T) {
 	t.Run("blocked", func(t *testing.T) {
 		dir, dbEnv := setupRepo(t)
-		if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 			t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
 		outside := createMatter(t, dir, dbEnv, "Outside the batch")
@@ -310,7 +310,7 @@ func TestOrchestrator_SkipReachableAndEvented(t *testing.T) {
 		free := createMatter(t, dir, dbEnv, "Free")
 		addDependency(t, dir, dbEnv, waiting.Locator, outside.Locator)
 
-		if r := runIn(t, dir, dbEnv, "batch", "create", "blocked-batch", "--json"); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "blocked-batch", "--json"); r.exitCode != 0 {
 			t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
 		joinBatch(t, dir, dbEnv, "blocked-batch", waiting.Locator)
@@ -347,12 +347,12 @@ func TestOrchestrator_SkipReachableAndEvented(t *testing.T) {
 
 	t.Run("failed", func(t *testing.T) {
 		dir, dbEnv := setupRepo(t)
-		if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 			t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
 		fragile := createMatter(t, dir, dbEnv, "Fragile")
 		solid := createMatter(t, dir, dbEnv, "Solid")
-		if r := runIn(t, dir, dbEnv, "batch", "create", "fail-batch", "--json"); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "fail-batch", "--json"); r.exitCode != 0 {
 			t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
 		joinBatch(t, dir, dbEnv, "fail-batch", fragile.Locator)
@@ -401,12 +401,12 @@ var errWorkBroke = errors.New("the build broke")
 // (never run.finished — a halted pass decides nothing about the Batch).
 func TestOrchestrator_HaltReachableAndEvented(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	first := createMatter(t, dir, dbEnv, "First")
 	second := createMatter(t, dir, dbEnv, "Second")
-	if r := runIn(t, dir, dbEnv, "batch", "create", "halt-batch", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "halt-batch", "--json"); r.exitCode != 0 {
 		t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	joinBatch(t, dir, dbEnv, "halt-batch", first.Locator)
@@ -444,7 +444,7 @@ func TestOrchestrator_HaltReachableAndEvented(t *testing.T) {
 		t.Fatalf("run closed %s, want open — a halted pass finishes nothing", openRun.CloseReason)
 	}
 
-	show := runIn(t, dir, dbEnv, "run", "show", run.ID, "--json")
+	show := runIn(t, dir, dbEnv, "plumbing", "run", "show", run.ID, "--json")
 	if show.exitCode != 0 {
 		t.Fatalf("run show: exit=%d stderr=%q", show.exitCode, show.stderr)
 	}
@@ -462,17 +462,17 @@ func TestOrchestrator_HaltReachableAndEvented(t *testing.T) {
 // rather than finishing, with no run.skipped for the parked member.
 func TestOrchestrator_ParkReachableAndEvented(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	gated := createMatter(t, dir, dbEnv, "Gated")
-	if r := runIn(t, dir, dbEnv, "step", "create", gated.Locator, "--title", "the work", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "step", "create", gated.Locator, "--title", "the work", "--json"); r.exitCode != 0 {
 		t.Fatalf("step create: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "batch", "create", "gated-batch", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "batch", "create", "gated-batch", "--json"); r.exitCode != 0 {
 		t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	joinBatch(t, dir, dbEnv, "gated-batch", gated.Locator)
@@ -516,7 +516,7 @@ func TestOrchestrator_ParkReachableAndEvented(t *testing.T) {
 		t.Fatalf("run closed %s, want open and standing by", openRun.CloseReason)
 	}
 
-	show := runIn(t, dir, dbEnv, "run", "show", run.ID, "--json")
+	show := runIn(t, dir, dbEnv, "plumbing", "run", "show", run.ID, "--json")
 	if show.exitCode != 0 {
 		t.Fatalf("run show: exit=%d stderr=%q", show.exitCode, show.stderr)
 	}
@@ -561,7 +561,7 @@ func mustHaveRunSkipped(t *testing.T, s *store.Store, run, matter string, reason
 // with no branch in the engine for "anonymous" versus "named."
 func TestOrchestrator_AnonymousBatchWrapsBareMatter(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	solo := createMatter(t, dir, dbEnv, "Solo")
@@ -631,8 +631,8 @@ func TestOrchestrator_BatchDeclaredSequenceIsImpossibleByConstruction(t *testing
 
 	dir, dbEnv := setupRepo(t)
 	for _, args := range [][]string{
-		{"batch", "create", "--help"},
-		{"batch", "join", "--help"},
+		{"plumbing", "batch", "create", "--help"},
+		{"plumbing", "batch", "join", "--help"},
 	} {
 		r := runIn(t, dir, dbEnv, args...)
 		if r.exitCode != 0 {
@@ -657,7 +657,7 @@ func TestOrchestrator_BatchDeclaredSequenceIsImpossibleByConstruction(t *testing
 func TestOrchestrator_NoCLIResumePath(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	help := runIn(t, dir, dbEnv, "run", "--help")
+	help := runIn(t, dir, dbEnv, "plumbing", "run", "--help")
 	if help.exitCode != 0 {
 		t.Fatalf("run --help: exit=%d stderr=%q", help.exitCode, help.stderr)
 	}
@@ -673,7 +673,7 @@ func TestOrchestrator_NoCLIResumePath(t *testing.T) {
 	// "resume" matches none of run's subcommands, so cobra falls back to the
 	// group's own usage rather than resuming anything — no Run identity was
 	// even parsed, let alone acted on.
-	unknown := runIn(t, dir, dbEnv, "run", "resume", "01KZ842G5HB589KF5P525DQYA2")
+	unknown := runIn(t, dir, dbEnv, "plumbing", "run", "resume", "01KZ842G5HB589KF5P525DQYA2")
 	if unknown.exitCode != 0 || !strings.Contains(unknown.stdout, "Usage:") || strings.Contains(unknown.stdout, "resume") {
 		t.Fatalf("run resume = %+v, want the run group's own usage with no mention of resume", unknown)
 	}

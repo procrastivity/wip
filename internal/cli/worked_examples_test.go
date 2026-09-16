@@ -69,7 +69,7 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 	if doctorReport.exitCode != 0 {
 		t.Fatalf("doctor at moved widget-b: exit=%d stderr=%q", doctorReport.exitCode, doctorReport.stderr)
 	}
-	relinkResult := runIn(t, bMoved, dbEnv, "clone", "relink", "widget-b")
+	relinkResult := runIn(t, bMoved, dbEnv, "plumbing", "clone", "relink", "widget-b")
 	if relinkResult.exitCode != 0 {
 		t.Fatalf("clone relink: exit=%d stderr=%q", relinkResult.exitCode, relinkResult.stderr)
 	}
@@ -84,7 +84,7 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 	}
 
 	// Recovery left exactly one clone row for widget-b, not a duplicate.
-	list := runIn(t, a, dbEnv, "clone", "list", "--json")
+	list := runIn(t, a, dbEnv, "plumbing", "clone", "list", "--json")
 	var listPayload struct {
 		Clones []struct{ Label string } `json:"clones"`
 	}
@@ -571,7 +571,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	// its own Repo's clone; only the Run itself is dispatched cross-repo.
 	seed := func(dir, locator, title string) string {
 		t.Helper()
-		r := runIn(t, dir, dbEnv, "matter", "create", "--locator", locator, "--title", title, "--json")
+		r := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--locator", locator, "--title", title, "--json")
 		if r.exitCode != 0 {
 			t.Fatalf("matter create %s: exit=%d stderr=%q", locator, r.exitCode, r.stderr)
 		}
@@ -582,7 +582,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	b1 := seed(repoB, "matter-b1", "Repo B, Matter 1")
 	b2 := seed(repoB, "matter-b2", "Repo B, Matter 2")
 
-	if r := runIn(t, repoA, dbEnv, "batch", "create", "cross-repo-run"); r.exitCode != 0 {
+	if r := runIn(t, repoA, dbEnv, "plumbing", "batch", "create", "cross-repo-run"); r.exitCode != 0 {
 		t.Fatalf("batch create: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	for _, join := range []struct{ dir, locator string }{
@@ -591,13 +591,13 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 		{repoB, "matter-b1"},
 		{repoB, "matter-b2"},
 	} {
-		if r := runIn(t, join.dir, dbEnv, "batch", "join", "cross-repo-run", join.locator); r.exitCode != 0 {
+		if r := runIn(t, join.dir, dbEnv, "plumbing", "batch", "join", "cross-repo-run", join.locator); r.exitCode != 0 {
 			t.Fatalf("batch join %s: exit=%d stderr=%q", join.locator, r.exitCode, r.stderr)
 		}
 	}
 
 	// The plain bracket the Orchestrator binds to (D59).
-	if r := runIn(t, repoA, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, repoA, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 

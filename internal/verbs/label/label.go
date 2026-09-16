@@ -1,4 +1,4 @@
-// Package label implements the `wip label` verb: sets or renames the
+// Package label implements the `wip plumbing label` verb: sets or renames the
 // current clone's label, per the tiers Brief's "Labels and addressing"
 // section.
 package label
@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs the `wip label <new-label>` verb.
+// Command constructs the `wip plumbing label <new-label>` verb.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "label <new-label>",

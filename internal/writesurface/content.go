@@ -5,8 +5,8 @@ package writesurface
 // property, and `payload.kind` discrimination (CONTRACT §B) — it does not
 // decide argument shape (argument/stdin/scratch-file, D45), which the
 // `agent-path` workplan resolves: stdin (default) or `--file <path>` for
-// `wip brief`/`wip workplan`/`wip body`, and a positional argument (default)
-// plus stdin/`--file` for `wip finding add` (agent-path step-01). That shape
+// `wip plumbing brief`/`wip plumbing workplan`/`wip plumbing body`, and a positional argument (default)
+// plus stdin/`--file` for `wip plumbing finding add` (agent-path step-01). That shape
 // is implemented at the verb layer (internal/verbs/content); this file only
 // carries the store-facing half — create-once refusal and the accumulating
 // append — which is agnostic to how the bytes arrived.

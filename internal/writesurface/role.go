@@ -88,7 +88,7 @@ func SpawnRole(ctx context.Context, s *store.Store, actor store.Actor, env store
 	}
 	if !found {
 		return store.Role{}, wiperr.New("validation.no-open-dispatch",
-			"no open dispatch on this worktree; run `wip refresh` first")
+			"no open dispatch on this worktree; run `wip plumbing refresh` first")
 	}
 
 	req := store.Request{Actor: actor, Env: env}
@@ -128,7 +128,7 @@ func CloseRole(ctx context.Context, s *store.Store, env store.Env, name store.Ro
 	}
 	if !found {
 		return store.Role{}, wiperr.New("validation.no-open-dispatch",
-			"no open dispatch on this worktree; run `wip refresh` first")
+			"no open dispatch on this worktree; run `wip plumbing refresh` first")
 	}
 
 	// Asked before the commit as well as inside it: the commit speaks as the

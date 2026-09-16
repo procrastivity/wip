@@ -1,4 +1,4 @@
-// Package depend implements `wip depend add` and `wip depend remove` — the
+// Package depend implements `wip plumbing depend add` and `wip plumbing depend remove` — the
 // `blocked-by` edge verbs (MODEL §5, D28/D29).
 package depend
 
@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip depend` parent command and its two verbs.
+// Command constructs the `wip plumbing depend` parent command and its two verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "depend",

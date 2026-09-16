@@ -95,7 +95,7 @@ func setupRepo(t *testing.T) (dir string, dbEnv []string) {
 func TestBirth_MatterStageStep_OneEventEach(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := runIn(t, dir, dbEnv, "matter", "create", "--title", "Fix flaky detect", "--json")
+	m := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Fix flaky detect", "--json")
 	if m.exitCode != 0 {
 		t.Fatalf("matter create: exit=%d stderr=%q", m.exitCode, m.stderr)
 	}
@@ -104,13 +104,13 @@ func TestBirth_MatterStageStep_OneEventEach(t *testing.T) {
 		t.Errorf("matter locator = %q, want %q", matter.Locator, "fix-flaky-detect")
 	}
 
-	st := runIn(t, dir, dbEnv, "stage", "create", matter.Locator, "--title", "Investigate", "--json")
+	st := runIn(t, dir, dbEnv, "plumbing", "stage", "create", matter.Locator, "--title", "Investigate", "--json")
 	if st.exitCode != 0 {
 		t.Fatalf("stage create: exit=%d stderr=%q", st.exitCode, st.stderr)
 	}
 	stage := mustJSON[nodePayload](t, st.stdout)
 
-	sp := runIn(t, dir, dbEnv, "step", "create", stage.ID, "--title", "Reproduce", "--json")
+	sp := runIn(t, dir, dbEnv, "plumbing", "step", "create", stage.ID, "--title", "Reproduce", "--json")
 	if sp.exitCode != 0 {
 		t.Fatalf("step create: exit=%d stderr=%q", sp.exitCode, sp.stderr)
 	}
@@ -136,7 +136,7 @@ func TestBirth_MatterStageStep_OneEventEach(t *testing.T) {
 
 	// A second create with the same title collides on the derived locator
 	// rather than silently minting a duplicate.
-	dup := runIn(t, dir, dbEnv, "matter", "create", "--title", "Fix flaky detect", "--json")
+	dup := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Fix flaky detect", "--json")
 	if dup.exitCode != 1 {
 		t.Fatalf("duplicate matter create: exit=%d, want 1 (validation)", dup.exitCode)
 	}
@@ -148,7 +148,7 @@ func TestBirth_MatterStageStep_OneEventEach(t *testing.T) {
 func TestBirth_MatterLocatorOverride(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := runIn(t, dir, dbEnv, "matter", "create",
+	m := runIn(t, dir, dbEnv, "plumbing", "matter", "create",
 		"--title", "wip next: the no-cursor view must see in-progress work",
 		"--locator", "next-sees-in-progress", "--json")
 	if m.exitCode != 0 {
@@ -159,12 +159,12 @@ func TestBirth_MatterLocatorOverride(t *testing.T) {
 		t.Errorf("locator = %q, want the override", matter.Locator)
 	}
 
-	bad := runIn(t, dir, dbEnv, "matter", "create", "--title", "t", "--locator", "Not A Slug", "--json")
+	bad := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "t", "--locator", "Not A Slug", "--json")
 	if bad.exitCode != 1 {
 		t.Fatalf("non-slug locator: exit=%d, want 1 (validation)", bad.exitCode)
 	}
 
-	dup := runIn(t, dir, dbEnv, "matter", "create", "--title", "different title", "--locator", "next-sees-in-progress", "--json")
+	dup := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "different title", "--locator", "next-sees-in-progress", "--json")
 	if dup.exitCode != 1 {
 		t.Fatalf("colliding override: exit=%d, want 1 (validation)", dup.exitCode)
 	}
@@ -183,12 +183,12 @@ func dbEnvPath(dbEnv []string) string {
 func TestAmendment_InsertReorderReplaceRemove(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Amend me", "--json").stdout)
-	s1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "One", "--json").stdout)
-	s3 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "Three", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Amend me", "--json").stdout)
+	s1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "One", "--json").stdout)
+	s3 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "Three", "--json").stdout)
 
 	// Insert between the two existing siblings.
-	insR := runIn(t, dir, dbEnv, "step", "insert", m.ID, "--title", "Two", "--after", s1.ID, "--json")
+	insR := runIn(t, dir, dbEnv, "plumbing", "step", "insert", m.ID, "--title", "Two", "--after", s1.ID, "--json")
 	if insR.exitCode != 0 {
 		t.Fatalf("step insert: exit=%d stderr=%q", insR.exitCode, insR.stderr)
 	}
@@ -209,7 +209,7 @@ func TestAmendment_InsertReorderReplaceRemove(t *testing.T) {
 	}
 
 	// Reorder: swap two to three, three to two.
-	reoR := runIn(t, dir, dbEnv, "step", "reorder", m.ID, s3.ID, s2.ID, s1.ID)
+	reoR := runIn(t, dir, dbEnv, "plumbing", "step", "reorder", m.ID, s3.ID, s2.ID, s1.ID)
 	if reoR.exitCode != 0 {
 		t.Fatalf("step reorder: exit=%d stderr=%q", reoR.exitCode, reoR.stderr)
 	}
@@ -236,7 +236,7 @@ func TestAmendment_InsertReorderReplaceRemove(t *testing.T) {
 	}
 
 	// Replace step one.
-	repR := runIn(t, dir, dbEnv, "step", "replace", s1.ID, "--title", "Replacement", "--json")
+	repR := runIn(t, dir, dbEnv, "plumbing", "step", "replace", s1.ID, "--title", "Replacement", "--json")
 	if repR.exitCode != 0 {
 		t.Fatalf("step replace: exit=%d stderr=%q", repR.exitCode, repR.stderr)
 	}
@@ -255,7 +255,7 @@ func TestAmendment_InsertReorderReplaceRemove(t *testing.T) {
 	}
 
 	// Remove step three.
-	remR := runIn(t, dir, dbEnv, "step", "remove", s3.ID, "--reason", "no longer needed")
+	remR := runIn(t, dir, dbEnv, "plumbing", "step", "remove", s3.ID, "--reason", "no longer needed")
 	if remR.exitCode != 0 {
 		t.Fatalf("step remove: exit=%d stderr=%q", remR.exitCode, remR.stderr)
 	}
@@ -279,11 +279,11 @@ func TestAmendment_InsertReorderReplaceRemove(t *testing.T) {
 func TestLifecycle_ScaleCorrectTypesAndCascade(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Cascade me", "--json").stdout)
-	stg := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "stage", "create", m.ID, "--title", "Stage one", "--json").stdout)
-	stp := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", stg.ID, "--title", "Step one", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Cascade me", "--json").stdout)
+	stg := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "stage", "create", m.ID, "--title", "Stage one", "--json").stdout)
+	stp := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", stg.ID, "--title", "Step one", "--json").stdout)
 
-	r := runIn(t, dir, dbEnv, "start", stp.ID)
+	r := runIn(t, dir, dbEnv, "plumbing", "start", stp.ID)
 	if r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -336,8 +336,8 @@ func TestLifecycle_ScaleCorrectTypesAndCascade(t *testing.T) {
 
 	// finish requires in-progress; a finish on a still-planned sibling
 	// matter is refused at write time with no event appended.
-	other := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Untouched", "--json").stdout)
-	badFinish := runIn(t, dir, dbEnv, "finish", other.ID)
+	other := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Untouched", "--json").stdout)
+	badFinish := runIn(t, dir, dbEnv, "plumbing", "finish", other.ID)
 	if badFinish.exitCode == 0 {
 		t.Fatalf("finish on a Planned matter should be refused")
 	}
@@ -350,7 +350,7 @@ func TestLifecycle_ScaleCorrectTypesAndCascade(t *testing.T) {
 	}
 
 	// finish/cancel/pause/resume round trip on the step.
-	if r := runIn(t, dir, dbEnv, "finish", stp.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", stp.ID); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s = openTestStore(t, dbPath)
@@ -362,17 +362,17 @@ func TestLifecycle_ScaleCorrectTypesAndCascade(t *testing.T) {
 		t.Errorf("step lifecycle = %q, want done", n.Lifecycle)
 	}
 
-	stp2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", stg.ID, "--title", "Step two", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", stp2.ID); r.exitCode != 0 {
+	stp2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", stg.ID, "--title", "Step two", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", stp2.ID); r.exitCode != 0 {
 		t.Fatalf("start step two: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "pause", stp2.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "pause", stp2.ID); r.exitCode != 0 {
 		t.Fatalf("pause: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "resume", stp2.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "resume", stp2.ID); r.exitCode != 0 {
 		t.Fatalf("resume: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "cancel", stp2.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "cancel", stp2.ID); r.exitCode != 0 {
 		t.Fatalf("cancel: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s = openTestStore(t, dbPath)
@@ -389,22 +389,22 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 	dbPath := dbEnvPath(dbEnv)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Origin matter", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Origin matter", "--json").stdout)
 
-	intake := runIn(t, dir, dbEnv, "backlog", "add", "--title", "An arrival", "--provenance", "intake", "--json")
+	intake := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "An arrival", "--provenance", "intake", "--json")
 	if intake.exitCode != 0 {
 		t.Fatalf("backlog add (intake): exit=%d stderr=%q", intake.exitCode, intake.stderr)
 	}
-	found := runIn(t, dir, dbEnv, "backlog", "add", "--title", "Discovered mid-flight", "--provenance", "found", "--origin", m.ID, "--json")
+	found := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Discovered mid-flight", "--provenance", "found", "--origin", m.ID, "--json")
 	if found.exitCode != 0 {
 		t.Fatalf("backlog add (found): exit=%d stderr=%q", found.exitCode, found.stderr)
 	}
-	deferred := runIn(t, dir, dbEnv, "backlog", "add", "--title", "Pushed out", "--provenance", "deferred", "--origin", m.ID, "--detail", "descoped", "--json")
+	deferred := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Pushed out", "--provenance", "deferred", "--origin", m.ID, "--detail", "descoped", "--json")
 	if deferred.exitCode != 0 {
 		t.Fatalf("backlog add (deferred): exit=%d stderr=%q", deferred.exitCode, deferred.stderr)
 	}
 	// deferred without an origin is refused (MODEL §4: records origin + why).
-	badDeferred := runIn(t, dir, dbEnv, "backlog", "add", "--title", "No origin", "--provenance", "deferred", "--json")
+	badDeferred := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "No origin", "--provenance", "deferred", "--json")
 	if badDeferred.exitCode == 0 {
 		t.Fatalf("deferred with no --origin should be refused")
 	}
@@ -436,7 +436,7 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := runIn(t, dir, dbEnv, "backlog", "list"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "backlog", "list"); r.exitCode != 0 {
 		t.Fatalf("backlog list: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s = openTestStore(t, dbPath)
@@ -449,14 +449,14 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	}
 
 	// Plan promotes the intake entry into the matter; decline needs a reason.
-	plan := runIn(t, dir, dbEnv, "backlog", "plan", intakeEntry.ID, m.ID, "--json")
+	plan := runIn(t, dir, dbEnv, "plumbing", "backlog", "plan", intakeEntry.ID, m.ID, "--json")
 	if plan.exitCode != 0 {
 		t.Fatalf("backlog plan: exit=%d stderr=%q", plan.exitCode, plan.stderr)
 	}
 	s = openTestStore(t, dbPath)
 	wantAppendedEvent(t, s, intakeEntry.ID, 1, store.TypeBacklogPlanned) // already carried its own backlog.entered
 
-	decline := runIn(t, dir, dbEnv, "backlog", "decline", foundEntry.ID, "--reason", "not worth it", "--json")
+	decline := runIn(t, dir, dbEnv, "plumbing", "backlog", "decline", foundEntry.ID, "--reason", "not worth it", "--json")
 	if decline.exitCode != 0 {
 		t.Fatalf("backlog decline: exit=%d stderr=%q", decline.exitCode, decline.stderr)
 	}
@@ -470,7 +470,7 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 		t.Errorf("declined entry must carry a reason (distinguishable from not-yet-acted-upon, MODEL §4)")
 	}
 
-	delegate := runIn(t, dir, dbEnv, "backlog", "delegate", deferredEntry.ID, "--json")
+	delegate := runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", deferredEntry.ID, "--json")
 	if delegate.exitCode != 0 {
 		t.Fatalf("backlog delegate: exit=%d stderr=%q", delegate.exitCode, delegate.stderr)
 	}
@@ -487,7 +487,7 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	if delegatedPayload.Outbox != delegated.Outbox || delegatedPayload.IdempotencyKey != "backlog:"+deferredEntry.ID {
 		t.Fatalf("delegation payload = %+v", delegatedPayload)
 	}
-	duplicate := runIn(t, dir, dbEnv, "backlog", "delegate", deferredEntry.ID)
+	duplicate := runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", deferredEntry.ID)
 	if duplicate.exitCode == 0 {
 		t.Fatal("delegating one entry twice should be refused")
 	}

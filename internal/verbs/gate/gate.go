@@ -1,4 +1,4 @@
-// Package gate implements `wip gate declare`, `wip gate repair`, and `wip gate
+// Package gate implements `wip plumbing gate declare`, `wip plumbing gate repair`, and `wip plumbing gate
 // close`. Per
 // `vocabulary` step-02, there is no bespoke `review` verb — every gate
 // close, including a local review, goes through this command.
@@ -36,7 +36,7 @@ type cursorEndedJSON struct {
 	Suggested string `json:"suggested,omitempty"`
 }
 
-// Command constructs the `wip gate` parent command and its verbs.
+// Command constructs the `wip plumbing gate` parent command and its verbs.
 func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	coordinator := tracker.NewAlignmentCoordinator(providers)
 	cmd := &cobra.Command{

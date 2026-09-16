@@ -16,7 +16,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs `wip bind <matter> <ref>`.
+// Command constructs `wip plumbing bind <matter> <ref>`.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bind <locator> <ref>",
@@ -68,7 +68,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	return cmd
 }
 
-// UnbindCommand constructs `wip unbind <matter> <ref>`.
+// UnbindCommand constructs `wip plumbing unbind <matter> <ref>`.
 func UnbindCommand(streams *iostreams.Streams) *cobra.Command {
 	return membershipCommand(streams, "unbind <matter> <ref>", "remove a tracker reference from a Matter", 2,
 		func(ctx *cobra.Command, s *store.Store, actor store.Actor, repo string, args []string) (store.Node, error) {
@@ -76,7 +76,7 @@ func UnbindCommand(streams *iostreams.Streams) *cobra.Command {
 		}, func(args []string) string { return fmt.Sprintf("unbound %s from %s", args[1], args[0]) })
 }
 
-// RebindCommand constructs `wip rebind <matter> <old-ref> <new-ref>`.
+// RebindCommand constructs `wip plumbing rebind <matter> <old-ref> <new-ref>`.
 func RebindCommand(streams *iostreams.Streams) *cobra.Command {
 	return membershipCommand(streams, "rebind <matter> <old-ref> <new-ref>", "replace a Matter tracker reference atomically", 3,
 		func(ctx *cobra.Command, s *store.Store, actor store.Actor, repo string, args []string) (store.Node, error) {

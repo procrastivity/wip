@@ -48,8 +48,8 @@ func ResolveNode(ctx context.Context, v store.View, repo, locator string) (store
 	return n, nil
 }
 
-// ResolveMatter is ResolveNode narrowed to a Matter — the shape `wip gate
-// declare`, `wip backlog plan` and the bind verb's locator argument need.
+// ResolveMatter is ResolveNode narrowed to a Matter — the shape `wip plumbing gate
+// declare`, `wip plumbing backlog plan` and the bind verb's locator argument need.
 func ResolveMatter(ctx context.Context, v store.View, repo, locator string) (store.Node, error) {
 	n, err := ResolveNode(ctx, v, repo, locator)
 	if err != nil {

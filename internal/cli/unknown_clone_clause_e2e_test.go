@@ -43,7 +43,7 @@ func TestUnknownClone_RefusalNamesInitAsAWrite(t *testing.T) {
 	}
 
 	// The clone verb: its copy leads with --repo.
-	r = runIn(t, dir, dbEnv, "clone", "list")
+	r = runIn(t, dir, dbEnv, "plumbing", "clone", "list")
 	if r.exitCode != 3 {
 		t.Fatalf("clone list exit code = %d, want 3 (refusal); stderr=%q", r.exitCode, r.stderr)
 	}

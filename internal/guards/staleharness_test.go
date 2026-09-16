@@ -36,17 +36,23 @@ func isolateAllSkillsDirs(t *testing.T) {
 }
 
 // fakeRoot mirrors internal/manifest's own test fixture: a minimal root
-// carrying one plumbing verb, standing in for the real, fully-assembled
-// NewRootCommand tree HarnessTargets reads in production.
+// carrying one plumbing-namespaced verb, standing in for the real,
+// fully-assembled NewRootCommand tree HarnessTargets reads in production.
+// The synthetic verb lives under a "plumbing" group command, not directly
+// on root, because harness.Projectable (D112) keys on the "plumbing " name
+// prefix, not on kind alone — a verb registered straight on root would
+// never project into any harness, and this fixture would test nothing.
 func fakeRoot() *cobra.Command {
 	root := &cobra.Command{Use: "wip"}
-	plumbing := &cobra.Command{
+	plumbingGroup := &cobra.Command{Use: "plumbing", Short: "the deterministic substrate"}
+	widget := &cobra.Command{
 		Use:   "widget",
 		Short: "a synthetic plumbing verb",
 		RunE:  func(*cobra.Command, []string) error { return nil },
 	}
-	surface.Annotate(plumbing, surface.Plumbing)
-	root.AddCommand(plumbing)
+	surface.Annotate(widget, surface.Plumbing)
+	plumbingGroup.AddCommand(widget)
+	root.AddCommand(plumbingGroup)
 	return root
 }
 
@@ -135,7 +141,12 @@ func TestHarnessTargets_FlagsDriftThenClearsOnReinstall(t *testing.T) {
 		RunE:  func(*cobra.Command, []string) error { return nil },
 	}
 	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
+	for _, c := range root.Commands() {
+		if c.Name() == "plumbing" {
+			c.AddCommand(extra)
+			break
+		}
+	}
 
 	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {

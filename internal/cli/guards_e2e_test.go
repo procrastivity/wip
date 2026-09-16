@@ -61,8 +61,8 @@ func TestGuards_Doctor_CleanRepoExitsZeroWithEmptyFindings(t *testing.T) {
 func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Recorded work", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Recorded work", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
 		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -93,7 +93,7 @@ func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
 	if got := payload.Findings[0].Message; got != wantMessage {
 		t.Errorf("finding message = %q, want %q", got, wantMessage)
 	}
-	if r := runIn(t, dir, dbEnv, "unbind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "unbind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
 		t.Fatalf("unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	r = runIn(t, dir, dbEnv, "doctor", "--json")
@@ -104,11 +104,11 @@ func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
 	if len(payload.Findings) != 0 {
 		t.Errorf("findings after unbind = %+v, want none", payload.Findings)
 	}
-	if r := runIn(t, dir, dbEnv, "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "bind", matter.Locator, "BDS-132", "--json"); r.exitCode != 0 {
 		t.Fatalf("rebind after unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	if r := runIn(t, dir, dbEnv, "outbox", "level", "boundary"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "boundary"); r.exitCode != 0 {
 		t.Fatalf("outbox level boundary: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	r = runIn(t, dir, dbEnv, "doctor", "--json")
@@ -122,7 +122,7 @@ func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
 		}
 	}
 
-	if r := runIn(t, dir, dbEnv, "outbox", "level", "off"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "off"); r.exitCode != 0 {
 		t.Fatalf("outbox level off: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s := openTestStore(t, dbEnvPath(dbEnv))
@@ -157,11 +157,11 @@ func TestGuards_Doctor_InertTrackerBindingsAreAdvisory(t *testing.T) {
 func TestGuards_GateDeclare_RefusesGateOrderViolation(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("declaring reviewed-local: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	r := runIn(t, dir, dbEnv, "gate", "declare", "ci-green", "--scale", "step", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "ci-green", "--scale", "step", "--json")
 	if r.exitCode != 3 {
 		t.Fatalf("declaring ci-green at step scale: exit=%d, want 3 (refusal); stderr=%q", r.exitCode, r.stderr)
 	}
@@ -193,7 +193,7 @@ func TestGuards_GateDeclare_RefusesGateOrderViolation(t *testing.T) {
 func TestGuards_Doctor_FindsAGateOrderViolationLandedSomeOtherWay(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("declaring reviewed-local: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -225,8 +225,8 @@ func TestGuards_Doctor_FindsAGateOrderViolationLandedSomeOtherWay(t *testing.T) 
 func TestGuards_Doctor_FindsABlockedByCycleLandedSomeOtherWay(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	a := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Cycle A", "--json").stdout)
-	b := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Cycle B", "--json").stdout)
+	a := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Cycle A", "--json").stdout)
+	b := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Cycle B", "--json").stdout)
 
 	// A cycle can never be built through `wip depend add` alone (WouldCycle
 	// refuses the closing edge) — insert both edges directly, the same
@@ -253,7 +253,7 @@ func TestGuards_Doctor_FindsABlockedByCycleLandedSomeOtherWay(t *testing.T) {
 
 	// The add-time half of "two callers, one function" — refused directly
 	// through the CLI, exit 3, never landing a second cycle.
-	dep := runIn(t, dir, dbEnv, "depend", "add", a.Locator, "--blocked-by", b.Locator, "--json")
+	dep := runIn(t, dir, dbEnv, "plumbing", "depend", "add", a.Locator, "--blocked-by", b.Locator, "--json")
 	if dep.exitCode != 3 {
 		t.Fatalf("depend add closing an existing cycle: exit=%d, want 3; stderr=%q", dep.exitCode, dep.stderr)
 	}
@@ -262,7 +262,7 @@ func TestGuards_Doctor_FindsABlockedByCycleLandedSomeOtherWay(t *testing.T) {
 func TestGuards_TrackedWipDir_DoctorFindingAndRenderRefusal(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	if r := runIn(t, dir, dbEnv, "refresh"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh"); r.exitCode != 0 {
 		t.Fatalf("initial refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -297,7 +297,7 @@ func TestGuards_TrackedWipDir_DoctorFindingAndRenderRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rr := runIn(t, dir, dbEnv, "refresh", "--json")
+	rr := runIn(t, dir, dbEnv, "plumbing", "refresh", "--json")
 	if rr.exitCode != 3 {
 		t.Fatalf("refresh against a tracked .wip/: exit=%d, want 3 (refusal); stderr=%q", rr.exitCode, rr.stderr)
 	}

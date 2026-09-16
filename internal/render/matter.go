@@ -14,7 +14,7 @@ import (
 // files (matter.md, roadmap.md). Brief and Workplan files stay verbatim
 // store content — a banner there would be a silent rewrite of prose.
 func snapshotNotice(locator string) string {
-	return fmt.Sprintf("This file is a snapshot from the last `wip refresh`, not live state. If it disagrees with `wip status`, run `wip refresh %s` and re-read.\n", locator)
+	return fmt.Sprintf("This file is a snapshot from the last `wip plumbing refresh`, not live state. If it disagrees with `wip status`, run `wip plumbing refresh %s` and re-read.\n", locator)
 }
 
 // renderMatterTree implements step-03's rendered-depth policy: filenames and

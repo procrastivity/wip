@@ -3,7 +3,7 @@ package guards
 // step-02: the dependency-cycle check (D29). This does not reimplement
 // cycle detection — it is the second caller of `store.Cycles`, the whole-
 // store audit `schema` step-06 built and reserved for exactly this ("the two
-// callers, one function"; `write-surface`'s `wip depend add` precondition is
+// callers, one function"; `write-surface`'s `wip plumbing depend add` precondition is
 // the first). A cycle present in the store here is always one that arrived
 // some other way — an edge added before the check existed, a hand-edited
 // database — since the add-time precondition already refuses one going in.

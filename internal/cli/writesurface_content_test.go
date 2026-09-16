@@ -47,7 +47,7 @@ func TestContent_CreateOnceVerbs_OneEventEachKindDiscrimination(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Content matter", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Content matter", "--json").stdout)
 	dbPath := dbEnvPath(dbEnv)
 
 	cases := []struct {
@@ -59,7 +59,7 @@ func TestContent_CreateOnceVerbs_OneEventEachKindDiscrimination(t *testing.T) {
 		{"body", string(store.KindBody)},
 	}
 	for _, c := range cases {
-		r := runInStdin(t, dir, dbEnv, "hello "+c.verb, c.verb, m.ID, "--json")
+		r := runInStdin(t, dir, dbEnv, "hello "+c.verb, "plumbing", c.verb, m.ID, "--json")
 		if r.exitCode != 0 {
 			t.Fatalf("%s (stdin): exit=%d stderr=%q", c.verb, r.exitCode, r.stderr)
 		}
@@ -83,7 +83,7 @@ func TestContent_CreateOnceVerbs_OneEventEachKindDiscrimination(t *testing.T) {
 
 		// A second create-once call is refused, not a second event.
 		before := len(events)
-		refused := runInStdin(t, dir, dbEnv, "second "+c.verb, c.verb, m.ID)
+		refused := runInStdin(t, dir, dbEnv, "second "+c.verb, "plumbing", c.verb, m.ID)
 		if refused.exitCode == 0 {
 			t.Errorf("%s: a second create-once call should be refused", c.verb)
 		}
@@ -104,13 +104,13 @@ func TestContent_FileFlag_SameSinglewriterPath(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "File flag matter", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "File flag matter", "--json").stdout)
 
 	proseFile := filepath.Join(t.TempDir(), "brief.md")
 	if err := os.WriteFile(proseFile, []byte("brief via --file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := runIn(t, dir, dbEnv, "brief", m.ID, "--file", proseFile, "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "brief", m.ID, "--file", proseFile, "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("brief --file: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -148,11 +148,11 @@ func TestContent_FindingAdd_AccumulatesEachCallItsOwnEvent(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Findings matter", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Findings matter", "--json").stdout)
 	dbPathStr := dbEnvPath(dbEnv)
 
 	// Positional-argument shape (agent-path's default for finding add).
-	r1 := runIn(t, dir, dbEnv, "finding", "add", m.ID, "first finding", "--json")
+	r1 := runIn(t, dir, dbEnv, "plumbing", "finding", "add", m.ID, "first finding", "--json")
 	if r1.exitCode != 0 {
 		t.Fatalf("finding add (positional): exit=%d stderr=%q", r1.exitCode, r1.stderr)
 	}
@@ -167,7 +167,7 @@ func TestContent_FindingAdd_AccumulatesEachCallItsOwnEvent(t *testing.T) {
 	}
 
 	// stdin shape, second call: accumulates, does not replace.
-	r2 := runInStdin(t, dir, dbEnv, "second finding via stdin", "finding", "add", m.ID, "--json")
+	r2 := runInStdin(t, dir, dbEnv, "second finding via stdin", "plumbing", "finding", "add", m.ID, "--json")
 	if r2.exitCode != 0 {
 		t.Fatalf("finding add (stdin): exit=%d stderr=%q", r2.exitCode, r2.stderr)
 	}
@@ -179,7 +179,7 @@ func TestContent_FindingAdd_AccumulatesEachCallItsOwnEvent(t *testing.T) {
 	if err := os.WriteFile(findingFile, []byte("third finding via file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r3 := runIn(t, dir, dbEnv, "finding", "add", m.ID, "--file", findingFile, "--json")
+	r3 := runIn(t, dir, dbEnv, "plumbing", "finding", "add", m.ID, "--file", findingFile, "--json")
 	if r3.exitCode != 0 {
 		t.Fatalf("finding add (--file): exit=%d stderr=%q", r3.exitCode, r3.stderr)
 	}

@@ -84,9 +84,9 @@ func collect(root, cmd *cobra.Command, out *[]Verb) error {
 }
 
 // verbPath names a command by its full subcommand path, minus the root
-// command's own name — "step create", not "wip step create" — mirroring
-// internal/cli.Execute's own verbPath helper (chassis's error-message
-// rendering uses the same shape for a different purpose).
+// command's own name — "plumbing step create", not "wip plumbing step
+// create" — mirroring internal/cli.Execute's own verbPath helper (chassis's
+// error-message rendering uses the same shape for a different purpose).
 func verbPath(root, cmd *cobra.Command) string {
 	path := strings.TrimPrefix(cmd.CommandPath(), root.Name())
 	return strings.TrimSpace(path)

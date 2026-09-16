@@ -1,4 +1,4 @@
-// Package clone implements the `wip clone` verb family: `list` (the
+// Package clone implements the `wip plumbing clone` verb family: `list` (the
 // read-only companion `relink`/`label` act on) and `relink` (the accepted
 // half of doctor's move-detection offer).
 package clone
@@ -19,7 +19,7 @@ import (
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
-// Command constructs the `wip clone` parent command and its subcommands.
+// Command constructs the `wip plumbing clone` parent command and its subcommands.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clone",

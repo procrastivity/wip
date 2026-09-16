@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// `wip outbox target --help` must say, per backend, whether the target is
-// read and where the token comes from, so an agent can configure a tracker
-// from --help alone (tracker-config-discoverability step-02, D2).
+// `wip plumbing outbox target --help` must say, per backend, whether the
+// target is read and where the token comes from, so an agent can configure
+// a tracker from --help alone (tracker-config-discoverability step-02, D2).
 func TestOutboxTargetHelpDescribesEachBackend(t *testing.T) {
-	r := run(t, nil, "outbox", "target", "--help")
+	r := run(t, nil, "plumbing", "outbox", "target", "--help")
 	if r.exitCode != 0 {
 		t.Fatalf("help: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}

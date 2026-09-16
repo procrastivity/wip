@@ -6,7 +6,7 @@ package guards
 // order monotonicity (D12) is a `doctor` check owned by `guards`, called at
 // declare time." Two callers, one function here (Violations), mirroring
 // `schema`'s cycle-check pattern with ownership reversed: `write-surface`'s
-// `wip gate declare` calls WouldViolate (itself built on Violations) as an
+// `wip plumbing gate declare` calls WouldViolate (itself built on Violations) as an
 // add-time precondition; `doctor`'s audit calls Violations directly over
 // every declared binding.
 
@@ -79,7 +79,7 @@ func Violations(declared []store.GateDeclaration) []Violation {
 
 // WouldViolate reports whether declaring gate at scale, given the Repo's
 // already-declared bindings, would introduce a gate-order violation — the
-// add-time precondition `wip gate declare` calls (mirrors WouldCycle:
+// add-time precondition `wip plumbing gate declare` calls (mirrors WouldCycle:
 // answer before anything is written). A redeclare of gate itself updates its
 // binding in place (D4) rather than duplicating it in the check. On a
 // violation, it returns the one already-declared binding gate conflicts

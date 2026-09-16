@@ -1,9 +1,9 @@
 // Package content implements write-surface's four content verbs: `wip
-// brief`, `wip workplan`, `wip body` (create-once) and `wip finding add`
+// brief`, `wip plumbing workplan`, `wip plumbing body` (create-once) and `wip plumbing finding add`
 // (append). Argument shape is not this Stage's call — it is the `agent-path`
 // workplan's resolved decision, reused verbatim here: stdin (default) or
 // `--file <path>` for the three create-once verbs, and a positional argument
-// (default) plus stdin/`--file` for `wip finding add`.
+// (default) plus stdin/`--file` for `wip plumbing finding add`.
 package content
 
 import (
@@ -99,22 +99,22 @@ func writeOnceCommand(use, short string, kind store.ContentKind) func(*iostreams
 	}
 }
 
-// BriefCommand constructs `wip brief <locator>`.
+// BriefCommand constructs `wip plumbing brief <locator>`.
 func BriefCommand(streams *iostreams.Streams) *cobra.Command {
 	return writeOnceCommand("brief <locator>", "write a node's Brief (create-once)", store.KindBrief)(streams)
 }
 
-// WorkplanCommand constructs `wip workplan <locator>`.
+// WorkplanCommand constructs `wip plumbing workplan <locator>`.
 func WorkplanCommand(streams *iostreams.Streams) *cobra.Command {
 	return writeOnceCommand("workplan <locator>", "write a node's Workplan (create-once)", store.KindWorkplan)(streams)
 }
 
-// BodyCommand constructs `wip body <locator>`.
+// BodyCommand constructs `wip plumbing body <locator>`.
 func BodyCommand(streams *iostreams.Streams) *cobra.Command {
 	return writeOnceCommand("body <locator>", "write a node's own prose body (create-once)", store.KindBody)(streams)
 }
 
-// FindingCommand constructs the `wip finding` parent command and its `add`
+// FindingCommand constructs the `wip plumbing finding` parent command and its `add`
 // verb.
 func FindingCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{

@@ -27,7 +27,7 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter", "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -48,7 +48,7 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	// fact that they can never close without their owning role (MODEL
 	// §2.3) — not a hardcoded refusal here. Declaring one is technically
 	// legal and still emits no event.
-	forge := runIn(t, dir, dbEnv, "gate", "declare", "verified", "--scale", "step", "--json")
+	forge := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "verified", "--scale", "step", "--json")
 	if forge.exitCode != 0 {
 		t.Fatalf("declaring a forge gate should be technically legal (the verb is general): exit=%d stderr=%q", forge.exitCode, forge.stderr)
 	}
@@ -68,15 +68,15 @@ func TestGateDeclare_IsProspectiveAndRefusesScaleChanges(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Already sealed", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Already sealed", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "verified", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "verified", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("declare prospective gate: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s := openTestStore(t, dbEnvPath(dbEnv))
@@ -92,7 +92,7 @@ func TestGateDeclare_IsProspectiveAndRefusesScaleChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	closeResult := runIn(t, dir, dbEnv, "gate", "close", "verified", m.Locator, "--json")
+	closeResult := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "verified", m.Locator, "--json")
 	if closeResult.exitCode != 3 {
 		t.Fatalf("close exempt gate: exit=%d, want 3; stderr=%q", closeResult.exitCode, closeResult.stderr)
 	}
@@ -108,7 +108,7 @@ func TestGateDeclare_IsProspectiveAndRefusesScaleChanges(t *testing.T) {
 		t.Errorf("close refusal code = %q, want refusal.gate-already-satisfied", closeEnvelope.Error.Code)
 	}
 
-	change := runIn(t, dir, dbEnv, "gate", "declare", "verified", "--scale", "step", "--json")
+	change := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "verified", "--scale", "step", "--json")
 	if change.exitCode != 3 {
 		t.Fatalf("change gate scale: exit=%d, want 3; stderr=%q", change.exitCode, change.stderr)
 	}
@@ -132,18 +132,18 @@ func TestGateRepair_AddsLegacyExemptionWithoutAnEvent(t *testing.T) {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	for _, gate := range []string{"reviewed-local", "verified"} {
-		if r := runIn(t, dir, dbEnv, "gate", "declare", gate, "--scale", "matter"); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", gate, "--scale", "matter"); r.exitCode != 0 {
 			t.Fatalf("declare %s: exit=%d stderr=%q", gate, r.exitCode, r.stderr)
 		}
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Legacy sealed", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Legacy sealed", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", m.Locator); r.exitCode != 0 {
 		t.Fatalf("close reviewed-local: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -156,7 +156,7 @@ func TestGateRepair_AddsLegacyExemptionWithoutAnEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := runIn(t, dir, dbEnv, "gate", "repair", "verified", m.Locator, "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "gate", "repair", "verified", m.Locator, "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("repair verified: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -193,14 +193,14 @@ func TestGateClose_OneEventRightSubjectAndScale(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Gate me", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Gate me", "--json").stdout)
 	dbPathStr := dbEnvPath(dbEnv)
 
 	// Closing an undeclared gate is refused, no event appended.
-	badClose := runIn(t, dir, dbEnv, "gate", "close", "no-such-gate", m.ID)
+	badClose := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "no-such-gate", m.ID)
 	if badClose.exitCode == 0 {
 		t.Fatalf("closing an undeclared gate should be refused")
 	}
@@ -213,7 +213,7 @@ func TestGateClose_OneEventRightSubjectAndScale(t *testing.T) {
 		t.Errorf("a refused gate close appended events; %s carries %d, want 1", m.ID, len(stillOne))
 	}
 
-	r := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.ID, "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", m.ID, "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("gate close: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -245,12 +245,12 @@ func TestDepend_AddRemoveAndCycleRefusal(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Downstream", "--json").stdout)
-	m2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Upstream", "--json").stdout)
+	m1 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Downstream", "--json").stdout)
+	m2 := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Upstream", "--json").stdout)
 	dbPathStr := dbEnvPath(dbEnv)
 
 	// m1 blocked-by m2.
-	addR := runIn(t, dir, dbEnv, "depend", "add", m1.ID, "--blocked-by", m2.ID, "--json")
+	addR := runIn(t, dir, dbEnv, "plumbing", "depend", "add", m1.ID, "--blocked-by", m2.ID, "--json")
 	if addR.exitCode != 0 {
 		t.Fatalf("depend add: exit=%d stderr=%q", addR.exitCode, addR.stderr)
 	}
@@ -268,7 +268,7 @@ func TestDepend_AddRemoveAndCycleRefusal(t *testing.T) {
 	}
 
 	// The reverse edge would close a cycle: refused, no event, no edge.
-	cycleR := runIn(t, dir, dbEnv, "depend", "add", m2.ID, "--blocked-by", m1.ID, "--json")
+	cycleR := runIn(t, dir, dbEnv, "plumbing", "depend", "add", m2.ID, "--blocked-by", m1.ID, "--json")
 	if cycleR.exitCode != 3 {
 		t.Fatalf("cycle-creating depend add: exit=%d, want 3 (refusal); stderr=%q", cycleR.exitCode, cycleR.stderr)
 	}
@@ -293,7 +293,7 @@ func TestDepend_AddRemoveAndCycleRefusal(t *testing.T) {
 	}
 
 	// Remove: tombstoned, not deleted; a second remove finds no live edge.
-	remR := runIn(t, dir, dbEnv, "depend", "remove", m1.ID, "--blocked-by", m2.ID, "--json")
+	remR := runIn(t, dir, dbEnv, "plumbing", "depend", "remove", m1.ID, "--blocked-by", m2.ID, "--json")
 	if remR.exitCode != 0 {
 		t.Fatalf("depend remove: exit=%d stderr=%q", remR.exitCode, remR.stderr)
 	}
@@ -307,7 +307,7 @@ func TestDepend_AddRemoveAndCycleRefusal(t *testing.T) {
 		t.Errorf("blockers of m1 after remove = %+v, want none (edges_in_force excludes tombstoned edges)", blockers)
 	}
 
-	remAgain := runIn(t, dir, dbEnv, "depend", "remove", m1.ID, "--blocked-by", m2.ID)
+	remAgain := runIn(t, dir, dbEnv, "plumbing", "depend", "remove", m1.ID, "--blocked-by", m2.ID)
 	if remAgain.exitCode == 0 {
 		t.Fatalf("removing an already-tombstoned edge should be refused, not silently succeed")
 	}
@@ -319,10 +319,10 @@ func TestBindUnbindRebind_MatterReferenceSetOneEventEach(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Bind me", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Bind me", "--json").stdout)
 	dbPathStr := dbEnvPath(dbEnv)
 
-	r := runIn(t, dir, dbEnv, "bind", m.ID, "https://tracker.example.com/issue/42", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "bind", m.ID, "https://tracker.example.com/issue/42", "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -338,7 +338,7 @@ func TestBindUnbindRebind_MatterReferenceSetOneEventEach(t *testing.T) {
 	}
 
 	second := "https://tracker.example.com/issue/43"
-	if r := runIn(t, dir, dbEnv, "rebind", m.ID, refs[0], second, "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "rebind", m.ID, refs[0], second, "--json"); r.exitCode != 0 {
 		t.Fatalf("rebind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s = openTestStore(t, dbPathStr)
@@ -348,7 +348,7 @@ func TestBindUnbindRebind_MatterReferenceSetOneEventEach(t *testing.T) {
 		t.Fatalf("tracker refs after rebind = %v (err %v), want %s", refs, err, second)
 	}
 
-	if r := runIn(t, dir, dbEnv, "unbind", m.ID, second, "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "unbind", m.ID, second, "--json"); r.exitCode != 0 {
 		t.Fatalf("unbind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 	s = openTestStore(t, dbPathStr)
@@ -373,7 +373,7 @@ func TestBindHumanOutputDisclosesInertReferenceOnlyWhenTrackerPushesAreOff(t *te
 			name: "configured backend enables boundary pushing",
 			configure: func(t *testing.T, dir string, dbEnv []string) {
 				t.Helper()
-				if r := runIn(t, dir, dbEnv, "outbox", "backend", "github"); r.exitCode != 0 {
+				if r := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "github"); r.exitCode != 0 {
 					t.Fatalf("configure tracker backend: exit=%d stderr=%q", r.exitCode, r.stderr)
 				}
 			},
@@ -383,10 +383,10 @@ func TestBindHumanOutputDisclosesInertReferenceOnlyWhenTrackerPushesAreOff(t *te
 			name: "explicit off overrides a configured backend",
 			configure: func(t *testing.T, dir string, dbEnv []string) {
 				t.Helper()
-				if r := runIn(t, dir, dbEnv, "outbox", "backend", "github"); r.exitCode != 0 {
+				if r := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "github"); r.exitCode != 0 {
 					t.Fatalf("configure tracker backend: exit=%d stderr=%q", r.exitCode, r.stderr)
 				}
-				if r := runIn(t, dir, dbEnv, "outbox", "level", "off"); r.exitCode != 0 {
+				if r := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "off"); r.exitCode != 0 {
 					t.Fatalf("turn tracker pushing off: exit=%d stderr=%q", r.exitCode, r.stderr)
 				}
 			},
@@ -401,12 +401,12 @@ func TestBindHumanOutputDisclosesInertReferenceOnlyWhenTrackerPushesAreOff(t *te
 			if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 				t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 			}
-			m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Bind me", "--json").stdout)
+			m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Bind me", "--json").stdout)
 			if test.configure != nil {
 				test.configure(t, dir, dbEnv)
 			}
 
-			r := runIn(t, dir, dbEnv, "bind", m.ID, "https://tracker.example.com/issue/42")
+			r := runIn(t, dir, dbEnv, "plumbing", "bind", m.ID, "https://tracker.example.com/issue/42")
 			if r.exitCode != 0 {
 				t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
 			}
@@ -423,9 +423,9 @@ func TestBindJSONOutputIsUnchangedWhenTrackerPushesAreOff(t *testing.T) {
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Bind me", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Bind me", "--json").stdout)
 
-	r := runIn(t, dir, dbEnv, "bind", m.ID, "https://tracker.example.com/issue/42", "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "bind", m.ID, "https://tracker.example.com/issue/42", "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("bind: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}

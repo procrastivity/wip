@@ -1,4 +1,4 @@
-// Package backlog implements the `wip backlog` verb family: `add`, `list`,
+// Package backlog implements the `wip plumbing backlog` verb family: `add`, `list`,
 // `plan`, `decline`, `delegate` (MODEL §4). `list` is read-only.
 package backlog
 
@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip backlog` parent command and its verbs.
+// Command constructs the `wip plumbing backlog` parent command and its verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backlog",

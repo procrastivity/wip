@@ -9,7 +9,7 @@ import (
 )
 
 // ReapOrphanBlobs implements D68's other orphan population: a spilled blob
-// file no live content row references. It is `wip clean`'s to call, never the
+// file no live content row references. It is `wip plumbing clean`'s to call, never the
 // store's own initiative — Open never reaps, and neither does any read — and
 // only past cutoff, a caller-supplied point in time rather than a duration,
 // so an in-flight command's just-written blob (ContentDraft writes the file

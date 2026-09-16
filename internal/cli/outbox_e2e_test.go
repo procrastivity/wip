@@ -30,8 +30,8 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 		t.Helper()
 		added := mustJSON[struct {
 			ID string `json:"id"`
-		}](t, runIn(t, dir, dbEnv, "backlog", "add", "--title", title, "--provenance", "intake", "--json").stdout)
-		result := runIn(t, dir, dbEnv, "backlog", "delegate", added.ID, "--json")
+		}](t, runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", title, "--provenance", "intake", "--json").stdout)
+		result := runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", added.ID, "--json")
 		if result.exitCode != 0 {
 			t.Fatalf("delegate: exit=%d stderr=%q", result.exitCode, result.stderr)
 		}
@@ -42,7 +42,7 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 
 	approvedID := delegate("Approve me")
 	declinedID := delegate("Decline me")
-	listed := runIn(t, dir, dbEnv, "outbox", "list", "--json")
+	listed := runIn(t, dir, dbEnv, "plumbing", "outbox", "list", "--json")
 	if listed.exitCode != 0 {
 		t.Fatalf("outbox list: exit=%d stderr=%q", listed.exitCode, listed.stderr)
 	}
@@ -58,11 +58,11 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 		}
 	}
 
-	approved := runIn(t, dir, dbEnv, "outbox", "approve", approvedID, "--json")
+	approved := runIn(t, dir, dbEnv, "plumbing", "outbox", "approve", approvedID, "--json")
 	if approved.exitCode != 0 || mustJSON[outboxPayload](t, approved.stdout).State != "approved" {
 		t.Fatalf("approve: exit=%d stdout=%q stderr=%q", approved.exitCode, approved.stdout, approved.stderr)
 	}
-	declined := runIn(t, dir, dbEnv, "outbox", "decline", declinedID, "--reason", "not sending", "--json")
+	declined := runIn(t, dir, dbEnv, "plumbing", "outbox", "decline", declinedID, "--reason", "not sending", "--json")
 	declinedEntry := mustJSON[outboxPayload](t, declined.stdout)
 	if declined.exitCode != 0 || declinedEntry.State != "declined" || declinedEntry.Reason != "not sending" {
 		t.Fatalf("decline: exit=%d payload=%+v stderr=%q", declined.exitCode, declinedEntry, declined.stderr)
@@ -70,7 +70,7 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 
 	// No backend is configured. Invoking flush refuses without changing durable
 	// approved work.
-	flush := runIn(t, dir, dbEnv, "outbox", "flush", "--json")
+	flush := runIn(t, dir, dbEnv, "plumbing", "outbox", "flush", "--json")
 	if flush.exitCode == 0 || !strings.Contains(flush.stderr, "no provider seam configured") {
 		t.Fatalf("flush without seam: exit=%d stderr=%q", flush.exitCode, flush.stderr)
 	}
@@ -89,7 +89,7 @@ func TestOutboxCLIExposesHumanAndJSONLifecycleActions(t *testing.T) {
 		t.Fatalf("approval events = %+v (err %v)", events, err)
 	}
 
-	retry := runIn(t, dir, dbEnv, "outbox", "retry", declinedID, "--json")
+	retry := runIn(t, dir, dbEnv, "plumbing", "outbox", "retry", declinedID, "--json")
 	if retry.exitCode == 0 {
 		t.Fatalf("retry of declined work unexpectedly succeeded: %q", retry.stdout)
 	}
@@ -101,7 +101,7 @@ func TestManifestIncludesOutboxPlumbing(t *testing.T) {
 	if manifest.exitCode != 0 {
 		t.Fatalf("manifest: exit=%d stderr=%q", manifest.exitCode, manifest.stderr)
 	}
-	for _, name := range []string{"outbox list", "outbox level", "outbox backlog-push", "outbox backend", "outbox target", "outbox canceled-label", "outbox approve", "outbox decline", "outbox retry", "outbox flush"} {
+	for _, name := range []string{"plumbing outbox list", "plumbing outbox level", "plumbing outbox backlog-push", "plumbing outbox backend", "plumbing outbox target", "plumbing outbox canceled-label", "plumbing outbox approve", "plumbing outbox decline", "plumbing outbox retry", "plumbing outbox flush"} {
 		if !strings.Contains(manifest.stdout, `"name":"`+name+`"`) {
 			t.Errorf("manifest is missing %q", name)
 		}
@@ -131,22 +131,22 @@ func TestOutboxTargetIsOpaqueLazyConfigAndReachesFlushFactory(t *testing.T) {
 	if r := runWithProviders(t, providers, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	initial := runWithProviders(t, providers, "outbox", "target")
+	initial := runWithProviders(t, providers, "plumbing", "outbox", "target")
 	if initial.exitCode != 0 || initial.stdout != "none\n" {
 		t.Fatalf("initial target: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
 
 	const target = "  provider-owned target  "
-	set := runWithProviders(t, providers, "outbox", "target", target, "--json")
+	set := runWithProviders(t, providers, "plumbing", "outbox", "target", target, "--json")
 	if set.exitCode != 0 || mustJSON[struct {
 		Target string `json:"target"`
 	}](t, set.stdout).Target != target {
 		t.Fatalf("set target: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
 	}
-	if r := runWithProviders(t, providers, "outbox", "backend", "fake"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
 		t.Fatalf("set backend: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	flush := runWithProviders(t, providers, "outbox", "flush", "--json")
+	flush := runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json")
 	if flush.exitCode != 0 {
 		t.Fatalf("flush: exit=%d stdout=%q stderr=%q", flush.exitCode, flush.stdout, flush.stderr)
 	}
@@ -170,10 +170,10 @@ func TestOutboxTargetIsOpaqueLazyConfigAndReachesFlushFactory(t *testing.T) {
 	}
 
 	for _, sentinel := range []string{"none", "  none  "} {
-		if r := runWithProviders(t, providers, "outbox", "target", target); r.exitCode != 0 {
+		if r := runWithProviders(t, providers, "plumbing", "outbox", "target", target); r.exitCode != 0 {
 			t.Fatalf("re-set target: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
-		cleared := runWithProviders(t, providers, "outbox", "target", sentinel)
+		cleared := runWithProviders(t, providers, "plumbing", "outbox", "target", sentinel)
 		if cleared.exitCode != 0 || cleared.stdout != "none\n" {
 			t.Fatalf("clear target with %q: exit=%d stdout=%q stderr=%q", sentinel, cleared.exitCode, cleared.stdout, cleared.stderr)
 		}
@@ -203,7 +203,7 @@ func TestOutboxCanceledLabelIsLazyConfigAndReachesFlushFactory(t *testing.T) {
 	if r := runWithProviders(t, providers, "init"); r.exitCode != 0 {
 		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	initial := runWithProviders(t, providers, "outbox", "canceled-label")
+	initial := runWithProviders(t, providers, "plumbing", "outbox", "canceled-label")
 	if initial.exitCode != 0 || initial.stdout != "none\n" {
 		t.Fatalf("initial canceled label: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
@@ -212,16 +212,16 @@ func TestOutboxCanceledLabelIsLazyConfigAndReachesFlushFactory(t *testing.T) {
 	// it exactly against the project's labels.
 	const label = "  wf::canceled  "
 	trimmed := strings.TrimSpace(label)
-	set := runWithProviders(t, providers, "outbox", "canceled-label", label, "--json")
+	set := runWithProviders(t, providers, "plumbing", "outbox", "canceled-label", label, "--json")
 	if set.exitCode != 0 || mustJSON[struct {
 		CanceledLabel string `json:"canceledLabel"`
 	}](t, set.stdout).CanceledLabel != trimmed {
 		t.Fatalf("set canceled label: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
 	}
-	if r := runWithProviders(t, providers, "outbox", "backend", "fake"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
 		t.Fatalf("set backend: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	flush := runWithProviders(t, providers, "outbox", "flush", "--json")
+	flush := runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json")
 	if flush.exitCode != 0 {
 		t.Fatalf("flush: exit=%d stdout=%q stderr=%q", flush.exitCode, flush.stdout, flush.stderr)
 	}
@@ -245,10 +245,10 @@ func TestOutboxCanceledLabelIsLazyConfigAndReachesFlushFactory(t *testing.T) {
 	}
 
 	for _, sentinel := range []string{"none", "  none  "} {
-		if r := runWithProviders(t, providers, "outbox", "canceled-label", label); r.exitCode != 0 {
+		if r := runWithProviders(t, providers, "plumbing", "outbox", "canceled-label", label); r.exitCode != 0 {
 			t.Fatalf("re-set canceled label: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
-		cleared := runWithProviders(t, providers, "outbox", "canceled-label", sentinel)
+		cleared := runWithProviders(t, providers, "plumbing", "outbox", "canceled-label", sentinel)
 		if cleared.exitCode != 0 || cleared.stdout != "none\n" {
 			t.Fatalf("clear canceled label with %q: exit=%d stdout=%q stderr=%q", sentinel, cleared.exitCode, cleared.stdout, cleared.stderr)
 		}
@@ -257,23 +257,23 @@ func TestOutboxCanceledLabelIsLazyConfigAndReachesFlushFactory(t *testing.T) {
 
 func TestOutboxBackendConfiguresRegisteredProvider(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	initial := runIn(t, dir, dbEnv, "outbox", "backend")
+	initial := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend")
 	if initial.exitCode != 0 || initial.stdout != "none\n" {
 		t.Fatalf("initial backend: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
-	invalid := runIn(t, dir, dbEnv, "outbox", "backend", "jira")
+	invalid := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "jira")
 	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, `backend "jira" is not registered; available: github, gitlab, linear`) {
 		t.Fatalf("invalid backend: exit=%d stderr=%q", invalid.exitCode, invalid.stderr)
 	}
-	set := runIn(t, dir, dbEnv, "outbox", "backend", "github", "--json")
+	set := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "github", "--json")
 	if set.exitCode != 0 || !strings.Contains(set.stdout, `"backend":"github"`) {
 		t.Fatalf("set backend: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
 	}
-	level := runIn(t, dir, dbEnv, "outbox", "level")
+	level := runIn(t, dir, dbEnv, "plumbing", "outbox", "level")
 	if level.exitCode != 0 || level.stdout != "boundary\n" {
 		t.Fatalf("backend default level: exit=%d stdout=%q stderr=%q", level.exitCode, level.stdout, level.stderr)
 	}
-	cleared := runIn(t, dir, dbEnv, "outbox", "backend", "none")
+	cleared := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "none")
 	if cleared.exitCode != 0 || cleared.stdout != "none\n" {
 		t.Fatalf("clear backend: exit=%d stdout=%q stderr=%q", cleared.exitCode, cleared.stdout, cleared.stderr)
 	}
@@ -281,21 +281,21 @@ func TestOutboxBackendConfiguresRegisteredProvider(t *testing.T) {
 
 func TestOutboxLevelTextJSONValidationAndLazyConfig(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	initial := runIn(t, dir, dbEnv, "outbox", "level")
+	initial := runIn(t, dir, dbEnv, "plumbing", "outbox", "level")
 	if initial.exitCode != 0 || initial.stdout != "off\n" {
 		t.Fatalf("initial level: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
 	}
-	set := runIn(t, dir, dbEnv, "outbox", "level", "boundary", "--json")
+	set := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "boundary", "--json")
 	if set.exitCode != 0 || mustJSON[struct {
 		Level string `json:"level"`
 	}](t, set.stdout).Level != "boundary" {
 		t.Fatalf("set level: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
 	}
-	read := runIn(t, dir, dbEnv, "outbox", "level", "--json")
+	read := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "--json")
 	if read.exitCode != 0 || !strings.Contains(read.stdout, `"level":"boundary"`) {
 		t.Fatalf("read level: exit=%d stdout=%q stderr=%q", read.exitCode, read.stdout, read.stderr)
 	}
-	invalid := runIn(t, dir, dbEnv, "outbox", "level", "verbose")
+	invalid := runIn(t, dir, dbEnv, "plumbing", "outbox", "level", "verbose")
 	if invalid.exitCode == 0 || !strings.Contains(invalid.stderr, "expected off, boundary, or narrated") {
 		t.Fatalf("invalid level: exit=%d stderr=%q", invalid.exitCode, invalid.stderr)
 	}

@@ -43,17 +43,17 @@ func wantJSONError(t *testing.T, label string, r result, code string, fragments 
 
 func TestBacklogExitsOnANonEnteredEntryAreValidationNotProjectionErrors(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Target", "--locator", "target", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Target", "--locator", "target", "--json").stdout)
 
 	added := mustJSON[struct {
 		ID string `json:"id"`
-	}](t, runIn(t, dir, dbEnv, "backlog", "add", "--title", "Push me", "--provenance", "intake", "--json").stdout)
+	}](t, runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Push me", "--provenance", "intake", "--json").stdout)
 
-	if r := runIn(t, dir, dbEnv, "backlog", "delegate", added.ID, "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", added.ID, "--json"); r.exitCode != 0 {
 		t.Fatalf("delegate: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	r := runIn(t, dir, dbEnv, "backlog", "plan", added.ID, m.Locator)
+	r := runIn(t, dir, dbEnv, "plumbing", "backlog", "plan", added.ID, m.Locator)
 	if r.exitCode != 1 {
 		t.Fatalf("plan (human mode): exit=%d, want 1; stderr=%q", r.exitCode, r.stderr)
 	}
@@ -71,18 +71,18 @@ func TestBacklogExitsOnANonEnteredEntryAreValidationNotProjectionErrors(t *testi
 	}
 
 	wantJSONError(t, "plan (json mode)",
-		runIn(t, dir, dbEnv, "backlog", "plan", added.ID, m.Locator, "--json"),
+		runIn(t, dir, dbEnv, "plumbing", "backlog", "plan", added.ID, m.Locator, "--json"),
 		"validation.backlog-not-entered", added.ID, "delegated")
 
 	wantJSONError(t, "decline (json mode)",
-		runIn(t, dir, dbEnv, "backlog", "decline", added.ID, "--reason", "x", "--json"),
+		runIn(t, dir, dbEnv, "plumbing", "backlog", "decline", added.ID, "--reason", "x", "--json"),
 		"validation.backlog-not-entered", "can be declined")
 
 	wantJSONError(t, "delegate (json mode)",
-		runIn(t, dir, dbEnv, "backlog", "delegate", added.ID, "--json"),
+		runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", added.ID, "--json"),
 		"validation.backlog-not-entered", "can be delegated")
 
 	wantJSONError(t, "plan unknown id (json mode)",
-		runIn(t, dir, dbEnv, "backlog", "plan", "01NOPE", m.Locator, "--json"),
+		runIn(t, dir, dbEnv, "plumbing", "backlog", "plan", "01NOPE", m.Locator, "--json"),
 		"validation.unknown-backlog-entry")
 }

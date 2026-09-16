@@ -205,7 +205,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 	if r := runInDir(t, dir, env, "init", "--json"); r.exitCode != 0 {
 		t.Fatalf("init exit code = %d, stderr=%q", r.exitCode, r.stderr)
 	}
-	matterResult := runInDir(t, dir, env, "matter", "create", "--title", "Batch Matter", "--locator", "batch-matter", "--json")
+	matterResult := runInDir(t, dir, env, "plumbing", "matter", "create", "--title", "Batch Matter", "--locator", "batch-matter", "--json")
 	if matterResult.exitCode != 0 {
 		t.Fatalf("matter create exit code = %d, stderr=%q", matterResult.exitCode, matterResult.stderr)
 	}
@@ -217,7 +217,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 		t.Fatalf("matter create JSON = %q, err=%v", matterResult.stdout, err)
 	}
 
-	created := runInDir(t, dir, env, "batch", "create", "release", "--json")
+	created := runInDir(t, dir, env, "plumbing", "batch", "create", "release", "--json")
 	if created.exitCode != 0 {
 		t.Fatalf("batch create exit code = %d, stderr=%q", created.exitCode, created.stderr)
 	}
@@ -238,7 +238,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 	}
 	batchID := batch.ID
 
-	joined := runInDir(t, dir, env, "batch", "join", "release", matter.Locator, "--json")
+	joined := runInDir(t, dir, env, "plumbing", "batch", "join", "release", matter.Locator, "--json")
 	if joined.exitCode != 0 {
 		t.Fatalf("batch join exit code = %d, stderr=%q", joined.exitCode, joined.stderr)
 	}
@@ -250,7 +250,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 	}
 
 	partial := batch.ID[:12]
-	refused := runInDir(t, dir, env, "batch", "join", partial, matter.Locator, "--json")
+	refused := runInDir(t, dir, env, "plumbing", "batch", "join", partial, matter.Locator, "--json")
 	if refused.exitCode != 1 || refused.stdout != "" {
 		t.Fatalf("partial Batch identity result = %+v, want validation refusal", refused)
 	}
@@ -263,7 +263,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 		t.Fatalf("partial Batch identity error = %q, err=%v", refused.stderr, err)
 	}
 
-	left := runInDir(t, dir, env, "batch", "leave", batch.ID, matter.Locator, "--json")
+	left := runInDir(t, dir, env, "plumbing", "batch", "leave", batch.ID, matter.Locator, "--json")
 	if left.exitCode != 0 {
 		t.Fatalf("batch leave exit code = %d, stderr=%q", left.exitCode, left.stderr)
 	}
@@ -274,7 +274,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 		t.Fatalf("batch leave payload = %+v, want member %s and action left", batch, matter.ID)
 	}
 
-	rejoined := runInDir(t, dir, env, "batch", "join", batch.ID, matter.Locator, "--json")
+	rejoined := runInDir(t, dir, env, "plumbing", "batch", "join", batch.ID, matter.Locator, "--json")
 	if rejoined.exitCode != 0 {
 		t.Fatalf("batch rejoin by full ULID exit code = %d, stderr=%q", rejoined.exitCode, rejoined.stderr)
 	}
@@ -282,7 +282,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 		t.Fatalf("batch rejoin JSON = %q, err=%v", rejoined.stdout, err)
 	}
 
-	dismissed := runInDir(t, dir, env, "batch", "dismiss", "release", "--json")
+	dismissed := runInDir(t, dir, env, "plumbing", "batch", "dismiss", "release", "--json")
 	if dismissed.exitCode != 0 {
 		t.Fatalf("batch dismiss exit code = %d, stderr=%q", dismissed.exitCode, dismissed.stderr)
 	}
@@ -293,14 +293,14 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 		t.Fatalf("batch dismiss payload = %+v, want terminal Batch identity and reason", batch)
 	}
 
-	human := runInDir(t, dir, env, "batch", "create", "human-output")
+	human := runInDir(t, dir, env, "plumbing", "batch", "create", "human-output")
 	if human.exitCode != 0 || !strings.Contains(human.stdout, "created Batch human-output (") || human.stderr != "" {
 		t.Fatalf("human batch output = %+v", human)
 	}
 
-	help := runInDir(t, dir, nil, "--help")
+	help := runInDir(t, dir, nil, "plumbing", "--help")
 	if help.exitCode != 0 || !strings.Contains(help.stdout, "batch") {
-		t.Fatalf("root help does not register batch: %+v", help)
+		t.Fatalf("plumbing help does not register batch: %+v", help)
 	}
 	manifestResult := runInDir(t, dir, nil, "manifest", "--json")
 	if manifestResult.exitCode != 0 {
@@ -315,7 +315,7 @@ func TestBatchCommands_EndToEndSurfaceAndProjection(t *testing.T) {
 	if err := json.Unmarshal([]byte(manifestResult.stdout), &manifest); err != nil {
 		t.Fatalf("manifest JSON = %q, err=%v", manifestResult.stdout, err)
 	}
-	for _, name := range []string{"batch create", "batch join", "batch leave", "batch dismiss"} {
+	for _, name := range []string{"plumbing batch create", "plumbing batch join", "plumbing batch leave", "plumbing batch dismiss"} {
 		found := false
 		for _, verb := range manifest.Verbs {
 			if verb.Name == name {

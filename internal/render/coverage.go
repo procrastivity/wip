@@ -7,11 +7,11 @@ import (
 )
 
 // EagerScope implements step-05's resolved coverage policy: every render
-// trigger (dispatch-open, or an explicit `wip refresh` with no locator)
+// trigger (dispatch-open, or an explicit `wip plumbing refresh` with no locator)
 // eagerly covers every not-sealed Matter in this Repo. A sealed Matter is
 // archival, not being worked — auto-rendering it on every dispatch would
 // grow `.wip/generated/` without bound for no reader — so it renders only
-// when named explicitly via `wip refresh <sealed-locator>` (renderMatterTree
+// when named explicitly via `wip plumbing refresh <sealed-locator>` (renderMatterTree
 // called directly on it, bypassing this scope). This is a coverage policy,
 // not a storage decision (MODEL §3.1).
 //

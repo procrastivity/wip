@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command is the `wip batch` verb group: create, join, leave, dismiss.
+// Command is the `wip plumbing batch` verb group: create, join, leave, dismiss.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{Use: "batch", Short: "manage named Batches"}
 	cmd.AddCommand(createCommand(streams), joinCommand(streams), leaveCommand(streams), dismissCommand(streams))

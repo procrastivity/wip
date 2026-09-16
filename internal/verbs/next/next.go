@@ -198,7 +198,7 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 			return err
 		}
 		if view.BacklogCount > 0 {
-			_, err := fmt.Fprintf(streams.Out, "Backlog holds %d unprocessed entries: wip backlog list\n", view.BacklogCount)
+			_, err := fmt.Fprintf(streams.Out, "Backlog holds %d unprocessed entries: wip plumbing backlog list\n", view.BacklogCount)
 			return err
 		}
 		return nil

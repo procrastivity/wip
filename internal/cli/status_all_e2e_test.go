@@ -24,18 +24,18 @@ import (
 func TestStatus_CollapsesSealedSubtreeAndAllRestoresIt(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Sealed matter", "--json").stdout)
-	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "Sealed step", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.ID); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Sealed matter", "--json").stdout)
+	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "Sealed step", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.ID); r.exitCode != 0 {
 		t.Fatalf("start matter: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "start", step.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", step.ID); r.exitCode != 0 {
 		t.Fatalf("start step: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", step.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", step.ID); r.exitCode != 0 {
 		t.Fatalf("finish step: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.ID); r.exitCode != 0 {
 		t.Fatalf("finish matter: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -68,11 +68,11 @@ func TestStatus_CollapsesSealedSubtreeAndAllRestoresIt(t *testing.T) {
 func TestStatus_JSONCarriesHiddenSealedMatters(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Sealed matter", "--json").stdout)
-	if r := runIn(t, dir, dbEnv, "start", m.ID); r.exitCode != 0 {
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Sealed matter", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.ID); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.ID); r.exitCode != 0 {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -115,12 +115,12 @@ func TestCancel_ReasonLandsInThePayload(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 	dbPath := dbEnvPath(dbEnv)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Origin matter", "--json").stdout)
-	withReason := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "Abandoned with a reason", "--json").stdout)
-	noReason := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "Abandoned without one", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Origin matter", "--json").stdout)
+	withReason := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "Abandoned with a reason", "--json").stdout)
+	noReason := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "Abandoned without one", "--json").stdout)
 
 	for _, id := range []string{withReason.ID, noReason.ID} {
-		if r := runIn(t, dir, dbEnv, "start", id); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "start", id); r.exitCode != 0 {
 			t.Fatalf("start %s: exit=%d stderr=%q", id, r.exitCode, r.stderr)
 		}
 	}
@@ -136,10 +136,10 @@ func TestCancel_ReasonLandsInThePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if r := runIn(t, dir, dbEnv, "cancel", withReason.ID, "--reason", "obsolete"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "cancel", withReason.ID, "--reason", "obsolete"); r.exitCode != 0 {
 		t.Fatalf("cancel --reason: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "cancel", noReason.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "cancel", noReason.ID); r.exitCode != 0 {
 		t.Fatalf("cancel (no reason): exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 

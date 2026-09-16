@@ -8,23 +8,41 @@ import (
 	"github.com/procrastivity/wip/internal/surface"
 )
 
-func TestProjectable_OnlyPlumbing(t *testing.T) {
+// TestProjectable_KeysOnThePlumbingNamespacePrefix pins the D53/D112
+// reading: the filter is structural (the "plumbing " name prefix, D112),
+// not kind-only (D53). A bare-named verb is dropped even when it is
+// kind=plumbing (every porcelain verb but init/doctor/install/uninstall/
+// version/manifest is exactly this shape), and a namespaced verb is kept
+// only when it is also kind=plumbing — the kind test stays a conjunct.
+func TestProjectable_KeysOnThePlumbingNamespacePrefix(t *testing.T) {
 	verbs := []manifest.Verb{
-		{Name: "step create", Kind: surface.Plumbing},
+		{Name: "plumbing step create", Kind: surface.Plumbing},
+		{Name: "status", Kind: surface.Plumbing},
 		{Name: "ask", Kind: surface.LLM},
 		{Name: "watch", Kind: surface.ControlPlane},
-		{Name: "status", Kind: surface.Plumbing},
 	}
 
 	got := harness.Projectable(verbs)
 
-	if len(got) != 2 {
-		t.Fatalf("Projectable returned %d verb(s), want 2 (plumbing only): %+v", len(got), got)
+	if len(got) != 1 || got[0].Name != "plumbing step create" {
+		t.Fatalf("Projectable returned %+v, want exactly [{plumbing step create}]", got)
 	}
-	for _, v := range got {
-		if v.Kind != surface.Plumbing {
-			t.Errorf("Projectable included %q with kind %q, want plumbing only", v.Name, v.Kind)
-		}
+}
+
+// TestProjectable_KindStaysAConjunct confirms D53 survives inside the
+// namespace: a "plumbing "-named verb that is NOT kind=plumbing (an
+// llm-kind verb landing inside the namespace, hypothetically) still does
+// not project.
+func TestProjectable_KindStaysAConjunct(t *testing.T) {
+	verbs := []manifest.Verb{
+		{Name: "plumbing step create", Kind: surface.Plumbing},
+		{Name: "plumbing ask", Kind: surface.LLM},
+	}
+
+	got := harness.Projectable(verbs)
+
+	if len(got) != 1 || got[0].Name != "plumbing step create" {
+		t.Fatalf("Projectable returned %+v, want exactly [{plumbing step create}]", got)
 	}
 }
 
