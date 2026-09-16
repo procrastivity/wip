@@ -100,9 +100,9 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 	fromBMoved := runIn(t, bMoved, dbEnv, "plumbing", "status")
 	fromFeature := runIn(t, wtDir, dbEnv, "plumbing", "status")
 
-	t.Logf("wip status (from widget-a):\n%s", fromA.stdout)
-	t.Logf("wip status (from widget-b, moved+relinked):\n%s", fromBMoved.stdout)
-	t.Logf("wip status (from widget-b-feature, linked worktree):\n%s", fromFeature.stdout)
+	t.Logf("wip plumbing status (from widget-a):\n%s", fromA.stdout)
+	t.Logf("wip plumbing status (from widget-b, moved+relinked):\n%s", fromBMoved.stdout)
+	t.Logf("wip plumbing status (from widget-b-feature, linked worktree):\n%s", fromFeature.stdout)
 
 	want := "acme/widget\n" +
 		"  widget-a           Clone · current\n" +
@@ -325,7 +325,7 @@ func TestWorkedExample5_ForkGetsADistinctRepo(t *testing.T) {
 		t.Fatal("upstream and fork resolved to the same Repo, want two distinct Repos")
 	}
 
-	// wip status, host-wide, sees both as separate repos.
+	// wip plumbing status, host-wide, sees both as separate repos.
 	elsewhere := t.TempDir()
 	hostWide := runIn(t, elsewhere, dbEnv, "plumbing", "status", "--json")
 	if hostWide.exitCode != 0 {
@@ -515,7 +515,7 @@ func TestWorkedExample7_CrossRepoBatch(t *testing.T) {
 	if statusResult.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", statusResult.exitCode, statusResult.stderr)
 	}
-	t.Logf("wip status (dispatched from repo-a, batch spans repo-a+repo-b):\n%s", statusResult.stdout)
+	t.Logf("wip plumbing status (dispatched from repo-a, batch spans repo-a+repo-b):\n%s", statusResult.stdout)
 	want := "acme/repo-a\n" +
 		"  repo-a             Clone · current\n" +
 		"\n" +
@@ -659,7 +659,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	if statusA.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", statusA.exitCode, statusA.stderr)
 	}
-	t.Logf("wip status (dispatching clone, after the cross-repo Run):\n%s", statusA.stdout)
+	t.Logf("wip plumbing status (dispatching clone, after the cross-repo Run):\n%s", statusA.stdout)
 	for _, want := range []string{"matter-a1", "matter-a2"} {
 		if !strings.Contains(statusA.stdout, want) {
 			t.Errorf("status from repo-a lacks %s:\n%s", want, statusA.stdout)
@@ -683,7 +683,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	if statusB.exitCode != 0 {
 		t.Fatalf("status from repo-b: exit=%d stderr=%q", statusB.exitCode, statusB.stderr)
 	}
-	t.Logf("wip status (repo-b's clone, after the cross-repo Run):\n%s", statusB.stdout)
+	t.Logf("wip plumbing status (repo-b's clone, after the cross-repo Run):\n%s", statusB.stdout)
 	for _, want := range []string{"matter-b1", "matter-b2"} {
 		if !strings.Contains(statusB.stdout, want) {
 			t.Errorf("status from repo-b lacks %s:\n%s", want, statusB.stdout)

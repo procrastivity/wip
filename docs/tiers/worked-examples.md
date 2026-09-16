@@ -1,10 +1,10 @@
 # `tiers` — worked examples
 
 PLAN 1.1's seven worked examples, produced against the real `tier-verbs`
-implementation — real rows, real keys, real `wip status` output, no mocks.
+implementation — real rows, real keys, real `wip plumbing status` output, no mocks.
 Presentation order (1–7) carries no sequencing meaning (D51); each is
 independent. Example 7 is deliberately scoped to tiers, key resolution, and
-`status` output only, per the seed card and PLAN's own framing note.
+`wip plumbing status` output only, per the seed card and PLAN's own framing note.
 
 Every transcript below is real command output, captured either directly from
 the built binary or from `internal/cli/worked_examples_test.go`'s `t.Logf`
@@ -30,19 +30,19 @@ this clone is unknown, but its remote matches known repo 01KYRN07G1T460JXM19RMB9
 $ wip clone relink widget-b
 relinked clone "widget-b" to /private/tmp/wip-examples-work/widget-b-moved/.git
 
-$ wip status   # from widget-a
+$ wip plumbing status   # from widget-a
 acme/widget
   widget-a           Clone · current
   widget-b           Clone
   widget-b-feature   Worktree (of widget-b)
 
-$ wip status   # from widget-b (moved+relinked)
+$ wip plumbing status   # from widget-b (moved+relinked)
 acme/widget
   widget-a           Clone
   widget-b           Clone · current
   widget-b-feature   Worktree (of widget-b)
 
-$ wip status   # from widget-b-feature (linked worktree)
+$ wip plumbing status   # from widget-b-feature (linked worktree)
 acme/widget
   widget-a           Clone
   widget-b           Clone
@@ -65,7 +65,7 @@ $ wip init   # inside the linked worktree, before the move
 
 $ git worktree move widget-feature ../widget-feature-moved
 
-$ wip status --json   # from the new location
+$ wip plumbing status --json   # from the new location
 {"hostWide":false,"repo":{"id":"01KYRN0EH9SHFHSBFJ7WQPT9V9","header":"acme/widget","clones":[{"id":"01KYRN0EH9SHFHSBFJ7WQPT9VA","label":"widget","current":false,"worktrees":[{"id":"01KYRN0EJJ07G2SWPXD4E6CB0Y","name":"widget-feature","current":true}]}]}}
 ```
 
@@ -112,7 +112,7 @@ $ wip init   # no remotes at all
 
 $ git remote add origin git@github.com:acme/local-only.git
 
-$ wip status --json   # same Repo ULID, now-populated remote
+$ wip plumbing status --json   # same Repo ULID, now-populated remote
 {"hostWide":false,"repo":{"id":"01KYRN0T3TAYB8A89EMHPQB3EZ","header":"acme/local-only","clones":[{"id":"01KYRN0T3TAYB8A89EMHPQB3F0","label":"local-only","current":true}]}}
 ```
 
@@ -133,7 +133,7 @@ $ wip init   # upstream
 $ wip init   # fork, no --identity-remote needed
 {"repo":"01KYRN0T905YDAD72BJTZZE9C2","repoCreated":true,"remoteUrl":"github.com/someone/widget-fork","clone":"01KYRN0T905YDAD72BJTZZE9C3","cloneLabel":"widget-fork","worktree":"01KYRN0T905YDAD72BJTZZE9C4"}
 
-$ wip status --json   # host-wide, from neither clone
+$ wip plumbing status --json   # host-wide, from neither clone
 {"hostWide":true,"repos":[
   {"id":"01KYRN0T76JJ8G6RXHZ6Q8X55K","header":"acme/widget","clones":[{"id":"01KYRN0T76JJ8G6RXHZ6Q8X55M","label":"widget-upstream","current":false}]},
   {"id":"01KYRN0T905YDAD72BJTZZE9C2","header":"someone/widget-fork","clones":[{"id":"01KYRN0T905YDAD72BJTZZE9C3","label":"widget-fork","current":false}]}
@@ -193,15 +193,15 @@ Worktree context (D56, `batch.*` alone carries clone+worktree with a null
 repo): the dispatching clone here is `repo-a`'s.
 
 ```
-$ wip status   # dispatched from a clone of repo-a; the batch spans repo-a + repo-b
+$ wip plumbing status   # dispatched from a clone of repo-a; the batch spans repo-a + repo-b
 acme/repo-a
   repo-a             Clone · current
 ```
 
-This is the point of the example: `status`'s own repo-wide/current-clone-marked
+This is the point of the example: `wip plumbing status`'s own repo-wide/current-clone-marked
 scope (this Stage's step-08) is completely unaffected by the Batch's
 cross-repo membership — it never mentions `repo-b`, because a tier-scoped
-`status` doesn't render Matter or Batch content at all. `store.BatchMembers`
+`wip plumbing status` doesn't render Matter or Batch content at all. `store.BatchMembers`
 confirms all four Matters (two from each Repo) are live members of the one
 Batch, directly against the store. Run and dispatch mechanics for this same
 scenario are `appendix-orchestration.md` item 7, Phase 2 — not attempted here.
@@ -228,14 +228,14 @@ anywhere in the path. The record it leaves is the load-bearing observation:
   answers "where did this write happen" with the dispatching tier; the
   subject's own Repo stays derivable from its birth row, so reads do not
   misproject.
-- Reads stay tier-scoped and unconfused: `status` from the dispatching
+- Reads stay tier-scoped and unconfused: `wip plumbing status` from the dispatching
   clone shows repo-a's two Matters sealed and never mentions repo-b;
-  `status` from repo-b's clone shows its own two Matters sealed — work its
+  `wip plumbing status` from repo-b's clone shows its own two Matters sealed — work its
   Repo's event dimensions never saw happen; `next` from the dispatching
   clone reports every Matter sealed.
 
 ```
-$ wip status   # dispatching clone, after the cross-repo Run
+$ wip plumbing status   # dispatching clone, after the cross-repo Run
 acme/repo-a
   repo-a             Clone · current
 
@@ -246,7 +246,7 @@ finished:
 $ wip next     # dispatching clone
 nothing in progress or planned — every Matter sealed
 
-$ wip status   # repo-b's clone, after the cross-repo Run
+$ wip plumbing status   # repo-b's clone, after the cross-repo Run
 acme/repo-b
   repo-b             Clone · current
 

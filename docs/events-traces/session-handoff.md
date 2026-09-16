@@ -56,7 +56,7 @@ now all produced — nothing left to run in a fresh session for this Matter.
    `content.appended` payloads down to `{"kind": ...}` (the "type-relevant
    fields" the workplan's resolved format calls for); extend `keep_keys`
    in the script if a new event type needs the same treatment.
-5. Capture the rendered pane by running the real CLI (`wip status`, `wip
+5. Capture the rendered pane by running the real CLI (`wip plumbing status`, `wip
    next`, `wip session`, both human-mode and sometimes `--json`) against
    the *same* db, at the moments the trace's spec calls for (e.g. trace
    2's "before the gate closes" capture).
@@ -175,7 +175,7 @@ Sequence:
   `batch.joined` on the Matter's first work in this dispatch — D58 — plus
   the lifecycle pair being durable/`repo`-only regardless of where typed),
   `wip finish <step-locator>`.
-- Capture `wip status` and `wip next` from **both** clone-X and clone-Y
+- Capture `wip plumbing status` and `wip next` from **both** clone-X and clone-Y
   (`cd` into each, same `WIP_DB_PATH`) — same Matter set either way
   (repo-wide), but the current-clone marker and `next`'s cursor differ per
   clone (no cursor move ever happened from X).
