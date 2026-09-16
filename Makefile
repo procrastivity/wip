@@ -22,8 +22,11 @@ test:
 
 check: lint test
 
+# Both stages explicitly: .pre-commit-config.yaml declares a commit-msg
+# hook, and a bare `pre-commit install` wires only the pre-commit stage,
+# leaving the conventional-commit check configured but never firing.
 hooks:
-	pre-commit install
+	pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 # CGO_ENABLED=0 everywhere in this file (and in CI, and in the Nix package) is
 # load-bearing, not a default we happened to keep: it's what makes the
