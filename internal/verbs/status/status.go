@@ -350,6 +350,7 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 	}
 
 	printed := false
+	cursorVisible := false
 	for _, sec := range []struct {
 		title string
 		nodes []store.Node
@@ -373,6 +374,48 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 			}
 		}
 		printed = true
+		for _, n := range sec.nodes {
+			if n.ID == cursorNode {
+				cursorVisible = true
+				break
+			}
+		}
+	}
+	if !cursorVisible && cursorNode != "" {
+		var cursorLines []string
+		for _, f := range c.Finished {
+			if f.Node.ID == cursorNode {
+				lines, err := finishedLines(ctx, v, []readsurface.Finished{f}, cursorNode)
+				if err != nil {
+					return err
+				}
+				cursorLines = lines
+				break
+			}
+		}
+		if len(cursorLines) == 0 {
+			for _, b := range c.Blocked {
+				if b.Node.ID == cursorNode {
+					lines, err := blockedLines(ctx, v, []readsurface.Blocked{b}, cursorNode)
+					if err != nil {
+						return err
+					}
+					cursorLines = lines
+					break
+				}
+			}
+		}
+		if len(cursorLines) > 0 {
+			if _, err := fmt.Fprintln(streams.Out, "\ncursor:"); err != nil {
+				return err
+			}
+			for _, l := range cursorLines {
+				if _, err := fmt.Fprintln(streams.Out, l); err != nil {
+					return err
+				}
+			}
+			printed = true
+		}
 	}
 	if !printed {
 		if _, err := fmt.Fprintln(streams.Out, "\nnothing in progress, nothing unblocked"); err != nil {
