@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -58,6 +59,15 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				return err
 			}
 
+			// HarnessTargets returns both findings and per-target state
+			// (C4.5), so it runs beside the registry rather than inside
+			// it — a future check with no per-target state would run
+			// through guards.Run as before.
+			harnessFindings, targets, err := guards.HarnessTargets(root, build)
+			if err != nil {
+				return err
+			}
+
 			findings, err := guards.Run(cmd.Context(), s, dir,
 				func(ctx context.Context, s *store.Store, _ string) ([]guards.Finding, error) {
 					repo := report.Repo
@@ -69,13 +79,11 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				guards.CheckCycles,
 				guards.CheckGateOrder,
 				trackedwip.CheckTrackedWipDir,
-				func(_ context.Context, _ *store.Store, _ string) ([]guards.Finding, error) {
-					return guards.CheckStaleHarnessArtifacts(root, build)
-				},
 			)
 			if err != nil {
 				return err
 			}
+			findings = append(findings, harnessFindings...)
 
 			if flags.JSON {
 				type cloneOut struct {
@@ -87,15 +95,16 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 					offered = append(offered, cloneOut{ID: c.ID, Label: c.Label})
 				}
 				b, err := json.Marshal(struct {
-					Known       bool             `json:"known"`
-					Clone       string           `json:"clone,omitempty"`
-					OfferRepo   string           `json:"offerRepo,omitempty"`
-					OfferClones []cloneOut       `json:"offerClones,omitempty"`
-					Findings    []guards.Finding `json:"findings"`
+					Known       bool                 `json:"known"`
+					Clone       string               `json:"clone,omitempty"`
+					OfferRepo   string               `json:"offerRepo,omitempty"`
+					OfferClones []cloneOut           `json:"offerClones,omitempty"`
+					Findings    []guards.Finding     `json:"findings"`
+					Targets     []guards.TargetState `json:"targets"`
 				}{
 					Known: report.Known, Clone: report.Clone.ID,
 					OfferRepo: report.OfferRepo.ID, OfferClones: offered,
-					Findings: findings,
+					Findings: findings, Targets: targets,
 				})
 				if err != nil {
 					return err
@@ -132,6 +141,14 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				}
 			}
 
+			// Each registered target's drift state comes ahead of the
+			// findings (C4.5) — per-target fact first, problems after.
+			for _, t := range targets {
+				if _, err := fmt.Fprintf(streams.Out, "%s: %s at %s\n", t.Harness, t.State, t.Dir); err != nil {
+					return err
+				}
+			}
+
 			if len(findings) == 0 {
 				_, err := fmt.Fprintln(streams.Out, "no issues found")
 				return err
@@ -150,14 +167,17 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 
 // findingsError signals doctor's own exit posture — 0 with no failing
 // findings, 1 with one or more failing findings (chassis's "user-facing
-// failure" code). The inert-tracker-binding advisory remains in the same flat
-// output list but does not make doctor fail —
-// distinct from the refusal exit code (3) the render precondition uses at
-// its own call site for the tracked-`.wip/` condition specifically.
+// failure" code). A finding whose code carries the "advisory." prefix
+// never fails the run (C4.7): the inert-tracker-binding advisory, the
+// per-file stale-harness-artifact findings, and the modified/unowned
+// harness-target advisories all stay in the same flat output list without
+// failing doctor. This is distinct from the refusal exit code (3) the
+// render precondition uses at its own call site for the tracked-`.wip/`
+// condition specifically.
 func findingsError(findings []guards.Finding) error {
 	failing := 0
 	for _, finding := range findings {
-		if finding.Code != guards.InertTrackerBindingCode {
+		if !strings.HasPrefix(finding.Code, "advisory.") {
 			failing++
 		}
 	}

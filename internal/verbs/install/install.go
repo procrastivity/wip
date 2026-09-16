@@ -8,12 +8,12 @@
 // bare, it instead detects every harness available on this host and
 // installs into each one in turn, reporting a per-harness result rather
 // than aborting the whole run for one harness's refusal. Before writing to
-// any target, it refuses to overwrite a target tree that a human edited by
-// hand or that holds foreign, unstamped content
-// (internal/harness.RefuseHandEdited); once a target clears that check, a
-// tree already byte-identical to what this binary would generate is
-// reported current rather than rewritten; --force skips both checks and
-// overwrites unconditionally, in both modes.
+// any target, it asks internal/harness.Status and refuses
+// (internal/harness.Refusal) on any of its three unsafe states — a target
+// a human edited, one holding foreign unstamped content, or one whose
+// stamp this binary cannot use; a Current target is reported current
+// rather than rewritten; --force skips Status and overwrites
+// unconditionally, in both modes.
 package install
 
 import (
@@ -48,7 +48,7 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 		Long: "render and install wip's self-projection into an agent harness.\n\n" +
 			"With no harness name, wip install detects every harness available on this host and installs into each one, reporting a result per harness. Naming a harness installs (or reinstalls) only that one.\n\n" +
 			"Available harnesses: " + strings.Join(registry.Names, ", ") + ".\n\n" +
-			"Refuses to overwrite a target that was hand-edited or holds unstamped content; pass --force to overwrite it anyway, in either mode. A tree that already matches what this binary would write is reported as current and left untouched; --force rewrites it anyway.",
+			"Refuses to overwrite a target that was hand-edited, holds unstamped content, or carries a stamp this binary cannot use; pass --force to overwrite it anyway, in either mode. A tree that already matches what this binary would write is reported as current and left untouched; --force rewrites it anyway.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
@@ -85,21 +85,21 @@ func Command(streams *iostreams.Streams, build buildinfo.Info, root *cobra.Comma
 				if err != nil {
 					return err
 				}
-				if err := harness.RefuseHandEdited(harnessName, installDir); err != nil {
-					return err
-				}
-
 				files, err := h.Generate(m)
 				if err != nil {
 					return err
 				}
-				current, err := harness.IsCurrent(installDir, files)
+				s, err := harness.Status(installDir, files)
 				if err != nil {
 					return err
 				}
-				if current {
+				if err := harness.Refusal(harnessName, installDir, s, harness.ForceRemedy(harnessName, s)); err != nil {
+					return err
+				}
+				if s == harness.Current {
 					return writeTargetedResult(streams, flags, harnessName, installDir, "current")
 				}
+				// Missing or Stale: fall through and install below.
 			}
 
 			dir, err := h.Install(m)
@@ -167,13 +167,14 @@ type harnessResultError struct {
 // reports present on this host and recording one result per harness —
 // installed, current (the tree on disk already matches what this binary
 // would generate, so nothing is written), skipped (not detected), or
-// refused (hand-edited or unstamped content, without --force). A refusal
-// on one harness does not stop the
-// run; any other error (an I/O failure reading or writing a harness's
-// install dir) does, since that is not a policy decision this loop can
-// route around. After printing every result, it returns a single
-// refusal-shaped error naming every refused harness so the process still
-// exits non-zero, unless nothing was refused.
+// refused (Status found one of its three unsafe states, without --force;
+// each carries its own code, per harness.Refusal). A refusal on one
+// harness does not stop the run; any other error (an I/O failure reading
+// or writing a harness's install dir) does, since that is not a policy
+// decision this loop can route around. After printing every result, it
+// returns a single refusal.harness-targets-refused error naming every
+// refused harness so the process still exits non-zero, unless nothing was
+// refused.
 func installAll(streams *iostreams.Streams, flags cliflags.Flags, m manifest.Manifest, force bool) error {
 	results := make([]harnessResult, 0, len(registry.All))
 	var refused []string
@@ -189,7 +190,15 @@ func installAll(streams *iostreams.Streams, flags cliflags.Flags, m manifest.Man
 			if err != nil {
 				return err
 			}
-			if err := harness.RefuseHandEdited(h.Name, installDir); err != nil {
+			files, err := h.Generate(m)
+			if err != nil {
+				return err
+			}
+			s, err := harness.Status(installDir, files)
+			if err != nil {
+				return err
+			}
+			if err := harness.Refusal(h.Name, installDir, s, harness.ForceRemedy(h.Name, s)); err != nil {
 				var werr *wiperr.Error
 				if errors.As(err, &werr) {
 					results = append(results, harnessResult{
@@ -202,19 +211,11 @@ func installAll(streams *iostreams.Streams, flags cliflags.Flags, m manifest.Man
 				}
 				return err
 			}
-
-			files, err := h.Generate(m)
-			if err != nil {
-				return err
-			}
-			current, err := harness.IsCurrent(installDir, files)
-			if err != nil {
-				return err
-			}
-			if current {
+			if s == harness.Current {
 				results = append(results, harnessResult{Harness: h.Name, Status: "current", Dir: installDir})
 				continue
 			}
+			// Missing or Stale: fall through and install below.
 		}
 
 		dir, err := h.Install(m)
@@ -229,8 +230,8 @@ func installAll(streams *iostreams.Streams, flags cliflags.Flags, m manifest.Man
 	}
 
 	if len(refused) > 0 {
-		return wiperr.New("refusal.unstamped-harness-target",
-			fmt.Sprintf("refused — %d harness target(s) hold hand-edited or unstamped content (%s); re-run `wip install <harness> --force` for each to overwrite",
+		return wiperr.New("refusal.harness-targets-refused",
+			fmt.Sprintf("refused — %d harness target(s) hold hand-edited, unstamped, or incompatible content (%s); re-run `wip install <harness> --force` for each to overwrite",
 				len(refused), strings.Join(refused, ", ")))
 	}
 	return nil

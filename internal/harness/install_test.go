@@ -1,31 +1,59 @@
-package codex_test
+package harness_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/procrastivity/wip/internal/harness/codex"
+	"github.com/procrastivity/wip/internal/harness"
 	"github.com/procrastivity/wip/internal/manifest"
 )
 
-func withSkillsDir(t *testing.T) string {
+// The shared Install/Uninstall bodies serve every harness, so their
+// behavior is proven once here against a stub target — per-harness install
+// coverage lives in the e2e tests, which drive `wip install <harness>` for
+// each registered name.
+
+func stubTarget(t *testing.T) (installDir func() (string, error), dir string) {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv(codex.SkillsDirEnv, dir)
-	return dir
+	dir = filepath.Join(t.TempDir(), "wip")
+	return func() (string, error) { return dir, nil }, dir
+}
+
+func stubGenerate(m manifest.Manifest) (map[string][]byte, error) {
+	body := []byte("# " + m.Tool.Name + " " + m.Tool.Version + "\n")
+	for _, v := range m.Verbs {
+		body = append(body, []byte(v.Name+"\n")...)
+	}
+	return map[string][]byte{
+		"SKILL.md":        body,
+		"nested/extra.md": []byte("nested content\n"),
+	}, nil
+}
+
+func installManifest() manifest.Manifest {
+	return manifest.Manifest{
+		Tool:          manifest.Tool{Name: "wip", Version: "1.2.3"},
+		SchemaVersion: manifest.SchemaVersion,
+		Verbs:         []manifest.Verb{{Name: "status"}},
+	}
 }
 
 func TestInstall_WritesStampedTree(t *testing.T) {
-	withSkillsDir(t)
+	installDir, dir := stubTarget(t)
 
-	dir, err := codex.Install(testManifest())
+	got, err := harness.Install("stub", installDir, stubGenerate, installManifest())
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
+	if got != dir {
+		t.Errorf("Install returned %q, want %q", got, dir)
+	}
 
-	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
-		t.Errorf("SKILL.md missing after install: %v", err)
+	for _, want := range []string{"SKILL.md", filepath.Join("nested", "extra.md")} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Errorf("%s missing after install: %v", want, err)
+		}
 	}
 
 	stamp, ok, err := manifest.ReadStamp(dir)
@@ -35,8 +63,8 @@ func TestInstall_WritesStampedTree(t *testing.T) {
 	if !ok {
 		t.Fatal("ReadStamp: no stamp found after install")
 	}
-	if stamp.ToolVersion != testManifest().Tool.Version {
-		t.Errorf("stamp.ToolVersion = %q, want %q", stamp.ToolVersion, testManifest().Tool.Version)
+	if stamp.ToolVersion != "1.2.3" {
+		t.Errorf("stamp.ToolVersion = %q, want %q", stamp.ToolVersion, "1.2.3")
 	}
 	if _, ok := stamp.Files["SKILL.md"]; !ok {
 		t.Error("stamp.Files missing SKILL.md")
@@ -44,10 +72,10 @@ func TestInstall_WritesStampedTree(t *testing.T) {
 }
 
 func TestUninstall_RemovesExactlyTheStampedTree(t *testing.T) {
-	skillsDir := withSkillsDir(t)
+	installDir, dir := stubTarget(t)
 
-	// An unrelated skill directory that must survive uninstall untouched.
-	unrelated := filepath.Join(skillsDir, "some-other-skill")
+	// An unrelated sibling directory that must survive uninstall untouched.
+	unrelated := filepath.Join(filepath.Dir(dir), "some-other-skill")
 	if err := os.MkdirAll(unrelated, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +83,11 @@ func TestUninstall_RemovesExactlyTheStampedTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir, err := codex.Install(testManifest())
-	if err != nil {
+	if _, err := harness.Install("stub", installDir, stubGenerate, installManifest()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
-	removedDir, err := codex.Uninstall()
+	removedDir, err := harness.Uninstall("stub", installDir)
 	if err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
@@ -76,17 +103,16 @@ func TestUninstall_RemovesExactlyTheStampedTree(t *testing.T) {
 }
 
 func TestUninstall_NothingInstalled(t *testing.T) {
-	withSkillsDir(t)
+	installDir, _ := stubTarget(t)
 
-	if _, err := codex.Uninstall(); err == nil {
+	if _, err := harness.Uninstall("stub", installDir); err == nil {
 		t.Fatal("Uninstall: want an error when nothing is installed")
 	}
 }
 
 func TestUninstall_RefusesUnstampedForeignContent(t *testing.T) {
-	skillsDir := withSkillsDir(t)
+	installDir, dir := stubTarget(t)
 
-	dir := filepath.Join(skillsDir, "wip")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +120,7 @@ func TestUninstall_RefusesUnstampedForeignContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := codex.Uninstall(); err == nil {
+	if _, err := harness.Uninstall("stub", installDir); err == nil {
 		t.Fatal("Uninstall: want a refusal against a target with no install stamp")
 	}
 	if _, err := os.Stat(dir); err != nil {
@@ -103,10 +129,9 @@ func TestUninstall_RefusesUnstampedForeignContent(t *testing.T) {
 }
 
 func TestUninstall_RefusesHandEditedInstalledContent(t *testing.T) {
-	withSkillsDir(t)
+	installDir, dir := stubTarget(t)
 
-	dir, err := codex.Install(testManifest())
-	if err != nil {
+	if _, err := harness.Install("stub", installDir, stubGenerate, installManifest()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -115,7 +140,7 @@ func TestUninstall_RefusesHandEditedInstalledContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := codex.Uninstall(); err == nil {
+	if _, err := harness.Uninstall("stub", installDir); err == nil {
 		t.Fatal("Uninstall: want a refusal when installed content was hand-edited since install")
 	}
 	if _, err := os.Stat(dir); err != nil {
@@ -124,11 +149,10 @@ func TestUninstall_RefusesHandEditedInstalledContent(t *testing.T) {
 }
 
 func TestDrift_ReportsAddedVerbAfterInstall_ThenReinstallClearsIt(t *testing.T) {
-	withSkillsDir(t)
+	installDir, dir := stubTarget(t)
 
-	m1 := testManifest()
-	dir, err := codex.Install(m1)
-	if err != nil {
+	m1 := installManifest()
+	if _, err := harness.Install("stub", installDir, stubGenerate, m1); err != nil {
 		t.Fatalf("Install(m1): %v", err)
 	}
 	stamp, ok, err := manifest.ReadStamp(dir)
@@ -136,12 +160,12 @@ func TestDrift_ReportsAddedVerbAfterInstall_ThenReinstallClearsIt(t *testing.T) 
 		t.Fatalf("ReadStamp after install: ok=%v err=%v", ok, err)
 	}
 
-	m2 := testManifest()
-	m2.Verbs = append(m2.Verbs, manifest.Verb{Name: "next", Kind: m1.Verbs[0].Kind, Description: "what's next"})
+	m2 := installManifest()
+	m2.Verbs = append(m2.Verbs, manifest.Verb{Name: "next", Description: "what's next"})
 
-	files2, err := codex.Generate(m2)
+	files2, err := stubGenerate(m2)
 	if err != nil {
-		t.Fatalf("Generate(m2): %v", err)
+		t.Fatalf("stubGenerate(m2): %v", err)
 	}
 	want := manifest.ChecksumFiles(files2)
 
@@ -150,7 +174,7 @@ func TestDrift_ReportsAddedVerbAfterInstall_ThenReinstallClearsIt(t *testing.T) 
 		t.Fatal("Drift: want at least one finding after adding a verb, got none")
 	}
 
-	if _, err := codex.Install(m2); err != nil {
+	if _, err := harness.Install("stub", installDir, stubGenerate, m2); err != nil {
 		t.Fatalf("Install(m2): %v", err)
 	}
 	stamp2, ok, err := manifest.ReadStamp(dir)

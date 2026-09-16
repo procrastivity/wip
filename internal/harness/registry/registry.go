@@ -12,6 +12,7 @@ package registry
 import (
 	"fmt"
 
+	"github.com/procrastivity/wip/internal/harness"
 	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
@@ -22,17 +23,29 @@ import (
 )
 
 // Harness is one row of the install/uninstall/doctor table: a harness's
-// name plus the functions that generate, install, uninstall, locate, and
-// probe its projection. Every field is required — Lookup's callers dispatch
-// through them unconditionally, in place of the five-way switches this
-// table replaces.
+// name plus the functions that generate, locate, and probe its projection.
+// Every field is required — Lookup's callers dispatch through them
+// unconditionally, in place of the five-way switches this table replaces.
+// Install and Uninstall are methods, not fields: their bodies are the same
+// for every harness (internal/harness.Install/Uninstall), parameterized by
+// exactly the three fields a row already carries.
 type Harness struct {
 	Name       string
 	InstallDir func() (string, error)
 	Generate   func(manifest.Manifest) (map[string][]byte, error)
-	Install    func(manifest.Manifest) (string, error)
-	Uninstall  func() (string, error)
 	Available  func() bool
+}
+
+// Install renders h's projection into its install dir and stamps it — the
+// shared body in internal/harness, applied to this row.
+func (h Harness) Install(m manifest.Manifest) (string, error) {
+	return harness.Install(h.Name, h.InstallDir, h.Generate, m)
+}
+
+// Uninstall removes exactly the stamped tree at h's install dir — the
+// shared body in internal/harness, applied to this row.
+func (h Harness) Uninstall() (string, error) {
+	return harness.Uninstall(h.Name, h.InstallDir)
 }
 
 // All lists every harness wip can project itself into, in the same order
@@ -43,48 +56,36 @@ var All = []Harness{
 		Name:       claudecode.Name,
 		InstallDir: claudecode.InstallDir,
 		Generate:   claudecode.Generate,
-		Install:    claudecode.Install,
-		Uninstall:  claudecode.Uninstall,
 		Available:  claudecode.Available,
 	},
 	{
 		Name:       amp.Name,
 		InstallDir: amp.InstallDir,
 		Generate:   amp.Generate,
-		Install:    amp.Install,
-		Uninstall:  amp.Uninstall,
 		Available:  amp.Available,
 	},
 	{
 		Name:       codex.Name,
 		InstallDir: codex.InstallDir,
 		Generate:   codex.Generate,
-		Install:    codex.Install,
-		Uninstall:  codex.Uninstall,
 		Available:  codex.Available,
 	},
 	{
 		Name:       devin.Name,
 		InstallDir: devin.InstallDir,
 		Generate:   devin.Generate,
-		Install:    devin.Install,
-		Uninstall:  devin.Uninstall,
 		Available:  devin.Available,
 	},
 	{
 		Name:       pi.Name,
 		InstallDir: pi.InstallDir,
 		Generate:   pi.Generate,
-		Install:    pi.Install,
-		Uninstall:  pi.Uninstall,
 		Available:  pi.Available,
 	},
 	{
 		Name:       opencode.Name,
 		InstallDir: opencode.InstallDir,
 		Generate:   opencode.Generate,
-		Install:    opencode.Install,
-		Uninstall:  opencode.Uninstall,
 		Available:  opencode.Available,
 	},
 }
