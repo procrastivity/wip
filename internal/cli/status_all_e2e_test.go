@@ -1,5 +1,5 @@
-// End-to-end tests for `wip status`'s finished-section collapsing and `--all`
-// escape hatch, plus `wip cancel --reason`. binPath, run, runIn, gitIn,
+// End-to-end tests for `wip plumbing status`'s finished-section collapsing and `--all`
+// escape hatch, plus `wip plumbing cancel --reason`. binPath, run, runIn, gitIn,
 // newGitRepo come from e2e_test.go / tiers_e2e_test.go; setupRepo,
 // mustJSON, nodePayload, openTestStore come from writesurface_birth_test.go
 // (same package). Recency (the 14-day hide-old-sealed-matter window) is
@@ -39,7 +39,7 @@ func TestStatus_CollapsesSealedSubtreeAndAllRestoresIt(t *testing.T) {
 		t.Fatalf("finish matter: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	def := runIn(t, dir, dbEnv, "status")
+	def := runIn(t, dir, dbEnv, "plumbing", "status")
 	if def.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", def.exitCode, def.stderr)
 	}
@@ -50,7 +50,7 @@ func TestStatus_CollapsesSealedSubtreeAndAllRestoresIt(t *testing.T) {
 		t.Errorf("default status = %q, want the sealed matter %s present", def.stdout, m.Locator)
 	}
 
-	all := runIn(t, dir, dbEnv, "status", "--all")
+	all := runIn(t, dir, dbEnv, "plumbing", "status", "--all")
 	if all.exitCode != 0 {
 		t.Fatalf("status --all: exit=%d stderr=%q", all.exitCode, all.stderr)
 	}
@@ -76,7 +76,7 @@ func TestStatus_JSONCarriesHiddenSealedMatters(t *testing.T) {
 		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	out := runIn(t, dir, dbEnv, "status", "--json")
+	out := runIn(t, dir, dbEnv, "plumbing", "status", "--json")
 	if out.exitCode != 0 {
 		t.Fatalf("status --json: exit=%d stderr=%q", out.exitCode, out.stderr)
 	}

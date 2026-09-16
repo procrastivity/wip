@@ -28,7 +28,7 @@ import (
 // TestWorkedExample1_ThreeClonesOneRepo: a fresh clone, a second clone moved
 // on disk after init (recovered via doctor's relink offer, not a duplicate
 // row), and a linked worktree of that second clone with its own Worktree
-// row. All three resolve to the same Repo; `wip status` from each location
+// row. All three resolve to the same Repo; `wip plumbing status` from each location
 // is captured.
 func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
@@ -95,10 +95,10 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 		t.Fatalf("clones = %+v, want exactly 2 (widget-a, widget-b) — a duplicate row means relink failed to recover", listPayload.Clones)
 	}
 
-	// `wip status` from each location, captured verbatim.
-	fromA := runIn(t, a, dbEnv, "status")
-	fromBMoved := runIn(t, bMoved, dbEnv, "status")
-	fromFeature := runIn(t, wtDir, dbEnv, "status")
+	// `wip plumbing status` from each location, captured verbatim.
+	fromA := runIn(t, a, dbEnv, "plumbing", "status")
+	fromBMoved := runIn(t, bMoved, dbEnv, "plumbing", "status")
+	fromFeature := runIn(t, wtDir, dbEnv, "plumbing", "status")
 
 	t.Logf("wip status (from widget-a):\n%s", fromA.stdout)
 	t.Logf("wip status (from widget-b, moved+relinked):\n%s", fromBMoved.stdout)
@@ -152,7 +152,7 @@ func TestWorkedExample2_LinkedWorktreeThenMoved(t *testing.T) {
 	movedWT := filepath.Join(root, "widget-feature-moved")
 	gitIn(t, main, "worktree", "move", wtDir, movedWT)
 
-	after := runIn(t, movedWT, dbEnv, "status", "--json")
+	after := runIn(t, movedWT, dbEnv, "plumbing", "status", "--json")
 	if after.exitCode != 0 {
 		t.Fatalf("status after worktree move: exit=%d stderr=%q", after.exitCode, after.stderr)
 	}
@@ -270,7 +270,7 @@ func TestWorkedExample4_LocalOnlyThenAdoptsARemote(t *testing.T) {
 
 	gitIn(t, dir, "remote", "add", "origin", "git@github.com:acme/local-only.git")
 
-	after := runIn(t, dir, dbEnv, "status", "--json")
+	after := runIn(t, dir, dbEnv, "plumbing", "status", "--json")
 	if after.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", after.exitCode, after.stderr)
 	}
@@ -327,7 +327,7 @@ func TestWorkedExample5_ForkGetsADistinctRepo(t *testing.T) {
 
 	// wip status, host-wide, sees both as separate repos.
 	elsewhere := t.TempDir()
-	hostWide := runIn(t, elsewhere, dbEnv, "status", "--json")
+	hostWide := runIn(t, elsewhere, dbEnv, "plumbing", "status", "--json")
 	if hostWide.exitCode != 0 {
 		t.Fatalf("status host-wide: exit=%d stderr=%q", hostWide.exitCode, hostWide.stderr)
 	}
@@ -402,7 +402,7 @@ func TestWorkedExample6_UnknownClone(t *testing.T) {
 // birth verbs (`write-surface`) don't exist yet, which is this Stage's
 // stated posture, not a shortcut — all four joined to one Batch row (Batch
 // "keys at no tier", D39, so spanning two Repos is legal by construction).
-// Dispatched from a single clone of one of the two Repos. `wip status` from
+// Dispatched from a single clone of one of the two Repos. `wip plumbing status` from
 // that clone is captured showing its own repo-wide/current-clone-marked
 // scope is unaffected by the Batch's cross-repo membership; the Batch's
 // legality is confirmed directly against the store.
@@ -501,7 +501,7 @@ func TestWorkedExample7_CrossRepoBatch(t *testing.T) {
 		t.Fatalf("batch members = %v, want all four Matters", members)
 	}
 
-	// Dispatched from a single clone of repo-a: `wip status`'s own
+	// Dispatched from a single clone of repo-a: `wip plumbing status`'s own
 	// repo-wide/current-clone-marked scope (step-08) is unaffected by the
 	// Batch's cross-repo membership — it never mentions repo-b or the
 	// Batch (Batch-scoped rendering is D25's deferred territory, and status
@@ -511,7 +511,7 @@ func TestWorkedExample7_CrossRepoBatch(t *testing.T) {
 	// Planned with no blockers, so they show up as the unblocked frontier
 	// ("next to start"), and nothing about repo-b or the cross-repo Batch
 	// leaks in.
-	statusResult := runIn(t, repoA, dbEnv, "status")
+	statusResult := runIn(t, repoA, dbEnv, "plumbing", "status")
 	if statusResult.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", statusResult.exitCode, statusResult.stderr)
 	}
@@ -655,7 +655,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	// What the dispatching clone sees afterward: `status` stays repo-scoped —
 	// repo-a's two Matters are sealed; repo-b's never appear, even though this
 	// clone's Run just worked them.
-	statusA := runIn(t, repoA, dbEnv, "status")
+	statusA := runIn(t, repoA, dbEnv, "plumbing", "status")
 	if statusA.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", statusA.exitCode, statusA.stderr)
 	}
@@ -679,7 +679,7 @@ func TestWorkedExample7_CrossRepoRun(t *testing.T) {
 	// And repo-b's own clone reads its Matters as sealed work it never saw
 	// happen: the lifecycle is durable and repo-scoped reads pick it up, but
 	// every event that moved them carries another Repo's dimension.
-	statusB := runIn(t, repoB, dbEnv, "status")
+	statusB := runIn(t, repoB, dbEnv, "plumbing", "status")
 	if statusB.exitCode != 0 {
 		t.Fatalf("status from repo-b: exit=%d stderr=%q", statusB.exitCode, statusB.stderr)
 	}

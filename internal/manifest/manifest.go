@@ -79,6 +79,13 @@ type Verb struct {
 	Args         []Arg           `json:"args"`
 	Description  string          `json:"description"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
+
+	// AliasOf names the canonical member when this verb is the porcelain
+	// spelling of an alias pair (D112) — "plumbing next" on the top-level
+	// `next` entry. Empty on every other verb, including the canonical
+	// member itself. Unratified at the contract: wip's own mechanism,
+	// proven here before toolsmith ratifies it (plumbing-namespace step-04).
+	AliasOf string `json:"alias-of,omitempty"`
 }
 
 // Asset describes one file under the shipped assets/ tree.

@@ -1,9 +1,9 @@
 package readsurface
 
-// Step-04: `wip next` — the cursor fused with the frontier, producing
+// Step-04: `wip plumbing next` — the cursor fused with the frontier, producing
 // exactly vocabulary's five drafted outputs plus the choose-next case D67
 // makes first-class (reframed from "dangling": the cursor's work ending is
-// not a defect, it is the forward-looking moment `wip next --set` or `wip
+// not a defect, it is the forward-looking moment `wip plumbing next --set` or `wip
 // next --clear` resolves). `next` needs a resolved current Clone + Worktree
 // (unlike `status`, it does not inherit `tiers`'s host-wide carve-out) and
 // composes over Frontier/FinishedNodes/LocallyComplete/Sealed — the same
@@ -39,14 +39,14 @@ const (
 	EverythingSealed
 	// InProgressNoCursor is the trace-1 finding made first-class: no cursor
 	// and an empty Planned frontier, but work actively In Progress (a node
-	// started with no plan, before any `wip next --set`). Reported as its own
+	// started with no plan, before any `wip plumbing next --set`). Reported as its own
 	// shape so output 5 is never reused for a state it does not describe.
 	InProgressNoCursor
 	// ChooseNext is D67's first-class result, reframed from "dangling": the
 	// cursor's target is tombstoned, Canceled, or sealed — its work is done,
 	// and what comes next is a forward-looking choice, not a repair. next
 	// reports the fact plus the unblocked candidates and the in-progress
-	// work, and never moves the cursor itself; `wip next --set` or `wip next
+	// work, and never moves the cursor itself; `wip plumbing next --set` or `wip plumbing next
 	// --clear` (an explicit "leave it open") are the two ways to answer.
 	ChooseNext
 )
@@ -99,7 +99,7 @@ func Next(ctx context.Context, s *store.Store, actor store.Actor, dir string) (V
 // next is Next's composition against an already-resolved Current — factored
 // out so package tests can exercise every branch without a real git clone
 // for ResolveCurrent to shell out to (the e2e suite in internal/cli covers
-// that resolution end to end, including the real `wip next --set` write
+// that resolution end to end, including the real `wip plumbing next --set` write
 // path — step-07(b)).
 func next(ctx context.Context, v store.View, cur Current) (View, error) {
 	repo := cur.Repo.ID
@@ -251,7 +251,7 @@ func filterBlockedByRepo(blocked []Blocked, repo string) []Blocked {
 	return out
 }
 
-// SetCursor implements `wip next --set <locator>`: the one write path this
+// SetCursor implements `wip plumbing next --set <locator>`: the one write path this
 // whole Matter has. It resolves locator against the current Repo, moves the
 // cursor for the current Clone + Worktree, and emits the one event this
 // Matter produces — cursor.moved (an execution event carrying repo, clone
@@ -294,7 +294,7 @@ func setCursor(ctx context.Context, s *store.Store, actor store.Actor, cur Curre
 	return target, nil
 }
 
-// ClearCursor implements `wip next --clear`: the explicit "leave what's next
+// ClearCursor implements `wip plumbing next --clear`: the explicit "leave what's next
 // undecided" write D67's choose-next reframing offers beside `--set` —
 // attention is allowed to be nowhere on purpose (D38), and this is how a
 // caller says so out loud rather than just letting a stale cursor sit. It

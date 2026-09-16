@@ -1,5 +1,5 @@
-// Package readsurface implements PLAN 1.7's read verbs: `wip status`'s
-// founding-question content, `wip next` (with `--set`), and `wip plumbing session`.
+// Package readsurface implements PLAN 1.7's read verbs: `wip plumbing status`'s
+// founding-question content, `wip plumbing next` (with `--set`), and `wip plumbing session`.
 // MODEL §1's founding question is what is in progress, what is finished,
 // what is next to start — plus the temporal tense Session adds, what was
 // done recently. Every answer here comes from the store directly, never
@@ -8,10 +8,10 @@
 // This package owns no storage of its own; it reads and writes exclusively
 // through internal/store's data-access layer (the `schema` Brief) and, for
 // the current Clone/Worktree a command runs from, through internal/tiers —
-// exactly the contract `tiers/tier-verbs` step-08's `wip status` stub
+// exactly the contract `tiers/tier-verbs` step-08's `wip plumbing status` stub
 // already confirms. It deliberately does not import internal/writesurface:
 // this Matter's one edge is `read-surface ← schema, tiers/tier-verbs`, and
-// its own addressing needs (`wip next --set <locator>`) are small enough to
+// its own addressing needs (`wip plumbing next --set <locator>`) are small enough to
 // own here rather than depend on the write verbs for.
 package readsurface
 

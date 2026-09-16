@@ -60,9 +60,17 @@ func TestPlumbingNamespace_BarePlumbingListsSubstrateAndExitsZero(t *testing.T) 
 			t.Errorf("bare plumbing does not list %q:\n%s", moved, r.stdout)
 		}
 	}
-	for _, porcelain := range []string{"status", "next", "init", "doctor", "install", "uninstall", "version", "manifest"} {
+	// The pair members (status, next) ARE listed here — their plumbing
+	// membership is what keeps them projectable (D112). Porcelain-only
+	// verbs stay absent.
+	for _, pairMember := range []string{"status", "next"} {
+		if !strings.Contains(r.stdout, "\n  "+pairMember+" ") {
+			t.Errorf("bare plumbing does not list pair member %q:\n%s", pairMember, r.stdout)
+		}
+	}
+	for _, porcelain := range []string{"init", "doctor", "install", "uninstall", "version", "manifest"} {
 		if strings.Contains(r.stdout, "\n  "+porcelain+" ") {
-			t.Errorf("bare plumbing lists porcelain verb %q, want it absent:\n%s", porcelain, r.stdout)
+			t.Errorf("bare plumbing lists porcelain-only verb %q, want it absent:\n%s", porcelain, r.stdout)
 		}
 	}
 }

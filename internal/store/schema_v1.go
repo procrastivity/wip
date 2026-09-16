@@ -339,7 +339,7 @@ func v1Statements() []string {
 		// Why both ends and not just the row: an edge is a relation between two
 		// nodes, and a relation to a node that has been structurally removed is not
 		// a relation. Removing the blocker is how D44's amendment clears an
-		// obstruction; if the edge outlived it, `wip status` would report a blocker
+		// obstruction; if the edge outlived it, `wip plumbing status` would report a blocker
 		// that can never complete and `doctor` would report loops running through
 		// removed nodes — loops no repair can break, because there is nothing left
 		// to unblock. The edge row itself is untouched and stays tombstone-free: it

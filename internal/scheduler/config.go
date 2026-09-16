@@ -2,7 +2,7 @@ package scheduler
 
 // The default Run cap lives in tool config, next to read-surface's idle_gap
 // (D54: tool config, resolved user-override -> shipped default). The engine
-// takes its cap per invocation; this default shapes reads — `wip next`'s
+// takes its cap per invocation; this default shapes reads — `wip plumbing next`'s
 // slot display — and callers that have no better answer.
 
 import (
