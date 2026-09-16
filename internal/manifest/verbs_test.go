@@ -152,3 +152,30 @@ func TestBuild_ArgsExcludeInheritedGlobalFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestBuild_UsageRecordsPositionalPortionVerbatim(t *testing.T) {
+	root := fakeRoot(t)
+	withPositional := &cobra.Command{
+		Use:   "create <name>",
+		Short: "a synthetic verb with a positional",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	surface.Annotate(withPositional, surface.Plumbing)
+	root.AddCommand(withPositional)
+
+	m, err := manifest.Build(root, buildinfo.Info{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	usage := map[string]string{}
+	for _, v := range m.Verbs {
+		usage[v.Name] = v.Usage
+	}
+	if got := usage["create"]; got != "<name>" {
+		t.Errorf(`usage["create"] = %q, want "<name>" — the Use line's positional portion, verbatim (C3.8)`, got)
+	}
+	if got := usage["widget"]; got != "" {
+		t.Errorf(`usage["widget"] = %q, want "" for a verb with no positionals`, got)
+	}
+}

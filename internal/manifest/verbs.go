@@ -18,10 +18,12 @@ import (
 // registry.
 const outputSchemaAnnotation = "wip.output-schema"
 
-// SetOutputSchema records schema as cmd's declared --json output shape. No
-// verb calls this yet — the field exists in the manifest shape per the
-// Brief, ready for the first verb that earns one; it is not filled
-// speculatively.
+// SetOutputSchema records schema as cmd's declared --json output shape.
+// Decided (contract-backport step-07, C3.7): this is a reserved slot,
+// kept, awaiting the first verb with a JSON payload worth describing — no
+// verb calls it yet, and it is never filled speculatively. The skeleton
+// chassis ships the same slot, so dropping it here would diverge the
+// reference implementation from the chassis extracted from it.
 func SetOutputSchema(cmd *cobra.Command, schema json.RawMessage) {
 	if cmd.Annotations == nil {
 		cmd.Annotations = map[string]string{}
@@ -69,6 +71,7 @@ func collect(root, cmd *cobra.Command, out *[]Verb) error {
 		v := Verb{
 			Name:        verbPath(root, child),
 			Kind:        kind,
+			Usage:       usageArgs(child),
 			Args:        walkArgs(child),
 			Description: child.Short,
 		}
@@ -87,6 +90,14 @@ func collect(root, cmd *cobra.Command, out *[]Verb) error {
 func verbPath(root, cmd *cobra.Command) string {
 	path := strings.TrimPrefix(cmd.CommandPath(), root.Name())
 	return strings.TrimSpace(path)
+}
+
+// usageArgs returns the positional-argument portion of cmd's Use line —
+// "<name>" from "new <name>", "" from "version". Cobra's Use line always
+// opens with the command's own name; everything after it is the verb's
+// declaration of what it takes positionally.
+func usageArgs(cmd *cobra.Command) string {
+	return strings.TrimSpace(strings.TrimPrefix(cmd.Use, cmd.Name()))
 }
 
 // cobraBuiltinFlags names flags Cobra adds to every command automatically

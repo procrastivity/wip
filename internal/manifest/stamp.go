@@ -2,10 +2,19 @@ package manifest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrStampUnparseable marks a stamp file whose JSON does not parse.
+// harness.Status maps it to the incompatible state: a stamp this binary
+// cannot read is the same fact as a stamp from another schemaVersion —
+// either way the binary cannot tell what it owns (C4.5, C4.6, T6). It is a
+// sentinel, not a value, so callers use errors.Is rather than matching the
+// wrapped message.
+var ErrStampUnparseable = errors.New("manifest: stamp file is not valid JSON")
 
 // StampFileName is the bookkeeping file a harness install writes alongside
 // its generated tree — the Brief's "stamps every generated file with
@@ -62,7 +71,7 @@ func ReadStamp(dir string) (Stamp, bool, error) {
 	}
 	var stamp Stamp
 	if err := json.Unmarshal(data, &stamp); err != nil {
-		return Stamp{}, false, fmt.Errorf("manifest: parsing stamp: %w", err)
+		return Stamp{}, false, fmt.Errorf("manifest: parsing stamp: %w: %w", ErrStampUnparseable, err)
 	}
 	return stamp, true, nil
 }

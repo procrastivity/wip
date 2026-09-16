@@ -1,8 +1,9 @@
 // Package manifest builds wip's machine-readable declaration of itself
 // (manifest-install Brief, "What the manifest is"): the flat JSON object
-// `wip manifest --json` emits — tool identity, every registered verb
-// regardless of kind, the shipped-asset list with checksums, and the
-// registered tracker backend names. It reads chassis's single
+// `wip manifest --json` emits — tool identity, contract version, every
+// registered verb regardless of kind, the shipped-asset list with
+// checksums, the registered tracker backend names, and a self-committing
+// digest. It reads chassis's single
 // verb-registration point (the built root command) and chassis's
 // asset-resolution chain; it adds no second registry of either.
 package manifest
@@ -25,6 +26,11 @@ import (
 // a bump would flag drift on every install.
 const SchemaVersion = 1
 
+// Contract names the toolsmith contract version this tool conforms to
+// (C3.6). The conformance checker and the fleet register read it from the
+// manifest rather than asserting it from memory.
+const Contract = "toolsmith/v1"
+
 // Tool identifies the binary that produced the manifest. Its three fields
 // reuse chassis step-08's exact version/commit/date vars — the same names,
 // the same package path — so `wip version` and `wip manifest --json`'s tool
@@ -38,8 +44,8 @@ type Tool struct {
 
 // Arg describes one flag a verb declares on itself (its LocalFlags — the
 // global --json/-v pair is chassis's, not a per-verb arg, and is excluded).
-// Positional arguments are not introspectable generically from a Cobra
-// command and are not described here.
+// A verb's positional arguments are not flags and are recorded separately,
+// as Verb.Usage.
 type Arg struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
@@ -50,8 +56,26 @@ type Arg struct {
 // the manifest itself never filters (Brief, "verbs"); that happens only on
 // the harness-projection side (internal/harness).
 type Verb struct {
-	Name         string          `json:"name"`
-	Kind         surface.Kind    `json:"kind"`
+	Name string       `json:"name"`
+	Kind surface.Kind `json:"kind"`
+
+	// Usage is the positional-argument portion of the verb's own cobra Use
+	// line, recorded verbatim (toolsmith C3.8): "<name>" for a verb
+	// declared as `Use: "new <name>"`, empty for one that takes no
+	// positionals. Without it a consumer reading only the manifest — the
+	// harness projection is one — cannot tell that a verb requires an
+	// argument at all.
+	//
+	// It is recorded, never parsed. Cobra's Args validator is an opaque
+	// func, so the shape of a verb's positionals is not mechanically
+	// introspectable; the Use line is the one place a verb declares it, and
+	// the angle/bracket convention it uses is a convention nothing
+	// enforces. Splitting it into {name, required, variadic} would be
+	// inventing structure from that convention, which is what C3.7 forbids
+	// doing speculatively. A consumer that needs structure earns the field
+	// then.
+	Usage string `json:"usage,omitempty"`
+
 	Args         []Arg           `json:"args"`
 	Description  string          `json:"description"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
@@ -67,6 +91,7 @@ type Asset struct {
 type Manifest struct {
 	Tool          Tool    `json:"tool"`
 	SchemaVersion int     `json:"schemaVersion"`
+	Contract      string  `json:"contract"`
 	Verbs         []Verb  `json:"verbs"`
 	Assets        []Asset `json:"assets"`
 
@@ -76,6 +101,12 @@ type Manifest struct {
 	// answer "which trackers can wip use" without reading source. Always
 	// present — an empty list marshals as [] rather than null.
 	Trackers []string `json:"trackers"`
+
+	// ManifestDigest is a sha256 over this document's own canonical JSON
+	// with this field held empty (toolsmith C3.4, adopted from duo): a
+	// comparable identity for the whole manifest, so drift can be detected
+	// without re-walking. Build sets it last.
+	ManifestDigest string `json:"manifest_digest"`
 }
 
 // Option adjusts what Build records beyond the verb walk and asset tree.
@@ -114,6 +145,7 @@ func Build(root *cobra.Command, build buildinfo.Info, opts ...Option) (Manifest,
 			Date:    build.Date,
 		},
 		SchemaVersion: SchemaVersion,
+		Contract:      Contract,
 		Verbs:         verbs,
 		Assets:        assets,
 		Trackers:      []string{},
@@ -121,5 +153,13 @@ func Build(root *cobra.Command, build buildinfo.Info, opts ...Option) (Manifest,
 	for _, opt := range opts {
 		opt(&m)
 	}
+
+	// The digest commits to the exact document the caller receives, so it
+	// is computed only after every other field — options included — is set.
+	digest, err := manifestDigest(m)
+	if err != nil {
+		return Manifest{}, err
+	}
+	m.ManifestDigest = digest
 	return m, nil
 }
