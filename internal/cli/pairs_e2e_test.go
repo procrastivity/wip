@@ -142,6 +142,46 @@ func TestPair_PorcelainStatusIsTheMinimalWorkingSet(t *testing.T) {
 	}
 }
 
+func TestPair_PorcelainStatusKeepsBlockedCursorVisible(t *testing.T) {
+	dir, dbEnv := seedStatusFixture(t)
+	if r := runIn(t, dir, dbEnv, "next", "--set", "blocked-matter"); r.exitCode != 0 {
+		t.Fatalf("next --set blocked-matter: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	r := runIn(t, dir, dbEnv, "status")
+	if r.exitCode != 0 {
+		t.Fatalf("status: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, want := range []string{"cursor:\n", "blocked-matter", "blocked-by: pair-matter", "· cursor"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("status = %q, want it to contain %q", r.stdout, want)
+		}
+	}
+	if strings.Contains(r.stdout, "blocked:\n") {
+		t.Errorf("status = %q, want unrelated blocked rows collapsed", r.stdout)
+	}
+}
+
+func TestPair_PorcelainStatusKeepsFinishedCursorVisible(t *testing.T) {
+	dir, dbEnv := seedStatusFixture(t)
+	if r := runIn(t, dir, dbEnv, "next", "--set", "pair-matter/step-01"); r.exitCode != 0 {
+		t.Fatalf("next --set pair-matter/step-01: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	r := runIn(t, dir, dbEnv, "status")
+	if r.exitCode != 0 {
+		t.Fatalf("status: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, want := range []string{"cursor:\n", "pair-matter · step-01", "· sealed", "· cursor"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("status = %q, want it to contain %q", r.stdout, want)
+		}
+	}
+	if strings.Contains(r.stdout, "finished:\n") {
+		t.Errorf("status = %q, want unrelated finished rows collapsed", r.stdout)
+	}
+}
+
 // TestPair_PorcelainStatusFullRendersEverySection covers `--full`: all
 // four sections minus the clone/worktree enumeration — finished keeps its
 // sealed/locally-complete words, blocked keeps its blocked-by list.
