@@ -4,7 +4,7 @@ package readsurface
 // exactly vocabulary's five drafted outputs plus the choose-next case D67
 // makes first-class (reframed from "dangling": the cursor's work ending is
 // not a defect, it is the forward-looking moment `wip plumbing next --set` or `wip
-// next --clear` resolves). `next` needs a resolved current Clone + Worktree
+// plumbing next --clear` resolves). `next` needs a resolved current Clone + Worktree
 // (unlike `status`, it does not inherit `tiers`'s host-wide carve-out) and
 // composes over Frontier/FinishedNodes/LocallyComplete/Sealed — the same
 // logic `status` (step-03) consumes, so the two verbs never diverge on what
