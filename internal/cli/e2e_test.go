@@ -652,8 +652,8 @@ func TestUninstall_RefusesHandEditedTarget(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stderr), &envelope); err != nil {
 		t.Fatalf("stderr is not the --json error envelope: %v (stderr=%q)", err, r.stderr)
 	}
-	if envelope.Error.Code != "refusal.unstamped-harness-target" {
-		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.unstamped-harness-target")
+	if envelope.Error.Code != "refusal.modified-harness-target" {
+		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.modified-harness-target")
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("hand-edited install dir was removed despite the refusal: %v", err)
@@ -843,8 +843,8 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 		seen[res.Harness] = true
 		switch res.Harness {
 		case "claude-code":
-			if res.Status != "refused" || res.Error == nil || res.Error.Code != "refusal.unstamped-harness-target" {
-				t.Errorf("claude-code result = %+v, want refused with code refusal.unstamped-harness-target", res)
+			if res.Status != "refused" || res.Error == nil || res.Error.Code != "refusal.modified-harness-target" {
+				t.Errorf("claude-code result = %+v, want refused with code refusal.modified-harness-target", res)
 			}
 		case "opencode":
 			if res.Status != "current" || res.Dir == "" {
@@ -864,8 +864,8 @@ func TestInstall_Bare_RefusesHandEditedHarnessAndContinues(t *testing.T) {
 	if err := json.Unmarshal([]byte(jr.stderr), &envelope); err != nil {
 		t.Fatalf("stderr is not the --json error envelope: %v (stderr=%q)", err, jr.stderr)
 	}
-	if envelope.Error.Code != "refusal.unstamped-harness-target" {
-		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.unstamped-harness-target")
+	if envelope.Error.Code != "refusal.harness-targets-refused" {
+		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.harness-targets-refused")
 	}
 
 	force := run(t, env, "install", "--force")
@@ -1011,8 +1011,8 @@ func TestInstall_Targeted_RefusesHandEditedThenForceOverwrites(t *testing.T) {
 	if err := json.Unmarshal([]byte(refused.stderr), &envelope); err != nil {
 		t.Fatalf("stderr is not the --json error envelope: %v (stderr=%q)", err, refused.stderr)
 	}
-	if envelope.Error.Code != "refusal.unstamped-harness-target" {
-		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.unstamped-harness-target")
+	if envelope.Error.Code != "refusal.modified-harness-target" {
+		t.Fatalf("error.code = %q, want %q", envelope.Error.Code, "refusal.modified-harness-target")
 	}
 
 	forced := run(t, env, "install", "pi", "--force", "--json")

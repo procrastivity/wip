@@ -97,8 +97,8 @@ func TestCommand_Force(t *testing.T) {
 	if !errors.As(err, &got) {
 		t.Fatalf("re-install error = %T %v, want *wiperr.Error", err, err)
 	}
-	if got.Code != "refusal.unstamped-harness-target" {
-		t.Fatalf("re-install error code = %q, want %q", got.Code, "refusal.unstamped-harness-target")
+	if got.Code != "refusal.modified-harness-target" {
+		t.Fatalf("re-install error code = %q, want %q", got.Code, "refusal.modified-harness-target")
 	}
 
 	edited, err := os.ReadFile(skillMD)
@@ -334,8 +334,8 @@ func TestCommand_BareRefusesHandEditedAmongDetected(t *testing.T) {
 	if !errors.As(err, &got) {
 		t.Fatalf("Execute() error = %T %v, want *wiperr.Error", err, err)
 	}
-	if got.Code != "refusal.unstamped-harness-target" {
-		t.Fatalf("error code = %q, want %q", got.Code, "refusal.unstamped-harness-target")
+	if got.Code != "refusal.harness-targets-refused" {
+		t.Fatalf("error code = %q, want %q", got.Code, "refusal.harness-targets-refused")
 	}
 	if !strings.Contains(got.Message, "pi") {
 		t.Fatalf("error message %q does not name the refused harness pi", got.Message)

@@ -1,6 +1,8 @@
 package guards_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,19 +10,34 @@ import (
 
 	"github.com/procrastivity/wip/internal/buildinfo"
 	"github.com/procrastivity/wip/internal/guards"
+	"github.com/procrastivity/wip/internal/harness"
 	"github.com/procrastivity/wip/internal/harness/amp"
 	"github.com/procrastivity/wip/internal/harness/claudecode"
 	"github.com/procrastivity/wip/internal/harness/codex"
 	"github.com/procrastivity/wip/internal/harness/devin"
 	"github.com/procrastivity/wip/internal/harness/opencode"
 	"github.com/procrastivity/wip/internal/harness/pi"
+	"github.com/procrastivity/wip/internal/harness/registry"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/surface"
 )
 
+// isolateAllSkillsDirs points every registered harness at its own temp
+// dir — HarnessTargets walks the whole registry, so a test that leaves one
+// env unset would read the real host's install dirs.
+func isolateAllSkillsDirs(t *testing.T) {
+	t.Helper()
+	for _, env := range []string{
+		claudecode.SkillsDirEnv, amp.SkillsDirEnv, codex.SkillsDirEnv,
+		devin.SkillsDirEnv, pi.SkillsDirEnv, opencode.SkillsDirEnv,
+	} {
+		t.Setenv(env, t.TempDir())
+	}
+}
+
 // fakeRoot mirrors internal/manifest's own test fixture: a minimal root
 // carrying one plumbing verb, standing in for the real, fully-assembled
-// NewRootCommand tree CheckStaleHarnessArtifact reads in production.
+// NewRootCommand tree HarnessTargets reads in production.
 func fakeRoot() *cobra.Command {
 	root := &cobra.Command{Use: "wip"}
 	plumbing := &cobra.Command{
@@ -33,55 +50,82 @@ func fakeRoot() *cobra.Command {
 	return root
 }
 
-func TestCheckStaleHarnessArtifact_NeverInstalledReportsNothing(t *testing.T) {
-	t.Setenv(claudecode.SkillsDirEnv, t.TempDir())
-
-	findings, err := guards.CheckStaleHarnessArtifact(fakeRoot(), buildinfo.Info{Version: "1.0.0"})
+func installHarness(t *testing.T, name string, root *cobra.Command, build buildinfo.Info) string {
+	t.Helper()
+	m, err := manifest.Build(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleHarnessArtifact: %v", err)
+		t.Fatalf("manifest.Build: %v", err)
+	}
+	h, ok := registry.Lookup(name)
+	if !ok {
+		t.Fatalf("registry.Lookup(%q): not registered", name)
+	}
+	dir, err := h.Install(m)
+	if err != nil {
+		t.Fatalf("h.Install(%q): %v", name, err)
+	}
+	return dir
+}
+
+func stateOf(t *testing.T, targets []guards.TargetState, name string) harness.State {
+	t.Helper()
+	for _, target := range targets {
+		if target.Harness == name {
+			return target.State
+		}
+	}
+	t.Fatalf("targets = %+v, no entry for %q", targets, name)
+	return ""
+}
+
+func TestHarnessTargets_NeverInstalledReportsMissingAndNoFindings(t *testing.T) {
+	isolateAllSkillsDirs(t)
+
+	findings, targets, err := guards.HarnessTargets(fakeRoot(), buildinfo.Info{Version: "1.0.0"})
+	if err != nil {
+		t.Fatalf("HarnessTargets: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none — nothing has been installed to drift from", findings)
 	}
+	if len(targets) != len(registry.All) {
+		t.Fatalf("targets = %d entries, want one per registered harness (%d)", len(targets), len(registry.All))
+	}
+	for _, target := range targets {
+		if target.State != harness.Missing {
+			t.Errorf("%s state = %q, want %q", target.Harness, target.State, harness.Missing)
+		}
+	}
 }
 
-func TestCheckStaleHarnessArtifact_CleanRightAfterInstall(t *testing.T) {
-	t.Setenv(claudecode.SkillsDirEnv, t.TempDir())
+func TestHarnessTargets_CurrentRightAfterInstall(t *testing.T) {
+	isolateAllSkillsDirs(t)
 	build := buildinfo.Info{Version: "1.0.0"}
 	root := fakeRoot()
 
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := claudecode.Install(m); err != nil {
-		t.Fatalf("claudecode.Install: %v", err)
-	}
+	installHarness(t, claudecode.Name, root, build)
 
-	findings, err := guards.CheckStaleHarnessArtifact(root, build)
+	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleHarnessArtifact: %v", err)
+		t.Fatalf("HarnessTargets: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none immediately after install", findings)
 	}
+	if got := stateOf(t, targets, claudecode.Name); got != harness.Current {
+		t.Errorf("claude-code state = %q, want %q", got, harness.Current)
+	}
 }
 
-// TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall is step-08's
-// own test: install -> mutate the manifest (add a verb) -> doctor flags
-// drift; re-install -> doctor reports clean.
-func TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
-	t.Setenv(claudecode.SkillsDirEnv, t.TempDir())
+// TestHarnessTargets_FlagsDriftThenClearsOnReinstall is step-08's own
+// test, kept through the six-state port: install -> mutate the manifest
+// (add a verb) -> doctor flags stale drift; re-install -> clean.
+func TestHarnessTargets_FlagsDriftThenClearsOnReinstall(t *testing.T) {
+	isolateAllSkillsDirs(t)
 	build := buildinfo.Info{Version: "1.0.0"}
 	root := fakeRoot()
 
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := claudecode.Install(m); err != nil {
-		t.Fatalf("claudecode.Install: %v", err)
-	}
+	installHarness(t, claudecode.Name, root, build)
 
 	// Mutate the registered verb set after install, exactly as the workplan
 	// asks: a synthetic verb added to the registry the stamp predates.
@@ -93,9 +137,12 @@ func TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T)
 	surface.Annotate(extra, surface.Plumbing)
 	root.AddCommand(extra)
 
-	findings, err := guards.CheckStaleHarnessArtifact(root, build)
+	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleHarnessArtifact: %v", err)
+		t.Fatalf("HarnessTargets: %v", err)
+	}
+	if got := stateOf(t, targets, claudecode.Name); got != harness.Stale {
+		t.Errorf("claude-code state = %q, want %q", got, harness.Stale)
 	}
 	if len(findings) == 0 {
 		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
@@ -107,255 +154,106 @@ func TestCheckStaleHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T)
 	}
 
 	// Re-install against the now-current manifest clears the drift.
-	m2, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := claudecode.Install(m2); err != nil {
-		t.Fatalf("claudecode.Install (re-install): %v", err)
-	}
+	installHarness(t, claudecode.Name, root, build)
 
-	findings, err = guards.CheckStaleHarnessArtifact(root, build)
+	findings, targets, err = guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleHarnessArtifact after re-install: %v", err)
+		t.Fatalf("HarnessTargets after re-install: %v", err)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
 	}
-}
-
-// TestCheckStaleAmpHarnessArtifact_FlagsDriftThenClearsOnReinstall checks
-// the same drift-then-reinstall shape against the Amp harness.
-func TestCheckStaleAmpHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
-	t.Setenv(amp.SkillsDirEnv, t.TempDir())
-	build := buildinfo.Info{Version: "1.0.0"}
-	root := fakeRoot()
-
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := amp.Install(m); err != nil {
-		t.Fatalf("amp.Install: %v", err)
-	}
-
-	extra := &cobra.Command{
-		Use:   "gizmo",
-		Short: "a second synthetic plumbing verb, added after install",
-		RunE:  func(*cobra.Command, []string) error { return nil },
-	}
-	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
-
-	findings, err := guards.CheckStaleAmpHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStaleAmpHarnessArtifact: %v", err)
-	}
-	if len(findings) == 0 {
-		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
-	}
-
-	m2, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := amp.Install(m2); err != nil {
-		t.Fatalf("amp.Install (re-install): %v", err)
-	}
-
-	findings, err = guards.CheckStaleAmpHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStaleAmpHarnessArtifact after re-install: %v", err)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	if got := stateOf(t, targets, claudecode.Name); got != harness.Current {
+		t.Errorf("claude-code state after re-install = %q, want %q", got, harness.Current)
 	}
 }
 
-func TestCheckStaleHarnessArtifacts_IncludesAmp(t *testing.T) {
-	t.Setenv(claudecode.SkillsDirEnv, t.TempDir())
-	t.Setenv(amp.SkillsDirEnv, t.TempDir())
-	t.Setenv(codex.SkillsDirEnv, t.TempDir())
-	t.Setenv(devin.SkillsDirEnv, t.TempDir())
-	t.Setenv(pi.SkillsDirEnv, t.TempDir())
-	t.Setenv(opencode.SkillsDirEnv, t.TempDir())
+func TestHarnessTargets_ModifiedTreeGetsAdvisoryNotRefusal(t *testing.T) {
+	isolateAllSkillsDirs(t)
 	build := buildinfo.Info{Version: "1.0.0"}
 	root := fakeRoot()
 
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := amp.Install(m); err != nil {
-		t.Fatalf("amp.Install: %v", err)
+	dir := installHarness(t, amp.Name, root, build)
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("hand-edited"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	extra := &cobra.Command{
-		Use:   "gizmo",
-		Short: "a second synthetic plumbing verb, added after install",
-		RunE:  func(*cobra.Command, []string) error { return nil },
-	}
-	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
-
-	findings, err := guards.CheckStaleHarnessArtifacts(root, build)
+	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleHarnessArtifacts: %v", err)
+		t.Fatalf("HarnessTargets: %v", err)
 	}
-	if len(findings) == 0 {
-		t.Fatal("findings = none, want Amp drift through the aggregate doctor check")
+	if got := stateOf(t, targets, amp.Name); got != harness.Modified {
+		t.Errorf("amp state = %q, want %q", got, harness.Modified)
 	}
-	for _, finding := range findings {
-		if strings.Contains(finding.Message, "amp harness artifact") {
-			return
+	var sawModified bool
+	for _, f := range findings {
+		if f.Code == "advisory.modified-harness-target" {
+			sawModified = true
+			if !strings.Contains(f.Message, amp.Name) {
+				t.Errorf("modified finding %q does not name the harness", f.Message)
+			}
 		}
 	}
-	t.Fatalf("findings = %+v, want one that names the Amp harness", findings)
-}
-
-// TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall is
-// install-target-codex/step-03's counterpart to the claude-code test above:
-// same drift-then-reinstall shape, against the codex harness.
-func TestCheckStaleCodexHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
-	t.Setenv(codex.SkillsDirEnv, t.TempDir())
-	build := buildinfo.Info{Version: "1.0.0"}
-	root := fakeRoot()
-
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := codex.Install(m); err != nil {
-		t.Fatalf("codex.Install: %v", err)
-	}
-
-	extra := &cobra.Command{
-		Use:   "gizmo",
-		Short: "a second synthetic plumbing verb, added after install",
-		RunE:  func(*cobra.Command, []string) error { return nil },
-	}
-	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
-
-	findings, err := guards.CheckStaleCodexHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStaleCodexHarnessArtifact: %v", err)
-	}
-	if len(findings) == 0 {
-		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
-	}
-
-	m2, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := codex.Install(m2); err != nil {
-		t.Fatalf("codex.Install (re-install): %v", err)
-	}
-
-	findings, err = guards.CheckStaleCodexHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStaleCodexHarnessArtifact after re-install: %v", err)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	if !sawModified {
+		t.Fatalf("findings = %+v, want an advisory.modified-harness-target entry", findings)
 	}
 }
 
-// TestCheckStaleDevinHarnessArtifact_FlagsDriftThenClearsOnReinstall is
-// install-target-devin's counterpart to the claude-code/codex/pi tests
-// above: same drift-then-reinstall shape, against the devin harness.
-func TestCheckStaleDevinHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
-	t.Setenv(devin.SkillsDirEnv, t.TempDir())
+func TestHarnessTargets_UnownedConflictGetsAdvisory(t *testing.T) {
+	isolateAllSkillsDirs(t)
 	build := buildinfo.Info{Version: "1.0.0"}
 	root := fakeRoot()
 
-	m, err := manifest.Build(root, build)
+	// Foreign content, no stamp: something wip never wrote.
+	dir, err := mustRowInstallDir(codex.Name)
 	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := devin.Install(m); err != nil {
-		t.Fatalf("devin.Install: %v", err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("hand-written, not ours"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	extra := &cobra.Command{
-		Use:   "gizmo",
-		Short: "a second synthetic plumbing verb, added after install",
-		RunE:  func(*cobra.Command, []string) error { return nil },
-	}
-	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
-
-	findings, err := guards.CheckStaleDevinHarnessArtifact(root, build)
+	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStaleDevinHarnessArtifact: %v", err)
+		t.Fatalf("HarnessTargets: %v", err)
 	}
-	if len(findings) == 0 {
-		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
+	if got := stateOf(t, targets, codex.Name); got != harness.UnownedConflict {
+		t.Errorf("codex state = %q, want %q", got, harness.UnownedConflict)
 	}
-
-	m2, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := devin.Install(m2); err != nil {
-		t.Fatalf("devin.Install (re-install): %v", err)
-	}
-
-	findings, err = guards.CheckStaleDevinHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStaleDevinHarnessArtifact after re-install: %v", err)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
+	if len(findings) != 1 || findings[0].Code != "advisory.unowned-harness-target" {
+		t.Fatalf("findings = %+v, want exactly one advisory.unowned-harness-target", findings)
 	}
 }
 
-// TestCheckStalePiHarnessArtifact_FlagsDriftThenClearsOnReinstall is
-// install-target-pi/step-03's counterpart to the claude-code/codex tests
-// above: same drift-then-reinstall shape, against the pi harness.
-func TestCheckStalePiHarnessArtifact_FlagsDriftThenClearsOnReinstall(t *testing.T) {
-	t.Setenv(pi.SkillsDirEnv, t.TempDir())
+func TestHarnessTargets_IncompatibleStampFailsWithRefusalAndNoPerFileFindings(t *testing.T) {
+	isolateAllSkillsDirs(t)
 	build := buildinfo.Info{Version: "1.0.0"}
 	root := fakeRoot()
 
-	m, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
-	}
-	if _, err := pi.Install(m); err != nil {
-		t.Fatalf("pi.Install: %v", err)
+	dir := installHarness(t, pi.Name, root, build)
+	if err := os.WriteFile(filepath.Join(dir, manifest.StampFileName), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	extra := &cobra.Command{
-		Use:   "gizmo",
-		Short: "a second synthetic plumbing verb, added after install",
-		RunE:  func(*cobra.Command, []string) error { return nil },
-	}
-	surface.Annotate(extra, surface.Plumbing)
-	root.AddCommand(extra)
-
-	findings, err := guards.CheckStalePiHarnessArtifact(root, build)
+	findings, targets, err := guards.HarnessTargets(root, build)
 	if err != nil {
-		t.Fatalf("CheckStalePiHarnessArtifact: %v", err)
+		t.Fatalf("HarnessTargets: %v", err)
 	}
-	if len(findings) == 0 {
-		t.Fatal("findings = none, want at least one — the installed skill no longer reflects the current verb set")
+	if got := stateOf(t, targets, pi.Name); got != harness.Incompatible {
+		t.Errorf("pi state = %q, want %q", got, harness.Incompatible)
 	}
+	if len(findings) != 1 || findings[0].Code != harness.CodeIncompatible {
+		t.Fatalf("findings = %+v, want exactly one %s and no per-file findings — a stamp Status cannot trust cannot be diffed", findings, harness.CodeIncompatible)
+	}
+}
 
-	m2, err := manifest.Build(root, build)
-	if err != nil {
-		t.Fatalf("manifest.Build: %v", err)
+func mustRowInstallDir(name string) (string, error) {
+	h, ok := registry.Lookup(name)
+	if !ok {
+		return "", os.ErrNotExist
 	}
-	if _, err := pi.Install(m2); err != nil {
-		t.Fatalf("pi.Install (re-install): %v", err)
-	}
-
-	findings, err = guards.CheckStalePiHarnessArtifact(root, build)
-	if err != nil {
-		t.Fatalf("CheckStalePiHarnessArtifact after re-install: %v", err)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("findings = %+v, want none after re-install clears the drift", findings)
-	}
+	return h.InstallDir()
 }

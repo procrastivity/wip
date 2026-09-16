@@ -62,12 +62,6 @@ func TestAll_NoNilFunctionFields(t *testing.T) {
 		if h.Generate == nil {
 			t.Errorf("%s: Generate is nil", h.Name)
 		}
-		if h.Install == nil {
-			t.Errorf("%s: Install is nil", h.Name)
-		}
-		if h.Uninstall == nil {
-			t.Errorf("%s: Uninstall is nil", h.Name)
-		}
 		if h.Available == nil {
 			t.Errorf("%s: Available is nil", h.Name)
 		}
