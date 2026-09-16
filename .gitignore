@@ -1,6 +1,11 @@
 # Private, uncommitted project instructions
 /CLAUDE.local.md
 
+# wip's own rendered snapshot (wip refresh). Ignored by decision, not by
+# one machine's git config (C6.8): .wip/ is per-clone working state, and
+# wip doctor itself refuses to render into a tracked .wip/.
+/.wip/
+
 # Build artifacts
 /bin/
 /dist/
