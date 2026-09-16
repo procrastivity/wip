@@ -110,6 +110,11 @@ func InstallDir() (string, error) {
 func Generate(m manifest.Manifest) (map[string][]byte, error) {
 	verbs := harness.Projectable(m.Verbs)
 
+	description, err := harness.SkillDescription()
+	if err != nil {
+		return nil, err
+	}
+
 	judgment, err := asset.Resolve(judgmentAsset)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: resolving judgment template: %w", err)
@@ -120,16 +125,16 @@ func Generate(m manifest.Manifest) (map[string][]byte, error) {
 	}
 
 	return map[string][]byte{
-		"SKILL.md": renderSkillMD(m, verbs, judgment.Bytes(), guidance.Bytes()),
+		"SKILL.md": renderSkillMD(m, verbs, description, judgment.Bytes(), guidance.Bytes()),
 	}, nil
 }
 
-func renderSkillMD(m manifest.Manifest, verbs []manifest.Verb, judgment, guidance []byte) []byte {
+func renderSkillMD(m manifest.Manifest, verbs []manifest.Verb, description string, judgment, guidance []byte) []byte {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "---\n")
 	fmt.Fprintf(&b, "name: %s\n", skillName)
-	fmt.Fprintf(&b, "description: Track and drive %s work — Matters, Stages, Steps — through its verb surface.\n", m.Tool.Name)
+	fmt.Fprintf(&b, "description: %s\n", description)
 	fmt.Fprintf(&b, "---\n\n")
 
 	fmt.Fprintf(&b, "# %s\n\n", m.Tool.Name)
@@ -149,7 +154,8 @@ func renderSkillMD(m manifest.Manifest, verbs []manifest.Verb, judgment, guidanc
 			if desc == "" {
 				desc = "(no description)"
 			}
-			fmt.Fprintf(&b, "| `%s %s` | %s |\n", m.Tool.Name, v.Name, desc)
+			invocation := strings.TrimSpace(m.Tool.Name + " " + v.Name + " " + v.Usage)
+			fmt.Fprintf(&b, "| `%s` | %s |\n", invocation, desc)
 		}
 		fmt.Fprintf(&b, "\n")
 	}
