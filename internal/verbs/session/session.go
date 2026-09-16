@@ -1,4 +1,4 @@
-// Package session implements `wip session [--idle-gap <duration>]` — a
+// Package session implements `wip plumbing session [--idle-gap <duration>]` — a
 // derived view over the event log covering contiguous working periods
 // (MODEL §2.4). Never persisted, drives nothing, gates nothing (D17):
 // every call recomputes it from the log. Unlike `status`/`next`, it takes no
@@ -19,7 +19,7 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs `wip session`.
+// Command constructs `wip plumbing session`.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	var idleGapFlag string
 	cmd := &cobra.Command{

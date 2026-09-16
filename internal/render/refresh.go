@@ -21,7 +21,7 @@ type Precondition func(ctx context.Context, cur Current) error
 // (internal/verbs/refresh) passes this until `guards` supplies its own.
 func NoPrecondition(context.Context, Current) error { return nil }
 
-// Result is what a render pass produced — `wip refresh`'s success payload.
+// Result is what a render pass produced — `wip plumbing refresh`'s success payload.
 type Result struct {
 	DispatchID string
 	ScratchDir string
@@ -72,7 +72,7 @@ func Refresh(ctx context.Context, s *store.Store, cur Current, actor store.Actor
 	}, nil
 }
 
-// Render implements the on-demand path: `wip refresh <locator>` names one
+// Render implements the on-demand path: `wip plumbing refresh <locator>` names one
 // node explicitly — the only way a sealed Matter renders (step-05). Render
 // granularity is always the owning Matter's whole subtree (step-03's depth
 // policy is per-Matter), regardless of which node within it locator names.
@@ -118,7 +118,7 @@ func Render(ctx context.Context, s *store.Store, cur Current, actor store.Actor,
 // Exit writes one Matter's generated tree after it sealed, without opening
 // a dispatch and without emitting render.performed. Eager coverage will
 // skip this Matter from here on, so this is the last snapshot a subsequent
-// bare `wip refresh` would have taken. Seal is not a render pass of a
+// bare `wip plumbing refresh` would have taken. Seal is not a render pass of a
 // dispatch (D59); minting one here would be a side effect of finish or
 // gate close.
 func Exit(ctx context.Context, s *store.Store, cur Current, node store.Node, precondition Precondition) error {

@@ -1,5 +1,5 @@
 // Package lifecycle implements the five scale-polymorphic lifecycle verbs:
-// `wip start`, `wip finish`, `wip cancel`, `wip pause`, `wip resume` — each a
+// `wip plumbing start`, `wip plumbing finish`, `wip plumbing cancel`, `wip plumbing pause`, `wip plumbing resume` — each a
 // top-level root command (MODEL §2.2's lifecycle is uniform at every scale,
 // so there is no per-scale verb triple).
 package lifecycle
@@ -68,7 +68,7 @@ func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {
 	return s, repo, nil
 }
 
-// StartCommand constructs `wip start <locator>`.
+// StartCommand constructs `wip plumbing start <locator>`.
 func StartCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start <locator>",
@@ -213,13 +213,13 @@ func transitionCommandWithEnv(use, short string, move func(context.Context, *sto
 	}
 }
 
-// FinishCommand constructs `wip finish <locator>`.
+// FinishCommand constructs `wip plumbing finish <locator>`.
 func FinishCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	return transitionCommandWithEnv("finish <locator>", "move a matter, stage or step from In Progress to Done",
 		writesurface.FinishWithEnvResult, "finished", tracker.NewAlignmentCoordinator(providers))(streams)
 }
 
-// CancelCommand constructs `wip cancel <locator>`. It cannot use
+// CancelCommand constructs `wip plumbing cancel <locator>`. It cannot use
 // transitionCommand — writesurface.Cancel carries the extra optional
 // `reason` param transitionCommand's move signature has no room for — so its
 // body mirrors transitionCommand's exactly, plus the flag.
@@ -282,13 +282,13 @@ func CancelCommand(streams *iostreams.Streams) *cobra.Command {
 	return cmd
 }
 
-// PauseCommand constructs `wip pause <locator>`.
+// PauseCommand constructs `wip plumbing pause <locator>`.
 func PauseCommand(streams *iostreams.Streams) *cobra.Command {
 	return transitionCommand("pause <locator>", "move a matter, stage or step from In Progress to Paused",
 		writesurface.Pause, "paused")(streams)
 }
 
-// ResumeCommand constructs `wip resume <locator>`.
+// ResumeCommand constructs `wip plumbing resume <locator>`.
 func ResumeCommand(streams *iostreams.Streams) *cobra.Command {
 	return transitionCommand("resume <locator>", "move a matter, stage or step from Paused to In Progress",
 		writesurface.Resume, "resumed")(streams)

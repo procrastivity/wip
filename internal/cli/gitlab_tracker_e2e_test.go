@@ -179,37 +179,37 @@ func TestGitLabCreateThroughCLIPersistsWebURLBinding(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "gitlab"},
-		{"outbox", "canceled-label", gitlabCLILabel},
+		{"plumbing", "outbox", "backend", "gitlab"},
+		{"plumbing", "outbox", "canceled-label", gitlabCLILabel},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, r.exitCode, r.stdout, r.stderr)
 		}
 	}
 
-	if r := runWithProviders(t, providers, "outbox", "backend"); r.exitCode != 0 || r.stdout != "gitlab\n" {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend"); r.exitCode != 0 || r.stdout != "gitlab\n" {
 		t.Fatalf("durable backend = exit %d, stdout %q, stderr %q", r.exitCode, r.stdout, r.stderr)
 	}
-	if r := runWithProviders(t, providers, "outbox", "target"); r.exitCode != 0 || r.stdout != "none\n" {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "target"); r.exitCode != 0 || r.stdout != "none\n" {
 		t.Fatalf("durable target = exit %d, stdout %q, stderr %q", r.exitCode, r.stdout, r.stderr)
 	}
-	if r := runWithProviders(t, providers, "outbox", "canceled-label"); r.exitCode != 0 || r.stdout != gitlabCLILabel+"\n" {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "canceled-label"); r.exitCode != 0 || r.stdout != gitlabCLILabel+"\n" {
 		t.Fatalf("durable canceled label = exit %d, stdout %q, stderr %q", r.exitCode, r.stdout, r.stderr)
 	}
 
 	added := mustJSON[struct {
 		ID string `json:"id"`
-	}](t, runWithProviders(t, providers, "backlog", "add", "--title", "Reconcile GitLab create", "--provenance", "intake", "--json").stdout)
+	}](t, runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "Reconcile GitLab create", "--provenance", "intake", "--json").stdout)
 	delegated := mustJSON[struct {
 		Outbox string `json:"outbox"`
-	}](t, runWithProviders(t, providers, "backlog", "delegate", added.ID, "--json").stdout)
+	}](t, runWithProviders(t, providers, "plumbing", "backlog", "delegate", added.ID, "--json").stdout)
 	if delegated.Outbox == "" {
 		t.Fatal("delegation returned no outbox identity")
 	}
-	if r := runWithProviders(t, providers, "outbox", "approve", delegated.Outbox); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "approve", delegated.Outbox); r.exitCode != 0 {
 		t.Fatalf("approve: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
-	flushed := mustJSON[tracker.Report](t, runWithProviders(t, providers, "outbox", "flush", "--json").stdout)
+	flushed := mustJSON[tracker.Report](t, runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(flushed.Entries) != 1 || flushed.Entries[0].ID != delegated.Outbox || flushed.Entries[0].State != "flushed" {
 		t.Fatalf("flush report = %+v", flushed)
 	}
@@ -281,8 +281,8 @@ func TestGitLabStartConvergesAndCancelAppliesLabelThroughCLI(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "gitlab"},
-		{"outbox", "canceled-label", gitlabCLILabel},
+		{"plumbing", "outbox", "backend", "gitlab"},
+		{"plumbing", "outbox", "canceled-label", gitlabCLILabel},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, r.exitCode, r.stdout, r.stderr)
@@ -290,22 +290,22 @@ func TestGitLabStartConvergesAndCancelAppliesLabelThroughCLI(t *testing.T) {
 	}
 
 	matter := mustJSON[nodePayload](t, runWithProviders(t, providers,
-		"matter", "create", "--title", "Cancel via GitLab", "--locator", "cancel-gitlab", "--json").stdout)
-	if r := runWithProviders(t, providers, "bind", "cancel-gitlab", gitlabCLIRef, "--json"); r.exitCode != 0 {
+		"plumbing", "matter", "create", "--title", "Cancel via GitLab", "--locator", "cancel-gitlab", "--json").stdout)
+	if r := runWithProviders(t, providers, "plumbing", "bind", "cancel-gitlab", gitlabCLIRef, "--json"); r.exitCode != 0 {
 		t.Fatalf("bind: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
 	if entries := startTransitionOutbox(t, providers); len(entries) != 0 {
 		t.Fatalf("Planned bind queued outbox entries: %+v", entries)
 	}
 
-	if r := runWithProviders(t, providers, "start", "cancel-gitlab", "--json"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "start", "cancel-gitlab", "--json"); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
 	active := wantActiveStartEntry(t, startTransitionOutbox(t, providers), matter.ID, gitlabCLIRef)
-	if r := runWithProviders(t, providers, "outbox", "approve", active.ID, "--json"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "approve", active.ID, "--json"); r.exitCode != 0 {
 		t.Fatalf("approve active: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
-	startFlush := mustJSON[tracker.Report](t, runWithProviders(t, providers, "outbox", "flush", "--json").stdout)
+	startFlush := mustJSON[tracker.Report](t, runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(startFlush.Entries) != 1 || startFlush.Entries[0].ID != active.ID || startFlush.Entries[0].State != "converged" {
 		t.Fatalf("start flush report = %+v", startFlush)
 	}
@@ -329,7 +329,7 @@ func TestGitLabStartConvergesAndCancelAppliesLabelThroughCLI(t *testing.T) {
 		t.Fatalf("tracker.state-observed payload = %+v (err %v)", observed, err)
 	}
 
-	if r := runWithProviders(t, providers, "cancel", "cancel-gitlab", "--json"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "cancel", "cancel-gitlab", "--json"); r.exitCode != 0 {
 		t.Fatalf("cancel: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
 	entries := startTransitionOutbox(t, providers)
@@ -353,11 +353,11 @@ func TestGitLabStartConvergesAndCancelAppliesLabelThroughCLI(t *testing.T) {
 		t.Fatalf("cancel candidate = %+v payload=%s, want queued canceled state for %s", canceled, canceled.Payload, gitlabCLIRef)
 	}
 
-	if r := runWithProviders(t, providers, "outbox", "approve", canceled.ID, "--json"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "approve", canceled.ID, "--json"); r.exitCode != 0 {
 		t.Fatalf("approve canceled: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
 	}
 	callsBeforeCancelFlush := len(fake.calls)
-	cancelFlush := mustJSON[tracker.Report](t, runWithProviders(t, providers, "outbox", "flush", "--json").stdout)
+	cancelFlush := mustJSON[tracker.Report](t, runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json").stdout)
 	if len(cancelFlush.Entries) != 1 || cancelFlush.Entries[0].ID != canceled.ID || cancelFlush.Entries[0].State != "flushed" {
 		t.Fatalf("cancel flush report = %+v", cancelFlush)
 	}
@@ -395,7 +395,7 @@ func TestGitLabStartConvergesAndCancelAppliesLabelThroughCLI(t *testing.T) {
 
 func TestGitLabIsAStockBackend(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
-	result := runIn(t, dir, dbEnv, "outbox", "backend", "gitlab", "--json")
+	result := runIn(t, dir, dbEnv, "plumbing", "outbox", "backend", "gitlab", "--json")
 	if result.exitCode != 0 || !strings.Contains(result.stdout, `"backend":"gitlab"`) {
 		t.Fatalf("set stock gitlab backend: exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
 	}

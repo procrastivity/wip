@@ -458,7 +458,7 @@ func verifyRoleActor(ctx context.Context, tx *sql.Tx, env Env, name string) erro
 		return fmt.Errorf("store: verify actor role:%s: %w", name, err)
 	}
 	if count == 0 {
-		return fmt.Errorf("store: actor role:%s claims a role with no open spawn behind it; `wip role spawn %s` first (MODEL §6, D59)", name, name)
+		return fmt.Errorf("store: actor role:%s claims a role with no open spawn behind it; `wip plumbing role spawn %s` first (MODEL §6, D59)", name, name)
 	}
 	return nil
 }

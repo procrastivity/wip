@@ -2,7 +2,7 @@
 
 wip is a personal, agent-friendly project-management CLI. It tracks real
 work — Matters, Stages, Steps — through a verb surface (`wip next`,
-`wip start`, `wip finish`, …), records every write as an event, and
+`wip plumbing start`, `wip plumbing finish`, …), records every write as an event, and
 queues tracker writes in an outbox that only a person approves and
 flushes. It is built for a solo developer who works alongside coding
 agents: the same verbs serve both, and `wip install` projects the tool

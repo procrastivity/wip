@@ -47,10 +47,10 @@ func TestAgentPath_CreateOnce_CrossShapeRefusal(t *testing.T) {
 		"body":     store.KindBody,
 	}
 	for verb, kind := range kinds {
-		m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Cross-shape "+verb, "--json").stdout)
+		m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Cross-shape "+verb, "--json").stdout)
 
 		// First write: stdin (the default shape).
-		if r := runInStdin(t, dir, dbEnv, "first via stdin", verb, m.ID, "--json"); r.exitCode != 0 {
+		if r := runInStdin(t, dir, dbEnv, "first via stdin", "plumbing", verb, m.ID, "--json"); r.exitCode != 0 {
 			t.Fatalf("%s (stdin): exit=%d stderr=%q", verb, r.exitCode, r.stderr)
 		}
 		s := openTestStore(t, dbPath)
@@ -65,7 +65,7 @@ func TestAgentPath_CreateOnce_CrossShapeRefusal(t *testing.T) {
 		if err := os.WriteFile(filePath, []byte("second via file, should never land"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		refused := runIn(t, dir, dbEnv, verb, m.ID, "--file", filePath, "--json")
+		refused := runIn(t, dir, dbEnv, "plumbing", verb, m.ID, "--file", filePath, "--json")
 		if refused.exitCode == 0 {
 			t.Errorf("%s: a second create-once call via a different shape (--file after stdin) should be refused", verb)
 		}
@@ -98,9 +98,9 @@ func TestAgentPath_D40Boundary_UnconsumedScratchFileHasNoEffect(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 	dbPath := dbEnvPath(dbEnv)
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Untouched by drops", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Untouched by drops", "--json").stdout)
 
-	first := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "refresh", "--json").stdout)
+	first := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "plumbing", "refresh", "--json").stdout)
 	if !first.Opened {
 		t.Fatal("first refresh should have opened a dispatch")
 	}
@@ -123,7 +123,7 @@ func TestAgentPath_D40Boundary_UnconsumedScratchFileHasNoEffect(t *testing.T) {
 
 	// A second refresh (same still-open dispatch) just re-renders — it never
 	// globs the scratch dir looking for something to pick up.
-	if r := runIn(t, dir, dbEnv, "refresh", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh", "--json"); r.exitCode != 0 {
 		t.Fatalf("second refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -167,7 +167,7 @@ func TestAgentPath_ScratchFileConsumption_LiveDispatch(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 	dbPath := dbEnvPath(dbEnv)
 
-	refreshed := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "refresh", "--json").stdout)
+	refreshed := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "plumbing", "refresh", "--json").stdout)
 	if !refreshed.Opened {
 		t.Fatal("refresh should have opened a dispatch")
 	}
@@ -178,7 +178,7 @@ func TestAgentPath_ScratchFileConsumption_LiveDispatch(t *testing.T) {
 		t.Errorf("scratch dir %q is not namespaced by its own dispatch-id %q", refreshed.ScratchDir, refreshed.Dispatch)
 	}
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Live scratch consumption", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Live scratch consumption", "--json").stdout)
 
 	// The agent's own draft, written into the *real* scratch dir a real
 	// dispatch opened.
@@ -188,7 +188,7 @@ func TestAgentPath_ScratchFileConsumption_LiveDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := runIn(t, dir, dbEnv, "brief", m.ID, "--file", draftPath, "--json")
+	r := runIn(t, dir, dbEnv, "plumbing", "brief", m.ID, "--file", draftPath, "--json")
 	if r.exitCode != 0 {
 		t.Fatalf("brief --file <live scratch path>: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
@@ -237,7 +237,7 @@ func TestAgentPath_AcceptanceSession_IntakeThroughGate(t *testing.T) {
 	dbPath := dbEnvPath(dbEnv)
 	ctx := context.Background()
 
-	if r := runIn(t, dir, dbEnv, "gate", "declare", "reviewed-local", "--scale", "matter", "--json"); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter", "--json"); r.exitCode != 0 {
 		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -245,13 +245,13 @@ func TestAgentPath_AcceptanceSession_IntakeThroughGate(t *testing.T) {
 	// step-02/this Matter's step-03) and would hand the agent this
 	// dispatch-id and scratch dir — nothing in the sequence below composes
 	// either value itself.
-	spawned := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "refresh", "--json").stdout)
+	spawned := mustJSON[refreshPayload](t, runIn(t, dir, dbEnv, "plumbing", "refresh", "--json").stdout)
 	if !spawned.Opened || spawned.Dispatch == "" || spawned.ScratchDir == "" {
 		t.Fatalf("spawn: refresh did not open a dispatch with a scratch dir: %+v", spawned)
 	}
 
 	// Intake: birth the Matter.
-	matterR := runIn(t, dir, dbEnv, "matter", "create", "--title", "Reduce p99 latency", "--json")
+	matterR := runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Reduce p99 latency", "--json")
 	if matterR.exitCode != 0 {
 		t.Fatalf("matter create: exit=%d stderr=%q", matterR.exitCode, matterR.stderr)
 	}
@@ -260,7 +260,7 @@ func TestAgentPath_AcceptanceSession_IntakeThroughGate(t *testing.T) {
 	// Plan: the Workplan, via stdin — this Matter's resolved shape for the
 	// three create-once prose verbs.
 	workplanText := "# Workplan: reduce p99 latency\n\nProfile the hot path, then cut it.\n"
-	workplanR := runInStdin(t, dir, dbEnv, workplanText, "workplan", m.ID, "--json")
+	workplanR := runInStdin(t, dir, dbEnv, workplanText, "plumbing", "workplan", m.ID, "--json")
 	if workplanR.exitCode != 0 {
 		t.Fatalf("workplan (stdin): exit=%d stderr=%q", workplanR.exitCode, workplanR.stderr)
 	}
@@ -272,40 +272,40 @@ func TestAgentPath_AcceptanceSession_IntakeThroughGate(t *testing.T) {
 	// Work: a Step directly under the Matter (D2), started, findings logged
 	// via the positional-argument shape (this Matter's resolved default for
 	// `wip finding add`), then finished.
-	stepR := runIn(t, dir, dbEnv, "step", "create", m.ID, "--title", "Profile the hot path", "--json")
+	stepR := runIn(t, dir, dbEnv, "plumbing", "step", "create", m.ID, "--title", "Profile the hot path", "--json")
 	if stepR.exitCode != 0 {
 		t.Fatalf("step create: exit=%d stderr=%q", stepR.exitCode, stepR.stderr)
 	}
 	step := mustJSON[nodePayload](t, stepR.stdout)
 
-	if r := runIn(t, dir, dbEnv, "start", step.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", step.ID); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
 	findings := []string{"the flame graph points at the marshal step", "cutting the marshal alone gets p99 under budget"}
 	for i, text := range findings {
-		findingR := runIn(t, dir, dbEnv, "finding", "add", step.ID, text, "--json")
+		findingR := runIn(t, dir, dbEnv, "plumbing", "finding", "add", step.ID, text, "--json")
 		if findingR.exitCode != 0 {
 			t.Fatalf("finding add #%d (positional): exit=%d stderr=%q", i+1, findingR.exitCode, findingR.stderr)
 		}
 	}
 
-	if r := runIn(t, dir, dbEnv, "finish", step.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", step.ID); r.exitCode != 0 {
 		t.Fatalf("finish step: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	if r := runIn(t, dir, dbEnv, "finish", m.ID); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.ID); r.exitCode != 0 {
 		t.Fatalf("finish matter: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
 	// Gate: the only gate this dogfood ever declares or closes.
-	gateR := runIn(t, dir, dbEnv, "gate", "close", "reviewed-local", m.ID, "--json")
+	gateR := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "reviewed-local", m.ID, "--json")
 	if gateR.exitCode != 0 {
 		t.Fatalf("gate close: exit=%d stderr=%q", gateR.exitCode, gateR.stderr)
 	}
 
 	// Stand-down: the explicit dispatch close, reason = completed (D59) —
 	// the agent's last act per the porcelain contract.
-	closeR := runIn(t, dir, dbEnv, "dispatch", "close", "--json")
+	closeR := runIn(t, dir, dbEnv, "plumbing", "dispatch", "close", "--json")
 	if closeR.exitCode != 0 {
 		t.Fatalf("dispatch close: exit=%d stderr=%q", closeR.exitCode, closeR.stderr)
 	}

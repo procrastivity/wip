@@ -18,13 +18,13 @@ func TestGenerate_SkillCarriesTrackerRecipe(t *testing.T) {
 	skill := string(files["SKILL.md"])
 	for _, want := range []string{
 		"Configuring a tracker takes five commands",
-		"`wip outbox backend <name>`",
+		"`wip plumbing outbox backend <name>`",
 		"`github`, `gitlab` and `linear`",
 		"is for Linear only; GitHub and GitLab",
 		"`WIP_GITLAB_TOKEN`, `GITLAB_TOKEN`, then",
 		"`WIP_GITHUB_TOKEN`, `GH_TOKEN`,",
 		"`WIP_LINEAR_TOKEN`, `LINEAR_API_KEY`",
-		"`wip outbox approve` and\n`wip outbox flush`",
+		"`wip plumbing outbox approve` and\n`wip plumbing outbox flush`",
 	} {
 		if !strings.Contains(skill, want) {
 			t.Errorf("SKILL.md missing tracker-recipe text %q", want)

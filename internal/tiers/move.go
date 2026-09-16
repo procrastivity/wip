@@ -99,7 +99,7 @@ func repoOfAnyRemote(ctx context.Context, s *store.Store, dir string) (store.Rep
 	return store.Repo{}, false, nil
 }
 
-// Relink implements `wip clone relink <clone-locator>`: the accepted half of
+// Relink implements `wip plumbing clone relink <clone-locator>`: the accepted half of
 // the move-detection offer above, run from the new location. A ULID locator
 // resolves directly; a label locator resolves scoped to whichever Repo the
 // current directory's own remote matches — the same "remote known" situation

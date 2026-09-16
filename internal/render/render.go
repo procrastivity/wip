@@ -1,7 +1,7 @@
 // Package render implements PLAN 1.4: the render pipeline that projects
 // store content onto `.wip/generated/`, the `.wip/` layout and its
 // `.git/info/exclude` management (D41), dispatch-id minting and
-// `.wip/work/<dispatch-id>/` namespacing, sweep-on-close plus `wip clean` for
+// `.wip/work/<dispatch-id>/` namespacing, sweep-on-close plus `wip plumbing clean` for
 // crash orphans, and the two decisions PLAN 1.4 leaves open (eager-vs-on-demand
 // coverage, missing-file recovery) — see workplans/render-scratch.md's "Open
 // calls resolved here" for the resolutions this package encodes.

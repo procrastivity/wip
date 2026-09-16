@@ -352,7 +352,7 @@ func (v View) LiveEdges(ctx context.Context) ([]Edge, error) {
 }
 
 // EdgeBetween resolves the live edge for one `blocked-by` pair, if any —
-// `wip depend remove`'s lookup: the verb names the two nodes, and removal
+// `wip plumbing depend remove`'s lookup: the verb names the two nodes, and removal
 // needs the edge's own identity to tombstone (D44).
 func (v View) EdgeBetween(ctx context.Context, blocked, blocker string) (Edge, bool, error) {
 	var e Edge
@@ -668,7 +668,7 @@ func (v View) WorktreeByName(ctx context.Context, clone, name string) (Worktree,
 
 // ClonesOfRepo lists a Repo's live Clones — the repo-wide view `status` shows
 // from inside any of them, and the read-only companion `relink`/`label` act
-// on (`wip clone list`).
+// on (`wip plumbing clone list`).
 func (v View) ClonesOfRepo(ctx context.Context, repo string) ([]Clone, error) {
 	rows, err := v.q.QueryContext(ctx,
 		`SELECT id, repo, git_common_dir, label FROM clones WHERE repo = ? ORDER BY birth_event`, repo)

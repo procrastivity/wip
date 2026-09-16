@@ -96,7 +96,7 @@ type Manifest struct {
 	Assets        []Asset `json:"assets"`
 
 	// Trackers lists the tracker backend names the binary registered
-	// (tracker.Registry.Names(), sorted). It is the same list `wip outbox
+	// (tracker.Registry.Names(), sorted). It is the same list `wip plumbing outbox
 	// backend --help` enumerates; the manifest carries it so an agent can
 	// answer "which trackers can wip use" without reading source. Always
 	// present — an empty list marshals as [] rather than null.

@@ -1,4 +1,4 @@
-// Package role implements `wip role` — spawning and closing role instances
+// Package role implements `wip plumbing role` — spawning and closing role instances
 // (MODEL §6). A role instance is execution: it keys at Clone and binds to
 // this worktree's open Dispatch (D59). Spawn speaks as the caller; close
 // speaks as the role itself, which is what keeps a Builder closing visible
@@ -24,7 +24,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip role` parent command and its verbs.
+// Command constructs the `wip plumbing role` parent command and its verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "role",
@@ -234,7 +234,7 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			if !found {
 				return wiperr.New("validation.no-open-dispatch",
-					"no open dispatch on this worktree; run `wip refresh` first")
+					"no open dispatch on this worktree; run `wip plumbing refresh` first")
 			}
 			roles, err := s.RolesForDispatch(cmd.Context(), dispatch.ID)
 			if err != nil {

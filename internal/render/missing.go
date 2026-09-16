@@ -14,10 +14,10 @@ import (
 // a fresh render behind its back is exactly the kind of guess MODEL §11's
 // refusal-over-guessing posture refuses elsewhere. So a read against a
 // missing expected file returns a wip-authored refusal naming the missing
-// path and directing to `wip refresh <locator>` — an explicit, observable
+// path and directing to `wip plumbing refresh <locator>` — an explicit, observable
 // action, never a substitution the caller can't see.
 //
-// locator is what a human or agent should pass to `wip refresh` to
+// locator is what a human or agent should pass to `wip plumbing refresh` to
 // regenerate path — ordinarily the Matter (or narrower node) locator whose
 // render produced it.
 func ReadGenerated(path, locator string) ([]byte, error) {
@@ -37,5 +37,5 @@ func ReadGenerated(path, locator string) ([]byte, error) {
 // (the same convention tiers/errors.go documents for refusal.unknown-clone).
 func missingGenerated(path, locator string) error {
 	return wiperr.New("refusal.generated-missing",
-		fmt.Sprintf("%s is missing; run `wip refresh %s` to regenerate it", path, locator))
+		fmt.Sprintf("%s is missing; run `wip plumbing refresh %s` to regenerate it", path, locator))
 }

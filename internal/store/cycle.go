@@ -12,7 +12,7 @@ import (
 // that would close a cycle is refused *before* it is persisted, so a cycle is
 // never recorded as an event. Two callers, one function:
 //
-//   - `write-surface`'s `wip depend add <node> --blocked-by <node>` calls
+//   - `write-surface`'s `wip plumbing depend add <node> --blocked-by <node>` calls
 //     WouldCycle as a precondition, and refuses without emitting
 //     `dependency.added`;
 //   - `guards`/`doctor`'s cycle check calls Cycles as a whole-store audit.

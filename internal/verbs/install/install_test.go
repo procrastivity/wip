@@ -587,15 +587,21 @@ func TestCommand_BareManifestChangeReportsInstalledNotCurrent(t *testing.T) {
 		t.Fatalf("first (bare) install: %v", err)
 	}
 
-	// Register a new plumbing verb on root after the first install — the
-	// manifest a second run builds now differs from what was stamped.
+	// Register a new plumbing verb under the plumbing namespace after the
+	// first install — the manifest a second run builds now differs from
+	// what was stamped. It must live under "plumbing" (D112): harness
+	// projection keys on that name prefix, not on kind alone, so a verb
+	// registered straight on root would never project and this test would
+	// see no drift at all.
 	newVerb := &cobra.Command{
 		Use:   "newly-added",
 		Short: "a verb added since the last install",
 		RunE:  func(*cobra.Command, []string) error { return nil },
 	}
 	surface.Annotate(newVerb, surface.Plumbing)
-	root.AddCommand(newVerb)
+	plumbingGroup := &cobra.Command{Use: "plumbing", Short: "the deterministic substrate"}
+	plumbingGroup.AddCommand(newVerb)
+	root.AddCommand(plumbingGroup)
 
 	out := &bytes.Buffer{}
 	second := Command(&iostreams.Streams{Out: out, Err: &bytes.Buffer{}}, build, root, tracker.NewRegistry())

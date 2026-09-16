@@ -13,7 +13,7 @@ import (
 // package accepts the staleness window a render leaves open within one
 // Clone — a render is not instantly refreshed by another write, in this
 // Clone or any other, because rendering happens only when this Clone's own
-// `wip refresh` runs (D33: filenames are render policy, not a live view).
+// `wip plumbing refresh` runs (D33: filenames are render policy, not a live view).
 // D43 (a Matter is worked from one clone at a time) is what bounds this: no
 // cross-Clone staleness scenario is exercised here, because D43 makes it
 // structurally not arise (unenforced in P1 per D69, but the two clones this
@@ -69,7 +69,7 @@ func TestD43_StalenessWindowWithinOneClone(t *testing.T) {
 	// replication lag to accept here; the staleness this test accepts is
 	// narrower: clone A's own already-rendered file is what could go stale
 	// after clone B (or clone A itself) writes again, and only clone A's
-	// own next `wip refresh` would notice.
+	// own next `wip plumbing refresh` would notice.
 	if _, err := Refresh(ctx, s, curB, store.ActorHuman, NoPrecondition); err != nil {
 		t.Fatalf("Refresh from clone B: %v", err)
 	}

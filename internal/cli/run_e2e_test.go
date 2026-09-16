@@ -49,7 +49,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	show := runInDir(t, dir, env, "run", "show", run, "--json")
+	show := runInDir(t, dir, env, "plumbing", "run", "show", run, "--json")
 	if show.exitCode != 0 {
 		t.Fatalf("run show exit=%d stderr=%q", show.exitCode, show.stderr)
 	}
@@ -67,7 +67,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 		t.Fatalf("run show = %+v", shown)
 	}
 
-	listJSON := runInDir(t, dir, env, "run", "list", "--json")
+	listJSON := runInDir(t, dir, env, "plumbing", "run", "list", "--json")
 	if listJSON.exitCode != 0 {
 		t.Fatalf("run list --json exit=%d stderr=%q", listJSON.exitCode, listJSON.stderr)
 	}
@@ -83,7 +83,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 	if len(listed.Runs) != 1 || listed.Runs[0].ID != run || listed.Runs[0].Liveness == nil || *listed.Runs[0].Liveness != "interrupted" {
 		t.Fatalf("run list = %+v", listed)
 	}
-	listHuman := runInDir(t, dir, env, "run", "list")
+	listHuman := runInDir(t, dir, env, "plumbing", "run", "list")
 	if listHuman.exitCode != 0 || !strings.Contains(listHuman.stdout, run) || !strings.Contains(listHuman.stdout, "interrupted") || !strings.Contains(listHuman.stdout, "owned") {
 		t.Fatalf("run list human = %+v", listHuman)
 	}
@@ -92,7 +92,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 	if initialized := runInDir(t, otherDir, env, "init"); initialized.exitCode != 0 {
 		t.Fatalf("second clone init exit=%d stderr=%q", initialized.exitCode, initialized.stderr)
 	}
-	strandedFree := runInDir(t, otherDir, env, "run", "show", run, "--json")
+	strandedFree := runInDir(t, otherDir, env, "plumbing", "run", "show", run, "--json")
 	if strandedFree.exitCode != 0 {
 		t.Fatalf("stranded free Run show exit=%d stderr=%q", strandedFree.exitCode, strandedFree.stderr)
 	}
@@ -108,7 +108,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	liveShow := runInDir(t, otherDir, env, "run", "show", run, "--json")
+	liveShow := runInDir(t, otherDir, env, "plumbing", "run", "show", run, "--json")
 	_ = liveLock.Release()
 	if liveShow.exitCode != 0 {
 		t.Fatalf("held stranded Run show exit=%d stderr=%q", liveShow.exitCode, liveShow.stderr)
@@ -121,7 +121,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 		t.Fatalf("held stranded Run show = %+v, err=%v", held, err)
 	}
 
-	stood := runInDir(t, dir, env, "run", "stand-down", run, "--json")
+	stood := runInDir(t, dir, env, "plumbing", "run", "stand-down", run, "--json")
 	if stood.exitCode != 0 {
 		t.Fatalf("run stand-down exit=%d stderr=%q", stood.exitCode, stood.stderr)
 	}
@@ -138,23 +138,23 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 		t.Fatalf("stand-down result = %+v", result)
 	}
 
-	human := runInDir(t, dir, env, "run", "show", run)
+	human := runInDir(t, dir, env, "plumbing", "run", "show", run)
 	if human.exitCode != 0 || !strings.Contains(human.stdout, "liveness: -") || !strings.Contains(human.stdout, "ownership: owned") {
 		t.Fatalf("closed human show = %+v", human)
 	}
-	if help := runInDir(t, dir, env, "--help"); help.exitCode != 0 || !strings.Contains(help.stdout, "run") {
-		t.Fatalf("root help does not list run: %+v", help)
+	if help := runInDir(t, dir, env, "plumbing", "--help"); help.exitCode != 0 || !strings.Contains(help.stdout, "run") {
+		t.Fatalf("plumbing help does not list run: %+v", help)
 	}
 
 	manifest := runInDir(t, dir, env, "manifest", "--json")
-	if manifest.exitCode != 0 || !strings.Contains(manifest.stdout, `"name":"run stand-down"`) || !strings.Contains(manifest.stdout, `"kind":"plumbing"`) {
+	if manifest.exitCode != 0 || !strings.Contains(manifest.stdout, `"name":"plumbing run stand-down"`) || !strings.Contains(manifest.stdout, `"kind":"plumbing"`) {
 		t.Fatalf("manifest does not project run stand-down: %+v", manifest)
 	}
-	badIdentity := runInDir(t, dir, env, "run", "show", "short", "--json")
+	badIdentity := runInDir(t, dir, env, "plumbing", "run", "show", "short", "--json")
 	if badIdentity.exitCode != 1 || !strings.Contains(badIdentity.stderr, "validation.invalid-run-identity") {
 		t.Fatalf("malformed Run read = %+v", badIdentity)
 	}
-	unknown := runInDir(t, dir, env, "run", "show", "01KZ842G5HB589KF5P525DQYA2", "--json")
+	unknown := runInDir(t, dir, env, "plumbing", "run", "show", "01KZ842G5HB589KF5P525DQYA2", "--json")
 	if unknown.exitCode != 1 || !strings.Contains(unknown.stderr, "validation.unknown-run") {
 		t.Fatalf("unknown Run read = %+v", unknown)
 	}
@@ -187,7 +187,7 @@ func TestRunReadsAndStandDownEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refused := runInDir(t, dir, env, "run", "stand-down", run, "--json")
+	refused := runInDir(t, dir, env, "plumbing", "run", "stand-down", run, "--json")
 	if refused.exitCode == 0 || !strings.Contains(refused.stderr, "refusal.run-closed") {
 		t.Fatalf("closed stand-down refusal = %+v", refused)
 	}

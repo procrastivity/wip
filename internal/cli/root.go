@@ -5,7 +5,9 @@
 package cli
 
 import (
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,33 +19,16 @@ import (
 	githubtracker "github.com/procrastivity/wip/internal/tracker/github"
 	gitlabtracker "github.com/procrastivity/wip/internal/tracker/gitlab"
 	lineartracker "github.com/procrastivity/wip/internal/tracker/linear"
-	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
-	batchverb "github.com/procrastivity/wip/internal/verbs/batch"
-	bindverb "github.com/procrastivity/wip/internal/verbs/bind"
-	cleanverb "github.com/procrastivity/wip/internal/verbs/clean"
-	cloneverb "github.com/procrastivity/wip/internal/verbs/clone"
-	contentverb "github.com/procrastivity/wip/internal/verbs/content"
-	dependverb "github.com/procrastivity/wip/internal/verbs/depend"
-	dispatchverb "github.com/procrastivity/wip/internal/verbs/dispatch"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
-	gateverb "github.com/procrastivity/wip/internal/verbs/gate"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
-	labelverb "github.com/procrastivity/wip/internal/verbs/label"
-	lifecycleverb "github.com/procrastivity/wip/internal/verbs/lifecycle"
 	manifestverb "github.com/procrastivity/wip/internal/verbs/manifest"
-	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
-	outboxverb "github.com/procrastivity/wip/internal/verbs/outbox"
-	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
-	roleverb "github.com/procrastivity/wip/internal/verbs/role"
-	runverb "github.com/procrastivity/wip/internal/verbs/run"
-	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
-	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
+	plumbingverb "github.com/procrastivity/wip/internal/verbs/plumbing"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
-	stepverb "github.com/procrastivity/wip/internal/verbs/step"
 	uninstallverb "github.com/procrastivity/wip/internal/verbs/uninstall"
 	versionverb "github.com/procrastivity/wip/internal/verbs/version"
+	"github.com/procrastivity/wip/internal/wiperr"
 )
 
 // NewRootCommand builds the wip root command with both global flags bound
@@ -94,56 +79,25 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 
 	root.PersistentFlags().Bool("json", false, "emit the success payload as one JSON value")
 	root.PersistentFlags().BoolP("verbose", "v", false, "extra diagnostic lines on stderr")
-	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip role spawn` behind it")
+	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip plumbing role spawn` behind it")
 
-	root.AddCommand(versionverb.Command(streams, build))
-	root.AddCommand(manifestverb.Command(streams, build, root, providers))
+	// Help lists the porcelain in registration order (D112), not
+	// alphabetically — nine entries, manifest last. Every verb that isn't
+	// one of these nine lives under the plumbing namespace instead
+	// (internal/verbs/plumbing), registered alphabetically there since
+	// this global also disables sorting inside that group.
+	cobra.EnableCommandSorting = false
+	root.AddCommand(statusverb.Command(streams))
+	root.AddCommand(nextverb.Command(streams))
+	root.AddCommand(initverb.Command(streams))
+	root.AddCommand(doctorverb.Command(streams, build, root))
 	root.AddCommand(installverb.Command(streams, build, root, providers))
 	root.AddCommand(uninstallverb.Command(streams))
-	root.AddCommand(initverb.Command(streams))
-	root.AddCommand(cloneverb.Command(streams))
-	root.AddCommand(labelverb.Command(streams))
-	root.AddCommand(doctorverb.Command(streams, build, root))
-	root.AddCommand(statusverb.Command(streams))
-
-	// read-surface: status's founding-question content lives inside
-	// statusverb itself (it extends tiers/tier-verbs step-08's stub in
-	// place); next and session are this Matter's two new verbs.
-	root.AddCommand(nextverb.Command(streams))
-	root.AddCommand(sessionverb.Command(streams))
-
-	// write-surface: birth-and-amendment.
-	root.AddCommand(matterverb.Command(streams))
-	root.AddCommand(stageverb.Command(streams))
-	root.AddCommand(stepverb.Command(streams))
-	root.AddCommand(lifecycleverb.StartCommand(streams))
-	root.AddCommand(lifecycleverb.FinishCommand(streams, providers))
-	root.AddCommand(lifecycleverb.CancelCommand(streams))
-	root.AddCommand(lifecycleverb.PauseCommand(streams))
-	root.AddCommand(lifecycleverb.ResumeCommand(streams))
-	root.AddCommand(backlogverb.Command(streams))
-	root.AddCommand(outboxverb.Command(streams, providers))
-	root.AddCommand(batchverb.Command(streams))
-	root.AddCommand(runverb.Command(streams))
-	root.AddCommand(roleverb.Command(streams))
-
-	// write-surface: content-prose.
-	root.AddCommand(contentverb.BriefCommand(streams))
-	root.AddCommand(contentverb.WorkplanCommand(streams))
-	root.AddCommand(contentverb.BodyCommand(streams))
-	root.AddCommand(contentverb.FindingCommand(streams))
-
-	// write-surface: gates-and-dependencies.
-	root.AddCommand(gateverb.Command(streams, providers))
-	root.AddCommand(dependverb.Command(streams))
-	root.AddCommand(bindverb.Command(streams))
-	root.AddCommand(bindverb.UnbindCommand(streams))
-	root.AddCommand(bindverb.RebindCommand(streams))
-
-	// render-scratch: dispatch-open/refresh, explicit dispatch close, clean.
-	root.AddCommand(refreshverb.Command(streams))
-	root.AddCommand(dispatchverb.Command(streams))
-	root.AddCommand(cleanverb.Command(streams))
+	root.AddCommand(versionverb.Command(streams, build))
+	plumbingCmd := plumbingverb.Command(streams, providers)
+	root.AddCommand(plumbingCmd)
+	// manifest stays last (D112).
+	root.AddCommand(manifestverb.Command(streams, build, root, providers))
 
 	// WIP_SELFTEST-gated fixture command: chassis step-11 needs an
 	// end-to-end, through-the-built-binary exercise of the code-3/--json
@@ -155,5 +109,71 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 		root.AddCommand(selftest.RefusalCommand())
 	}
 
+	// D112's flat-invocation seam. Cobra's own "unknown command" error
+	// (legacyArgs, cobra v1.10.2 args.go) only fires when the resolved
+	// command's Args field is nil; Find resolves to root itself for any
+	// first token that no longer names a root-level command (every moved
+	// verb, and any command that never existed). Giving root a non-nil
+	// Args lets us tell those two cases apart before Cobra's own message
+	// ever gets produced, and giving root a RunE keeps it Runnable so
+	// Cobra reaches ValidateArgs (and so this Args func) at all — bare
+	// `wip` still gets nil args and falls through to help, exit 0,
+	// exactly as before.
+	moved := movedVerbs(plumbingCmd)
+	root.Args = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		if qualified, ok := moved[args[0]]; ok {
+			return wiperr.New("validation.moved-verb", fmt.Sprintf(
+				"moved — `%s` now lives under the plumbing namespace; run `wip plumbing %s` instead (`wip plumbing` lists the substrate)",
+				args[0], qualified,
+			))
+		}
+		return fmt.Errorf("unknown command %q for %q%s", args[0], cmd.CommandPath(), suggestionsBlock(cmd, args[0]))
+	}
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cmd.Help()
+	}
+
 	return root
+}
+
+// movedVerbs derives the flat-invocation moved set from the plumbing
+// group's own registered children (and their aliases) rather than a
+// hand-written second list, which would be exactly the kind of parallel
+// registry internal/surface exists to avoid. The map's value is each verb's
+// canonical (non-alias) name, for the "run `wip plumbing <name>`" remedy.
+func movedVerbs(plumbingCmd *cobra.Command) map[string]string {
+	moved := map[string]string{}
+	for _, c := range plumbingCmd.Commands() {
+		moved[c.Name()] = c.Name()
+		for _, a := range c.Aliases {
+			moved[a] = c.Name()
+		}
+	}
+	return moved
+}
+
+// suggestionsBlock rebuilds Cobra's own "Did you mean this?" block
+// (Command.findSuggestions is unexported; Command.SuggestionsFor is not)
+// so a genuinely unknown command keeps its typo help once root grows its
+// own Args func.
+func suggestionsBlock(cmd *cobra.Command, arg string) string {
+	if cmd.DisableSuggestions {
+		return ""
+	}
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		cmd.SuggestionsMinimumDistance = 2
+	}
+	suggestions := cmd.SuggestionsFor(arg)
+	if len(suggestions) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\nDid you mean this?\n")
+	for _, s := range suggestions {
+		_, _ = fmt.Fprintf(&sb, "\t%v\n", s)
+	}
+	return sb.String()
 }

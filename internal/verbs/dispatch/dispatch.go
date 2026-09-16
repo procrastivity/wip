@@ -1,4 +1,4 @@
-// Package dispatch implements `wip dispatch close` — D59's path (a): the
+// Package dispatch implements `wip plumbing dispatch close` — D59's path (a): the
 // explicit, deliberate close, `reason = completed`. The agent-porcelain
 // contract makes this the agent's last act (agent-path).
 package dispatch
@@ -18,7 +18,7 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs the `wip dispatch` parent command and its one verb.
+// Command constructs the `wip plumbing dispatch` parent command and its one verb.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dispatch",

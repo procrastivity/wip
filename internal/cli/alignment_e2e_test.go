@@ -66,16 +66,16 @@ func TestPostSealAlignmentThroughFinishAndFinalGate(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "fake"},
-		{"matter", "create", "--title", "Behind", "--locator", "behind"},
-		{"bind", "behind", "R-behind"},
-		{"start", "behind"},
+		{"plumbing", "outbox", "backend", "fake"},
+		{"plumbing", "matter", "create", "--title", "Behind", "--locator", "behind"},
+		{"plumbing", "bind", "behind", "R-behind"},
+		{"plumbing", "start", "behind"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
 		}
 	}
-	finished := runWithProviders(t, providers, "finish", "behind", "--json")
+	finished := runWithProviders(t, providers, "plumbing", "finish", "behind", "--json")
 	if finished.exitCode != 0 || finished.stderr != "" {
 		t.Fatalf("finish: exit=%d stdout=%q stderr=%q", finished.exitCode, finished.stdout, finished.stderr)
 	}
@@ -91,20 +91,20 @@ func TestPostSealAlignmentThroughFinishAndFinalGate(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"gate", "declare", "reviewed-local", "--scale", "matter"},
-		{"matter", "create", "--title", "Gated", "--locator", "gated"},
-		{"bind", "gated", "R-gated"},
-		{"start", "gated"},
+		{"plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"},
+		{"plumbing", "matter", "create", "--title", "Gated", "--locator", "gated"},
+		{"plumbing", "bind", "gated", "R-gated"},
+		{"plumbing", "start", "gated"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
 		}
 	}
 	reader.reads = nil
-	if r := runWithProviders(t, providers, "finish", "gated"); r.exitCode != 0 || len(reader.reads) != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "finish", "gated"); r.exitCode != 0 || len(reader.reads) != 0 {
 		t.Fatalf("unsealed finish: exit=%d stdout=%q stderr=%q reads=%v", r.exitCode, r.stdout, r.stderr, reader.reads)
 	}
-	closed := runWithProviders(t, providers, "gate", "close", "reviewed-local", "gated")
+	closed := runWithProviders(t, providers, "plumbing", "gate", "close", "reviewed-local", "gated")
 	if closed.exitCode != 0 || closed.stderr != "" || closed.stdout != "closed reviewed-local on gated\n" {
 		t.Fatalf("aligned final gate: exit=%d stdout=%q stderr=%q", closed.exitCode, closed.stdout, closed.stderr)
 	}
@@ -137,24 +137,24 @@ func TestPostSealAlignmentReadsAtPushOffAndBackendNoneIsNonfatal(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "fake"},
-		{"outbox", "level", "off"},
-		{"matter", "create", "--title", "Push off", "--locator", "push-off"},
-		{"bind", "push-off", "R-off"},
-		{"start", "push-off"},
+		{"plumbing", "outbox", "backend", "fake"},
+		{"plumbing", "outbox", "level", "off"},
+		{"plumbing", "matter", "create", "--title", "Push off", "--locator", "push-off"},
+		{"plumbing", "bind", "push-off", "R-off"},
+		{"plumbing", "start", "push-off"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
 		}
 	}
-	finished := runWithProviders(t, providers, "finish", "push-off")
+	finished := runWithProviders(t, providers, "plumbing", "finish", "push-off")
 	if finished.exitCode != 0 || finished.stderr != "" || !strings.Contains(finished.stdout, "offer: move to completed") {
 		t.Fatalf("push-off finish: exit=%d stdout=%q stderr=%q", finished.exitCode, finished.stdout, finished.stderr)
 	}
 	if !reflect.DeepEqual(reader.reads, []string{"R-off"}) {
 		t.Fatalf("push-off reads = %v, want R-off once", reader.reads)
 	}
-	listed := runWithProviders(t, providers, "outbox", "list", "--json")
+	listed := runWithProviders(t, providers, "plumbing", "outbox", "list", "--json")
 	var outbox struct {
 		Entries []json.RawMessage `json:"entries"`
 	}
@@ -163,16 +163,16 @@ func TestPostSealAlignmentReadsAtPushOffAndBackendNoneIsNonfatal(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"outbox", "backend", "none"},
-		{"matter", "create", "--title", "No backend", "--locator", "no-backend"},
-		{"bind", "no-backend", "R-none"},
-		{"start", "no-backend"},
+		{"plumbing", "outbox", "backend", "none"},
+		{"plumbing", "matter", "create", "--title", "No backend", "--locator", "no-backend"},
+		{"plumbing", "bind", "no-backend", "R-none"},
+		{"plumbing", "start", "no-backend"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
 		}
 	}
-	unavailable := runWithProviders(t, providers, "finish", "no-backend", "--json")
+	unavailable := runWithProviders(t, providers, "plumbing", "finish", "no-backend", "--json")
 	var unavailablePayload struct {
 		Alignment *tracker.AlignmentReport `json:"alignment"`
 	}
@@ -181,16 +181,16 @@ func TestPostSealAlignmentReadsAtPushOffAndBackendNoneIsNonfatal(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"outbox", "backend", "fake"},
-		{"matter", "create", "--title", "Aligned JSON", "--locator", "aligned-json"},
-		{"bind", "aligned-json", "R-aligned"},
-		{"start", "aligned-json"},
+		{"plumbing", "outbox", "backend", "fake"},
+		{"plumbing", "matter", "create", "--title", "Aligned JSON", "--locator", "aligned-json"},
+		{"plumbing", "bind", "aligned-json", "R-aligned"},
+		{"plumbing", "start", "aligned-json"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
 		}
 	}
-	aligned := runWithProviders(t, providers, "finish", "aligned-json", "--json")
+	aligned := runWithProviders(t, providers, "plumbing", "finish", "aligned-json", "--json")
 	var alignedPayload map[string]json.RawMessage
 	if aligned.exitCode != 0 || json.Unmarshal([]byte(aligned.stdout), &alignedPayload) != nil {
 		t.Fatalf("aligned JSON finish: exit=%d stdout=%q stderr=%q", aligned.exitCode, aligned.stdout, aligned.stderr)
@@ -222,27 +222,27 @@ func TestRrulerReplayAlreadyDoneIssueProducesNoCloseOffer(t *testing.T) {
 	providers.Register("linear-fixture", func(tracker.FactoryInput) (tracker.Seam, error) { return reader, nil })
 	for _, args := range [][]string{
 		{"init", "--json"},
-		{"outbox", "backend", "linear-fixture"},
-		{"outbox", "level", "off"},
-		{"gate", "declare", "reviewed-local", "--scale", "matter"},
-		{"matter", "create", "--title", "Release framing", "--locator", "v001-release-framing"},
-		{"bind", "v001-release-framing", "BDS-132"},
-		{"start", "v001-release-framing"},
-		{"finish", "v001-release-framing"},
+		{"plumbing", "outbox", "backend", "linear-fixture"},
+		{"plumbing", "outbox", "level", "off"},
+		{"plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"},
+		{"plumbing", "matter", "create", "--title", "Release framing", "--locator", "v001-release-framing"},
+		{"plumbing", "bind", "v001-release-framing", "BDS-132"},
+		{"plumbing", "start", "v001-release-framing"},
+		{"plumbing", "finish", "v001-release-framing"},
 	} {
 		if r := runWithProviders(t, providers, args...); r.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, r.exitCode, r.stdout, r.stderr)
 		}
 	}
 	reader.reads = nil
-	closed := runWithProviders(t, providers, "gate", "close", "reviewed-local", "v001-release-framing")
+	closed := runWithProviders(t, providers, "plumbing", "gate", "close", "reviewed-local", "v001-release-framing")
 	if closed.exitCode != 0 || closed.stderr != "" || closed.stdout != "closed reviewed-local on v001-release-framing\n" {
 		t.Fatalf("rruler final gate: exit=%d stdout=%q stderr=%q", closed.exitCode, closed.stdout, closed.stderr)
 	}
 	if !reflect.DeepEqual(reader.reads, []string{"BDS-132"}) {
 		t.Fatalf("rruler reads = %v, want one BDS-132 read", reader.reads)
 	}
-	listed := runWithProviders(t, providers, "outbox", "list", "--json")
+	listed := runWithProviders(t, providers, "plumbing", "outbox", "list", "--json")
 	var outbox struct {
 		Entries []json.RawMessage `json:"entries"`
 	}

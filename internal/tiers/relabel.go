@@ -8,7 +8,7 @@ import (
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
-// SetLabel implements `wip label <new-label>`, operating on the Clone at
+// SetLabel implements `wip plumbing label <new-label>`, operating on the Clone at
 // dir's git-common-dir (tiers Brief, "Labels and addressing"): per-Repo
 // uniqueness enforced, a ULID-shaped label refused outright (closing the
 // addressing ambiguity at the source), and — on an ordinary collision — a

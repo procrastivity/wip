@@ -11,8 +11,8 @@ import (
 )
 
 // TestClean_ReapsStaleOpenDispatchAsCrashOrphan is step-07/D59 path (c): a
-// process died before any subsequent `wip refresh` could supersede it —
-// `wip clean` finds the still-open, past-bound dispatch, closes it `reaped`,
+// process died before any subsequent `wip plumbing refresh` could supersede it —
+// `wip plumbing clean` finds the still-open, past-bound dispatch, closes it `reaped`,
 // and sweeps its scratch directory.
 func TestClean_ReapsStaleOpenDispatchAsCrashOrphan(t *testing.T) {
 	backdated := time.Now().Add(-48 * time.Hour)
@@ -62,7 +62,7 @@ func TestClean_ReapsStaleOpenDispatchAsCrashOrphan(t *testing.T) {
 	}
 }
 
-// TestClean_LeavesAFreshOpenDispatchAlone confirms `wip clean` never touches
+// TestClean_LeavesAFreshOpenDispatchAlone confirms `wip plumbing clean` never touches
 // a dispatch that is still genuinely within the staleness bound — the
 // worked-in-progress case, not a crash orphan.
 func TestClean_LeavesAFreshOpenDispatchAlone(t *testing.T) {

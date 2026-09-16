@@ -76,12 +76,12 @@ func (s *Store) SetTrackerPushLevel(ctx context.Context, repo, value string) (Tr
 	return level, nil
 }
 
-// TrackerBacklogPush controls whether `wip backlog add` also delegates the new
+// TrackerBacklogPush controls whether `wip plumbing backlog add` also delegates the new
 // entry through the outbox. It is Repo-tier configuration, not domain history.
 type TrackerBacklogPush string
 
 const (
-	// TrackerBacklogPushManual leaves a new entry entered; `wip backlog delegate`
+	// TrackerBacklogPushManual leaves a new entry entered; `wip plumbing backlog delegate`
 	// is the explicit exit.
 	TrackerBacklogPushManual TrackerBacklogPush = "manual"
 	// TrackerBacklogPushAuto delegates every new entry as it is added. Approval

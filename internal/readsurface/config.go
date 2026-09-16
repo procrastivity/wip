@@ -4,7 +4,7 @@ package readsurface
 // ($XDG_CONFIG_HOME/wip/config.yaml, resolved user-override -> shipped
 // config.default.yaml, D54) — not project config in the store — loaded
 // through chassis's own loader (its step-07) with no new store access from
-// this Matter. `wip session --idle-gap` overrides it per invocation
+// this Matter. `wip plumbing session --idle-gap` overrides it per invocation
 // (MODEL §2.4's first-class call); the shipped default (6h) is documented
 // next to the key in assets/config.default.yaml.
 

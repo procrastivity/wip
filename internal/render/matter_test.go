@@ -122,7 +122,8 @@ func TestMatterSummaryListsInForceBlockedByEdges(t *testing.T) {
 
 // TestMatterSummaryCarriesSnapshotStamp is the orientation contract for
 // wip-authored generated files: matter.md names when it was rendered and
-// tells a reader that disagrees with `wip status` to run a named refresh.
+// tells a reader that disagrees with `wip status` to run a named
+// `wip plumbing refresh`.
 func TestMatterSummaryCarriesSnapshotStamp(t *testing.T) {
 	s, _, cur := setup(t)
 	locator := matter(t, s, cur.Repo.ID, "Fix the thing")
@@ -139,11 +140,11 @@ func TestMatterSummaryCarriesSnapshotStamp(t *testing.T) {
 	if !strings.Contains(got, "rendered-at: ") {
 		t.Errorf("matter.md missing rendered-at:\n%s", got)
 	}
-	want := "run `wip refresh " + locator + "` and re-read"
+	want := "run `wip plumbing refresh " + locator + "` and re-read"
 	if !strings.Contains(got, want) {
 		t.Errorf("matter.md missing named refresh instruction %q:\n%s", want, got)
 	}
-	if !strings.Contains(got, "snapshot from the last `wip refresh`") {
+	if !strings.Contains(got, "snapshot from the last `wip plumbing refresh`") {
 		t.Errorf("matter.md missing snapshot notice:\n%s", got)
 	}
 }
@@ -165,7 +166,7 @@ func TestRoadmapCarriesSnapshotNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(md)
-	want := "run `wip refresh " + locator + "` and re-read"
+	want := "run `wip plumbing refresh " + locator + "` and re-read"
 	if !strings.Contains(got, want) {
 		t.Errorf("roadmap.md missing named refresh instruction %q:\n%s", want, got)
 	}

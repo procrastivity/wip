@@ -1,5 +1,5 @@
 // Package readsurface implements PLAN 1.7's read verbs: `wip status`'s
-// founding-question content, `wip next` (with `--set`), and `wip session`.
+// founding-question content, `wip next` (with `--set`), and `wip plumbing session`.
 // MODEL §1's founding question is what is in progress, what is finished,
 // what is next to start — plus the temporal tense Session adds, what was
 // done recently. Every answer here comes from the store directly, never

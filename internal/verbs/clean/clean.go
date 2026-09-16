@@ -1,4 +1,4 @@
-// Package clean implements `wip clean` — step-07's sweep for crash orphans:
+// Package clean implements `wip plumbing clean` — step-07's sweep for crash orphans:
 // a scratch directory whose dispatch never got explicitly closed or
 // superseded, and D68's orphaned blobs, both reaped past a documented
 // staleness bound.
@@ -20,7 +20,7 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs `wip clean`.
+// Command constructs `wip plumbing clean`.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clean",

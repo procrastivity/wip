@@ -1,4 +1,4 @@
-// Package stage implements `wip stage create` — write-surface's birth verb
+// Package stage implements `wip plumbing stage create` — write-surface's birth verb
 // for a Stage under a Matter.
 package stage
 
@@ -17,7 +17,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip stage` parent command and its `create` verb.
+// Command constructs the `wip plumbing stage` parent command and its `create` verb.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stage",

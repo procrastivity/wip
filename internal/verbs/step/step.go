@@ -18,7 +18,7 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
-// Command constructs the `wip step` parent command and its five verbs.
+// Command constructs the `wip plumbing step` parent command and its five verbs.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "step",

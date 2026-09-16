@@ -66,7 +66,7 @@ type backlogAddPayload struct {
 
 func outboxRows(t *testing.T, providers *tracker.Registry) []outboxPayload {
 	t.Helper()
-	listed := runWithProviders(t, providers, "outbox", "list", "--json")
+	listed := runWithProviders(t, providers, "plumbing", "outbox", "list", "--json")
 	if listed.exitCode != 0 {
 		t.Fatalf("outbox list: exit=%d stderr=%q", listed.exitCode, listed.stderr)
 	}
@@ -78,16 +78,16 @@ func outboxRows(t *testing.T, providers *tracker.Registry) []outboxPayload {
 func TestBacklogAddUnderManualLeavesTheEntryEnteredEvenWithABackend(t *testing.T) {
 	_, providers, seam := backlogPushRepo(t, "backlog-push-manual")
 
-	if r := runWithProviders(t, providers, "outbox", "backend", "fake"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
 		t.Fatalf("outbox backend fake: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	push := runWithProviders(t, providers, "outbox", "backlog-push")
+	push := runWithProviders(t, providers, "plumbing", "outbox", "backlog-push")
 	if push.exitCode != 0 || push.stdout != "manual\n" || push.stderr != "" {
 		t.Fatalf("outbox backlog-push: exit=%d stdout=%q stderr=%q", push.exitCode, push.stdout, push.stderr)
 	}
 
-	added := runWithProviders(t, providers, "backlog", "add", "--title", "found thing", "--provenance", "intake", "--json")
+	added := runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "found thing", "--provenance", "intake", "--json")
 	if added.exitCode != 0 {
 		t.Fatalf("backlog add: exit=%d stderr=%q", added.exitCode, added.stderr)
 	}
@@ -114,16 +114,16 @@ func TestBacklogAddUnderManualLeavesTheEntryEnteredEvenWithABackend(t *testing.T
 func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *testing.T) {
 	dbPath, providers, seam := backlogPushRepo(t, "backlog-push-auto")
 
-	if r := runWithProviders(t, providers, "outbox", "backend", "fake"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
 		t.Fatalf("outbox backend fake: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
-	push := runWithProviders(t, providers, "outbox", "backlog-push", "auto")
+	push := runWithProviders(t, providers, "plumbing", "outbox", "backlog-push", "auto")
 	if push.exitCode != 0 || push.stdout != "auto\n" || push.stderr != "" {
 		t.Fatalf("outbox backlog-push auto: exit=%d stdout=%q stderr=%q", push.exitCode, push.stdout, push.stderr)
 	}
 
-	added := runWithProviders(t, providers, "backlog", "add", "--title", "Push me", "--provenance", "intake", "--json")
+	added := runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "Push me", "--provenance", "intake", "--json")
 	if added.exitCode != 0 {
 		t.Fatalf("backlog add: exit=%d stderr=%q", added.exitCode, added.stderr)
 	}
@@ -183,7 +183,7 @@ func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *t
 		t.Fatalf("events[1].Causation = %q, want %q", events[1].Causation, events[0].ID)
 	}
 
-	human := runWithProviders(t, providers, "backlog", "add", "--title", "Push me too", "--provenance", "found")
+	human := runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "Push me too", "--provenance", "found")
 	if human.exitCode != 0 {
 		t.Fatalf("backlog add (human): exit=%d stderr=%q", human.exitCode, human.stderr)
 	}
@@ -214,7 +214,7 @@ func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *t
 		t.Fatalf("seam.deliveries = %d, want 0 (nothing approved or flushed yet)", seam.deliveries)
 	}
 
-	flushedNone := runWithProviders(t, providers, "outbox", "flush")
+	flushedNone := runWithProviders(t, providers, "plumbing", "outbox", "flush")
 	if flushedNone.exitCode != 0 {
 		t.Fatalf("outbox flush (nothing approved): exit=%d stderr=%q", flushedNone.exitCode, flushedNone.stderr)
 	}
@@ -234,7 +234,7 @@ func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *t
 		}
 	}
 
-	approved := runWithProviders(t, providers, "outbox", "approve", entry.Outbox, "--json")
+	approved := runWithProviders(t, providers, "plumbing", "outbox", "approve", entry.Outbox, "--json")
 	if approved.exitCode != 0 {
 		t.Fatalf("outbox approve: exit=%d stderr=%q", approved.exitCode, approved.stderr)
 	}
@@ -243,7 +243,7 @@ func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *t
 		t.Fatalf("approved state = %q, want approved", approvedRow.State)
 	}
 
-	flushedOne := runWithProviders(t, providers, "outbox", "flush")
+	flushedOne := runWithProviders(t, providers, "plumbing", "outbox", "flush")
 	if flushedOne.exitCode != 0 {
 		t.Fatalf("outbox flush (one approved): exit=%d stderr=%q", flushedOne.exitCode, flushedOne.stderr)
 	}
@@ -274,15 +274,15 @@ func TestBacklogAddUnderAutoWithABackendQueuesOneCreateThatWaitsForApproval(t *t
 func TestBacklogAddUnderAutoWithoutABackendBehavesAsManualAndWarns(t *testing.T) {
 	_, providers, seam := backlogPushRepo(t, "backlog-push-no-backend")
 
-	if r := runWithProviders(t, providers, "outbox", "backend", "fake"); r.exitCode != 0 {
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
 		t.Fatalf("outbox backend fake: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	none := runWithProviders(t, providers, "outbox", "backend", "none")
+	none := runWithProviders(t, providers, "plumbing", "outbox", "backend", "none")
 	if none.exitCode != 0 || none.stdout != "none\n" {
 		t.Fatalf("outbox backend none: exit=%d stdout=%q stderr=%q", none.exitCode, none.stdout, none.stderr)
 	}
 
-	push := runWithProviders(t, providers, "outbox", "backlog-push", "auto")
+	push := runWithProviders(t, providers, "plumbing", "outbox", "backlog-push", "auto")
 	if push.exitCode != 0 || push.stdout != "auto\n" {
 		t.Fatalf("outbox backlog-push auto: exit=%d stdout=%q stderr=%q", push.exitCode, push.stdout, push.stderr)
 	}
@@ -290,7 +290,7 @@ func TestBacklogAddUnderAutoWithoutABackendBehavesAsManualAndWarns(t *testing.T)
 		t.Fatalf("outbox backlog-push auto stderr = %q, want the no-backend warning", push.stderr)
 	}
 
-	added := runWithProviders(t, providers, "backlog", "add", "--title", "found thing", "--provenance", "intake", "--json")
+	added := runWithProviders(t, providers, "plumbing", "backlog", "add", "--title", "found thing", "--provenance", "intake", "--json")
 	if added.exitCode != 0 {
 		t.Fatalf("backlog add: exit=%d stderr=%q", added.exitCode, added.stderr)
 	}
@@ -313,7 +313,7 @@ func TestBacklogAddUnderAutoWithoutABackendBehavesAsManualAndWarns(t *testing.T)
 		t.Fatalf("seam.deliveries = %d, want 0", seam.deliveries)
 	}
 
-	read := runWithProviders(t, providers, "outbox", "backlog-push")
+	read := runWithProviders(t, providers, "plumbing", "outbox", "backlog-push")
 	if read.exitCode != 0 || read.stdout != "auto\n" || read.stderr != "" {
 		t.Fatalf("outbox backlog-push (read): exit=%d stdout=%q stderr=%q", read.exitCode, read.stdout, read.stderr)
 	}

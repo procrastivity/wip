@@ -17,18 +17,18 @@ func TestNext_ParallelFrontierForAnOpenRun(t *testing.T) {
 	dir, dbEnv := setupRepo(t)
 	dbPath := strings.TrimPrefix(dbEnv[0], "WIP_DB_PATH=")
 
-	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "matter", "create", "--title", "Docs refresh", "--json").stdout)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Docs refresh", "--json").stdout)
 	var steps []nodePayload
 	for _, title := range []string{"three", "four", "five"} {
-		steps = append(steps, mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", title, "--json").stdout))
+		steps = append(steps, mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", title, "--json").stdout))
 	}
-	blocked := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "step", "create", m.Locator, "--title", "join", "--json").stdout)
+	blocked := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "join", "--json").stdout)
 	for _, s := range steps {
-		if r := runIn(t, dir, dbEnv, "depend", "add", m.Locator+"/"+blocked.Locator, "--blocked-by", m.Locator+"/"+s.Locator); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "depend", "add", m.Locator+"/"+blocked.Locator, "--blocked-by", m.Locator+"/"+s.Locator); r.exitCode != 0 {
 			t.Fatalf("depend add: exit=%d stderr=%q", r.exitCode, r.stderr)
 		}
 	}
-	if r := runIn(t, dir, dbEnv, "start", m.Locator); r.exitCode != 0 {
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator); r.exitCode != 0 {
 		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
 
@@ -86,10 +86,10 @@ func TestNext_ParallelFrontierForAnOpenRun(t *testing.T) {
 	// With one Ready node the singular output stands: satisfy two edges so
 	// only the join remains.
 	for _, st := range steps[:2] {
-		if r := runIn(t, dir, dbEnv, "start", m.Locator+"/"+st.Locator); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "start", m.Locator+"/"+st.Locator); r.exitCode != 0 {
 			t.Fatalf("start step: %q", r.stderr)
 		}
-		if r := runIn(t, dir, dbEnv, "finish", m.Locator+"/"+st.Locator); r.exitCode != 0 {
+		if r := runIn(t, dir, dbEnv, "plumbing", "finish", m.Locator+"/"+st.Locator); r.exitCode != 0 {
 			t.Fatalf("finish step: %q", r.stderr)
 		}
 	}

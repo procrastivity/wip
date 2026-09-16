@@ -15,7 +15,7 @@ func DefaultLabel(dir string) string {
 // form: the false result means both attempts also collide, and the caller
 // hard-errors rather than falling back to anything else (no `-2`, `-3`,
 // ever). The same algorithm serves two callers: `wip init` runs it silently
-// to resolve the default label automatically, and `wip label` runs it only
+// to resolve the default label automatically, and `wip plumbing label` runs it only
 // to name the one alternative it proposes in its refusal.
 func SuggestLabel(dir string, taken map[string]bool) (string, bool) {
 	clean := filepath.Clean(dir)

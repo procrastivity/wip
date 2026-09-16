@@ -10,8 +10,8 @@ import (
 
 // TestReadGenerated_MissingFileRefuses is step-08's Done: a read against a
 // missing expected file fails with a wip-authored refusal naming the
-// missing path and directing to `wip refresh <locator>` — never a silent
-// re-render, never a raw filesystem error.
+// missing path and directing to `wip plumbing refresh <locator>` — never a
+// silent re-render, never a raw filesystem error.
 func TestReadGenerated_MissingFileRefuses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "generated", "matter-042.md")
 
@@ -26,8 +26,8 @@ func TestReadGenerated_MissingFileRefuses(t *testing.T) {
 	if werr.Code != "refusal.generated-missing" {
 		t.Errorf("code = %q, want %q", werr.Code, "refusal.generated-missing")
 	}
-	if !contains(werr.Message, path) || !contains(werr.Message, "wip refresh matter-042") {
-		t.Errorf("message = %q, want it to name the path and `wip refresh matter-042`", werr.Message)
+	if !contains(werr.Message, path) || !contains(werr.Message, "wip plumbing refresh matter-042") {
+		t.Errorf("message = %q, want it to name the path and `wip plumbing refresh matter-042`", werr.Message)
 	}
 }
 
