@@ -103,6 +103,70 @@ func TestPair_NextGoldenSameness(t *testing.T) {
 	}
 }
 
+func TestPair_NextFailureSameness(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStderr string
+		fixture    bool
+	}{
+		{
+			name:       "extra positional argument",
+			args:       []string{"next", "extra"},
+			wantExit:   2,
+			wantStderr: "wip: unknown command \"extra\" for \"wip plumbing next\"\n",
+		},
+		{
+			name:       "unknown locator",
+			args:       []string{"next", "--set", "missing"},
+			wantExit:   1,
+			wantStderr: "wip: plumbing next: no matter labeled \"missing\"\n",
+			fixture:    true,
+		},
+		{
+			name:       "mutually exclusive flags",
+			args:       []string{"next", "--set", "missing", "--clear"},
+			wantExit:   2,
+			wantStderr: "wip: if any flags in the group [set clear] are set none of the others can be; [clear set] were all set\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results := make([]result, 2)
+			for i, prefix := range [][]string{nil, {"plumbing"}} {
+				var dir string
+				var dbEnv []string
+				if tc.fixture {
+					dir, dbEnv = seedStatusFixture(t)
+				}
+				args := append(append([]string{}, prefix...), tc.args...)
+				if tc.fixture {
+					results[i] = runIn(t, dir, dbEnv, args...)
+				} else {
+					results[i] = run(t, nil, args...)
+				}
+			}
+
+			porcelain, plumbing := results[0], results[1]
+			for _, r := range results {
+				if r.exitCode != tc.wantExit {
+					t.Errorf("exit code = %d, want %d; stdout=%q stderr=%q", r.exitCode, tc.wantExit, r.stdout, r.stderr)
+				}
+				if r.stdout != "" {
+					t.Errorf("stdout = %q, want empty on failure", r.stdout)
+				}
+				if r.stderr != tc.wantStderr {
+					t.Errorf("stderr = %q, want %q", r.stderr, tc.wantStderr)
+				}
+			}
+			if porcelain.exitCode != plumbing.exitCode || porcelain.stdout != plumbing.stdout || porcelain.stderr != plumbing.stderr {
+				t.Errorf("failure outputs differ:\nwip next → %#v\nwip plumbing next → %#v", porcelain, plumbing)
+			}
+		})
+	}
+}
+
 // TestPair_NextHelpDiffersOnlyInCommandPath pins the one place the two
 // spellings may legitimately diverge: the usage line's own command path.
 func TestPair_NextHelpDiffersOnlyInCommandPath(t *testing.T) {

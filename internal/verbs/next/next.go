@@ -24,6 +24,8 @@ import (
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
+const canonicalCommandPath = "wip plumbing next"
+
 // Command constructs `wip plumbing next` — the canonical member of the
 // pair.
 func Command(streams *iostreams.Streams) *cobra.Command { return command(streams, "") }
@@ -42,7 +44,7 @@ func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "next",
 		Short: "the cursor fused with the unblocked frontier — what to work on next",
-		Args:  cobra.NoArgs,
+		Args:  canonicalNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags := cliflags.FromContext(cmd.Context())
 
@@ -100,6 +102,13 @@ func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 		manifest.SetAliasOf(cmd, "plumbing "+aliasOf)
 	}
 	return cmd
+}
+
+func canonicalNoArgs(_ *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("unknown command %q for %q", args[0], canonicalCommandPath)
+	}
+	return nil
 }
 
 func renderSet(ctx context.Context, streams *iostreams.Streams, v store.View, jsonMode bool, node store.Node) error {

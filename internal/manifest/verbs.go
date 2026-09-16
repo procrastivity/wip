@@ -47,6 +47,12 @@ func SetAliasOf(cmd *cobra.Command, name string) {
 	cmd.Annotations[aliasOfAnnotation] = name
 }
 
+// AliasOf returns the canonical manifest verb name for an alternate command
+// spelling, or an empty string when cmd is not an alias.
+func AliasOf(cmd *cobra.Command) string {
+	return cmd.Annotations[aliasOfAnnotation]
+}
+
 // walkVerbs collects every leaf, non-hidden command under root, regardless
 // of surface kind. A hidden command (e.g. internal/selftest's fixture,
 // gated behind WIP_SELFTEST) never appears in a real install or a manifest

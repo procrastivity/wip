@@ -9,6 +9,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/exitcode"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
@@ -26,7 +27,11 @@ func Execute(root *cobra.Command, streams *iostreams.Streams) int {
 	var werr *wiperr.Error
 	if errors.As(err, &werr) {
 		jsonOut, _ := cmd.Flags().GetBool("json")
-		wiperr.Render(streams.Err, verbPath(root, cmd), werr, jsonOut)
+		path := manifest.AliasOf(cmd)
+		if path == "" {
+			path = verbPath(root, cmd)
+		}
+		wiperr.Render(streams.Err, path, werr, jsonOut)
 		return exitcode.FromError(werr)
 	}
 
