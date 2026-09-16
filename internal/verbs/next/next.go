@@ -1,9 +1,10 @@
-// Package next implements `wip next`, `wip next --set <locator>` and `wip
-// next --clear` — read-surface's fusion of the personal cursor with the
-// durable unblocked frontier (MODEL §1), producing vocabulary's five
-// drafted outputs plus the choose-next case D67 makes first-class:
-// forward-looking, never a defect, and answered by naming a target
-// (`--set`) or explicitly leaving it open (`--clear`).
+// Package next implements `wip next` / `wip plumbing next` — read-surface's
+// fusion of the personal cursor with the durable unblocked frontier (MODEL
+// §1), producing vocabulary's five drafted outputs plus the choose-next
+// case D67 makes first-class: forward-looking, never a defect, and answered
+// by naming a target (`--set`) or explicitly leaving it open (`--clear`).
+// The two spellings are D112's alias pair: one implementation, registered
+// at both the top level and under the plumbing namespace.
 package next
 
 import (
@@ -16,14 +17,26 @@ import (
 
 	"github.com/procrastivity/wip/internal/cliflags"
 	"github.com/procrastivity/wip/internal/iostreams"
+	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/readsurface"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
 )
 
-// Command constructs `wip next`.
-func Command(streams *iostreams.Streams) *cobra.Command {
+// Command constructs `wip plumbing next` — the canonical member of the
+// pair.
+func Command(streams *iostreams.Streams) *cobra.Command { return command(streams, "") }
+
+// AliasCommand constructs `wip next` — the same verb at its porcelain
+// spelling (D112's alias pair): one implementation registered twice, with
+// identical flags (--set/--clear), output, schema, and kind. The manifest
+// records the porcelain member's `alias-of` pointing at the canonical
+// plumbing name; projection keys on the plumbing tree, so only the
+// canonical member reaches a skill table.
+func AliasCommand(streams *iostreams.Streams) *cobra.Command { return command(streams, "next") }
+
+func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 	var set string
 	var clearCursor bool
 	cmd := &cobra.Command{
@@ -83,6 +96,9 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd.Flags().BoolVar(&clearCursor, "clear", false, "clear the cursor — leave what's next undecided")
 	cmd.MarkFlagsMutuallyExclusive("set", "clear")
 	surface.Annotate(cmd, surface.Plumbing)
+	if aliasOf != "" {
+		manifest.SetAliasOf(cmd, "plumbing "+aliasOf)
+	}
 	return cmd
 }
 
@@ -170,7 +186,7 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 				return err
 			}
 		}
-		_, err := fmt.Fprintln(streams.Out, "run `wip status` for the full dependency picture")
+		_, err := fmt.Fprintln(streams.Out, "run `wip plumbing status` for the full dependency picture")
 		return err
 
 	case readsurface.NoCursor:

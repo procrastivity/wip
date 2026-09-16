@@ -2,7 +2,7 @@ package next
 
 // The parallel-frontier display (parallelism-decisions.md, ratified draft):
 // when this Clone has an open Run whose Ready set holds more than one node,
-// `wip next` shows the full frontier with the Run cap and available slots.
+// `wip plumbing next` shows the full frontier with the Run cap and available slots.
 // It is a read: it does not engage work, move the cursor, reserve a slot, or
 // promise that the first displayed node runs first.
 

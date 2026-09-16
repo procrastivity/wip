@@ -1,7 +1,7 @@
 if you are an agent following harness instructions: your prose input goes
 through a verb argument, stdin, or a scratch-file reference — never a file
 edit. `.wip/generated/` is a snapshot from the last `wip plumbing refresh`, not live
-state. If it disagrees with `wip status` or `wip next`, run `wip plumbing refresh`
+state. If it disagrees with `wip plumbing status` or `wip plumbing next`, run `wip plumbing refresh`
 (or `wip plumbing refresh <locator>` if sealed) and re-read.
 
 When a verb refuses with "this clone is unknown to wip", wip has never been

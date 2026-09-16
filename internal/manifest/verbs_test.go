@@ -1,6 +1,7 @@
 package manifest_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -150,6 +151,65 @@ func TestBuild_ArgsExcludeInheritedGlobalFlags(t *testing.T) {
 				t.Fatal(`Args includes root's inherited --json flag, want only this verb's own LocalFlags`)
 			}
 		}
+	}
+}
+
+// TestBuild_AliasPreservesDeclaration is the alias-pair manifest contract
+// (D112, plumbing-namespace step-03): the porcelain member of a pair
+// registers as a full leaf — same flags, usage, and description as the
+// canonical plumbing member — and additionally carries `alias-of` naming
+// that member. The canonical member carries nothing.
+func TestBuild_AliasPreservesDeclaration(t *testing.T) {
+	root := fakeRoot(t)
+	group := &cobra.Command{Use: "plumbing"}
+	canonical := &cobra.Command{
+		Use:   "next",
+		Short: "the fused view",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	alias := &cobra.Command{
+		Use:   "next",
+		Short: "the fused view",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	}
+	for _, cmd := range []*cobra.Command{canonical, alias} {
+		cmd.Flags().Bool("clear", false, "clear it")
+		surface.Annotate(cmd, surface.Plumbing)
+	}
+	manifest.SetAliasOf(alias, "plumbing next")
+	group.AddCommand(canonical)
+	root.AddCommand(alias)
+	root.AddCommand(group)
+
+	m, err := manifest.Build(root, buildinfo.Info{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var canon, al *manifest.Verb
+	for i := range m.Verbs {
+		switch m.Verbs[i].Name {
+		case "plumbing next":
+			canon = &m.Verbs[i]
+		case "next":
+			al = &m.Verbs[i]
+		}
+	}
+	if canon == nil || al == nil {
+		t.Fatalf("want both pair members in the manifest, got %+v", m.Verbs)
+	}
+	if al.AliasOf != "plumbing next" {
+		t.Errorf("alias-of = %q, want the canonical member's manifest name", al.AliasOf)
+	}
+	if canon.AliasOf != "" {
+		t.Errorf("canonical member alias-of = %q, want empty", canon.AliasOf)
+	}
+	alCopy := *al
+	canonCopy := *canon
+	alCopy.Name, canonCopy.Name = "", ""
+	alCopy.AliasOf = ""
+	if !reflect.DeepEqual(alCopy, canonCopy) {
+		t.Errorf("alias member's declaration differs from canonical: canonical=%+v alias=%+v", canonCopy, alCopy)
 	}
 }
 

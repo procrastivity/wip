@@ -28,12 +28,14 @@ import (
 	labelverb "github.com/procrastivity/wip/internal/verbs/label"
 	lifecycleverb "github.com/procrastivity/wip/internal/verbs/lifecycle"
 	matterverb "github.com/procrastivity/wip/internal/verbs/matter"
+	nextverb "github.com/procrastivity/wip/internal/verbs/next"
 	outboxverb "github.com/procrastivity/wip/internal/verbs/outbox"
 	refreshverb "github.com/procrastivity/wip/internal/verbs/refresh"
 	roleverb "github.com/procrastivity/wip/internal/verbs/role"
 	runverb "github.com/procrastivity/wip/internal/verbs/run"
 	sessionverb "github.com/procrastivity/wip/internal/verbs/session"
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
+	statusverb "github.com/procrastivity/wip/internal/verbs/status"
 	stepverb "github.com/procrastivity/wip/internal/verbs/step"
 )
 
@@ -75,6 +77,7 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	cmd.AddCommand(gateverb.Command(streams, providers))
 	cmd.AddCommand(labelverb.Command(streams))
 	cmd.AddCommand(matterverb.Command(streams))
+	cmd.AddCommand(nextverb.Command(streams))
 	cmd.AddCommand(outboxverb.Command(streams, providers))
 	cmd.AddCommand(lifecycleverb.PauseCommand(streams))
 	cmd.AddCommand(bindverb.RebindCommand(streams))
@@ -85,6 +88,7 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	cmd.AddCommand(sessionverb.Command(streams))
 	cmd.AddCommand(stageverb.Command(streams))
 	cmd.AddCommand(lifecycleverb.StartCommand(streams))
+	cmd.AddCommand(statusverb.Command(streams))
 	cmd.AddCommand(stepverb.Command(streams))
 	cmd.AddCommand(bindverb.UnbindCommand(streams))
 	cmd.AddCommand(contentverb.WorkplanCommand(streams))

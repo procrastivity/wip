@@ -11,12 +11,14 @@ import (
 	"github.com/procrastivity/wip/internal/surface"
 )
 
-// outputSchemaAnnotation is the cobra.Command.Annotations key a verb's
-// declared output schema (if any) is recorded under, mirroring
-// internal/surface's own annotation-on-the-command approach: the
-// registration lives on the command itself, so this walk needs no parallel
-// registry.
-const outputSchemaAnnotation = "wip.output-schema"
+// The two cobra.Command.Annotations keys a verb's manifest extras are
+// recorded under, mirroring internal/surface's own
+// annotation-on-the-command approach: the registration lives on the
+// command itself, so this walk needs no parallel registry.
+const (
+	outputSchemaAnnotation = "wip.output-schema"
+	aliasOfAnnotation      = "wip.alias-of"
+)
 
 // SetOutputSchema records schema as cmd's declared --json output shape.
 // Decided (contract-backport step-07, C3.7): this is a reserved slot,
@@ -29,6 +31,20 @@ func SetOutputSchema(cmd *cobra.Command, schema json.RawMessage) {
 		cmd.Annotations = map[string]string{}
 	}
 	cmd.Annotations[outputSchemaAnnotation] = string(schema)
+}
+
+// SetAliasOf records that this command is an alternate spelling of another
+// manifest verb — the porcelain member of an alias pair (D112), where one
+// constructor registers at both the top level and under `wip plumbing`.
+// The command remains a real leaf so flags, usage and schema are emitted
+// and checked independently; the field names the canonical member. The
+// mechanism itself stays unratified at the contract (plumbing-namespace
+// step-03): wip proves it in use before toolsmith ratifies it.
+func SetAliasOf(cmd *cobra.Command, name string) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[aliasOfAnnotation] = name
 }
 
 // walkVerbs collects every leaf, non-hidden command under root, regardless
@@ -74,6 +90,7 @@ func collect(root, cmd *cobra.Command, out *[]Verb) error {
 			Usage:       usageArgs(child),
 			Args:        walkArgs(child),
 			Description: child.Short,
+			AliasOf:     child.Annotations[aliasOfAnnotation],
 		}
 		if schema, ok := child.Annotations[outputSchemaAnnotation]; ok && schema != "" {
 			v.OutputSchema = json.RawMessage(schema)

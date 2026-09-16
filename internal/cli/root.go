@@ -87,8 +87,8 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	// (internal/verbs/plumbing), registered alphabetically there since
 	// this global also disables sorting inside that group.
 	cobra.EnableCommandSorting = false
-	root.AddCommand(statusverb.Command(streams))
-	root.AddCommand(nextverb.Command(streams))
+	root.AddCommand(statusverb.PorcelainCommand(streams))
+	root.AddCommand(nextverb.AliasCommand(streams))
 	root.AddCommand(initverb.Command(streams))
 	root.AddCommand(doctorverb.Command(streams, build, root))
 	root.AddCommand(installverb.Command(streams, build, root, providers))

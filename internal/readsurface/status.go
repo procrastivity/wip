@@ -1,6 +1,6 @@
 package readsurface
 
-// Step-03: `wip status`'s founding-question content, composed over the
+// Step-03: `wip plumbing status`'s founding-question content, composed over the
 // tier-scoped stub `tiers/tier-verbs` step-08 already built. This package
 // does not touch `tiers.Status` or its types at all — it reads that Step's
 // output as settled input (this Matter's own seed card, verbatim) and adds

@@ -7,7 +7,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
-// StatusView is what `wip status` (tier-scoped stub, step-08) renders: the
+// StatusView is what `wip plumbing status` (tier-scoped stub, step-08) renders: the
 // whole of the tiers Brief's "Read scope" section and nothing else.
 // `read-surface` extends this same verb with the founding "what is in
 // progress" content, `next`, and Session on top of this Step's output,
@@ -43,7 +43,7 @@ type WorktreeStatus struct {
 	Current  bool
 }
 
-// Status implements `wip status`'s tier scoping exactly as the Brief states
+// Status implements `wip plumbing status`'s tier scoping exactly as the Brief states
 // it: repo-wide with the current Clone (and current Worktree, if linked)
 // marked inside a known Clone; host-wide outside one.
 func Status(ctx context.Context, s *store.Store, actor store.Actor, dir string) (StatusView, error) {
@@ -116,7 +116,7 @@ func repoStatus(ctx context.Context, s *store.Store, repo store.Repo, currentClo
 	return out, nil
 }
 
-// RepoHeader is the display name `wip status` prints above a Repo's clones:
+// RepoHeader is the display name `wip plumbing status` prints above a Repo's clones:
 // the normalized remote's path with the host dropped (github.com/acme/widget
 // -> acme/widget) when the Repo has a remote, or a local-only marker naming
 // its ULID when it does not.
