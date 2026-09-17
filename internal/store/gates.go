@@ -14,6 +14,10 @@ const (
 	GateRequirementOpen GateRequirementState = "open"
 	// GateRequirementClosed is a gate requirement satisfied by a close event.
 	GateRequirementClosed GateRequirementState = "closed"
+	// GateRequirementDismissed is a gate requirement satisfied by an explicit
+	// emergency dismissal. It is terminal and satisfies sealing, but remains
+	// distinct from normal close evidence.
+	GateRequirementDismissed GateRequirementState = "dismissed"
 	// GateRequirementExempt is a gate requirement satisfied by a prospective exemption.
 	GateRequirementExempt GateRequirementState = "exempt"
 )
@@ -31,14 +35,17 @@ const (
 
 // GateRequirement is one repository declaration applied to a live node.
 type GateRequirement struct {
-	Gate         string
-	Scale        Scale
-	Owner        Actor
-	Subject      Node
-	Relationship GateRelationship
-	State        GateRequirementState
-	ClosedBy     Actor
-	ClosedAt     *time.Time
+	Gate            string
+	Scale           Scale
+	Owner           Actor
+	Subject         Node
+	Relationship    GateRelationship
+	State           GateRequirementState
+	ClosedBy        Actor
+	ClosedAt        *time.Time
+	DismissedBy     Actor
+	DismissedAt     *time.Time
+	DismissalReason string
 }
 
 // CompletionOverlay describes lifecycle and gate decisions that have not yet
@@ -58,9 +65,11 @@ type NodeCompletion struct {
 }
 
 type closedGateMetadata struct {
-	scale    Scale
-	actor    Actor
-	closedAt time.Time
+	scale           Scale
+	state           GateRequirementState
+	actor           Actor
+	at              time.Time
+	dismissalReason string
 }
 
 // EffectiveGateRequirements returns the target's own requirements followed by
@@ -96,10 +105,17 @@ func (v View) EffectiveGateRequirements(ctx context.Context, target Node) ([]Gat
 				requirement.Owner = owner.Actor()
 			}
 			if metadata, ok := closed[declaration.Gate]; ok {
-				requirement.State = GateRequirementClosed
-				requirement.ClosedBy = metadata.actor
-				closedAt := metadata.closedAt
-				requirement.ClosedAt = &closedAt
+				requirement.State = metadata.state
+				if metadata.state == GateRequirementDismissed {
+					dismissedAt := metadata.at
+					requirement.DismissedBy = metadata.actor
+					requirement.DismissedAt = &dismissedAt
+					requirement.DismissalReason = metadata.dismissalReason
+				} else {
+					requirement.ClosedBy = metadata.actor
+					closedAt := metadata.at
+					requirement.ClosedAt = &closedAt
+				}
 			} else {
 				exempt, err := v.gateExemptOnNode(ctx, target.Repo, current.ID, declaration.Gate)
 				if err != nil {
@@ -139,7 +155,12 @@ func (v View) NodeCompletionWithOverlay(ctx context.Context, target Node, overla
 	sealed := done
 	pending := make([]GateRequirement, 0)
 	for _, requirement := range requirements {
-		satisfied := requirement.State != GateRequirementOpen
+		// Keep the terminal set explicit. In particular, a future or corrupt
+		// state must not silently satisfy sealing merely because it is not
+		// `open`.
+		satisfied := requirement.State == GateRequirementClosed ||
+			requirement.State == GateRequirementDismissed ||
+			requirement.State == GateRequirementExempt
 		if overlay.ClosingNode != "" && overlay.ClosingGate != "" &&
 			requirement.Subject.ID == overlay.ClosingNode && requirement.Gate == overlay.ClosingGate {
 			satisfied = true
@@ -166,7 +187,7 @@ func (v View) NodeCompletionWithOverlay(ctx context.Context, target Node, overla
 }
 
 func (v View) closedGateMetadata(ctx context.Context, node string) (map[string]closedGateMetadata, error) {
-	rows, err := v.q.QueryContext(ctx, `SELECT s.gate, s.scale, e.actor, e.occurred_at
+	rows, err := v.q.QueryContext(ctx, `SELECT s.gate, s.scale, e.id, e.type, e.actor, e.occurred_at, e.payload
 		FROM gate_state s JOIN events e ON e.id = s.last_event WHERE s.node = ?`, node)
 	if err != nil {
 		return nil, fmt.Errorf("store: read closed gate metadata of %s: %w", node, err)
@@ -174,18 +195,33 @@ func (v View) closedGateMetadata(ctx context.Context, node string) (map[string]c
 	defer func() { _ = rows.Close() }()
 	closed := make(map[string]closedGateMetadata)
 	for rows.Next() {
-		var gate string
+		var gate, eventID, eventType, actor, at, payload string
 		var metadata closedGateMetadata
-		var actor, at string
-		if err := rows.Scan(&gate, &metadata.scale, &actor, &at); err != nil {
+		if err := rows.Scan(&gate, &metadata.scale, &eventID, &eventType, &actor, &at, &payload); err != nil {
 			return nil, fmt.Errorf("store: read closed gate metadata of %s: %w", node, err)
 		}
 		metadata.actor = Actor(actor)
-		metadata.closedAt, err = time.Parse(timestampLayout, at)
+		metadata.at, err = time.Parse(timestampLayout, at)
 		if err != nil {
 			return nil, fmt.Errorf("store: gate %s on %s carries an unreadable timestamp %q: %w", gate, node, at, err)
 		}
-		metadata.closedAt = metadata.closedAt.UTC()
+		metadata.at = metadata.at.UTC()
+		switch eventType {
+		case TypeGateClosed:
+			metadata.state = GateRequirementClosed
+		case TypeGateDismissed:
+			var dismissal GateDismissed
+			if err := decodeStrict(Event{ID: eventID, Type: eventType, Payload: []byte(payload)}, &dismissal); err != nil {
+				return nil, err
+			}
+			if dismissal.Gate != gate || dismissal.Scale != metadata.scale {
+				return nil, fmt.Errorf("store: gate %s on %s has inconsistent dismissal metadata", gate, node)
+			}
+			metadata.state = GateRequirementDismissed
+			metadata.dismissalReason = dismissal.Reason
+		default:
+			return nil, fmt.Errorf("store: gate %s on %s points at non-gate event %s", gate, node, eventType)
+		}
 		closed[gate] = metadata
 	}
 	if err := rows.Err(); err != nil {

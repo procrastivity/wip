@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/procrastivity/wip/internal/store"
+	"github.com/procrastivity/wip/internal/writesurface"
 )
 
 type fakeAlignmentView struct {
@@ -137,6 +138,81 @@ func TestAlignmentCoordinatorReturnsSilentlyForUnboundMatter(t *testing.T) {
 	report := coordinator.Check(context.Background(), view, view.node.ID)
 	if len(report.Items) != 0 || len(reader.reads) != 0 || len(view.configKeys) != 0 {
 		t.Fatalf("unbound check = %+v, reads=%v config=%v", report, reader.reads, view.configKeys)
+	}
+}
+
+func TestAlignmentCoordinatorTreatsDismissedMatterAsCompletedWithoutProviderEvents(t *testing.T) {
+	f := newFixture(t)
+	if err := f.s.DeclareGate(f.ctx, f.repo, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	var matter string
+	commit := func(decide func(context.Context, *store.Tx) ([]store.Draft, error)) {
+		f.t.Helper()
+		if _, err := f.s.Commit(f.ctx, store.Request{Actor: f.actor, Env: store.Env{Repo: f.repo}}, decide); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	commit(func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		matter = tx.NewID()
+		return []store.Draft{{
+			Type: store.TypeMatterCreated, Subject: matter,
+			Payload: store.NodeBirth{Locator: "dismissed", Title: "Dismissed matter", SortKey: 1000},
+		}}, nil
+	})
+	commit(func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type: store.TypeMatterStarted, Subject: matter,
+			Payload: store.Transition{From: store.Planned, To: store.InProgress},
+		}}, nil
+	})
+	commit(func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type: store.TypeMatterFinished, Subject: matter,
+			Payload: store.Transition{From: store.InProgress, To: store.Done},
+		}}, nil
+	})
+	commit(func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type: store.TypeReferenceAdded, Subject: matter,
+			Payload: store.ReferenceAdded{Ref: "R-dismissed"},
+		}}, nil
+	})
+	if _, err := writesurface.DismissGate(f.ctx, f.s, f.actor, f.repo, "reviewed-local", "dismissed", "the verifier is unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.SetConfig(f.ctx, f.repo, store.TrackerBackendKey, "fake"); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fakeAlignmentReader{states: map[string]LiveState{
+		"R-dismissed": {Class: LiveCompleted, Display: "Done", Lease: "lease-dismissed"},
+	}}
+	providers := NewRegistry()
+	providers.Register("fake", func(FactoryInput) (Seam, error) { return reader, nil })
+	report := NewAlignmentCoordinator(providers).Check(f.ctx, f.s.View, matter)
+	if len(report.Items) != 1 || report.Items[0].Classification != AlignmentAligned ||
+		report.Items[0].Expected != store.TrackerCompleted {
+		t.Fatalf("dismissed alignment report = %+v, want completed aggregate and aligned provider state", report)
+	}
+	if len(reader.reads) != 1 || reader.reads[0] != "R-dismissed" {
+		t.Fatalf("provider reads = %v, want one read after canonical seal", reader.reads)
+	}
+	outbox, err := f.s.Outbox(f.ctx, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outbox) != 0 {
+		t.Fatalf("dismissal created provider outbox entries: %+v", outbox)
+	}
+	events, err := f.s.Events(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if strings.HasPrefix(event.Type, "tracker.") {
+			t.Fatalf("dismissal emitted provider-specific event %s", event.Type)
+		}
 	}
 }
 

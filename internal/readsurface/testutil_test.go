@@ -212,6 +212,18 @@ func (f *fixture) closeGate(node, gate string, scale store.Scale) store.Event {
 	return evs[0]
 }
 
+func (f *fixture) dismissGate(node, gate string, scale store.Scale, reason string) store.Event {
+	f.t.Helper()
+	evs := f.commit(store.Env{Repo: f.Repo}, func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeGateDismissed,
+			Subject: node,
+			Payload: store.GateDismissed{Gate: gate, Scale: scale, Reason: reason},
+		}}, nil
+	})
+	return evs[0]
+}
+
 // seedBacklogEntry births an unprocessed Backlog entry (MODEL §4), the
 // fixture NextView's EverythingSealed branch nudges toward.
 func (f *fixture) seedBacklogEntry(title string) string {

@@ -430,6 +430,36 @@ func TestMatterSummaryRendersAllGateStatesInOrder(t *testing.T) {
 	}
 }
 
+func TestMatterSummaryRendersDismissalMetadataDistinctFromClose(t *testing.T) {
+	s, _, cur := setup(t)
+	locator := matter(t, s, cur.Repo.ID, "Dismissed gate")
+	if err := writesurface.DeclareGate(ctx, s, cur.Repo.ID, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(ctx, s, store.ActorHuman, cur.Repo.ID, locator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Finish(ctx, s, store.ActorHuman, cur.Repo.ID, locator); err != nil {
+		t.Fatal(err)
+	}
+	reason := "the designated verifier is unavailable during the incident"
+	if _, err := writesurface.DismissGateWithEnvResult(ctx, s, store.ActorHuman, cur.Env(), "reviewed-local", locator, reason); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(ctx, s, cur, store.ActorHuman, locator, NoPrecondition); err != nil {
+		t.Fatal(err)
+	}
+
+	md := matterMarkdown(t, cur, locator)
+	if !strings.Contains(md, "- reviewed-local (matter, own): dismissed by human at ") ||
+		!strings.Contains(md, ": "+reason+"\n") {
+		t.Errorf("dismissed gate rendering = %q, want actor, timestamp and immutable reason", md)
+	}
+	if strings.Contains(md, "reviewed-local (matter, own): closed by") {
+		t.Errorf("dismissed gate was rendered as a normal close:\n%s", md)
+	}
+}
+
 func TestMatterSummaryRendersEmptyGatesSection(t *testing.T) {
 	s, _, cur := setup(t)
 	locator := matter(t, s, cur.Repo.ID, "No gates")

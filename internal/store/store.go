@@ -309,6 +309,9 @@ func (s *Store) verifyTaxonomy(ctx context.Context) error {
 	if s.version >= 6 {
 		types = append(types, V6Taxonomy...)
 	}
+	if s.version >= 11 {
+		types = append(types, V11Taxonomy...)
+	}
 	for _, t := range types {
 		if !known[t.Type] {
 			return fmt.Errorf(
@@ -495,6 +498,12 @@ func (s *Store) stamp(req Request, d Draft) (Event, error) {
 		Actor:      req.Actor,
 		Subject:    d.Subject,
 		Payload:    raw,
+	}
+	if d.Type == TypeGateDismissed {
+		var dismissal GateDismissed
+		if err := decodeStrict(ev, &dismissal); err != nil {
+			return Event{}, err
+		}
 	}
 	env := req.Env
 	if d.Env != nil {

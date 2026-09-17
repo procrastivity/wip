@@ -48,9 +48,11 @@ const (
 	TypeDependencyAdded   = "dependency.added"
 	TypeDependencyRemoved = "dependency.removed"
 
-	// Gate — the only gate event in P1; declaring a gate is config, not an
-	// event (D4, D54).
-	TypeGateClosed = "gate.closed"
+	// Gate — declaring a gate is config, not an event (D4, D54). Normal close
+	// and emergency dismissal are separate terminal actions so the exception
+	// remains visible in the event log and read model.
+	TypeGateClosed    = "gate.closed"
+	TypeGateDismissed = "gate.dismissed"
 
 	// Intake/backlog.
 	TypeBacklogEntered   = "backlog.entered"
@@ -282,13 +284,20 @@ var V9Taxonomy = []EventType{
 	durable(TypeTrackerStateObserved, FamilyTracker),
 }
 
+// V11Taxonomy records emergency satisfaction of an otherwise-open gate. It is
+// separate from gate.closed so normal verifier evidence and an exceptional
+// dismissal can never be conflated by a projection or a reader.
+var V11Taxonomy = []EventType{
+	durable(TypeGateDismissed, FamilyGate),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

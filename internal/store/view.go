@@ -395,16 +395,23 @@ func (v View) edgeList(ctx context.Context, query string, args ...any) ([]Edge, 
 
 // ClosedGate is one gate closed against one node.
 type ClosedGate struct {
-	Node     string
-	Gate     string
-	Scale    Scale
-	ClosedAt time.Time
+	Node            string
+	Gate            string
+	Scale           Scale
+	State           GateRequirementState
+	ClosedBy        Actor
+	ClosedAt        time.Time
+	DismissedBy     Actor
+	DismissedAt     *time.Time
+	DismissalReason string
 }
 
-// ClosedGates lists the gates closed against a node.
+// ClosedGates lists the terminal gate satisfactions projected against a node.
 func (v View) ClosedGates(ctx context.Context, node string) ([]ClosedGate, error) {
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT node, gate, scale, closed_at FROM gate_state WHERE node = ? ORDER BY gate`, node)
+		`SELECT s.node, s.gate, s.scale, e.id, e.type, e.actor, e.occurred_at, e.payload
+		 FROM gate_state s JOIN events e ON e.id = s.last_event
+		 WHERE s.node = ? ORDER BY s.gate`, node)
 	if err != nil {
 		return nil, fmt.Errorf("store: read the gate state of %s: %w", node, err)
 	}
@@ -413,15 +420,36 @@ func (v View) ClosedGates(ctx context.Context, node string) ([]ClosedGate, error
 	var out []ClosedGate
 	for rows.Next() {
 		var (
-			g  ClosedGate
-			at string
+			g                                      ClosedGate
+			eventID, eventType, actor, at, payload string
 		)
-		if err := rows.Scan(&g.Node, &g.Gate, &g.Scale, &at); err != nil {
+		if err := rows.Scan(&g.Node, &g.Gate, &g.Scale, &eventID, &eventType, &actor, &at, &payload); err != nil {
 			return nil, fmt.Errorf("store: read the gate state of %s: %w", node, err)
 		}
-		g.ClosedAt, err = time.Parse(timestampLayout, at)
+		parsedAt, err := time.Parse(timestampLayout, at)
 		if err != nil {
 			return nil, fmt.Errorf("store: gate %s on %s carries an unreadable timestamp %q: %w", g.Gate, node, at, err)
+		}
+		parsedAt = parsedAt.UTC()
+		switch eventType {
+		case TypeGateClosed:
+			g.State = GateRequirementClosed
+			g.ClosedBy = Actor(actor)
+			g.ClosedAt = parsedAt
+		case TypeGateDismissed:
+			var dismissal GateDismissed
+			if err := decodeStrict(Event{ID: eventID, Type: eventType, Payload: []byte(payload)}, &dismissal); err != nil {
+				return nil, err
+			}
+			if dismissal.Gate != g.Gate || dismissal.Scale != g.Scale {
+				return nil, fmt.Errorf("store: gate %s on %s has inconsistent dismissal metadata", g.Gate, node)
+			}
+			g.State = GateRequirementDismissed
+			g.DismissedBy = Actor(actor)
+			g.DismissedAt = &parsedAt
+			g.DismissalReason = dismissal.Reason
+		default:
+			return nil, fmt.Errorf("store: gate %s on %s points at non-gate event %s", g.Gate, node, eventType)
 		}
 		out = append(out, g)
 	}

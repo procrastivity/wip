@@ -107,6 +107,20 @@ type GateClosed struct {
 	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
+// GateDismissed is the payload of gate.dismissed. Dismissal is a terminal
+// satisfaction of a still-open declared gate on a Done node; the reason is
+// required, retained verbatim, and immutable because the event log is
+// append-only. Actor and timestamp remain envelope fields, as they do for
+// gate.closed. TrackerPushLevel snapshots the same candidate policy used by a
+// normal gate close so a dismissal that seals a Matter has identical existing
+// tracker consequences.
+type GateDismissed struct {
+	Gate             string           `json:"gate"`
+	Scale            Scale            `json:"scale"`
+	Reason           string           `json:"reason"`
+	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
+}
+
 // BacklogEntered is the payload of backlog.entered. subject is the entry.
 type BacklogEntered struct {
 	Provenance Provenance `json:"provenance"`
