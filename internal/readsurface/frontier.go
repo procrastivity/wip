@@ -23,10 +23,8 @@ import (
 // in this dogfood, which declares its one gate at Matter scale only
 // (HANDOFF §1.2).
 func LocallyComplete(ctx context.Context, v store.View, n store.Node) (bool, error) {
-	if n.Lifecycle != store.Done {
-		return false, nil
-	}
-	return gatesClosedAt(ctx, v, n.Repo, n.Kind, n.ID)
+	completion, err := v.NodeCompletion(ctx, n)
+	return completion.LocallyComplete, err
 }
 
 // Sealed reports whether a node is Done with every gate at its own scale
@@ -38,56 +36,8 @@ func LocallyComplete(ctx context.Context, v store.View, n store.Node) (bool, err
 // is locally complete the moment it's Done (its own scale declares nothing),
 // but not sealed until its Matter's `reviewed-local` gate is also closed.
 func Sealed(ctx context.Context, v store.View, n store.Node) (bool, error) {
-	ok, err := LocallyComplete(ctx, v, n)
-	if err != nil || !ok {
-		return false, err
-	}
-	cur := n
-	for cur.Parent != "" {
-		parent, err := v.Node(ctx, cur.Parent)
-		if err != nil {
-			return false, err
-		}
-		satisfied, err := gatesClosedAt(ctx, v, parent.Repo, parent.Kind, parent.ID)
-		if err != nil {
-			return false, err
-		}
-		if !satisfied {
-			return false, nil
-		}
-		cur = parent
-	}
-	return true, nil
-}
-
-// gatesClosedAt reports whether every gate a Repo declares at one scale is
-// closed against one node at that scale — the one question both
-// LocallyComplete (asked of the node itself) and Sealed (asked of each
-// ancestor in turn) reduce to.
-func gatesClosedAt(ctx context.Context, v store.View, repo string, scale store.Scale, node string) (bool, error) {
-	declared, err := v.GateDeclarations(ctx, repo)
-	if err != nil {
-		return false, err
-	}
-	var names []string
-	for _, d := range declared {
-		if d.Scale == scale {
-			names = append(names, d.Gate)
-		}
-	}
-	if len(names) == 0 {
-		return true, nil // D62: an empty declaration set completes at Done.
-	}
-	for _, name := range names {
-		satisfied, err := v.GateSatisfied(ctx, repo, node, name)
-		if err != nil {
-			return false, err
-		}
-		if !satisfied {
-			return false, nil
-		}
-	}
-	return true, nil
+	completion, err := v.NodeCompletion(ctx, n)
+	return completion.Sealed, err
 }
 
 // Blocked is one Planned node still waiting, and what it's waiting for.
@@ -237,13 +187,14 @@ func SealedAt(ctx context.Context, v store.View, n store.Node) (time.Time, bool,
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	gates, err := v.ClosedGates(ctx, n.ID)
+	requirements, err := v.EffectiveGateRequirements(ctx, n)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	for _, g := range gates {
-		if !ok || g.ClosedAt.After(at) {
-			at, ok = g.ClosedAt, true
+	for _, requirement := range requirements {
+		if requirement.State == store.GateRequirementClosed && requirement.ClosedAt != nil &&
+			(!ok || requirement.ClosedAt.After(at)) {
+			at, ok = *requirement.ClosedAt, true
 		}
 	}
 	return at, ok, nil
@@ -257,6 +208,7 @@ type Finished struct {
 	Node            store.Node
 	LocallyComplete bool
 	Sealed          bool
+	Pending         []store.GateRequirement
 }
 
 // FinishedNodes computes MODEL §1's "finished" third: every Done node,
@@ -272,18 +224,14 @@ func FinishedNodes(ctx context.Context, v store.View) ([]Finished, error) {
 	}
 	out := make([]Finished, 0, len(nodes))
 	for _, n := range nodes {
-		lc, err := LocallyComplete(ctx, v, n)
+		completion, err := v.NodeCompletion(ctx, n)
 		if err != nil {
 			return nil, err
 		}
-		var sl bool
-		if lc {
-			sl, err = Sealed(ctx, v, n)
-			if err != nil {
-				return nil, err
-			}
-		}
-		out = append(out, Finished{Node: n, LocallyComplete: lc, Sealed: sl})
+		out = append(out, Finished{
+			Node: n, LocallyComplete: completion.LocallyComplete,
+			Sealed: completion.Sealed, Pending: completion.Pending,
+		})
 	}
 	return out, nil
 }

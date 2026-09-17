@@ -348,9 +348,6 @@ next Matter finds them rather than rediscovering them.
   spans every Repo in the store. The founding question is asked from somewhere,
   and `read-surface` composes the output; whether the filter belongs in the
   query (and therefore in the index) is its call, not this Matter's.
-- **`backlog.declined` overwrites `detail` with the decline reason**, destroying a
-  `deferred` entry's rationale in the projection. The log keeps both, and there is
-  no second free-text column.
 - **`SegmentBytes` and `Content` are on `*Store`** and read `s.db` directly while
   `ContentSegments` is on `View`, so a decide function can list segments inside
   its own transaction but not read their bytes. Nothing in P1 needs it; a verb
@@ -382,6 +379,12 @@ next Matter finds them rather than rediscovering them.
   and backup retention are the same owner's problem.
 
 ## Where this stands
+
+Backlog decline rationale is now versioned separately. Schema v10 adds
+`backlog_entries.decline_reason`; projection version 9 refolds the event log so
+`backlog.entered.detail` remains the entry context and `backlog.declined.reason`
+becomes the decline reason. Pre-v10 folding remains available for legacy
+migration fixtures, and the event log is unchanged.
 
 Built and passing: the v1 baseline (all tables, indexes, triggers, both views),
 the taxonomy as data, the write path (`Commit`/`stamp`/`appendEvent`), the

@@ -82,8 +82,7 @@ func (r AlignmentReport) Lines() []string {
 // Store.View satisfies it, and focused tests can supply a read-only fake.
 type AlignmentView interface {
 	Node(context.Context, string) (store.Node, error)
-	GateDeclarations(context.Context, string) ([]store.GateDeclaration, error)
-	GateSatisfied(context.Context, string, string, string) (bool, error)
+	NodeCompletion(context.Context, store.Node) (store.NodeCompletion, error)
 	TrackerReferences(context.Context, string) ([]string, error)
 	TrackerAggregate(context.Context, string) (store.TrackerDisposition, bool, error)
 	Config(context.Context, string, string) (string, bool, error)
@@ -110,24 +109,15 @@ func (c *AlignmentCoordinator) Check(ctx context.Context, v AlignmentView, matte
 	if err != nil {
 		return unavailableReport("", err)
 	}
-	if matter.Kind != store.ScaleMatter || matter.Lifecycle != store.Done {
+	if matter.Kind != store.ScaleMatter {
 		return AlignmentReport{}
 	}
-	declarations, err := v.GateDeclarations(ctx, matter.Repo)
+	completion, err := v.NodeCompletion(ctx, matter)
 	if err != nil {
 		return unavailableReport("", err)
 	}
-	for _, declaration := range declarations {
-		if declaration.Scale != store.ScaleMatter {
-			continue
-		}
-		satisfied, err := v.GateSatisfied(ctx, matter.Repo, matter.ID, declaration.Gate)
-		if err != nil {
-			return unavailableReport("", err)
-		}
-		if !satisfied {
-			return AlignmentReport{}
-		}
+	if !completion.Sealed {
+		return AlignmentReport{}
 	}
 
 	refs, err := v.TrackerReferences(ctx, matter.ID)

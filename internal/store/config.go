@@ -268,49 +268,22 @@ func (s *Store) RepairGateExemption(ctx context.Context, repo, gate, node string
 // sealedNodesAtScale returns the live Done nodes whose own and enclosing gate
 // declarations are satisfied before a new declaration becomes operative.
 func sealedNodesAtScale(ctx context.Context, tx *sql.Tx, repo string, scale Scale) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `
-		WITH RECURSIVE
-		candidates(id) AS (
-			SELECT id FROM nodes
-			WHERE repo=? AND kind=? AND lifecycle='done' AND tombstone_event IS NULL
-		),
-		ancestry(candidate,node) AS (
-			SELECT id,id FROM candidates
-			UNION ALL
-			SELECT a.candidate,n.parent
-			FROM ancestry a JOIN nodes n ON n.id=a.node
-			WHERE n.parent IS NOT NULL
-		)
-		SELECT c.id
-		FROM candidates c
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM ancestry a
-			JOIN nodes n ON n.id=a.node
-			JOIN gate_declarations d ON d.repo=? AND d.scale=n.kind
-			WHERE a.candidate=c.id
-			  AND NOT EXISTS (
-				SELECT 1 FROM gate_state s WHERE s.node=n.id AND s.gate=d.gate)
-			  AND NOT EXISTS (
-				SELECT 1 FROM gate_exemptions x
-				WHERE x.repo=? AND x.node=n.id AND x.gate=d.gate)
-		)
-		ORDER BY c.id`, repo, string(scale), repo, repo)
+	v := View{q: tx, schemaVersion: latestVersion(register)}
+	rows, err := v.nodeList(ctx, `SELECT `+nodeColumns+` FROM nodes
+		WHERE repo=? AND kind=? AND lifecycle='done' AND tombstone_event IS NULL
+		ORDER BY id`, repo, string(scale))
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
 	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+	for _, node := range rows {
+		completion, err := v.NodeCompletion(ctx, node)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		if completion.Sealed {
+			out = append(out, node.ID)
+		}
 	}
 	return out, nil
 }

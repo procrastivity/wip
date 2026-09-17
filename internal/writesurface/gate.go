@@ -103,28 +103,18 @@ func RepairGateExemption(ctx context.Context, s *store.Store, repo, gate, locato
 			fmt.Sprintf("%s is already satisfied on %s", gate, locator))
 	}
 
-	cur := n
-	for {
-		for _, d := range declared {
-			if d.Scale != cur.Kind || (cur.ID == n.ID && d.Gate == gate) {
-				continue
-			}
-			ok, err := s.GateSatisfied(ctx, repo, cur.ID, d.Gate)
-			if err != nil {
-				return store.Node{}, err
-			}
-			if !ok {
-				return store.Node{}, wiperr.New("refusal.gate-repair-prerequisite", fmt.Sprintf(
-					"%s was not sealed before %s became operative: %s is open on %s",
-					locator, gate, d.Gate, cur.Locator))
-			}
+	requirements, err := s.EffectiveGateRequirements(ctx, n)
+	if err != nil {
+		return store.Node{}, err
+	}
+	for _, requirement := range requirements {
+		if requirement.Subject.ID == n.ID && requirement.Gate == gate {
+			continue
 		}
-		if cur.Parent == "" {
-			break
-		}
-		cur, err = s.Node(ctx, cur.Parent)
-		if err != nil {
-			return store.Node{}, err
+		if requirement.State == store.GateRequirementOpen {
+			return store.Node{}, wiperr.New("refusal.gate-repair-prerequisite", fmt.Sprintf(
+				"%s was not sealed before %s became operative: %s is open on %s",
+				locator, gate, requirement.Gate, requirement.Subject.Locator))
 		}
 	}
 
@@ -239,15 +229,18 @@ func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env st
 			Payload: store.GateClosed{Gate: gate, Scale: fresh.Kind, TrackerPushLevel: level},
 		}}
 		if fresh.Kind == store.ScaleMatter {
-			wasSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, "")
+			before, err := tx.NodeCompletion(ctx, fresh)
 			if err != nil {
 				return nil, err
 			}
-			willBeSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, gate)
+			willBeSealed, err := tx.NodeCompletionWithOverlay(ctx, fresh, store.CompletionOverlay{
+				ClosingNode: fresh.ID,
+				ClosingGate: gate,
+			})
 			if err != nil {
 				return nil, err
 			}
-			becameSealed = !wasSealed && willBeSealed
+			becameSealed = !before.Sealed && willBeSealed.Sealed
 			if !becameSealed {
 				return drafts, nil
 			}

@@ -546,11 +546,11 @@ func (p *pass) settle(ctx context.Context) error {
 		}
 		switch matter.Lifecycle {
 		case store.Done:
-			sealed, err := p.matterSealed(ctx, matter)
+			completion, err := p.s.NodeCompletion(ctx, matter)
 			if err != nil {
 				return err
 			}
-			if !sealed {
+			if !completion.Sealed {
 				p.out.Parked = append(p.out.Parked, matter)
 			}
 		case store.Canceled:
@@ -582,28 +582,6 @@ func (p *pass) settle(ctx context.Context) error {
 		return []store.Draft{{Type: store.TypeRunFinished, Subject: p.run.ID, Payload: store.RunFinished{}}}, nil
 	})
 	return err
-}
-
-// matterSealed is the D55 pair at Matter scale, where sealed and locally
-// complete coincide (D13).
-func (p *pass) matterSealed(ctx context.Context, matter store.Node) (bool, error) {
-	declared, err := p.s.GateDeclarations(ctx, matter.Repo)
-	if err != nil {
-		return false, err
-	}
-	for _, d := range declared {
-		if d.Scale != store.ScaleMatter {
-			continue
-		}
-		satisfied, err := p.s.GateSatisfied(ctx, matter.Repo, matter.ID, d.Gate)
-		if err != nil {
-			return false, err
-		}
-		if !satisfied {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // spawnRole and closeRole are direct drafts rather than writesurface calls:

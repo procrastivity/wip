@@ -47,17 +47,19 @@ func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {
 
 func entryJSON(e store.BacklogEntry) any {
 	return struct {
-		ID         string `json:"id"`
-		Provenance string `json:"provenance"`
-		State      string `json:"state"`
-		Title      string `json:"title"`
-		Detail     string `json:"detail,omitempty"`
-		OriginNode string `json:"originNode,omitempty"`
-		Matter     string `json:"matter,omitempty"`
-		Outbox     string `json:"outbox,omitempty"`
+		ID            string `json:"id"`
+		Provenance    string `json:"provenance"`
+		State         string `json:"state"`
+		Title         string `json:"title"`
+		Detail        string `json:"detail,omitempty"`
+		DeclineReason string `json:"declineReason,omitempty"`
+		OriginNode    string `json:"originNode,omitempty"`
+		Matter        string `json:"matter,omitempty"`
+		Outbox        string `json:"outbox,omitempty"`
 	}{
 		ID: e.ID, Provenance: string(e.Provenance), State: e.State, Title: e.Title,
-		Detail: e.Detail, OriginNode: e.OriginNode, Matter: e.Matter, Outbox: e.Outbox,
+		Detail: e.Detail, DeclineReason: e.DeclineReason, OriginNode: e.OriginNode,
+		Matter: e.Matter, Outbox: e.Outbox,
 	}
 }
 

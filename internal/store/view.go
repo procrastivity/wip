@@ -221,11 +221,11 @@ func (v View) TrackerAggregate(ctx context.Context, ref string) (TrackerDisposit
 		if matter.Lifecycle == Canceled {
 			continue
 		}
-		sealed, err := trackerNodeSealed(ctx, v, matter)
+		completion, err := v.NodeCompletion(ctx, matter)
 		if err != nil {
 			return "", false, err
 		}
-		if sealed {
+		if completion.Sealed {
 			sealedCount++
 			continue
 		}
@@ -1166,21 +1166,26 @@ func (v View) OpenRole(ctx context.Context, dispatch string, name RoleName) (Rol
 // BacklogEntry is one Backlog row (MODEL §4). Deferred is a provenance, not a
 // second list (D9).
 type BacklogEntry struct {
-	ID         string
-	Repo       string
-	Provenance Provenance
-	State      string
-	Title      string
-	Detail     string
-	OriginNode string
-	Matter     string
-	Outbox     string
+	ID            string
+	Repo          string
+	Provenance    Provenance
+	State         string
+	Title         string
+	Detail        string
+	DeclineReason string
+	OriginNode    string
+	Matter        string
+	Outbox        string
 }
 
 // Backlog lists a Repo's entries.
 func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) {
+	declineReason := "''"
+	if v.schemaVersion >= 10 {
+		declineReason = "decline_reason"
+	}
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT id, repo, provenance, state, title, detail,
+		`SELECT id, repo, provenance, state, title, detail, `+declineReason+`,
 		        COALESCE(origin_node, ''), COALESCE(matter, ''), COALESCE(outbox, '')
 		 FROM   backlog_entries WHERE repo = ? ORDER BY id`, repo)
 	if err != nil {
@@ -1192,7 +1197,7 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 	for rows.Next() {
 		var e BacklogEntry
 		if err := rows.Scan(&e.ID, &e.Repo, &e.Provenance, &e.State, &e.Title,
-			&e.Detail, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
+			&e.Detail, &e.DeclineReason, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
 			return nil, fmt.Errorf("store: read the backlog of %s: %w", repo, err)
 		}
 		out = append(out, e)
@@ -1207,8 +1212,12 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 // A delegated stub retires when its creation entry is flushed. Both projection
 // rows remain available through Backlog and Outbox for audit and rebuild.
 func (v View) ActiveBacklog(ctx context.Context, repo string) ([]BacklogEntry, error) {
+	declineReason := "''"
+	if v.schemaVersion >= 10 {
+		declineReason = "b.decline_reason"
+	}
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT b.id,b.repo,b.provenance,b.state,b.title,b.detail,
+		`SELECT b.id,b.repo,b.provenance,b.state,b.title,b.detail,`+declineReason+`,
 		        COALESCE(b.origin_node,''),COALESCE(b.matter,''),COALESCE(b.outbox,'')
 		 FROM backlog_entries b
 		 LEFT JOIN outbox_entries o ON o.id=b.outbox
@@ -1223,7 +1232,7 @@ func (v View) ActiveBacklog(ctx context.Context, repo string) ([]BacklogEntry, e
 	for rows.Next() {
 		var e BacklogEntry
 		if err := rows.Scan(&e.ID, &e.Repo, &e.Provenance, &e.State, &e.Title,
-			&e.Detail, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
+			&e.Detail, &e.DeclineReason, &e.OriginNode, &e.Matter, &e.Outbox); err != nil {
 			return nil, fmt.Errorf("store: read the active backlog of %s: %w", repo, err)
 		}
 		out = append(out, e)
@@ -1355,10 +1364,21 @@ func (v View) FindTrackerPushRecord(ctx context.Context, ref string) (TrackerPus
 // order-independent, which is exactly what a predicate expresses and a state
 // would not.
 func (v View) ArchivedMatters(ctx context.Context, repo string) ([]Node, error) {
-	return v.nodeList(ctx,
-		`SELECT `+nodeColumns+` FROM nodes
-		 WHERE id IN (SELECT id FROM archived_matters WHERE repo = ?)
-		 ORDER BY birth_event`, repo)
+	matters, err := v.Matters(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	sealed := make([]Node, 0, len(matters))
+	for _, matter := range matters {
+		completion, err := v.NodeCompletion(ctx, matter)
+		if err != nil {
+			return nil, err
+		}
+		if completion.Sealed {
+			sealed = append(sealed, matter)
+		}
+	}
+	return sealed, nil
 }
 
 // ---------------------------------------------------------------------------

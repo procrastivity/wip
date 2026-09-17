@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tiers"
@@ -63,6 +64,24 @@ func newStore(t *testing.T) *store.Store {
 func setup(t *testing.T) (*store.Store, string, Current) {
 	t.Helper()
 	s := newStore(t)
+	dir := newRepo(t)
+	if _, err := tiers.Init(ctx, s, store.ActorHuman, dir, ""); err != nil {
+		t.Fatalf("tiers.Init: %v", err)
+	}
+	cur, err := ResolveCurrent(ctx, s, store.ActorHuman, dir)
+	if err != nil {
+		t.Fatalf("ResolveCurrent: %v", err)
+	}
+	return s, dir, cur
+}
+
+func setupWithClock(t *testing.T, clock func() time.Time) (*store.Store, string, Current) {
+	t.Helper()
+	s, err := store.OpenWithClock(filepath.Join(t.TempDir(), "wip.db"), clock)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	dir := newRepo(t)
 	if _, err := tiers.Init(ctx, s, store.ActorHuman, dir, ""); err != nil {
 		t.Fatalf("tiers.Init: %v", err)

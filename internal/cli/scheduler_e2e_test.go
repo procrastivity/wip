@@ -67,6 +67,9 @@ func TestNext_ParallelFrontierForAnOpenRun(t *testing.T) {
 	if strings.Contains(r.stdout, blocked.Locator) {
 		t.Errorf("the blocked join step appears in the frontier:\n%s", r.stdout)
 	}
+	if strings.Contains(r.stdout, "pending gate") {
+		t.Errorf("the unchanged Run frontier gained pending-gate output:\n%s", r.stdout)
+	}
 
 	// JSON carries the same facts.
 	j := runIn(t, dir, dbEnv, "next", "--json")
@@ -81,6 +84,9 @@ func TestNext_ParallelFrontierForAnOpenRun(t *testing.T) {
 	}](t, j.stdout)
 	if frontier.Run != run || frontier.Batch != "release-docs" || frontier.Cap != 1 || frontier.Slots != 1 || len(frontier.Ready) != 3 {
 		t.Fatalf("frontier json = %+v", frontier)
+	}
+	if strings.Contains(j.stdout, "pendingGates") {
+		t.Errorf("the unchanged Run frontier gained a pendingGates field: %s", j.stdout)
 	}
 
 	// With one Ready node the singular output stands: satisfy two edges so

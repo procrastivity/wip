@@ -9,6 +9,449 @@ import (
 	"testing"
 )
 
+func TestEffectiveGateRequirementsNoDeclarations(t *testing.T) {
+	h := newHarness(t)
+	matter := h.matter("plain", "No declared gates")
+	node, err := h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements, err := h.EffectiveGateRequirements(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requirements == nil || len(requirements) != 0 {
+		t.Fatalf("requirements = %#v, want an empty non-nil slice", requirements)
+	}
+	completion, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.LocallyComplete || completion.Sealed || len(completion.Pending) != 0 {
+		t.Fatalf("planned completion = %+v, want all predicates false and no pending gates", completion)
+	}
+}
+
+func TestEffectiveGateRequirementsPreserveStatesAndClosureMetadata(t *testing.T) {
+	h := newHarness(t)
+	for _, declaration := range []struct {
+		gate  string
+		scale Scale
+	}{
+		{"approved", ScaleMatter},
+		{"ci-green", ScaleMatter},
+		{"reviewed-local", ScaleMatter},
+		{"verified", ScaleStep},
+	} {
+		if err := h.DeclareGate(h.ctx, h.Repo, declaration.gate, declaration.scale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	matter := h.matter("mixed", "Mixed gate states")
+	step := h.step(matter, "step-01", "A step with an own gate")
+	h.start(matter)
+	h.start(step)
+	h.finish(matter)
+	h.finish(step)
+	closed := h.closeGate(matter, "approved", ScaleMatter)
+	if err := h.RepairGateExemption(h.ctx, h.Repo, "reviewed-local", matter); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.RepairGateExemption(h.ctx, h.Repo, "verified", step); err != nil {
+		t.Fatal(err)
+	}
+
+	node, err := h.Node(h.ctx, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements, err := h.EffectiveGateRequirements(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requirements) != 4 {
+		t.Fatalf("requirements = %+v, want four own and enclosing requirements", requirements)
+	}
+	want := []struct {
+		gate         string
+		scale        Scale
+		relationship GateRelationship
+		state        GateRequirementState
+		subject      string
+		owner        Actor
+	}{
+		{"verified", ScaleStep, GateOwn, GateRequirementExempt, step, RoleActor("verifier")},
+		{"approved", ScaleMatter, GateEnclosing, GateRequirementClosed, matter, ActorHuman},
+		{"ci-green", ScaleMatter, GateEnclosing, GateRequirementOpen, matter, RoleActor("warden")},
+		{"reviewed-local", ScaleMatter, GateEnclosing, GateRequirementExempt, matter, ActorHuman},
+	}
+	for i, expected := range want {
+		got := requirements[i]
+		if got.Gate != expected.gate || got.Scale != expected.scale || got.Relationship != expected.relationship ||
+			got.State != expected.state || got.Subject.ID != expected.subject || got.Owner != expected.owner {
+			t.Errorf("requirement %d = %+v, want %+v", i, got, expected)
+		}
+		if got.State != GateRequirementClosed && (got.ClosedBy != "" || got.ClosedAt != nil) {
+			t.Errorf("requirement %s carries closure metadata in state %s: %+v", got.Gate, got.State, got)
+		}
+	}
+	if requirements[1].ClosedBy != ActorHuman || requirements[1].ClosedAt == nil ||
+		!requirements[1].ClosedAt.Equal(closed.OccurredAt.UTC()) {
+		t.Fatalf("closed metadata = %+v, want actor %q and time %s", requirements[1], ActorHuman, closed.OccurredAt.UTC())
+	}
+
+	completion, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completion.LocallyComplete || completion.Sealed || len(completion.Pending) != 1 || completion.Pending[0].Gate != "ci-green" {
+		t.Fatalf("mixed completion = %+v, want local completion and only ci-green pending", completion)
+	}
+	if err := h.Rebuild(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := h.reopen(register, latestVersion(register))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements, err = reopened.EffectiveGateRequirements(reopened.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requirements[1].ClosedBy != ActorHuman || requirements[1].ClosedAt == nil ||
+		!requirements[1].ClosedAt.Equal(closed.OccurredAt.UTC()) {
+		t.Fatalf("closed metadata after rebuild/reopen = %+v, want actor %q and time %s", requirements[1], ActorHuman, closed.OccurredAt.UTC())
+	}
+}
+
+func TestEffectiveGateRequirementsOrderOwnNearestAncestorAndLexical(t *testing.T) {
+	h := newHarness(t)
+	declarations := []struct {
+		gate  string
+		scale Scale
+	}{
+		{"matter-z", ScaleMatter},
+		{"matter-a", ScaleMatter},
+		{"stage-z", ScaleStage},
+		{"stage-a", ScaleStage},
+		{"step-z", ScaleStep},
+		{"step-a", ScaleStep},
+	}
+	for _, declaration := range declarations {
+		if err := h.DeclareGate(h.ctx, h.Repo, declaration.gate, declaration.scale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	matter := h.matter("ordered", "Ordered requirements")
+	stage := h.stage(matter, "stage-01", "An enclosing stage")
+	step := h.step(stage, "step-01", "The target step")
+	node, err := h.Node(h.ctx, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements, err := h.EffectiveGateRequirements(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(requirements))
+	for _, requirement := range requirements {
+		got = append(got, requirement.Gate+":"+string(requirement.Relationship))
+	}
+	want := []string{"step-a:own", "step-z:own", "stage-a:enclosing", "stage-z:enclosing", "matter-a:enclosing", "matter-z:enclosing"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("requirement order = %v, want %v", got, want)
+	}
+}
+
+func TestNodeCompletionAgreesWithLocallyCompleteAndSealedAndOverlay(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	matter := h.matter("agreement", "Completion agreement")
+	step := h.step(matter, "step-01", "Completion target")
+	h.start(matter)
+	h.start(step)
+	h.finish(step)
+	node, err := h.Node(h.ctx, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.LocallyComplete || completion.Sealed {
+		t.Fatalf("open own gate completion = %+v", completion)
+	}
+	h.finish(matter)
+	completion, err = h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.LocallyComplete || completion.Sealed {
+		t.Fatalf("enclosing gate does not affect local completion = %+v", completion)
+	}
+	if got, err := h.GateSatisfied(h.ctx, h.Repo, node.ID, "verified"); err != nil || got {
+		t.Fatalf("own gate satisfaction = %v, err=%v, want false", got, err)
+	}
+	local, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.LocallyComplete {
+		t.Fatal("open own gate is locally complete")
+	}
+	h.closeGate(step, "verified", ScaleStep)
+	completion, err = h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completion.LocallyComplete || completion.Sealed {
+		t.Fatalf("open enclosing gate completion = %+v, want local only", completion)
+	}
+	overlay, err := h.NodeCompletionWithOverlay(h.ctx, node, CompletionOverlay{ClosingNode: matter, ClosingGate: "reviewed-local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overlay.LocallyComplete || !overlay.Sealed || len(overlay.Pending) != 0 {
+		t.Fatalf("prospective enclosing close = %+v, want sealed", overlay)
+	}
+}
+
+func TestNodeCompletionPendingOnlyAppliesToDoneNodes(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+
+	planned := h.matter("planned", "Planned")
+	inProgress := h.matter("in-progress", "In progress")
+	paused := h.matter("paused", "Paused")
+	canceled := h.matter("canceled", "Canceled")
+	done := h.matter("done", "Done")
+	h.start(inProgress)
+	h.start(paused)
+	h.pause(paused)
+	h.start(canceled)
+	h.cancel(canceled)
+	h.start(done)
+	h.finish(done)
+
+	for _, tc := range []struct {
+		name    string
+		node    string
+		local   bool
+		sealed  bool
+		pending int
+	}{
+		{"planned", planned, false, false, 0},
+		{"in progress", inProgress, false, false, 0},
+		{"paused", paused, false, false, 0},
+		{"canceled", canceled, false, false, 0},
+		{"done", done, false, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := h.Node(h.ctx, tc.node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completion, err := h.NodeCompletion(h.ctx, node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if completion.LocallyComplete != tc.local || completion.Sealed != tc.sealed || len(completion.Pending) != tc.pending {
+				t.Fatalf("completion = %+v, want local=%v sealed=%v pending=%d", completion, tc.local, tc.sealed, tc.pending)
+			}
+		})
+	}
+}
+
+func TestEffectiveGateRequirementsClosedStateWinsOverExemption(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	matter := h.matter("precedence", "Close and exemption")
+	h.start(matter)
+	h.finish(matter)
+	closed := h.closeGate(matter, "reviewed-local", ScaleMatter)
+	if _, err := h.db.ExecContext(h.ctx,
+		`INSERT INTO gate_exemptions (repo, gate, node) VALUES (?, ?, ?)`,
+		h.Repo, "reviewed-local", matter); err != nil {
+		t.Fatalf("insert defensive exemption: %v", err)
+	}
+
+	node, err := h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completion.Requirements) != 1 || completion.Requirements[0].State != GateRequirementClosed {
+		t.Fatalf("requirements = %+v, want one closed requirement", completion.Requirements)
+	}
+	got := completion.Requirements[0]
+	if got.ClosedBy != ActorHuman || got.ClosedAt == nil || !got.ClosedAt.Equal(closed.OccurredAt.UTC()) {
+		t.Fatalf("closed metadata = %+v, want event metadata", got)
+	}
+}
+
+func TestEffectiveGateRequirementsReadsRoleClosureActor(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "ci-green", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	matter := h.matter("role-closed", "Role closed")
+	h.start(matter)
+	h.finish(matter)
+	dispatch, role := h.NewID(), h.NewID()
+	if _, err := h.Commit(h.ctx, Request{
+		Actor: ActorHuman,
+		Env:   Env{Repo: h.Repo, Clone: h.Clone, Worktree: h.Worktree},
+	}, func(_ context.Context, _ *Tx) ([]Draft, error) {
+		return []Draft{
+			{Type: TypeDispatchOpened, Subject: dispatch, Payload: DispatchOpened{}},
+			{Type: TypeRoleSpawned, Subject: role, Payload: RoleSpawned{Dispatch: dispatch, Name: RoleWarden}},
+		}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := h.Commit(h.ctx, Request{
+		Actor: RoleActor("warden"),
+		Env:   Env{Repo: h.Repo, Clone: h.Clone, Worktree: h.Worktree},
+	}, func(_ context.Context, _ *Tx) ([]Draft, error) {
+		return []Draft{{
+			Type:    TypeGateClosed,
+			Subject: matter,
+			Payload: GateClosed{Gate: "ci-green", Scale: ScaleMatter},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(completion.Requirements) != 1 || completion.Requirements[0].State != GateRequirementClosed ||
+		completion.Requirements[0].ClosedBy != RoleActor("warden") {
+		t.Fatalf("role closure = events=%+v completion=%+v, want role:warden closed metadata", events, completion)
+	}
+}
+
+func TestNodeCompletionOverlayAgreesWithProjectedFinishAndGateClose(t *testing.T) {
+	h := newHarness(t)
+	for _, gate := range []string{"review", "approve"} {
+		if err := h.DeclareGate(h.ctx, h.Repo, gate, ScaleMatter); err != nil {
+			t.Fatal(err)
+		}
+	}
+	matter := h.matter("overlay", "Overlay")
+	h.start(matter)
+	node, err := h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishOverlay, err := h.NodeCompletionWithOverlay(h.ctx, node, CompletionOverlay{FinishingNode: matter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishOverlay.LocallyComplete || finishOverlay.Sealed || len(finishOverlay.Pending) != 2 {
+		t.Fatalf("finish overlay = %+v, want two pending gates and no completion", finishOverlay)
+	}
+	h.finish(matter)
+	node, err = h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonfinal, err := h.NodeCompletionWithOverlay(h.ctx, node, CompletionOverlay{ClosingNode: matter, ClosingGate: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonfinal.LocallyComplete || nonfinal.Sealed || len(nonfinal.Pending) != 1 || nonfinal.Pending[0].Gate != "approve" {
+		t.Fatalf("non-final close overlay = %+v, want only approve pending and no completion", nonfinal)
+	}
+	h.closeGate(matter, "review", ScaleMatter)
+	node, err = h.Node(h.ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := h.NodeCompletionWithOverlay(h.ctx, node, CompletionOverlay{ClosingNode: matter, ClosingGate: "approve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.LocallyComplete || !final.Sealed || len(final.Pending) != 0 {
+		t.Fatalf("final close overlay = %+v, want sealed", final)
+	}
+	h.closeGate(matter, "approve", ScaleMatter)
+	projected, err := h.NodeCompletion(h.ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.LocallyComplete != final.LocallyComplete || projected.Sealed != final.Sealed || len(projected.Pending) != len(final.Pending) {
+		t.Fatalf("projected completion = %+v, want overlay agreement %+v", projected, final)
+	}
+}
+
+func TestArchivedMattersMatchesCanonicalCompletionAndLegacyView(t *testing.T) {
+	h := newHarness(t)
+	preDeclaration := h.matter("pre-declaration", "Sealed before declaration")
+	h.start(preDeclaration)
+	h.finish(preDeclaration)
+	if err := h.DeclareGate(h.ctx, h.Repo, "approved", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+
+	open := h.matter("open", "Open gate")
+	h.start(open)
+	h.finish(open)
+	closed := h.matter("closed", "Closed gate")
+	h.start(closed)
+	h.finish(closed)
+	h.closeGate(closed, "approved", ScaleMatter)
+
+	canonical, err := h.ArchivedMatters(h.ctx, h.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy []string
+	rows, err := h.db.QueryContext(h.ctx, `SELECT id FROM archived_matters WHERE repo = ? ORDER BY birth_event`, h.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		legacy = append(legacy, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var canonicalIDs []string
+	for _, node := range canonical {
+		canonicalIDs = append(canonicalIDs, node.ID)
+	}
+	want := []string{preDeclaration, closed}
+	if strings.Join(canonicalIDs, ",") != strings.Join(want, ",") || strings.Join(legacy, ",") != strings.Join(want, ",") {
+		t.Fatalf("canonical archive=%v, legacy view=%v, want=%v", canonicalIDs, legacy, want)
+	}
+}
+
 // Tests for gate storage (step-07 of this Matter).
 //
 // MODEL §9 puts gate bindings and gate state at *any* scale — Matter, Stage and

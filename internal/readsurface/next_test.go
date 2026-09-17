@@ -66,6 +66,55 @@ func TestNext_Positioned(t *testing.T) {
 	}
 }
 
+func TestNext_PositionedDoneUnsealedCarriesPendingGates(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("approved", store.ScaleMatter)
+	f.declareGate("verified", store.ScaleStep)
+	m := f.matter("checkout", "Checkout")
+	step := f.step(m, "step-01", "Build")
+	f.start(m)
+	f.start(step)
+	f.finish(step)
+	cur := f.current()
+	if _, err := SetCursorForTest(f, cur, step); err != nil {
+		t.Fatal(err)
+	}
+
+	view := nextFor(t, f, cur)
+	if len(view.Pending) != 2 || view.Pending[0].Gate != "verified" || view.Pending[1].Gate != "approved" {
+		t.Fatalf("Pending = %+v, want verified then approved", view.Pending)
+	}
+	if view.Pending[0].Relationship != store.GateOwn || view.Pending[1].Relationship != store.GateEnclosing {
+		t.Errorf("Pending relationships = %+v, want own then enclosing", view.Pending)
+	}
+}
+
+func TestNext_BareMatterDoneUnsealedCarriesPendingGates(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("approved", store.ScaleMatter)
+	m := f.matter("checkout", "Checkout")
+	f.start(m)
+	f.finish(m)
+	cur := f.current()
+	if _, err := SetCursorForTest(f, cur, m); err != nil {
+		t.Fatal(err)
+	}
+
+	view := nextFor(t, f, cur)
+	if view.Kind != BareMatter {
+		t.Fatalf("Kind = %v, want BareMatter", view.Kind)
+	}
+	if len(view.Pending) != 1 || view.Pending[0].Gate != "approved" || view.Pending[0].Relationship != store.GateOwn {
+		t.Fatalf("Pending = %+v, want the own approved gate", view.Pending)
+	}
+
+	f.closeGate(m, "approved", store.ScaleMatter)
+	view = nextFor(t, f, cur)
+	if view.Kind != ChooseNext || view.EndedReason != "sealed" || len(view.Pending) != 0 {
+		t.Fatalf("sealed BareMatter view = %+v, want ChooseNext with no pending gates", view)
+	}
+}
+
 // TestNext_NothingUnblocked is vocabulary output 3: no cursor, and every
 // Planned node in scope is still waiting on something.
 func TestNext_NothingUnblocked(t *testing.T) {

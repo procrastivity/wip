@@ -270,6 +270,41 @@ func TestLoop_ParkedAtHumanGateStandsBy(t *testing.T) {
 	}
 }
 
+func TestLoop_LaterGateCloseSettlesPreviouslyParkedMatter(t *testing.T) {
+	f := newFixture(t)
+	if err := f.DeclareGate(ctx, f.Repo, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	m := f.matter("gated-later", "Gated later")
+	batch := f.namedBatch("gated-later-batch", m)
+	run := f.startRun(batch, "run-01", m)
+	f.bracket()
+
+	first := orchestrate(t, f, run, 1, Policy{}, Hooks{Work: (&workRecorder{}).work})
+	if first.State != StateStandingBy || len(first.Parked) != 1 {
+		t.Fatalf("first pass = %+v, want parked gated Matter", first)
+	}
+	f.commit(f.env(), func(_ context.Context, _ *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeGateClosed,
+			Subject: m,
+			Payload: store.GateClosed{Gate: "reviewed-local", Scale: store.ScaleMatter},
+		}}, nil
+	})
+
+	second := orchestrate(t, f, run, 1, Policy{}, Hooks{Work: (&workRecorder{}).work})
+	if second.State != StateFinished || len(second.Parked) != 0 || len(second.Skipped) != 0 {
+		t.Fatalf("second pass = %+v, want the final close to settle the Matter", second)
+	}
+	closed, err := f.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Open || closed.CloseReason != store.CloseCompleted {
+		t.Fatalf("run after second pass = %+v, want completed", closed)
+	}
+}
+
 func TestLoop_ResearcherPlansAnUnplannedMember(t *testing.T) {
 	f := newFixture(t)
 	m := f.matter("unplanned", "Unplanned")

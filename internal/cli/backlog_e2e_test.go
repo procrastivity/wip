@@ -86,3 +86,14 @@ func TestBacklogExitsOnANonEnteredEntryAreValidationNotProjectionErrors(t *testi
 		runIn(t, dir, dbEnv, "plumbing", "backlog", "plan", "01NOPE", m.Locator, "--json"),
 		"validation.unknown-backlog-entry")
 }
+
+func TestBacklogDeclineRequiresAReason(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	added := mustJSON[struct {
+		ID string `json:"id"`
+	}](t, runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Needs a reason", "--provenance", "intake", "--json").stdout)
+
+	wantJSONError(t, "decline without a reason",
+		runIn(t, dir, dbEnv, "plumbing", "backlog", "decline", added.ID, "--reason", "", "--json"),
+		"validation.missing-reason", "needs a reason")
+}

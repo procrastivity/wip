@@ -122,10 +122,13 @@ func TestV1MemberlessAnonymousBatchConvertsToSweptLegacyRow(t *testing.T) {
 		t.Fatalf("joining the legacy Batch = %v, want a closed-Batch refusal", err)
 	}
 
-	// The fold reproduces the migration's conversion: rebuild and compare.
-	before := migrated.snapshotProjection()
+	// The fold recovers the original detail and the distinct decline reason from
+	// the event log. The pre-v10 projection had overwritten detail with the reason.
 	if err := migrated.Rebuild(migrated.ctx); err != nil {
 		t.Fatalf("rebuild over legacy history: %v", err)
 	}
-	migrated.wantSameProjection("rebuild over a converted legacy Batch", before, migrated.snapshotProjection())
+	rows := migrated.rowsOf("backlog_entries", "title = ?", "Deferred out of the plan")
+	if len(rows) != 1 || rows[0]["detail"] != "'out of scope'" || rows[0]["decline_reason"] != "'the premise changed'" {
+		t.Fatalf("rebuilt legacy backlog entry = %+v, want original detail and distinct decline reason", rows)
+	}
 }

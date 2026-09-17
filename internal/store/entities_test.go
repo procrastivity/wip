@@ -1395,13 +1395,14 @@ func TestABacklogEntryRecordsHowItArrived(t *testing.T) {
 		})
 		birth := h.birthEventOf(id)
 		h.wantRow(want.what, "backlog_entries", "id = ?", []any{id}, map[string]any{
-			"id":          id,
-			"repo":        h.Repo,
-			"provenance":  payload.Provenance,
-			"state":       "entered",
-			"title":       payload.Title,
-			"detail":      payload.Detail,
-			"origin_node": want.origin,
+			"id":             id,
+			"repo":           h.Repo,
+			"provenance":     payload.Provenance,
+			"state":          "entered",
+			"title":          payload.Title,
+			"detail":         payload.Detail,
+			"decline_reason": "",
+			"origin_node":    want.origin,
 			// An entry that has not been acted upon names no Matter, which is the
 			// same CHECK that makes `planned` name one.
 			"matter":      nil,
@@ -1442,13 +1443,14 @@ func TestABacklogEntryLeavesByPlanningOrDeclining(t *testing.T) {
 	matter := h.matter("planned", "What it became")
 	plan := h.commit(Draft{Type: TypeBacklogPlanned, Subject: planned, Payload: BacklogPlanned{Matter: matter}})[0]
 	h.wantRow("a planned entry", "backlog_entries", "id = ?", []any{planned}, map[string]any{
-		"id":          planned,
-		"repo":        h.Repo,
-		"provenance":  ProvenanceIntake,
-		"state":       "planned",
-		"title":       "Becomes a Matter",
-		"detail":      "why it arrived",
-		"origin_node": nil,
+		"id":             planned,
+		"repo":           h.Repo,
+		"provenance":     ProvenanceIntake,
+		"state":          "planned",
+		"title":          "Becomes a Matter",
+		"detail":         "why it arrived",
+		"decline_reason": "",
+		"origin_node":    nil,
 		// Planned names what it became.
 		"matter":      matter,
 		"outbox":      nil,
@@ -1463,20 +1465,18 @@ func TestABacklogEntryLeavesByPlanningOrDeclining(t *testing.T) {
 		Payload: BacklogDeclined{Reason: "the premise stopped being true"},
 	})[0]
 	h.wantRow("a declined entry", "backlog_entries", "id = ?", []any{declined}, map[string]any{
-		"id":         declined,
-		"repo":       h.Repo,
-		"provenance": ProvenanceIntake,
-		"state":      "declined",
-		"title":      "Will not be done",
-		// The reason lands in `detail`, which is the row's one free-text column: the
-		// decision's reason replaces the arrival's. See the note in the step-03
-		// report — the log keeps both, the projection keeps the later one.
-		"detail":      "the premise stopped being true",
-		"origin_node": nil,
-		"matter":      nil,
-		"outbox":      nil,
-		"birth_event": h.birthEventOf(declined).ID,
-		"last_event":  decline.ID,
+		"id":             declined,
+		"repo":           h.Repo,
+		"provenance":     ProvenanceIntake,
+		"state":          "declined",
+		"title":          "Will not be done",
+		"detail":         "why it arrived",
+		"decline_reason": "the premise stopped being true",
+		"origin_node":    nil,
+		"matter":         nil,
+		"outbox":         nil,
+		"birth_event":    h.birthEventOf(declined).ID,
+		"last_event":     decline.ID,
 	})
 
 	// A decline with no reason is not a decline. (The entry is entered first: a

@@ -63,8 +63,9 @@ type View struct {
 
 	// Positioned's own blocked-by state — informational, since nothing in P1
 	// enforces blocked-by satisfaction at start time.
-	Unmet []store.Node
-	Met   []store.Node
+	Unmet   []store.Node
+	Met     []store.Node
+	Pending []store.GateRequirement
 
 	// ChooseNext's own reason: "sealed", "canceled", or "removed" — the last
 	// naming a tombstoned target, since a removed node cannot be resolved by
@@ -224,10 +225,14 @@ func positionedView(ctx context.Context, v store.View, target store.Node) (View,
 			kind = BareMatter
 		}
 	}
+	completion, err := v.NodeCompletion(ctx, target)
+	if err != nil {
+		return View{}, err
+	}
 
 	return View{
 		Kind: kind, Node: target, Address: address, Stage: stagePos,
-		Unmet: unmet, Met: met,
+		Unmet: unmet, Met: met, Pending: completion.Pending,
 	}, nil
 }
 

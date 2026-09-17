@@ -185,8 +185,33 @@ type nodeJSON struct {
 
 type finishedJSON struct {
 	nodeJSON
-	LocallyComplete bool `json:"locallyComplete"`
-	Sealed          bool `json:"sealed"`
+	LocallyComplete bool              `json:"locallyComplete"`
+	Sealed          bool              `json:"sealed"`
+	PendingGates    []pendingGateJSON `json:"pendingGates"`
+}
+
+type pendingGateJSON struct {
+	Name           string `json:"name"`
+	Scale          string `json:"scale"`
+	Relationship   string `json:"relationship"`
+	Subject        string `json:"subject"`
+	SubjectAddress string `json:"subjectAddress"`
+}
+
+func pendingGatesJSON(ctx context.Context, v store.View, pending []store.GateRequirement) ([]pendingGateJSON, error) {
+	out := make([]pendingGateJSON, 0, len(pending))
+	for _, requirement := range pending {
+		address, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pendingGateJSON{
+			Name: requirement.Gate, Scale: string(requirement.Scale),
+			Relationship: string(requirement.Relationship), Subject: requirement.Subject.ID,
+			SubjectAddress: address,
+		})
+	}
+	return out, nil
 }
 
 type blockedJSON struct {
@@ -232,8 +257,13 @@ func toContentJSON(ctx context.Context, v store.View, c readsurface.RepoContent,
 		if err != nil {
 			return contentJSON{}, err
 		}
+		pending, err := pendingGatesJSON(ctx, v, f.Pending)
+		if err != nil {
+			return contentJSON{}, err
+		}
 		out.Finished = append(out.Finished, finishedJSON{
-			nodeJSON: toNodeJSON(f.Node, addr, cursorNode), LocallyComplete: f.LocallyComplete, Sealed: f.Sealed,
+			nodeJSON: toNodeJSON(f.Node, addr, cursorNode), LocallyComplete: f.LocallyComplete,
+			Sealed: f.Sealed, PendingGates: pending,
 		})
 	}
 	for _, n := range c.Ready {
@@ -642,6 +672,25 @@ func finishedLines(ctx context.Context, v store.View, finished []readsurface.Fin
 			state = "locally complete"
 		}
 		out = append(out, fmt.Sprintf("  %-24s %s · %s%s", addr, f.Node.Kind, state, cursorSuffix(f.Node.ID, cursorNode)))
+		if !f.Sealed && len(f.Pending) > 0 {
+			pending, err := pendingGateLines(ctx, v, f.Pending)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, "    pending gates: "+strings.Join(pending, ", "))
+		}
+	}
+	return out, nil
+}
+
+func pendingGateLines(ctx context.Context, v store.View, pending []store.GateRequirement) ([]string, error) {
+	out := make([]string, 0, len(pending))
+	for _, requirement := range pending {
+		address, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s (%s on %s)", requirement.Gate, requirement.Relationship, address))
 	}
 	return out, nil
 }
