@@ -8,6 +8,8 @@ package readsurface
 import (
 	"testing"
 	"time"
+
+	"github.com/procrastivity/wip/internal/store"
 )
 
 // sealMatter births, starts and finishes a bare Matter (no gates declared,
@@ -58,6 +60,34 @@ func TestContent_ShowsSealedMatterWithinTheRecencyWindow(t *testing.T) {
 	}
 	if c.HiddenSealedMatters != 0 {
 		t.Errorf("HiddenSealedMatters = %d, want 0", c.HiddenSealedMatters)
+	}
+}
+
+func TestContentTreatsAnAllDismissedMatterAsSealed(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("dismissed", "Dismissed matter")
+	f.start(m)
+	f.finish(m)
+	f.dismissGate(m, "reviewed-local", store.ScaleMatter, "the verifier is unavailable")
+
+	before, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := Content(ctx, f.View, f.Repo, ContentOptions{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Finished) != 1 || c.Finished[0].Node.ID != m || !c.Finished[0].Sealed || len(c.Finished[0].Pending) != 0 {
+		t.Fatalf("content = %+v, want dismissed Matter in the sealed finished set with no pending gates", c)
+	}
+	after, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("Content changed the event log from %d to %d events", len(before), len(after))
 	}
 }
 

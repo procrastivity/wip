@@ -115,6 +115,29 @@ func TestNext_BareMatterDoneUnsealedCarriesPendingGates(t *testing.T) {
 	}
 }
 
+func TestNext_DismissedDoneMatterIsEndedNotAwaitingAGate(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("dismissed", "Dismissed")
+	f.start(m)
+	cur := f.current()
+	if _, err := SetCursorForTest(f, cur, m); err != nil {
+		t.Fatal(err)
+	}
+	f.finish(m)
+	f.dismissGate(m, "reviewed-local", store.ScaleMatter, "the verifier is unavailable")
+
+	before := countCursorMoves(t, f)
+	view := nextFor(t, f, cur)
+	if view.Kind != ChooseNext || view.EndedReason != "sealed" || len(view.Pending) != 0 {
+		t.Fatalf("dismissed Matter view = %+v, want sealed ChooseNext with no pending gate", view)
+	}
+	after := countCursorMoves(t, f)
+	if after != before {
+		t.Fatalf("next changed cursor state from %d to %d; reads must not write", before, after)
+	}
+}
+
 // TestNext_NothingUnblocked is vocabulary output 3: no cursor, and every
 // Planned node in scope is still waiting on something.
 func TestNext_NothingUnblocked(t *testing.T) {

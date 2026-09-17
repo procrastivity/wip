@@ -13,6 +13,7 @@ import (
 	"github.com/procrastivity/wip/internal/runlock"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tracker"
+	"github.com/procrastivity/wip/internal/writesurface"
 )
 
 // bracket opens the worktree's plain P1 dispatch the Orchestrator binds to.
@@ -302,6 +303,59 @@ func TestLoop_LaterGateCloseSettlesPreviouslyParkedMatter(t *testing.T) {
 	}
 	if closed.Open || closed.CloseReason != store.CloseCompleted {
 		t.Fatalf("run after second pass = %+v, want completed", closed)
+	}
+}
+
+func TestLoop_LaterGateDismissalSettlesPreviouslyParkedMatterWithoutProviderEvents(t *testing.T) {
+	f := newFixture(t)
+	if err := f.DeclareGate(ctx, f.Repo, "reviewed-local", store.ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	m := f.matter("dismissed-later", "Dismissed later")
+	batch := f.namedBatch("dismissed-later-batch", m)
+	run := f.startRun(batch, "run-01", m)
+	f.bracket()
+
+	first := orchestrate(t, f, run, 1, Policy{}, Hooks{Work: (&workRecorder{}).work})
+	if first.State != StateStandingBy || len(first.Parked) != 1 {
+		t.Fatalf("first pass = %+v, want parked gated Matter", first)
+	}
+	before, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := writesurface.DismissGateWithEnvResult(ctx, f.Store, store.ActorHuman, f.env(), "reviewed-local", "dismissed-later", "the verifier is unavailable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transition.BecameSealed {
+		t.Fatalf("dismissal transition = %+v, want the final gate to seal the Matter", transition)
+	}
+	afterDismissal, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterDismissal) != len(before)+1 || afterDismissal[len(afterDismissal)-1].Type != store.TypeGateDismissed {
+		t.Fatalf("dismissal events = %+v, want exactly one gate.dismissed event and no scheduler/provider event", afterDismissal)
+	}
+	outbox, err := f.Outbox(ctx, f.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outbox) != 0 {
+		t.Fatalf("dismissal created provider outbox entries: %+v", outbox)
+	}
+
+	second := orchestrate(t, f, run, 1, Policy{}, Hooks{Work: (&workRecorder{}).work})
+	if second.State != StateFinished || len(second.Parked) != 0 || len(second.Skipped) != 0 {
+		t.Fatalf("second pass = %+v, want final dismissal to settle the Matter", second)
+	}
+	closed, err := f.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Open || closed.CloseReason != store.CloseCompleted {
+		t.Fatalf("run after dismissal = %+v, want completed", closed)
 	}
 }
 

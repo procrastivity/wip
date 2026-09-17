@@ -1,8 +1,8 @@
 package writesurface
 
 // Stage gates-and-dependencies, step-01/step-02: gate declaration (config,
-// no taxonomy event — the one documented seam) and gate close (`gate.closed`,
-// the only gate event in P1).
+// no taxonomy event — the one documented seam), normal gate close
+// (`gate.closed`), and emergency dismissal (`gate.dismissed`).
 //
 // Gate-order monotonicity (D12) is a `doctor` check owned by `guards`,
 // called here at declare time as an add-time precondition — the mirror of
@@ -13,6 +13,7 @@ package writesurface
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/procrastivity/wip/internal/guards"
 	"github.com/procrastivity/wip/internal/store"
@@ -21,7 +22,7 @@ import (
 
 // DeclareGate declares a gate binding at a scale, as project configuration
 // (D4): statically knowable, never runtime-conditional. It writes config and
-// emits no domain event — the taxonomy's only gate event is `gate.closed`.
+// emits no domain event — gate actions are the evented seams.
 func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale store.Scale) error {
 	switch scale {
 	case store.ScaleMatter, store.ScaleStage, store.ScaleStep:
@@ -143,6 +144,166 @@ func CloseGateWithEnv(ctx context.Context, s *store.Store, actor store.Actor, en
 // this gate close crossed a Matter's seal boundary.
 func CloseGateWithEnvResult(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (SealTransition, error) {
 	return closeGateEnv(ctx, s, actor, env, gate, locator)
+}
+
+// DismissGate dismisses a declared gate against a Done node for an explicit
+// emergency reason. Unlike a normal close, dismissal is only available after
+// the subject's work is Done, and the reason is retained in the event log.
+func DismissGate(ctx context.Context, s *store.Store, actor store.Actor, repo, gate, locator, reason string) (store.Node, error) {
+	result, err := dismissGateEnv(ctx, s, actor, store.Env{Repo: repo}, gate, locator, reason)
+	return result.Node, err
+}
+
+// DismissGateWithEnv is DismissGate with the caller's full Env, so a final
+// Matter dismissal can seal and sweep with correct event dimensions.
+func DismissGateWithEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator, reason string) (store.Node, error) {
+	result, err := DismissGateWithEnvResult(ctx, s, actor, env, gate, locator, reason)
+	return result.Node, err
+}
+
+// DismissGateWithEnvResult is DismissGateWithEnv with an atomic indication
+// that this dismissal crossed a Matter's seal boundary.
+func DismissGateWithEnvResult(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator, reason string) (SealTransition, error) {
+	return dismissGateEnv(ctx, s, actor, env, gate, locator, reason)
+}
+
+func dismissGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator, reason string) (SealTransition, error) {
+	repo := env.Repo
+	if strings.TrimSpace(reason) == "" {
+		return SealTransition{}, wiperr.New("validation.missing-reason", "dismissing a gate needs a reason")
+	}
+
+	n, err := ResolveNode(ctx, s.View, repo, locator)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	if n.Repo != repo {
+		return SealTransition{}, wiperr.New("validation.unknown-locator", fmt.Sprintf("no node %s in this repo", locator))
+	}
+	declared, err := s.GateDeclarations(ctx, repo)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	var bound store.Scale
+	for _, d := range declared {
+		if d.Gate == gate {
+			bound = d.Scale
+			break
+		}
+	}
+	if bound == "" {
+		return SealTransition{}, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+	}
+	if n.Kind != bound {
+		return SealTransition{}, wiperr.New("refusal.gate-scale", fmt.Sprintf(
+			"%s binds to %s scale and cannot dismiss on %s %s", gate, bound, n.Kind, locator))
+	}
+	if n.Lifecycle != store.Done {
+		return SealTransition{}, wiperr.New("refusal.gate-dismissal-lifecycle", fmt.Sprintf(
+			"%s is %s; only Done nodes can receive a gate dismissal", locator, n.Lifecycle))
+	}
+	satisfied, err := s.GateSatisfied(ctx, repo, n.ID, gate)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	if satisfied {
+		return SealTransition{}, wiperr.New("refusal.gate-already-satisfied",
+			fmt.Sprintf("%s is already satisfied on %s", gate, locator))
+	}
+
+	// A human may make an explicit emergency dismissal. An agent may do so
+	// only as the owning role; Store.Commit separately verifies that the role
+	// claim has an open spawned instance in this request's current context.
+	// This deliberately does not change closeGateEnv's normal-close ownership
+	// rules.
+	if actor != store.ActorHuman {
+		if owner, owned := store.GateOwner(gate); !owned || actor != owner.Actor() {
+			return SealTransition{}, wiperr.New("refusal.gate-owner",
+				fmt.Sprintf("%s can only be dismissed by its owning role; a role or system actor cannot dismiss it", gate))
+		}
+	}
+
+	req := store.Request{Actor: actor, Env: env}
+	becameSealed := false
+	if _, err := s.Commit(ctx, req, func(ctx context.Context, tx *store.Tx) ([]store.Draft, error) {
+		level, err := tx.EffectiveTrackerPushLevel(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		fresh, err := tx.Node(ctx, n.ID)
+		if err != nil {
+			return nil, err
+		}
+		if fresh.Repo != repo {
+			return nil, wiperr.New("validation.unknown-locator", fmt.Sprintf("no node %s in this repo", locator))
+		}
+		if fresh.Lifecycle != store.Done {
+			return nil, wiperr.New("refusal.gate-dismissal-lifecycle", fmt.Sprintf(
+				"%s is %s; only Done nodes can receive a gate dismissal", locator, fresh.Lifecycle))
+		}
+		freshDeclarations, err := tx.GateDeclarations(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		var freshBound store.Scale
+		for _, declaration := range freshDeclarations {
+			if declaration.Gate == gate {
+				freshBound = declaration.Scale
+				break
+			}
+		}
+		if freshBound == "" {
+			return nil, wiperr.New("validation.gate-not-declared", fmt.Sprintf("%q is not a gate this repo declares", gate))
+		}
+		if fresh.Kind != freshBound {
+			return nil, wiperr.New("refusal.gate-scale", fmt.Sprintf(
+				"%s binds to %s scale and cannot dismiss on %s %s", gate, freshBound, fresh.Kind, locator))
+		}
+		satisfied, err := tx.GateSatisfied(ctx, repo, fresh.ID, gate)
+		if err != nil {
+			return nil, err
+		}
+		if satisfied {
+			return nil, wiperr.New("refusal.gate-already-satisfied",
+				fmt.Sprintf("%s is already satisfied on %s", gate, locator))
+		}
+		drafts := []store.Draft{{
+			Type:    store.TypeGateDismissed,
+			Subject: fresh.ID,
+			Payload: store.GateDismissed{Gate: gate, Scale: fresh.Kind, Reason: reason, TrackerPushLevel: level},
+		}}
+		if fresh.Kind == store.ScaleMatter {
+			before, err := tx.NodeCompletion(ctx, fresh)
+			if err != nil {
+				return nil, err
+			}
+			willBeSealed, err := tx.NodeCompletionWithOverlay(ctx, fresh, store.CompletionOverlay{
+				ClosingNode: fresh.ID,
+				ClosingGate: gate,
+			})
+			if err != nil {
+				return nil, err
+			}
+			becameSealed = !before.Sealed && willBeSealed.Sealed
+			if !becameSealed {
+				return drafts, nil
+			}
+			if sweep, found, err := sealSweepDraft(ctx, tx, fresh.ID); err != nil {
+				return nil, err
+			} else if found {
+				sweep.Cause = 0
+				drafts = append(drafts, sweep)
+			}
+		}
+		return drafts, nil
+	}); err != nil {
+		return SealTransition{}, err
+	}
+	fresh, err := s.Node(ctx, n.ID)
+	if err != nil {
+		return SealTransition{}, err
+	}
+	return SealTransition{Node: fresh, BecameSealed: becameSealed}, nil
 }
 
 func closeGateEnv(ctx context.Context, s *store.Store, actor store.Actor, env store.Env, gate, locator string) (SealTransition, error) {

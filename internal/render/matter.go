@@ -182,9 +182,14 @@ func renderMatterSummary(ctx context.Context, s *store.Store, dir string, matter
 	} else {
 		for _, requirement := range requirements {
 			state := string(requirement.State)
-			if requirement.State == store.GateRequirementClosed {
+			switch requirement.State {
+			case store.GateRequirementClosed:
 				state = fmt.Sprintf("closed by %s at %s", requirement.ClosedBy,
 					requirement.ClosedAt.UTC().Format("2006-01-02T15:04:05.000Z"))
+			case store.GateRequirementDismissed:
+				state = fmt.Sprintf("dismissed by %s at %s: %s", requirement.DismissedBy,
+					requirement.DismissedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+					requirement.DismissalReason)
 			}
 			fmt.Fprintf(&b, "- %s (%s, %s): %s\n", requirement.Gate, requirement.Scale,
 				requirement.Relationship, state)

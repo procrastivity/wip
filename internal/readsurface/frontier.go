@@ -168,11 +168,11 @@ func CollapseFinished(ctx context.Context, v store.View, finished []Finished, ex
 // SealedAt is the sealed-time proxy: there is no `*.sealed` event because
 // sealed is the predicate above, not a state, so "when" is the max of (a)
 // the node's own scale-correct `*.finished` event time and (b) the latest
-// ClosedAt among its closed gates. Either alone can be the later one —
-// finish-then-gate-close and gate-close-then-finish are both legal orders
-// (D62's order-independence). The bool result is false only when neither
-// exists, which should not happen for a node this package already reports
-// Sealed, but the caller decides what to do with that.
+// normal-close or dismissal timestamp among its satisfied gates. Either alone
+// can be the later one — finish-then-gate-close and gate-close-then-finish are
+// both legal orders (D62's order-independence). The bool result is false only
+// when neither exists, which should not happen for a node this package already
+// reports Sealed, but the caller decides what to do with that.
 func SealedAt(ctx context.Context, v store.View, n store.Node) (time.Time, bool, error) {
 	var finishedType string
 	switch n.Kind {
@@ -192,9 +192,15 @@ func SealedAt(ctx context.Context, v store.View, n store.Node) (time.Time, bool,
 		return time.Time{}, false, err
 	}
 	for _, requirement := range requirements {
-		if requirement.State == store.GateRequirementClosed && requirement.ClosedAt != nil &&
-			(!ok || requirement.ClosedAt.After(at)) {
-			at, ok = *requirement.ClosedAt, true
+		var satisfiedAt *time.Time
+		switch requirement.State {
+		case store.GateRequirementClosed:
+			satisfiedAt = requirement.ClosedAt
+		case store.GateRequirementDismissed:
+			satisfiedAt = requirement.DismissedAt
+		}
+		if satisfiedAt != nil && (!ok || satisfiedAt.After(at)) {
+			at, ok = *satisfiedAt, true
 		}
 	}
 	return at, ok, nil

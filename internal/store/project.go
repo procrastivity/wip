@@ -70,6 +70,11 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 			return err
 		}
 		return projectGateCandidates(ctx, tx, ev)
+	case TypeGateDismissed:
+		if err := dismissGate(ctx, tx, ev, schemaVersion); err != nil {
+			return err
+		}
+		return projectGateCandidates(ctx, tx, ev)
 
 	// ---- backlog ---------------------------------------------------------
 	case TypeBacklogEntered:
@@ -496,6 +501,103 @@ func closeGate(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return nil
 }
 
+// dismissalActorAllowed is the store-side floor under the write-surface
+// authorization. A human may explicitly dismiss; an agent may do so only when
+// it is the role that owns the declared gate. Arbitrary role and system actors
+// are not accepted by the event projection, even if they are otherwise valid
+// envelope actors.
+func dismissalActorAllowed(actor Actor, gate string) bool {
+	if actor == ActorHuman {
+		return true
+	}
+	owner, owned := GateOwner(gate)
+	return owned && actor == owner.Actor()
+}
+
+func dismissGate(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
+	var p GateDismissed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Gate == "" || p.Scale == "" {
+		return fmt.Errorf("store: %s must name a gate and a scale", ev.Type)
+	}
+	switch p.Scale {
+	case ScaleMatter, ScaleStage, ScaleStep:
+	default:
+		return fmt.Errorf("store: %s names invalid scale %q", ev.Type, p.Scale)
+	}
+	if strings.TrimSpace(p.Reason) == "" {
+		return fmt.Errorf("store: %s must carry a non-empty reason", ev.Type)
+	}
+	if !dismissalActorAllowed(ev.Actor, p.Gate) {
+		return fmt.Errorf("store: actor %s is not authorized to dismiss gate %s", ev.Actor, p.Gate)
+	}
+
+	var kind Scale
+	var lifecycle Lifecycle
+	var repo string
+	var tombstone sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT kind,lifecycle,repo,tombstone_event FROM nodes WHERE id=?`, ev.Subject).
+		Scan(&kind, &lifecycle, &repo, &tombstone); err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names no node as its subject (%s)", ev.Type, ev.Subject)
+	} else if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if tombstone.Valid {
+		return fmt.Errorf("store: %s names a removed node", ev.Type)
+	}
+	if lifecycle != Done {
+		return fmt.Errorf("store: %s requires a Done node, but the subject is %s", ev.Type, lifecycle)
+	}
+	if kind != p.Scale {
+		return fmt.Errorf("store: %s dismisses %s at %s scale against a %s", ev.Type, p.Gate, p.Scale, kind)
+	}
+	if ev.Repo != repo {
+		return fmt.Errorf("store: %s targets Repo %s from Repo %s", ev.Type, repo, ev.Repo)
+	}
+	var declaredScale Scale
+	err := tx.QueryRowContext(ctx,
+		`SELECT scale FROM gate_declarations WHERE repo=? AND gate=?`, repo, p.Gate).Scan(&declaredScale)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names gate %s, which is not declared for Repo %s", ev.Type, p.Gate, repo)
+	}
+	if err != nil {
+		return fmt.Errorf("store: read gate declaration %s for %s: %w", p.Gate, repo, err)
+	}
+	if declaredScale != p.Scale {
+		return fmt.Errorf("store: %s dismisses %s at %s scale, but the declared gate is bound to %s", ev.Type, p.Gate, p.Scale, declaredScale)
+	}
+
+	var existingType string
+	err = tx.QueryRowContext(ctx, `SELECT e.type FROM gate_state s JOIN events e ON e.id=s.last_event WHERE s.node=? AND s.gate=?`, ev.Subject, p.Gate).Scan(&existingType)
+	if err == nil {
+		return fmt.Errorf("store: %s is already satisfied on %s by %s", p.Gate, ev.Subject, existingType)
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("store: read gate satisfaction %s on %s: %w", p.Gate, ev.Subject, err)
+	}
+	if schemaVersion >= 8 {
+		var exempt bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM gate_exemptions WHERE repo=? AND node=? AND gate=?)`, repo, ev.Subject, p.Gate).Scan(&exempt); err != nil {
+			return fmt.Errorf("store: read gate exemption %s on %s: %w", p.Gate, ev.Subject, err)
+		}
+		if exempt {
+			return fmt.Errorf("store: %s is already satisfied on %s by an exemption", p.Gate, ev.Subject)
+		}
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO gate_state (node,gate,scale,closed_at,last_event) VALUES (?,?,?,?,?)`,
+		ev.Subject, p.Gate, string(p.Scale), ev.OccurredAt.UTC().Format(timestampLayout), ev.ID)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Backlog
 // ---------------------------------------------------------------------------
@@ -772,14 +874,27 @@ func projectTransitionCandidates(ctx context.Context, tx *sql.Tx, ev Event) erro
 }
 
 func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
-	var p GateClosed
-	if err := decode(ev, &p); err != nil {
-		return err
+	var level TrackerPushLevel
+	switch ev.Type {
+	case TypeGateClosed:
+		var p GateClosed
+		if err := decode(ev, &p); err != nil {
+			return err
+		}
+		level = p.TrackerPushLevel
+	case TypeGateDismissed:
+		var p GateDismissed
+		if err := decodeStrict(ev, &p); err != nil {
+			return err
+		}
+		level = p.TrackerPushLevel
+	default:
+		return fmt.Errorf("store: %s is not a gate event", ev.Type)
 	}
-	if p.TrackerPushLevel == "" || p.TrackerPushLevel == TrackerPushOff {
+	if level == "" || level == TrackerPushOff {
 		return nil
 	}
-	if _, err := ParseTrackerPushLevel(string(p.TrackerPushLevel)); err != nil {
+	if _, err := ParseTrackerPushLevel(string(level)); err != nil {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	v := View{q: tx, schemaVersion: latestVersion(register)}
@@ -798,7 +913,7 @@ func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
 			}
 		}
 	}
-	if p.TrackerPushLevel != TrackerPushNarrated {
+	if level != TrackerPushNarrated {
 		return nil
 	}
 	var stages []Node

@@ -1,8 +1,9 @@
 // Package gate implements `wip plumbing gate list`, `wip plumbing gate status`,
-// `wip plumbing gate declare`, `wip plumbing gate repair`, and `wip plumbing gate
-// close`. Per
+// `wip plumbing gate declare`, `wip plumbing gate repair`, and the distinct
+// `wip plumbing gate close` and `wip plumbing gate dismiss` operations. Per
 // `vocabulary` step-02, there is no bespoke `review` verb — every gate
-// close, including a local review, goes through this command.
+// decision, including a local review or an emergency dismissal, goes through
+// this command.
 package gate
 
 import (
@@ -44,9 +45,9 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	coordinator := tracker.NewAlignmentCoordinator(providers)
 	cmd := &cobra.Command{
 		Use:   "gate",
-		Short: "declare, repair, and close gates (MODEL §2.3)",
+		Short: "declare, repair, close, or dismiss gates (MODEL §2.3)",
 	}
-	cmd.AddCommand(listCommand(streams), statusCommand(streams), declareCommand(streams), repairCommand(streams), closeCommand(streams, coordinator))
+	cmd.AddCommand(listCommand(streams), statusCommand(streams), declareCommand(streams), repairCommand(streams), closeCommand(streams, coordinator), dismissCommand(streams, coordinator))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -79,14 +80,17 @@ type gateNodeJSON struct {
 }
 
 type gateRequirementJSON struct {
-	Name         string          `json:"name"`
-	Scale        string          `json:"scale"`
-	Owner        string          `json:"owner"`
-	Relationship string          `json:"relationship"`
-	Subject      gateSubjectJSON `json:"subject"`
-	State        string          `json:"state"`
-	ClosedBy     string          `json:"closedBy,omitempty"`
-	ClosedAt     string          `json:"closedAt,omitempty"`
+	Name            string          `json:"name"`
+	Scale           string          `json:"scale"`
+	Owner           string          `json:"owner"`
+	Relationship    string          `json:"relationship"`
+	Subject         gateSubjectJSON `json:"subject"`
+	State           string          `json:"state"`
+	ClosedBy        string          `json:"closedBy,omitempty"`
+	ClosedAt        string          `json:"closedAt,omitempty"`
+	DismissedBy     string          `json:"dismissedBy,omitempty"`
+	DismissedAt     string          `json:"dismissedAt,omitempty"`
+	DismissalReason string          `json:"dismissalReason,omitempty"`
 }
 
 type gateSubjectJSON struct {
@@ -215,11 +219,18 @@ func gateStatusPayload(ctx context.Context, v store.View, n store.Node, address 
 			},
 			State: string(requirement.State),
 		}
-		if requirement.State == store.GateRequirementClosed {
+		switch requirement.State {
+		case store.GateRequirementClosed:
 			out.ClosedBy = string(requirement.ClosedBy)
 			if requirement.ClosedAt != nil {
 				out.ClosedAt = requirement.ClosedAt.UTC().Format(gateTimestampLayout)
 			}
+		case store.GateRequirementDismissed:
+			out.DismissedBy = string(requirement.DismissedBy)
+			if requirement.DismissedAt != nil {
+				out.DismissedAt = requirement.DismissedAt.UTC().Format(gateTimestampLayout)
+			}
+			out.DismissalReason = requirement.DismissalReason
 		}
 		requirements = append(requirements, out)
 	}
@@ -259,11 +270,18 @@ func writeGateStatusHuman(ctx context.Context, out io.Writer, v store.View, n st
 			return err
 		}
 		state := string(requirement.State)
-		if requirement.State == store.GateRequirementClosed {
+		switch requirement.State {
+		case store.GateRequirementClosed:
 			state = fmt.Sprintf("closed by %s", requirement.ClosedBy)
 			if requirement.ClosedAt != nil {
 				state += " at " + requirement.ClosedAt.UTC().Format(gateTimestampLayout)
 			}
+		case store.GateRequirementDismissed:
+			state = fmt.Sprintf("dismissed by %s", requirement.DismissedBy)
+			if requirement.DismissedAt != nil {
+				state += " at " + requirement.DismissedAt.UTC().Format(gateTimestampLayout)
+			}
+			state += ": " + requirement.DismissalReason
 		}
 		if _, err := fmt.Fprintf(out, "  %s [%s, %s, %s, owner %s]: %s\n",
 			requirement.Gate, requirement.Scale, requirement.Relationship, subjectAddress, requirement.Owner, state); err != nil {
@@ -456,6 +474,116 @@ func closeCommand(streams *iostreams.Streams, coordinator *tracker.AlignmentCoor
 	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func dismissCommand(streams *iostreams.Streams, coordinator *tracker.AlignmentCoordinator) *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "dismiss <gate-name> <locator>",
+		Short: "dismiss an open gate on a Done node with a required emergency reason",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			s, err := tiers.OpenStore()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+			actor := store.ActorFor(flags.AsRole)
+			cur, err := render.ResolveCurrent(cmd.Context(), s, actor, dir)
+			if err != nil {
+				return err
+			}
+
+			transition, err := writesurface.DismissGateWithEnvResult(cmd.Context(), s, actor, cur.Env(), args[0], args[1], reason)
+			if err != nil {
+				return err
+			}
+			n := transition.Node
+			dismissal, err := dismissedGateRequirement(cmd.Context(), s.View, n, args[0])
+			if err != nil {
+				return err
+			}
+			var report tracker.AlignmentReport
+			if transition.BecameSealed {
+				report = coordinator.Check(cmd.Context(), s.View, n.ID)
+				if err := render.Exit(cmd.Context(), s, cur, n, trackedwip.RenderPrecondition); err != nil {
+					return err
+				}
+			}
+			var alignment *tracker.AlignmentReport
+			if report.Visible() {
+				alignment = &report
+			}
+
+			// Handoff is best-effort and post-commit, matching normal gate
+			// close. Dismissal can seal the Matter just as the final close can.
+			line, ce, ok := gateHandoff(cmd.Context(), s.View, cur.Clone.ID, cur.Worktree.ID)
+
+			if flags.JSON {
+				b, err := json.Marshal(struct {
+					Gate        string                   `json:"gate"`
+					Node        string                   `json:"node"`
+					Scale       string                   `json:"scale"`
+					State       string                   `json:"state"`
+					DismissedBy string                   `json:"dismissedBy"`
+					DismissedAt string                   `json:"dismissedAt"`
+					Reason      string                   `json:"reason"`
+					CursorEnded *cursorEndedJSON         `json:"cursorEnded,omitempty"`
+					Alignment   *tracker.AlignmentReport `json:"alignment,omitempty"`
+				}{
+					Gate: args[0], Node: n.ID, Scale: string(n.Kind), State: string(dismissal.State),
+					DismissedBy: string(dismissal.DismissedBy),
+					DismissedAt: dismissal.DismissedAt.UTC().Format(gateTimestampLayout),
+					Reason:      dismissal.DismissalReason, CursorEnded: ce, Alignment: alignment,
+				})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+			if _, err := fmt.Fprintf(streams.Out, "dismissed %s on %s by %s at %s: %s\n",
+				args[0], args[1], dismissal.DismissedBy, dismissal.DismissedAt.UTC().Format(gateTimestampLayout), dismissal.DismissalReason); err != nil {
+				return err
+			}
+			for _, alignmentLine := range report.Lines() {
+				if _, err := fmt.Fprintln(streams.Out, alignmentLine); err != nil {
+					return err
+				}
+			}
+			if ok {
+				_, err = fmt.Fprintln(streams.Out, line)
+			}
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "why this gate is being dismissed (required)")
+	_ = cmd.MarkFlagRequired("reason")
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func dismissedGateRequirement(ctx context.Context, v store.View, n store.Node, gate string) (store.GateRequirement, error) {
+	requirements, err := v.EffectiveGateRequirements(ctx, n)
+	if err != nil {
+		return store.GateRequirement{}, err
+	}
+	for _, requirement := range requirements {
+		if requirement.Gate == gate && requirement.Subject.ID == n.ID {
+			if requirement.State != store.GateRequirementDismissed || requirement.DismissedAt == nil {
+				return store.GateRequirement{}, wiperr.New("internal.gate-dismissal-metadata",
+					fmt.Sprintf("dismissed gate %s on %s has no dismissal metadata", gate, n.ID))
+			}
+			return requirement, nil
+		}
+	}
+	return store.GateRequirement{}, wiperr.New("internal.gate-dismissal-metadata",
+		fmt.Sprintf("dismissed gate %s is not present on %s", gate, n.ID))
 }
 
 // gateHandoff wraps readsurface.Handoff into this package's own

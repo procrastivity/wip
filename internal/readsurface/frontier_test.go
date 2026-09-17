@@ -530,6 +530,127 @@ func TestSealedAtIncludesEnclosingGateClose(t *testing.T) {
 	}
 }
 
+func TestSealedAtUsesTheLaterOfFinishAndGateDismissal(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	matter := f.matter("dismissed", "Dismissed gate")
+	f.start(matter)
+	finish := f.finish(matter)
+	time.Sleep(2 * time.Millisecond)
+	dismissal := f.dismissGate(matter, "reviewed-local", store.ScaleMatter, "the verifier is unavailable")
+
+	n, err := f.Node(ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok, err := SealedAt(ctx, f.View, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !at.Equal(dismissal.OccurredAt) || !dismissal.OccurredAt.After(finish.OccurredAt) {
+		t.Errorf("SealedAt = %v, ok=%v, finish=%v, dismissal=%v; want the later dismissal", at, ok, finish.OccurredAt, dismissal.OccurredAt)
+	}
+
+	// Dismissal is only legal after Done. Re-open the node through the low-level
+	// event fixture and finish it again so the dismissal precedes a later finish
+	// timestamp; SealedAt must still take the maximum rather than the dismissal
+	// unconditionally.
+	f2 := newFixture(t)
+	f2.declareGate("reviewed-local", store.ScaleMatter)
+	matter2 := f2.matter("dismissed-before-finish", "Dismissed before a later finish")
+	f2.start(matter2)
+	f2.finish(matter2)
+	dismissal2 := f2.dismissGate(matter2, "reviewed-local", store.ScaleMatter, "the verifier is unavailable")
+	time.Sleep(2 * time.Millisecond)
+	f2.transition(matter2, store.Done, store.InProgress, "start")
+	finalFinish := f2.finish(matter2)
+	n2, err := f2.Node(ctx, matter2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at2, ok, err := SealedAt(ctx, f2.View, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !at2.Equal(finalFinish.OccurredAt) || !finalFinish.OccurredAt.After(dismissal2.OccurredAt) {
+		t.Errorf("SealedAt after dismissal-before-finish = %v, ok=%v, finish=%v, dismissal=%v; want the later finish", at2, ok, finalFinish.OccurredAt, dismissal2.OccurredAt)
+	}
+
+	// A normal close before finish remains covered by the companion
+	// order-independence test above.
+	before, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := SealedAt(ctx, f.View, n); err != nil {
+		t.Fatal(err)
+	}
+	after, err := f.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("SealedAt changed the event log from %d to %d events", len(before), len(after))
+	}
+}
+
+func TestFrontierTreatsADismissedDoneBlockerAsLocallyComplete(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	blocker := f.matter("dismissed-blocker", "Dismissed blocker")
+	waiting := f.matter("waiting", "Waiting")
+	f.depend(waiting, blocker)
+	f.start(blocker)
+	f.finish(blocker)
+	f.dismissGate(blocker, "reviewed-local", store.ScaleMatter, "the review system is unavailable")
+
+	ready, blocked, err := Frontier(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked) != 0 || len(ready) != 1 || ready[0].ID != waiting {
+		t.Fatalf("frontier ready=%+v blocked=%+v, want dismissed blocker to unblock waiting Matter", ready, blocked)
+	}
+	finished, err := FinishedNodes(ctx, f.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finished) != 1 || !finished[0].Sealed || len(finished[0].Pending) != 0 {
+		t.Fatalf("finished = %+v, want the dismissed Done blocker sealed with no pending gates", finished)
+	}
+}
+
+func TestDismissedAndOpenGatesRemainPendingUntilTheFinalDismissal(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("approved", store.ScaleMatter)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	matter := f.matter("partially-dismissed", "Partially dismissed")
+	f.start(matter)
+	f.finish(matter)
+	f.dismissGate(matter, "approved", store.ScaleMatter, "the approver is unavailable")
+
+	n, err := f.Node(ctx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := f.NodeCompletion(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Sealed || len(completion.Pending) != 1 || completion.Pending[0].Gate != "reviewed-local" {
+		t.Fatalf("completion after one dismissal = %+v, want reviewed-local still pending", completion)
+	}
+
+	f.dismissGate(matter, "reviewed-local", store.ScaleMatter, "the review system is unavailable")
+	completion, err = f.NodeCompletion(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completion.Sealed || len(completion.Pending) != 0 {
+		t.Fatalf("completion after final dismissal = %+v, want sealed with no pending gates", completion)
+	}
+}
+
 // TestFrontier_CreationOrder pins the presentation-only ordering (D51):
 // ready nodes come back in the order they were born.
 func TestFrontier_CreationOrder(t *testing.T) {

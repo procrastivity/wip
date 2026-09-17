@@ -766,3 +766,269 @@ func TestBindJSONOutputIsUnchangedWhenTrackerPushesAreOff(t *testing.T) {
 		t.Errorf("bind JSON stdout = %q, want %q", r.stdout, want)
 	}
 }
+
+func TestGateDismiss_TwoDoneMatterGatesSealOnlyAfterTheFinalDismissal(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	for _, gate := range []string{"approve", "review"} {
+		declareGateCLI(t, dir, dbEnv, gate, "matter")
+	}
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Emergency gate", "--json").stdout)
+	for _, args := range [][]string{{"plumbing", "start", matter.ID}, {"plumbing", "finish", matter.ID}} {
+		if r := runIn(t, dir, dbEnv, args...); r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+	}
+
+	first := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "approve", matter.ID,
+		"--reason", "the approving reviewer is unavailable", "--json")
+	if first.exitCode != 0 || first.stderr != "" {
+		t.Fatalf("first dismissal = %+v", first)
+	}
+	var firstPayload struct {
+		Gate        string `json:"gate"`
+		Node        string `json:"node"`
+		Scale       string `json:"scale"`
+		State       string `json:"state"`
+		DismissedBy string `json:"dismissedBy"`
+		DismissedAt string `json:"dismissedAt"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(first.stdout), &firstPayload); err != nil {
+		t.Fatal(err)
+	}
+	if firstPayload.Gate != "approve" || firstPayload.Node != matter.ID || firstPayload.Scale != "matter" ||
+		firstPayload.State != "dismissed" || firstPayload.DismissedBy != "human" || firstPayload.DismissedAt == "" ||
+		firstPayload.Reason != "the approving reviewer is unavailable" {
+		t.Fatalf("first dismissal JSON = %+v", firstPayload)
+	}
+
+	status1 := runIn(t, dir, dbEnv, "plumbing", "gate", "status", matter.ID, "--json")
+	if status1.exitCode != 0 || status1.stderr != "" {
+		t.Fatalf("status after first dismissal = %+v", status1)
+	}
+	var statusPayload struct {
+		Sealed       bool `json:"sealed"`
+		Requirements []struct {
+			Name            string `json:"name"`
+			State           string `json:"state"`
+			ClosedBy        string `json:"closedBy"`
+			ClosedAt        string `json:"closedAt"`
+			DismissedBy     string `json:"dismissedBy"`
+			DismissedAt     string `json:"dismissedAt"`
+			DismissalReason string `json:"dismissalReason"`
+		} `json:"requirements"`
+	}
+	if err := json.Unmarshal([]byte(status1.stdout), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if statusPayload.Sealed || len(statusPayload.Requirements) != 2 {
+		t.Fatalf("status after first dismissal = %+v, want unsealed with two requirements", statusPayload)
+	}
+	if got := statusPayload.Requirements[0]; got.Name != "approve" || got.State != "dismissed" || got.DismissedBy != "human" ||
+		got.DismissedAt != firstPayload.DismissedAt || got.DismissalReason != firstPayload.Reason || got.ClosedBy != "" || got.ClosedAt != "" {
+		t.Errorf("dismissed status = %+v, want dismissal metadata without close metadata", got)
+	}
+	if got := statusPayload.Requirements[1]; got.Name != "review" || got.State != "open" {
+		t.Errorf("remaining gate status = %+v, want open", got)
+	}
+	humanStatus := runIn(t, dir, dbEnv, "plumbing", "gate", "status", matter.ID)
+	if humanStatus.exitCode != 0 || !strings.Contains(humanStatus.stdout, "dismissed by human at ") ||
+		!strings.Contains(humanStatus.stdout, ": the approving reviewer is unavailable") {
+		t.Fatalf("human status after first dismissal = %+v, want dismissal actor, timestamp and reason", humanStatus)
+	}
+
+	second := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID,
+		"--reason", "the review system is unavailable during the incident", "--json")
+	if second.exitCode != 0 || second.stderr != "" {
+		t.Fatalf("second dismissal = %+v", second)
+	}
+	var secondPayload struct {
+		State       string `json:"state"`
+		DismissedBy string `json:"dismissedBy"`
+		DismissedAt string `json:"dismissedAt"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(second.stdout), &secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	if secondPayload.State != "dismissed" || secondPayload.DismissedBy != "human" || secondPayload.DismissedAt == "" ||
+		secondPayload.Reason != "the review system is unavailable during the incident" {
+		t.Fatalf("second dismissal JSON = %+v", secondPayload)
+	}
+
+	status2 := runIn(t, dir, dbEnv, "plumbing", "gate", "status", matter.ID, "--json")
+	if status2.exitCode != 0 || status2.stderr != "" {
+		t.Fatalf("status after final dismissal = %+v", status2)
+	}
+	var finalStatus struct {
+		Sealed       bool `json:"sealed"`
+		Requirements []struct {
+			State           string `json:"state"`
+			DismissedBy     string `json:"dismissedBy"`
+			DismissedAt     string `json:"dismissedAt"`
+			DismissalReason string `json:"dismissalReason"`
+			ClosedBy        string `json:"closedBy"`
+			ClosedAt        string `json:"closedAt"`
+		} `json:"requirements"`
+	}
+	if err := json.Unmarshal([]byte(status2.stdout), &finalStatus); err != nil {
+		t.Fatal(err)
+	}
+	if !finalStatus.Sealed || len(finalStatus.Requirements) != 2 {
+		t.Fatalf("final status = %+v, want sealed", finalStatus)
+	}
+	for _, requirement := range finalStatus.Requirements {
+		if requirement.State != "dismissed" || requirement.DismissedBy != "human" || requirement.DismissedAt == "" ||
+			requirement.DismissalReason == "" || requirement.ClosedBy != "" || requirement.ClosedAt != "" {
+			t.Errorf("final dismissed requirement = %+v, want dismissal-only metadata", requirement)
+		}
+	}
+
+	events := gateEvents(t, dbEnvPath(dbEnv))
+	var dismissed []store.Event
+	for _, event := range events {
+		if event.Type == store.TypeGateDismissed {
+			dismissed = append(dismissed, event)
+		}
+	}
+	if len(dismissed) != 2 || dismissed[0].Subject != matter.ID || dismissed[1].Subject != matter.ID {
+		t.Fatalf("dismissal events = %+v, want exactly two Matter-subject events", dismissed)
+	}
+	for _, event := range dismissed {
+		var payload store.GateDismissed
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Gate == "" || payload.Scale != store.ScaleMatter || payload.Reason == "" {
+			t.Errorf("dismissal event payload = %+v, want gate, matter scale and reason", payload)
+		}
+	}
+}
+
+func TestGateDismiss_ReasonLifecycleAndRepeatRefusalsDoNotAppendEvents(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	declareGateCLI(t, dir, dbEnv, "review", "matter")
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Dismissal refusals", "--json").stdout)
+
+	before := len(gateEvents(t, dbEnvPath(dbEnv)))
+	missing := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID, "--json")
+	if missing.exitCode != 2 || missing.stdout != "" || missing.stderr == "" {
+		t.Fatalf("missing reason = %+v, want usage refusal", missing)
+	}
+	if got := len(gateEvents(t, dbEnvPath(dbEnv))); got != before {
+		t.Fatalf("missing reason changed event count from %d to %d", before, got)
+	}
+
+	blank := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID, "--reason", " \t", "--json")
+	if blank.exitCode != 1 || blank.stdout != "" {
+		t.Fatalf("blank reason = %+v, want validation refusal", blank)
+	}
+	if got := len(gateEvents(t, dbEnvPath(dbEnv))); got != before {
+		t.Fatalf("blank reason changed event count from %d to %d", before, got)
+	}
+
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", matter.ID); r.exitCode != 0 {
+		t.Fatalf("start: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	notDone := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID, "--reason", "not ready", "--json")
+	if notDone.exitCode != 3 || notDone.stdout != "" {
+		t.Fatalf("not-Done dismissal = %+v, want refusal", notDone)
+	}
+	if got := len(gateEvents(t, dbEnvPath(dbEnv))); got != before+1 {
+		t.Fatalf("not-Done dismissal changed event count from %d to %d", before+1, got)
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", matter.ID); r.exitCode != 0 {
+		t.Fatalf("finish: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	humanDismiss := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID, "--reason", "the review is waived")
+	if humanDismiss.exitCode != 0 || !strings.Contains(humanDismiss.stdout, "dismissed review on ") ||
+		!strings.Contains(humanDismiss.stdout, " by human at ") || !strings.Contains(humanDismiss.stdout, ": the review is waived") {
+		t.Fatalf("dismiss human output = %+v, want dismissal actor, timestamp and reason", humanDismiss)
+	}
+	afterDismiss := len(gateEvents(t, dbEnvPath(dbEnv)))
+	repeated := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "review", matter.ID, "--reason", "a different reason", "--json")
+	if repeated.exitCode != 3 || repeated.stdout != "" {
+		t.Fatalf("repeated dismissal = %+v, want refusal", repeated)
+	}
+	if got := len(gateEvents(t, dbEnvPath(dbEnv))); got != afterDismiss {
+		t.Fatalf("repeated dismissal changed event count from %d to %d", afterDismiss, got)
+	}
+}
+
+func TestGateDismiss_VerifierRoleCanDismissVerifiedButUnrelatedRoleCannot(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	refreshRepo(t, dir, dbEnv)
+	declareGateCLI(t, dir, dbEnv, "verified", "step")
+	for _, role := range []string{"verifier", "researcher"} {
+		if r := runIn(t, dir, dbEnv, "plumbing", "role", "spawn", role); r.exitCode != 0 {
+			t.Fatalf("spawn %s: exit=%d stderr=%q", role, r.exitCode, r.stderr)
+		}
+	}
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Verifier dismissal", "--json").stdout)
+	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", matter.ID, "--title", "Check", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", step.ID); r.exitCode != 0 {
+		t.Fatalf("start step: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", step.ID); r.exitCode != 0 {
+		t.Fatalf("finish step: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	before := len(gateEvents(t, dbEnvPath(dbEnv)))
+	unrelated := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "verified", step.ID,
+		"--as-role", "researcher", "--reason", "researcher is not the verifier", "--json")
+	if unrelated.exitCode != 3 || unrelated.stdout != "" {
+		t.Fatalf("unrelated role dismissal = %+v, want refusal", unrelated)
+	}
+	if got := len(gateEvents(t, dbEnvPath(dbEnv))); got != before {
+		t.Fatalf("unrelated role changed event count from %d to %d", before, got)
+	}
+
+	allowed := runIn(t, dir, dbEnv, "plumbing", "gate", "dismiss", "verified", step.ID,
+		"--as-role", "verifier", "--reason", "the verification service is unavailable", "--json")
+	if allowed.exitCode != 0 || allowed.stderr != "" {
+		t.Fatalf("verifier dismissal = %+v", allowed)
+	}
+	var payload struct {
+		State       string `json:"state"`
+		DismissedBy string `json:"dismissedBy"`
+		DismissedAt string `json:"dismissedAt"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(allowed.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.State != "dismissed" || payload.DismissedBy != "role:verifier" || payload.DismissedAt == "" ||
+		payload.Reason != "the verification service is unavailable" {
+		t.Fatalf("verifier dismissal JSON = %+v", payload)
+	}
+	events := gateEvents(t, dbEnvPath(dbEnv))
+	var found *store.Event
+	for i := range events {
+		if events[i].Type == store.TypeGateDismissed {
+			found = &events[i]
+		}
+	}
+	if found == nil || found.Subject != step.ID || found.Actor != store.RoleActor("verifier") {
+		t.Fatalf("dismissal event = %+v, want step subject and role:verifier actor", found)
+	}
+}
+
+func TestGateHelpDistinguishesCloseFromEmergencyDismissal(t *testing.T) {
+	r := run(t, nil, "plumbing", "gate", "--help")
+	if r.exitCode != 0 {
+		t.Fatalf("gate help: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, want := range []string{
+		"close       close a declared gate against a node",
+		"dismiss     dismiss an open gate on a Done node with a required emergency reason",
+	} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("gate help = %q, missing %q", r.stdout, want)
+		}
+	}
+	dismissHelp := run(t, nil, "plumbing", "gate", "dismiss", "--help")
+	if dismissHelp.exitCode != 0 || !strings.Contains(dismissHelp.stdout, "--reason") {
+		t.Fatalf("dismiss help = %+v, want required reason vocabulary", dismissHelp)
+	}
+}
