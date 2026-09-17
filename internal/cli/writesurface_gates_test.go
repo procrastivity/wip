@@ -7,11 +7,344 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/procrastivity/wip/internal/store"
 )
+
+func gateEvents(t *testing.T, dbPath string) []store.Event {
+	t.Helper()
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.Events(context.Background())
+	if closeErr := s.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func assertNoGateReadEvents(t *testing.T, dir string, dbEnv []string, dbPath string, args ...string) result {
+	t.Helper()
+	before := gateEvents(t, dbPath)
+	r := runIn(t, dir, dbEnv, args...)
+	after := gateEvents(t, dbPath)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("%v changed the event log", args)
+	}
+	return r
+}
+
+func declareGateCLI(t *testing.T, dir string, dbEnv []string, name, scale string) {
+	t.Helper()
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", name, "--scale", scale); r.exitCode != 0 {
+		t.Fatalf("declare %s: exit=%d stderr=%q", name, r.exitCode, r.stderr)
+	}
+}
+
+func TestGateList_ReadsDeclarationsInOrderAndEmitsNoEvents(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	dbPath := dbEnvPath(dbEnv)
+
+	empty := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "list")
+	if empty.exitCode != 0 || empty.stdout != "no gates declared\n" || empty.stderr != "" {
+		t.Fatalf("empty gate list = %+v", empty)
+	}
+	emptyJSON := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "list", "--json")
+	var emptyPayload struct {
+		Repo  string           `json:"repo"`
+		Gates []map[string]any `json:"gates"`
+	}
+	if err := json.Unmarshal([]byte(emptyJSON.stdout), &emptyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if emptyPayload.Repo == "" || emptyPayload.Gates == nil || len(emptyPayload.Gates) != 0 {
+		t.Fatalf("empty gate list JSON = %+v, want a non-nil empty gates array", emptyPayload)
+	}
+
+	for _, declaration := range [][2]string{
+		{"verified", "step"},
+		{"stage-check", "stage"},
+		{"reviewed-local", "matter"},
+		{"ci-green", "matter"},
+		{"approved", "matter"},
+	} {
+		declareGateCLI(t, dir, dbEnv, declaration[0], declaration[1])
+	}
+
+	first := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "list")
+	wantHuman := "approved         matter  human\n" +
+		"ci-green         matter  role:warden\n" +
+		"reviewed-local   matter  human\n" +
+		"stage-check      stage   human\n" +
+		"verified         step    role:verifier\n"
+	if first.exitCode != 0 || first.stdout != wantHuman || first.stderr != "" {
+		t.Fatalf("gate list human = %+v, want stdout %q", first, wantHuman)
+	}
+
+	jsonResult := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "list", "--json")
+	jsonAgain := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "list", "--json")
+	if jsonResult.stdout != jsonAgain.stdout {
+		t.Fatalf("gate list JSON is not deterministic: %q vs %q", jsonResult.stdout, jsonAgain.stdout)
+	}
+	var payload struct {
+		Repo  string `json:"repo"`
+		Gates []struct {
+			Name  string `json:"name"`
+			Scale string `json:"scale"`
+			Owner string `json:"owner"`
+		} `json:"gates"`
+	}
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Repo == "" || len(payload.Gates) != 5 {
+		t.Fatalf("gate list JSON = %+v", payload)
+	}
+	for i, want := range []struct{ name, scale, owner string }{
+		{"approved", "matter", "human"},
+		{"ci-green", "matter", "role:warden"},
+		{"reviewed-local", "matter", "human"},
+		{"stage-check", "stage", "human"},
+		{"verified", "step", "role:verifier"},
+	} {
+		if got := payload.Gates[i]; got.Name != want.name || got.Scale != want.scale || got.Owner != want.owner {
+			t.Errorf("gate %d = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+func TestGateStatus_ReportsMixedEffectiveRequirementsForNestedLocators(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	dbPath := dbEnvPath(dbEnv)
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Checkout", "--json").stdout)
+	stage := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "stage", "create", matter.ID, "--title", "Build", "--json").stdout)
+	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", stage.ID, "--title", "Verify", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", step.ID); r.exitCode != 0 {
+		t.Fatalf("start step: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "finish", step.ID); r.exitCode != 0 {
+		t.Fatalf("finish step: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	declareGateCLI(t, dir, dbEnv, "approved", "matter")
+	declareGateCLI(t, dir, dbEnv, "verified", "step")
+	declareGateCLI(t, dir, dbEnv, "local-check", "step")
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "approved", matter.ID); r.exitCode != 0 {
+		t.Fatalf("close approved: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "close", "local-check", step.ID); r.exitCode != 0 {
+		t.Fatalf("close local-check: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "repair", "verified", step.ID); r.exitCode != 0 {
+		t.Fatalf("repair verified: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	declareGateCLI(t, dir, dbEnv, "ci-green", "matter")
+
+	statusArgs := []string{"plumbing", "gate", "status", matter.Locator + "/presentation-only/" + step.Locator}
+	human := assertNoGateReadEvents(t, dir, dbEnv, dbPath, statusArgs...)
+	if human.exitCode != 0 || human.stderr != "" {
+		t.Fatalf("gate status human = %+v", human)
+	}
+	for _, want := range []string{
+		"checkout/build · step-01  step · done\n",
+		"locally-complete: yes\n",
+		"sealed: no\n",
+		"  local-check [step, own, checkout/build · step-01, owner human]: closed by human at ",
+		"  verified [step, own, checkout/build · step-01, owner role:verifier]: exempt\n",
+		"  approved [matter, enclosing, checkout, owner human]: closed by human at ",
+		"  ci-green [matter, enclosing, checkout, owner role:warden]: open\n",
+	} {
+		if !strings.Contains(human.stdout, want) {
+			t.Errorf("gate status human = %q, missing %q", human.stdout, want)
+		}
+	}
+
+	jsonResult := assertNoGateReadEvents(t, dir, dbEnv, dbPath, append(statusArgs, "--json")...)
+	jsonByULID := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", step.ID, "--json")
+	if jsonResult.stdout != jsonByULID.stdout {
+		t.Fatalf("nested and ULID status differ: %q vs %q", jsonResult.stdout, jsonByULID.stdout)
+	}
+	jsonAgain := assertNoGateReadEvents(t, dir, dbEnv, dbPath, append(statusArgs, "--json")...)
+	if jsonResult.stdout != jsonAgain.stdout {
+		t.Fatalf("gate status JSON is not deterministic: %q vs %q", jsonResult.stdout, jsonAgain.stdout)
+	}
+	var payload struct {
+		Node struct {
+			ID        string `json:"id"`
+			Address   string `json:"address"`
+			Kind      string `json:"kind"`
+			Lifecycle string `json:"lifecycle"`
+		} `json:"node"`
+		LocallyComplete bool             `json:"locallyComplete"`
+		Sealed          bool             `json:"sealed"`
+		Requirements    []map[string]any `json:"requirements"`
+	}
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Node.ID != step.ID || payload.Node.Address != "checkout/build · step-01" || payload.Node.Kind != "step" ||
+		payload.Node.Lifecycle != "done" || !payload.LocallyComplete || payload.Sealed || len(payload.Requirements) != 4 {
+		t.Fatalf("gate status JSON = %+v", payload)
+	}
+	for i, want := range []struct {
+		name, scale, owner, relationship, subject, state string
+	}{
+		{"local-check", "step", "human", "own", step.ID, "closed"},
+		{"verified", "step", "role:verifier", "own", step.ID, "exempt"},
+		{"approved", "matter", "human", "enclosing", matter.ID, "closed"},
+		{"ci-green", "matter", "role:warden", "enclosing", matter.ID, "open"},
+	} {
+		got := payload.Requirements[i]
+		if got["name"] != want.name || got["scale"] != want.scale || got["owner"] != want.owner ||
+			got["relationship"] != want.relationship || got["state"] != want.state {
+			t.Errorf("requirement %d = %+v, want %+v", i, got, want)
+		}
+		if subject, ok := got["subject"].(map[string]any); !ok || subject["id"] != want.subject {
+			t.Errorf("requirement %d subject = %#v, want %s", i, got["subject"], want.subject)
+		}
+		_, hasClosedBy := got["closedBy"]
+		_, hasClosedAt := got["closedAt"]
+		if want.state == "closed" {
+			if !hasClosedBy || !hasClosedAt {
+				t.Errorf("closed requirement %d omits closure metadata: %+v", i, got)
+			}
+		} else if hasClosedBy || hasClosedAt {
+			t.Errorf("%s requirement %d includes closure metadata: %+v", want.state, i, got)
+		}
+	}
+}
+
+func TestGateStatus_NoDeclarationsAndLocatorRefusalsAreReadOnly(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	dbPath := dbEnvPath(dbEnv)
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Plain Task", "--json").stdout)
+	for _, args := range [][]string{{"plumbing", "start", matter.Locator}, {"plumbing", "finish", matter.Locator}} {
+		if r := runIn(t, dir, dbEnv, args...); r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+	}
+
+	human := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", matter.Locator)
+	wantHuman := "plain-task  matter · done\nlocally-complete: yes\nsealed: yes\nrequirements: none\n"
+	if human.exitCode != 0 || human.stdout != wantHuman || human.stderr != "" {
+		t.Fatalf("empty gate status human = %+v, want stdout %q", human, wantHuman)
+	}
+	jsonResult := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", matter.ID, "--json")
+	if !strings.Contains(jsonResult.stdout, `"requirements":[]`) || !strings.Contains(jsonResult.stdout, `"sealed":true`) {
+		t.Fatalf("empty gate status JSON = %q", jsonResult.stdout)
+	}
+
+	unknown := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", "missing")
+	if unknown.exitCode != 1 || unknown.stderr != "wip: plumbing gate status: no matter labeled \"missing\"\n" {
+		t.Fatalf("unknown human locator = %+v", unknown)
+	}
+	unknownJSON := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", "missing", "--json")
+	if unknownJSON.exitCode != 1 || unknownJSON.stderr != `{"error":{"code":"validation.unknown-locator","message":"no matter labeled \"missing\""}}`+"\n" {
+		t.Fatalf("unknown JSON locator = %+v", unknownJSON)
+	}
+
+	otherDir := newGitRepo(t, "other")
+	if r := runIn(t, otherDir, dbEnv, "init"); r.exitCode != 0 {
+		t.Fatalf("other init: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	otherMatter := mustJSON[nodePayload](t, runIn(t, otherDir, dbEnv, "plumbing", "matter", "create", "--title", "Other", "--json").stdout)
+	crossRepo := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", otherMatter.ID, "--json")
+	if crossRepo.exitCode != 1 || crossRepo.stderr != fmt.Sprintf("{\"error\":{\"code\":\"validation.unknown-locator\",\"message\":\"no node %s in this repo\"}}\n", otherMatter.ID) {
+		t.Fatalf("cross-repository ULID = %+v", crossRepo)
+	}
+
+	tombstoneMatter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Tombstone", "--json").stdout)
+	tombstoneStep := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", tombstoneMatter.ID, "--title", "Removed", "--json").stdout)
+	if r := runIn(t, dir, dbEnv, "plumbing", "step", "remove", tombstoneStep.ID); r.exitCode != 0 {
+		t.Fatalf("remove step: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	tombstoned := assertNoGateReadEvents(t, dir, dbEnv, dbPath, "plumbing", "gate", "status", tombstoneStep.ID, "--json")
+	if tombstoned.exitCode != 1 || tombstoned.stderr != fmt.Sprintf("{\"error\":{\"code\":\"validation.unknown-locator\",\"message\":\"no node %s in this repo\"}}\n", tombstoneStep.ID) {
+		t.Fatalf("tombstoned ULID = %+v", tombstoned)
+	}
+	wrongArity := runIn(t, dir, dbEnv, "plumbing", "gate", "status")
+	if wrongArity.exitCode != 2 {
+		t.Fatalf("wrong gate status arity exit=%d, want 2; stderr=%q", wrongArity.exitCode, wrongArity.stderr)
+	}
+}
+
+func TestGateCommands_ManifestAndHarnessProjection(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	manifestResult := runIn(t, dir, dbEnv, "manifest", "--json")
+	if manifestResult.exitCode != 0 {
+		t.Fatalf("manifest: exit=%d stderr=%q", manifestResult.exitCode, manifestResult.stderr)
+	}
+	var manifest struct {
+		SchemaVersion int `json:"schemaVersion"`
+		Verbs         []struct {
+			Name         string          `json:"name"`
+			Kind         string          `json:"kind"`
+			Usage        string          `json:"usage"`
+			Description  string          `json:"description"`
+			OutputSchema json.RawMessage `json:"outputSchema"`
+		} `json:"verbs"`
+	}
+	if err := json.Unmarshal([]byte(manifestResult.stdout), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != 1 {
+		t.Fatalf("manifest schema version = %d, want unchanged version 1", manifest.SchemaVersion)
+	}
+	for _, want := range []struct {
+		name, usage, description string
+	}{
+		{"plumbing gate list", "", "list this repo's gate declarations - read-only, emits no event"},
+		{"plumbing gate status", "<locator>", "show one live node's effective gate requirements - read-only, emits no event"},
+	} {
+		found := false
+		for _, verb := range manifest.Verbs {
+			if verb.Name != want.name {
+				continue
+			}
+			found = true
+			if verb.Kind != "plumbing" || verb.Usage != want.usage || verb.Description != want.description || verb.OutputSchema != nil {
+				t.Errorf("manifest %q = %+v, want plumbing usage=%q description=%q and no outputSchema", want.name, verb, want.usage, want.description)
+			}
+		}
+		if !found {
+			t.Errorf("manifest does not contain %q", want.name)
+		}
+	}
+
+	skillsDir := t.TempDir()
+	installed := runIn(t, dir, []string{"WIP_PI_SKILLS_DIR=" + skillsDir}, "install", "pi", "--json")
+	if installed.exitCode != 0 {
+		t.Fatalf("install pi: exit=%d stderr=%q", installed.exitCode, installed.stderr)
+	}
+	var installPayload struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.Unmarshal([]byte(installed.stdout), &installPayload); err != nil {
+		t.Fatal(err)
+	}
+	skill, err := os.ReadFile(filepath.Join(installPayload.Dir, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(skill)
+	for _, want := range []string{
+		"| `wip plumbing gate list` | list this repo's gate declarations - read-only, emits no event |",
+		"| `wip plumbing gate status <locator>` | show one live node's effective gate requirements - read-only, emits no event |",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("generated Pi skill does not contain %q", want)
+		}
+	}
+}
 
 func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}

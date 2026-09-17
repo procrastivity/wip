@@ -174,15 +174,17 @@ func simpleTransitionEnvResult(ctx context.Context, s *store.Store, actor store.
 			Payload: store.Transition{From: from, To: to, TrackerPushLevel: level, Reason: reason},
 		}}
 		if action == "finished" && fresh.Kind == store.ScaleMatter {
-			wasSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, false, "")
+			before, err := tx.NodeCompletion(ctx, fresh)
 			if err != nil {
 				return nil, err
 			}
-			willBeSealed, err := matterSealedProspectively(ctx, tx, fresh.ID, true, "")
+			willBeSealed, err := tx.NodeCompletionWithOverlay(ctx, fresh, store.CompletionOverlay{
+				FinishingNode: fresh.ID,
+			})
 			if err != nil {
 				return nil, err
 			}
-			becameSealed = !wasSealed && willBeSealed
+			becameSealed = !before.Sealed && willBeSealed.Sealed
 			if !becameSealed {
 				return drafts, nil
 			}

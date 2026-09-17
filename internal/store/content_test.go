@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for step-04: prose and content storage.
@@ -95,6 +96,64 @@ func contentOf(t *testing.T, ev Event) ContentWritten {
 func (h *harness) blobPathOf(id string) string {
 	h.t.Helper()
 	return filepath.Join(blobDirFor(h.Path()), id)
+}
+
+func newHarnessWithClock(t *testing.T, now func() time.Time) *harness {
+	t.Helper()
+	s, err := openAt(filepath.Join(t.TempDir(), "wip.db"), register, latestVersion(register), now)
+	if err != nil {
+		t.Fatalf("open store with clock: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	h := &harness{Store: s, t: t, ctx: context.Background()}
+	h.Repo = h.attachRepo(RepoAttached{Label: "fixture"})
+	h.Clone = h.attachClone(CloneAttached{Repo: h.Repo, GitCommonDir: "/tmp/fixture/.git", Label: "main"})
+	h.Worktree = h.attachWorktree(h.Repo, WorktreeAttached{Clone: h.Clone})
+	return h
+}
+
+func TestContentSegmentsExposeBirthEventTimestamp(t *testing.T) {
+	pinned := time.Date(2026, 9, 17, 9, 8, 7, 654321000, time.FixedZone("source", -4*60*60))
+	h := newHarnessWithClock(t, func() time.Time { return pinned })
+	node := h.matter("finding-time", "Finding time")
+	event := h.write(node, KindFindings, []byte("Found the cause."))
+
+	segments := h.segments(node, KindFindings)
+	if len(segments) != 1 {
+		t.Fatalf("finding segments = %d, want 1", len(segments))
+	}
+	got := segments[0].OccurredAt
+	if !got.Equal(event.OccurredAt) {
+		t.Errorf("segment birth time = %s, want content.appended time %s", got, event.OccurredAt)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("segment birth time location = %s, want UTC", got.Location())
+	}
+	if got.Nanosecond()%int(time.Millisecond) != 0 {
+		t.Errorf("segment birth time = %s, want millisecond precision", got)
+	}
+}
+
+func TestStoreContentConcatenatesFindingSegmentsWithoutDelimiters(t *testing.T) {
+	h := newHarness(t)
+	node := h.matter("finding-bytes", "Finding bytes")
+	for _, payload := range [][]byte{[]byte("first"), []byte("second\n"), []byte("third\n\n")} {
+		h.write(node, KindFindings, payload)
+	}
+	h.wantContent("raw finding concatenation", node, KindFindings, []byte("firstsecond\nthird\n\n"))
+	segments := h.segments(node, KindFindings)
+	if len(segments) != 3 {
+		t.Fatalf("finding segments = %d, want 3", len(segments))
+	}
+	for i, want := range [][]byte{[]byte("first"), []byte("second\n"), []byte("third\n\n")} {
+		got, err := h.SegmentBytes(h.ctx, segments[i].ID)
+		if err != nil {
+			t.Fatalf("read segment %d: %v", i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("segment %d = %q, want %q", i, got, want)
+		}
+	}
 }
 
 // rawContentInsert puts a content row straight into the table, around every guard

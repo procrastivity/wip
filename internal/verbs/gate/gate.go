@@ -1,4 +1,5 @@
-// Package gate implements `wip plumbing gate declare`, `wip plumbing gate repair`, and `wip plumbing gate
+// Package gate implements `wip plumbing gate list`, `wip plumbing gate status`,
+// `wip plumbing gate declare`, `wip plumbing gate repair`, and `wip plumbing gate
 // close`. Per
 // `vocabulary` step-02, there is no bespoke `review` verb — every gate
 // close, including a local review, goes through this command.
@@ -8,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -21,6 +23,7 @@ import (
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
 	"github.com/procrastivity/wip/internal/tracker"
+	"github.com/procrastivity/wip/internal/wiperr"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
@@ -43,9 +46,247 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 		Use:   "gate",
 		Short: "declare, repair, and close gates (MODEL §2.3)",
 	}
-	cmd.AddCommand(declareCommand(streams), repairCommand(streams), closeCommand(streams, coordinator))
+	cmd.AddCommand(listCommand(streams), statusCommand(streams), declareCommand(streams), repairCommand(streams), closeCommand(streams, coordinator))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+const gateTimestampLayout = "2006-01-02T15:04:05.000Z"
+
+type gateListJSON struct {
+	Repo  string          `json:"repo"`
+	Gates []gateEntryJSON `json:"gates"`
+}
+
+type gateEntryJSON struct {
+	Name  string `json:"name"`
+	Scale string `json:"scale"`
+	Owner string `json:"owner"`
+}
+
+type gateStatusJSON struct {
+	Node            gateNodeJSON          `json:"node"`
+	LocallyComplete bool                  `json:"locallyComplete"`
+	Sealed          bool                  `json:"sealed"`
+	Requirements    []gateRequirementJSON `json:"requirements"`
+}
+
+type gateNodeJSON struct {
+	ID        string `json:"id"`
+	Address   string `json:"address"`
+	Kind      string `json:"kind"`
+	Lifecycle string `json:"lifecycle"`
+}
+
+type gateRequirementJSON struct {
+	Name         string          `json:"name"`
+	Scale        string          `json:"scale"`
+	Owner        string          `json:"owner"`
+	Relationship string          `json:"relationship"`
+	Subject      gateSubjectJSON `json:"subject"`
+	State        string          `json:"state"`
+	ClosedBy     string          `json:"closedBy,omitempty"`
+	ClosedAt     string          `json:"closedAt,omitempty"`
+}
+
+type gateSubjectJSON struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
+	Kind    string `json:"kind"`
+}
+
+func listCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "list this repo's gate declarations - read-only, emits no event",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			declarations, err := s.GateDeclarations(cmd.Context(), repo.ID)
+			if err != nil {
+				return err
+			}
+			gates := make([]gateEntryJSON, 0, len(declarations))
+			for _, declaration := range declarations {
+				gates = append(gates, gateEntryJSON{
+					Name:  declaration.Gate,
+					Scale: string(declaration.Scale),
+					Owner: gateOwner(declaration.Gate),
+				})
+			}
+			if flags.JSON {
+				return writeJSON(streams.Out, gateListJSON{Repo: repo.ID, Gates: gates})
+			}
+			if len(gates) == 0 {
+				_, err = fmt.Fprintln(streams.Out, "no gates declared")
+				return err
+			}
+			for _, gate := range gates {
+				if _, err := fmt.Fprintf(streams.Out, "%-16s %-7s %s\n", gate.Name, gate.Scale, gate.Owner); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func statusCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status <locator>",
+		Short: "show one live node's effective gate requirements - read-only, emits no event",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			n, err := resolveStatusNode(cmd.Context(), s.View, repo.ID, args[0])
+			if err != nil {
+				return err
+			}
+			completion, err := s.NodeCompletion(cmd.Context(), n)
+			if err != nil {
+				return err
+			}
+			address, _, err := readsurface.Address(cmd.Context(), s.View, n)
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				payload, err := gateStatusPayload(cmd.Context(), s.View, n, address, completion)
+				if err != nil {
+					return err
+				}
+				return writeJSON(streams.Out, payload)
+			}
+			return writeGateStatusHuman(cmd.Context(), streams.Out, s.View, n, address, completion)
+		},
+	}
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func gateOwner(gate string) string {
+	if owner, ok := store.GateOwner(gate); ok {
+		return string(owner.Actor())
+	}
+	return string(store.ActorHuman)
+}
+
+func resolveStatusNode(ctx context.Context, v store.View, repo, locator string) (store.Node, error) {
+	n, err := writesurface.ResolveNode(ctx, v, repo, locator)
+	if err != nil || n.Repo != repo {
+		if store.IsIdentityShaped(locator) {
+			return store.Node{}, wiperr.New("validation.unknown-locator", fmt.Sprintf("no node %s in this repo", locator))
+		}
+		return store.Node{}, err
+	}
+	return n, nil
+}
+
+func gateStatusPayload(ctx context.Context, v store.View, n store.Node, address string, completion store.NodeCompletion) (gateStatusJSON, error) {
+	requirements := make([]gateRequirementJSON, 0, len(completion.Requirements))
+	for _, requirement := range completion.Requirements {
+		subjectAddress, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return gateStatusJSON{}, err
+		}
+		out := gateRequirementJSON{
+			Name:         requirement.Gate,
+			Scale:        string(requirement.Scale),
+			Owner:        string(requirement.Owner),
+			Relationship: string(requirement.Relationship),
+			Subject: gateSubjectJSON{
+				ID:      requirement.Subject.ID,
+				Address: subjectAddress,
+				Kind:    string(requirement.Subject.Kind),
+			},
+			State: string(requirement.State),
+		}
+		if requirement.State == store.GateRequirementClosed {
+			out.ClosedBy = string(requirement.ClosedBy)
+			if requirement.ClosedAt != nil {
+				out.ClosedAt = requirement.ClosedAt.UTC().Format(gateTimestampLayout)
+			}
+		}
+		requirements = append(requirements, out)
+	}
+	return gateStatusJSON{
+		Node: gateNodeJSON{
+			ID:        n.ID,
+			Address:   address,
+			Kind:      string(n.Kind),
+			Lifecycle: string(n.Lifecycle),
+		},
+		LocallyComplete: completion.LocallyComplete,
+		Sealed:          completion.Sealed,
+		Requirements:    requirements,
+	}, nil
+}
+
+func writeGateStatusHuman(ctx context.Context, out io.Writer, v store.View, n store.Node, address string, completion store.NodeCompletion) error {
+	if _, err := fmt.Fprintf(out, "%s  %s · %s\n", address, n.Kind, n.Lifecycle); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "locally-complete: %s\n", yesNo(completion.LocallyComplete)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "sealed: %s\n", yesNo(completion.Sealed)); err != nil {
+		return err
+	}
+	if len(completion.Requirements) == 0 {
+		_, err := fmt.Fprintln(out, "requirements: none")
+		return err
+	}
+	if _, err := fmt.Fprintln(out, "requirements:"); err != nil {
+		return err
+	}
+	for _, requirement := range completion.Requirements {
+		subjectAddress, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return err
+		}
+		state := string(requirement.State)
+		if requirement.State == store.GateRequirementClosed {
+			state = fmt.Sprintf("closed by %s", requirement.ClosedBy)
+			if requirement.ClosedAt != nil {
+				state += " at " + requirement.ClosedAt.UTC().Format(gateTimestampLayout)
+			}
+		}
+		if _, err := fmt.Fprintf(out, "  %s [%s, %s, %s, owner %s]: %s\n",
+			requirement.Gate, requirement.Scale, requirement.Relationship, subjectAddress, requirement.Owner, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func writeJSON(out io.Writer, value any) error {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, string(b))
+	return err
 }
 
 func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {

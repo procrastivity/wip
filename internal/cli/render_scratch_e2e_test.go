@@ -80,6 +80,63 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 	}
 }
 
+func TestRenderStepWorkplans_UseMatterScopedPaths(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+
+	matter := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Step projection", "--json").stdout)
+	direct := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", matter.ID, "--title", "Direct", "--json").stdout)
+	stage := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "stage", "create", matter.Locator, "--title", "Investigation", "--json").stdout)
+	grouped := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", stage.ID, "--title", "Grouped", "--json").stdout)
+
+	for node, content := range map[string]string{
+		direct.ID:  "direct\r\nbytes",
+		grouped.ID: "grouped\x00bytes",
+	} {
+		if r := runIn(t, dir, dbEnv, "plumbing", "workplan", node, "--file", writeTempFile(t, content)); r.exitCode != 0 {
+			t.Fatalf("workplan %s: exit=%d stderr=%q", node, r.exitCode, r.stderr)
+		}
+	}
+
+	groupedTarget := matter.Locator + "/" + stage.Locator + "/" + grouped.Locator
+	if r := runIn(t, dir, dbEnv, "plumbing", "refresh", groupedTarget); r.exitCode != 0 {
+		t.Fatalf("targeted grouped refresh: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	base := filepath.Join(dir, ".wip", "generated", matter.Locator)
+	for locator, want := range map[string]string{
+		direct.Locator:  "direct\r\nbytes",
+		grouped.Locator: "grouped\x00bytes",
+	} {
+		path := filepath.Join(base, "workplan-"+locator+".md")
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o444 {
+			t.Errorf("%s mode = %o, want 0444", path, info.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, stage.Locator)); !os.IsNotExist(err) {
+		t.Errorf("Stage directory exists: err=%v", err)
+	}
+
+	help := runIn(t, dir, nil, "plumbing", "workplan", "--help")
+	if help.exitCode != 0 {
+		t.Fatalf("workplan --help: exit=%d stderr=%q", help.exitCode, help.stderr)
+	}
+	for _, want := range []string{"workplan.md", "workplan-<stage-locator>.md", "workplan-<step-locator>.md", "Matter-scoped Step locator"} {
+		if !strings.Contains(help.stdout, want) {
+			t.Errorf("workplan --help missing %q:\n%s", want, help.stdout)
+		}
+	}
+}
+
 // TestRenderScratch_ClusterOfMattersEagerlySkipsSealed is step-05's Done,
 // through the real binary: eager `wip refresh` covers every not-sealed
 // Matter and skips a sealed one. The sealing write itself exit-renders
@@ -171,6 +228,12 @@ func TestRenderScratch_FinishSealsExitRenders(t *testing.T) {
 	}
 	if !strings.Contains(got, "reviewed-local") {
 		t.Errorf("finish-seal snapshot missing closed gate:\n%s", got)
+	}
+	if !strings.Contains(got, "## Gates\n\n- reviewed-local (matter, own): closed by human at ") {
+		t.Errorf("finish-seal snapshot missing the canonical Gates section:\n%s", got)
+	}
+	if strings.Contains(got, "## Gates closed") {
+		t.Errorf("finish-seal snapshot uses the obsolete Gates closed section:\n%s", got)
 	}
 }
 

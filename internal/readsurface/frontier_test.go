@@ -452,6 +452,9 @@ func TestCollapseFinished_AwaitingGateChildStillSurfaces(t *testing.T) {
 	if len(collapsed) != 1 || collapsed[0].Node.ID != step || collapsed[0].Sealed {
 		t.Errorf("collapsed = %+v, want the awaiting-gate Step %s present and not sealed", collapsed, step)
 	}
+	if len(finished) != 1 || len(finished[0].Pending) != 1 || finished[0].Pending[0].Gate != "reviewed-local" {
+		t.Errorf("finished = %+v, want the enclosing open gate retained as pending", finished)
+	}
 }
 
 // TestSealedAt_LaterOfFinishAndGateClose covers both orders: finish then
@@ -501,6 +504,29 @@ func TestSealedAt_LaterOfFinishAndGateClose(t *testing.T) {
 	}
 	if !at2.Equal(finishEv2.OccurredAt) {
 		t.Errorf("SealedAt = %v, want the later finish time %v (gate-close was %v)", at2, finishEv2.OccurredAt, gateEv2.OccurredAt)
+	}
+}
+
+func TestSealedAtIncludesEnclosingGateClose(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	matter := f.matter("matter", "An enclosing Matter")
+	step := f.step(matter, "step-01", "A finished child")
+	f.start(matter)
+	f.start(step)
+	finish := f.finish(step)
+	gateClose := f.closeGate(matter, "reviewed-local", store.ScaleMatter)
+
+	n, err := f.Node(ctx, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok, err := SealedAt(ctx, f.View, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !at.Equal(gateClose.OccurredAt) || !gateClose.OccurredAt.After(finish.OccurredAt) {
+		t.Errorf("SealedAt = %v, ok=%v, finish=%v, close=%v; want the enclosing close", at, ok, finish.OccurredAt, gateClose.OccurredAt)
 	}
 }
 

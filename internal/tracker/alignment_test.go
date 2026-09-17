@@ -12,8 +12,7 @@ import (
 
 type fakeAlignmentView struct {
 	node          store.Node
-	gates         []store.GateDeclaration
-	satisfied     map[string]bool
+	completion    store.NodeCompletion
 	refs          []string
 	aggregates    map[string]store.TrackerDisposition
 	backend       string
@@ -26,12 +25,8 @@ func (f *fakeAlignmentView) Node(context.Context, string) (store.Node, error) {
 	return f.node, nil
 }
 
-func (f *fakeAlignmentView) GateDeclarations(context.Context, string) ([]store.GateDeclaration, error) {
-	return f.gates, nil
-}
-
-func (f *fakeAlignmentView) GateSatisfied(_ context.Context, _, _ string, gate string) (bool, error) {
-	return f.satisfied[gate], nil
+func (f *fakeAlignmentView) NodeCompletion(context.Context, store.Node) (store.NodeCompletion, error) {
+	return f.completion, nil
 }
 
 func (f *fakeAlignmentView) TrackerReferences(context.Context, string) ([]string, error) {
@@ -84,8 +79,9 @@ func coordinatorFixture(reader *fakeAlignmentReader) (*AlignmentCoordinator, *fa
 		return reader, nil
 	})
 	view := &fakeAlignmentView{
-		node: store.Node{ID: "matter-1", Kind: store.ScaleMatter, Repo: "repo-1", Lifecycle: store.Done},
-		refs: []string{"R-2", "R-1"},
+		node:       store.Node{ID: "matter-1", Kind: store.ScaleMatter, Repo: "repo-1", Lifecycle: store.Done},
+		completion: store.NodeCompletion{Sealed: true},
+		refs:       []string{"R-2", "R-1"},
 		aggregates: map[string]store.TrackerDisposition{
 			"R-2": store.TrackerActive,
 			"R-1": store.TrackerCompleted,
@@ -125,8 +121,7 @@ func TestAlignmentCoordinatorReadsEveryReferenceOnceInStableOrderWithPushOffIrre
 func TestAlignmentCoordinatorReturnsBeforeProviderIOUnlessMatterIsSealed(t *testing.T) {
 	reader := &fakeAlignmentReader{states: map[string]LiveState{}}
 	coordinator, view := coordinatorFixture(reader)
-	view.gates = []store.GateDeclaration{{Gate: "reviewed-local", Scale: store.ScaleMatter}}
-	view.satisfied = map[string]bool{"reviewed-local": false}
+	view.completion.Sealed = false
 
 	report := coordinator.Check(context.Background(), view, view.node.ID)
 	if len(report.Items) != 0 || len(reader.reads) != 0 || len(view.configKeys) != 0 {

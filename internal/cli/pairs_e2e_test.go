@@ -295,6 +295,167 @@ func TestPair_StatusJSONIsOneContract(t *testing.T) {
 	}
 }
 
+func TestOrientationSurfacesNamePendingGates(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Checkout", "--json").stdout)
+	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "Build", "--json").stdout)
+	for _, args := range [][]string{
+		{"plumbing", "gate", "declare", "approved", "--scale", "matter"},
+		{"plumbing", "gate", "declare", "verified", "--scale", "step"},
+		{"plumbing", "start", m.Locator},
+		{"plumbing", "start", m.Locator + "/" + step.Locator},
+		{"plumbing", "finish", m.Locator + "/" + step.Locator},
+		{"plumbing", "next", "--set", m.Locator + "/" + step.Locator},
+	} {
+		if r := runIn(t, dir, dbEnv, args...); r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+	}
+
+	status := runIn(t, dir, dbEnv, "plumbing", "status", "--all")
+	if status.exitCode != 0 {
+		t.Fatalf("status --all: exit=%d stderr=%q", status.exitCode, status.stderr)
+	}
+	wantPending := "pending gates: verified (own on " + m.Locator + " · " + step.Locator + "), approved (enclosing on " + m.Locator + ")"
+	if !strings.Contains(status.stdout, wantPending) {
+		t.Errorf("status = %q, want %q", status.stdout, wantPending)
+	}
+
+	next := runIn(t, dir, dbEnv, "next")
+	if next.exitCode != 0 {
+		t.Fatalf("next: exit=%d stderr=%q", next.exitCode, next.stderr)
+	}
+	if !strings.Contains(next.stdout, wantPending) {
+		t.Errorf("next = %q, want %q", next.stdout, wantPending)
+	}
+	nextJSON := runIn(t, dir, dbEnv, "next", "--json")
+	var nextPayload struct {
+		Pending []struct {
+			Name         string `json:"name"`
+			Scale        string `json:"scale"`
+			Relationship string `json:"relationship"`
+			Subject      string `json:"subject"`
+		} `json:"pendingGates"`
+	}
+	if err := json.Unmarshal([]byte(nextJSON.stdout), &nextPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(nextPayload.Pending) != 2 || nextPayload.Pending[0].Name != "verified" ||
+		nextPayload.Pending[0].Scale != "step" || nextPayload.Pending[0].Subject == "" ||
+		nextPayload.Pending[1].Relationship != "enclosing" {
+		t.Errorf("next pending JSON = %+v", nextPayload.Pending)
+	}
+
+	statusJSON := runIn(t, dir, dbEnv, "status", "--json")
+	plumbingJSON := runIn(t, dir, dbEnv, "plumbing", "status", "--json")
+	if statusJSON.stdout != plumbingJSON.stdout {
+		t.Fatalf("status JSON aliases differ:\n%s\n%s", statusJSON.stdout, plumbingJSON.stdout)
+	}
+	var statusPayload struct {
+		Repo struct {
+			Content struct {
+				Finished []struct {
+					Pending []struct {
+						Name         string `json:"name"`
+						Relationship string `json:"relationship"`
+					} `json:"pendingGates"`
+				} `json:"finished"`
+			} `json:"content"`
+		} `json:"repo"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON.stdout), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(statusPayload.Repo.Content.Finished) != 1 || len(statusPayload.Repo.Content.Finished[0].Pending) != 2 {
+		t.Fatalf("status pending JSON = %+v", statusPayload.Repo.Content.Finished)
+	}
+	if statusPayload.Repo.Content.Finished[0].Pending[0].Name != "verified" ||
+		statusPayload.Repo.Content.Finished[0].Pending[1].Relationship != "enclosing" {
+		t.Errorf("status pending JSON = %+v", statusPayload.Repo.Content.Finished[0].Pending)
+	}
+}
+
+func TestStage4_StatusPendingGateMatrixAndCursorException(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Checkout", "--json").stdout)
+	step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", m.Locator, "--title", "Build", "--json").stdout)
+	sealed := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Sealed", "--json").stdout)
+	for _, args := range [][]string{
+		{"plumbing", "gate", "declare", "approved", "--scale", "matter"},
+		{"plumbing", "gate", "declare", "verified", "--scale", "step"},
+		{"plumbing", "start", m.Locator},
+		{"plumbing", "start", m.Locator + "/" + step.Locator},
+		{"plumbing", "finish", m.Locator + "/" + step.Locator},
+		{"plumbing", "start", sealed.Locator},
+		{"plumbing", "finish", sealed.Locator},
+		{"plumbing", "gate", "close", "approved", sealed.Locator},
+		{"plumbing", "next", "--set", m.Locator + "/" + step.Locator},
+	} {
+		if r := runIn(t, dir, dbEnv, args...); r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+	}
+
+	wantPending := "pending gates: verified (own on " + m.Locator + " · " + step.Locator + "), approved (enclosing on " + m.Locator + ")"
+	for _, args := range [][]string{
+		{"plumbing", "status", "--all"},
+		{"status", "--full"},
+		{"status"},
+	} {
+		r := runIn(t, dir, dbEnv, args...)
+		if r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+		if !strings.Contains(r.stdout, wantPending) {
+			t.Errorf("%v = %q, want exact pending continuation %q", args, r.stdout, wantPending)
+		}
+	}
+	if status := runIn(t, dir, dbEnv, "plumbing", "status", "--all"); !strings.Contains(status.stdout, "· awaiting gate · cursor\n    pending gates: "+strings.TrimPrefix(wantPending, "pending gates: ")) {
+		t.Errorf("status --all = %q, want an awaiting-gate row followed by its pending continuation", status.stdout)
+	}
+
+	statusJSON := runIn(t, dir, dbEnv, "status", "--json")
+	plumbingJSON := runIn(t, dir, dbEnv, "plumbing", "status", "--json")
+	if statusJSON.stdout != plumbingJSON.stdout {
+		t.Fatalf("status JSON aliases differ:\n%s\n%s", statusJSON.stdout, plumbingJSON.stdout)
+	}
+	var payload struct {
+		Repo struct {
+			Content struct {
+				Finished []struct {
+					Address      string `json:"address"`
+					Sealed       bool   `json:"sealed"`
+					PendingGates []struct {
+						Name         string `json:"name"`
+						Scale        string `json:"scale"`
+						Relationship string `json:"relationship"`
+						Subject      string `json:"subject"`
+					} `json:"pendingGates"`
+				} `json:"finished"`
+			} `json:"content"`
+		} `json:"repo"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var foundPending, foundSealed bool
+	for _, finished := range payload.Repo.Content.Finished {
+		switch finished.Address {
+		case m.Locator + " · " + step.Locator:
+			foundPending = len(finished.PendingGates) == 2 &&
+				finished.PendingGates[0].Name == "verified" &&
+				finished.PendingGates[0].Scale == "step" &&
+				finished.PendingGates[0].Relationship == "own" &&
+				finished.PendingGates[0].Subject != ""
+		case sealed.Locator:
+			foundSealed = finished.Sealed && finished.PendingGates != nil && len(finished.PendingGates) == 0
+		}
+	}
+	if !foundPending || !foundSealed {
+		t.Fatalf("finished JSON = %+v, want pending and explicit empty sealed pendingGates", payload.Repo.Content.Finished)
+	}
+}
+
 // TestPair_PorcelainStatusHasNoAllFlag: audit expansion is the plumbing
 // member's knob — `wip status --all` fails Cobra's unknown-flag path.
 func TestPair_PorcelainStatusHasNoAllFlag(t *testing.T) {

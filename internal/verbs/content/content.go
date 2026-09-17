@@ -106,7 +106,9 @@ func BriefCommand(streams *iostreams.Streams) *cobra.Command {
 
 // WorkplanCommand constructs `wip plumbing workplan <locator>`.
 func WorkplanCommand(streams *iostreams.Streams) *cobra.Command {
-	return writeOnceCommand("workplan <locator>", "write a node's Workplan (create-once)", store.KindWorkplan)(streams)
+	cmd := writeOnceCommand("workplan <locator>", "write a node's Workplan (create-once)", store.KindWorkplan)(streams)
+	cmd.Long = "write a node's Workplan (create-once). After `wip plumbing refresh`, the read-only projection uses `.wip/generated/<matter-locator>/workplan.md` for a Matter, `workplan-<stage-locator>.md` for a Stage, and `workplan-<step-locator>.md` for a Step. A Step grouped under a Stage still uses only its Matter-scoped Step locator in the filename."
+	return cmd
 }
 
 // BodyCommand constructs `wip plumbing body <locator>`.

@@ -105,6 +105,27 @@ func TestTrackerAggregateReadsSharedReferenceLifecycle(t *testing.T) {
 	}
 }
 
+func TestTrackerAggregateRequiresCanonicalMatterSeal(t *testing.T) {
+	h := newHarness(t)
+	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+		t.Fatal(err)
+	}
+	matter := h.matter("gated-share", "Gated share")
+	h.commit(Draft{Type: TypeReferenceAdded, Subject: matter, Payload: ReferenceAdded{Ref: "GH-gated"}})
+	h.start(matter)
+	h.finish(matter)
+
+	got, found, err := h.TrackerAggregate(h.ctx, "GH-gated")
+	if err != nil || !found || got != TrackerActive {
+		t.Fatalf("open-gate aggregate = %q, found=%t, err=%v; want active", got, found, err)
+	}
+	h.closeGate(matter, "reviewed-local", ScaleMatter)
+	got, found, err = h.TrackerAggregate(h.ctx, "GH-gated")
+	if err != nil || !found || got != TrackerCompleted {
+		t.Fatalf("closed-gate aggregate = %q, found=%t, err=%v; want completed", got, found, err)
+	}
+}
+
 func TestTrackerReferenceEventsRefuseChildrenWithoutAnEvent(t *testing.T) {
 	h := newHarness(t)
 	matter := h.matter("children-are-inert", "Children are inert")

@@ -55,3 +55,5 @@ A linked git worktree is its own Worktree to wip. When a verb there refuses
 because the location is unknown, run `wip init` in that worktree first: wip
 attaches it to the clone it already knows, and the verb then works. Do not
 switch to the main checkout to work around the refusal.
+
+After `wip plumbing refresh`, read authored Workplans from `.wip/generated/<matter-locator>/`: `workplan.md` is the Matter Workplan, `workplan-<stage-locator>.md` is a Stage Workplan, and `workplan-<step-locator>.md` is a Step Workplan. A Step grouped under a Stage still uses only its Matter-scoped Step locator in the filename.

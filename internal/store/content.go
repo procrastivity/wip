@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Prose lives in the store.
@@ -167,6 +168,9 @@ type ContentSegment struct {
 	Kind    ContentKind
 	ByteLen int64
 	SHA256  string
+	// OccurredAt is the authoritative time of the event that birthed this
+	// segment.
+	OccurredAt time.Time
 	// Spilled reports that the bytes live in a sidecar file rather than in the
 	// database. Readers do not need to care: Bytes resolves either.
 	Spilled bool
@@ -175,10 +179,12 @@ type ContentSegment struct {
 // ContentSegments lists a node's live content of one kind, in write order.
 func (v View) ContentSegments(ctx context.Context, node string, kind ContentKind) ([]ContentSegment, error) {
 	rows, err := v.q.QueryContext(ctx,
-		`SELECT id, node, kind, byte_len, sha256, blob_ref IS NOT NULL
-		 FROM   content
-		 WHERE  node = ? AND kind = ? AND tombstone_event IS NULL
-		 ORDER  BY id`, node, string(kind))
+		`SELECT c.id, c.node, c.kind, c.byte_len, c.sha256,
+		        e.occurred_at, c.blob_ref IS NOT NULL
+		 FROM   content c
+		 JOIN   events e ON e.id = c.birth_event
+		 WHERE  c.node = ? AND c.kind = ? AND c.tombstone_event IS NULL
+		 ORDER  BY c.id`, node, string(kind))
 	if err != nil {
 		return nil, fmt.Errorf("store: read %s content of %s: %w", kind, node, err)
 	}
@@ -187,9 +193,15 @@ func (v View) ContentSegments(ctx context.Context, node string, kind ContentKind
 	var out []ContentSegment
 	for rows.Next() {
 		var seg ContentSegment
-		if err := rows.Scan(&seg.ID, &seg.Node, &seg.Kind, &seg.ByteLen, &seg.SHA256, &seg.Spilled); err != nil {
+		var occurredAt string
+		if err := rows.Scan(&seg.ID, &seg.Node, &seg.Kind, &seg.ByteLen, &seg.SHA256, &occurredAt, &seg.Spilled); err != nil {
 			return nil, fmt.Errorf("store: read %s content of %s: %w", kind, node, err)
 		}
+		parsed, err := time.Parse(timestampLayout, occurredAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: content %s carries an unreadable birth timestamp %q: %w", seg.ID, occurredAt, err)
+		}
+		seg.OccurredAt = parsed.UTC()
 		out = append(out, seg)
 	}
 	if err := rows.Err(); err != nil {

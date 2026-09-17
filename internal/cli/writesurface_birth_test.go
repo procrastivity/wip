@@ -395,7 +395,7 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	if intake.exitCode != 0 {
 		t.Fatalf("backlog add (intake): exit=%d stderr=%q", intake.exitCode, intake.stderr)
 	}
-	found := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Discovered mid-flight", "--provenance", "found", "--origin", m.ID, "--json")
+	found := runIn(t, dir, dbEnv, "plumbing", "backlog", "add", "--title", "Discovered mid-flight", "--provenance", "found", "--origin", m.ID, "--detail", "found context", "--json")
 	if found.exitCode != 0 {
 		t.Fatalf("backlog add (found): exit=%d stderr=%q", found.exitCode, found.stderr)
 	}
@@ -468,6 +468,13 @@ func TestBacklog_ProvenanceAndReadOnlyList(t *testing.T) {
 	}
 	if dp.Reason == "" {
 		t.Errorf("declined entry must carry a reason (distinguishable from not-yet-acted-upon, MODEL §4)")
+	}
+	declinedJSON := mustJSON[struct {
+		Detail        string `json:"detail"`
+		DeclineReason string `json:"declineReason"`
+	}](t, decline.stdout)
+	if declinedJSON.Detail != "found context" || declinedJSON.DeclineReason != "not worth it" {
+		t.Fatalf("declined JSON = %+v, want additive declineReason without overwriting detail", declinedJSON)
 	}
 
 	delegate := runIn(t, dir, dbEnv, "plumbing", "backlog", "delegate", deferredEntry.ID, "--json")

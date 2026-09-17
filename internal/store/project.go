@@ -77,7 +77,7 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 	case TypeBacklogPlanned:
 		return planBacklogEntry(ctx, tx, ev)
 	case TypeBacklogDeclined:
-		return declineBacklogEntry(ctx, tx, ev)
+		return declineBacklogEntry(ctx, tx, ev, schemaVersion)
 	case TypeBacklogDelegated:
 		return delegateBacklogEntry(ctx, tx, ev)
 
@@ -531,7 +531,7 @@ func planBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
 	return exactlyRows(res, 1, ev)
 }
 
-func declineBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
+func declineBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	var p BacklogDeclined
 	if err := decode(ev, &p); err != nil {
 		return err
@@ -539,9 +539,14 @@ func declineBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if p.Reason == "" {
 		return fmt.Errorf("store: %s must carry a reason: declined has to be distinguishable from not-yet-acted-upon", ev.Type)
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE backlog_entries SET state = 'declined', detail = ?, last_event = ?
-		 WHERE id = ? AND state = 'entered'`, p.Reason, ev.ID, ev.Subject)
+	query := `UPDATE backlog_entries SET state = 'declined', detail = ?, last_event = ?
+		 WHERE id = ? AND state = 'entered'`
+	args := []any{p.Reason, ev.ID, ev.Subject}
+	if schemaVersion >= 10 {
+		query = `UPDATE backlog_entries SET state = 'declined', decline_reason = ?, last_event = ?
+			 WHERE id = ? AND state = 'entered'`
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
@@ -748,16 +753,16 @@ func projectTransitionCandidates(ctx context.Context, tx *sql.Tx, ev Event) erro
 		case TypeMatterStarted, TypeMatterCanceled:
 			return queueMatterStateCandidates(ctx, tx, ev, n.ID, nil)
 		case TypeMatterFinished:
-			sealed, err := trackerNodeSealed(ctx, v, n)
-			if err != nil || !sealed {
+			completion, err := v.NodeCompletion(ctx, n)
+			if err != nil || !completion.Sealed {
 				return err
 			}
 			return queueMatterStateCandidates(ctx, tx, ev, n.ID, nil)
 		}
 	case ScaleStage:
 		if ev.Type == TypeStageFinished && p.TrackerPushLevel == TrackerPushNarrated {
-			sealed, err := trackerNodeSealed(ctx, v, n)
-			if err != nil || !sealed {
+			completion, err := v.NodeCompletion(ctx, n)
+			if err != nil || !completion.Sealed {
 				return err
 			}
 			return queueStageComments(ctx, tx, ev, n)
@@ -783,11 +788,11 @@ func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return err
 	}
 	if n.Kind == ScaleMatter {
-		sealed, err := trackerNodeSealed(ctx, v, n)
+		completion, err := v.NodeCompletion(ctx, n)
 		if err != nil {
 			return err
 		}
-		if sealed {
+		if completion.Sealed {
 			if err := queueMatterStateCandidates(ctx, tx, ev, n.ID, nil); err != nil {
 				return err
 			}
@@ -812,11 +817,11 @@ func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return nil
 	}
 	for _, stage := range stages {
-		sealed, err := trackerNodeSealed(ctx, v, stage)
+		completion, err := v.NodeCompletion(ctx, stage)
 		if err != nil {
 			return err
 		}
-		if sealed {
+		if completion.Sealed {
 			if err := queueStageComments(ctx, tx, ev, stage); err != nil {
 				return err
 			}
@@ -962,38 +967,6 @@ func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, sub
 func trackerAggregate(ctx context.Context, tx *sql.Tx, ref string) (TrackerDisposition, bool, error) {
 	v := View{q: tx, schemaVersion: latestVersion(register)}
 	return v.TrackerAggregate(ctx, ref)
-}
-
-func trackerNodeSealed(ctx context.Context, v View, node Node) (bool, error) {
-	if node.Lifecycle != Done {
-		return false, nil
-	}
-	cur := node
-	for {
-		declared, err := v.GateDeclarations(ctx, cur.Repo)
-		if err != nil {
-			return false, err
-		}
-		for _, gate := range declared {
-			if gate.Scale != cur.Kind {
-				continue
-			}
-			satisfied, err := v.GateSatisfied(ctx, cur.Repo, cur.ID, gate.Gate)
-			if err != nil {
-				return false, err
-			}
-			if !satisfied {
-				return false, nil
-			}
-		}
-		if cur.Parent == "" {
-			return true, nil
-		}
-		cur, err = v.Node(ctx, cur.Parent)
-		if err != nil {
-			return false, err
-		}
-	}
 }
 
 func recordTrackerStatePush(ctx context.Context, tx *sql.Tx, ev Event) error {

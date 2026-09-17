@@ -158,9 +158,11 @@ func renderClear(streams *iostreams.Streams, jsonMode bool, previous string) err
 func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View) error {
 	switch view.Kind {
 	case readsurface.BareMatter:
-		_, err := fmt.Fprintf(streams.Out, "%-34s %s · %s\n  no plan — work it directly\n",
-			view.Address, view.Node.Kind, view.Node.Lifecycle)
-		return err
+		if _, err := fmt.Fprintf(streams.Out, "%-34s %s · %s\n  no plan — work it directly\n",
+			view.Address, view.Node.Kind, view.Node.Lifecycle); err != nil {
+			return err
+		}
+		return renderPendingHuman(ctx, streams, v, view.Pending)
 
 	case readsurface.Positioned:
 		if _, err := fmt.Fprintf(streams.Out, "%-34s %s · %s\n", view.Address, view.Node.Kind, view.Node.Lifecycle); err != nil {
@@ -176,7 +178,10 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 			return err
 		}
 		_, err = fmt.Fprintf(streams.Out, "  blocked-by: %s\n", bb)
-		return err
+		if err != nil {
+			return err
+		}
+		return renderPendingHuman(ctx, streams, v, view.Pending)
 
 	case readsurface.NothingUnblocked:
 		if _, err := fmt.Fprintln(streams.Out, "nothing unblocked"); err != nil {
@@ -335,6 +340,30 @@ type nodeJSON struct {
 	Lifecycle string `json:"lifecycle"`
 }
 
+type pendingGateJSON struct {
+	Name           string `json:"name"`
+	Scale          string `json:"scale"`
+	Relationship   string `json:"relationship"`
+	Subject        string `json:"subject"`
+	SubjectAddress string `json:"subjectAddress"`
+}
+
+func pendingGatesJSON(ctx context.Context, v store.View, pending []store.GateRequirement) ([]pendingGateJSON, error) {
+	out := make([]pendingGateJSON, 0, len(pending))
+	for _, requirement := range pending {
+		address, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pendingGateJSON{
+			Name: requirement.Gate, Scale: string(requirement.Scale),
+			Relationship: string(requirement.Relationship), Subject: requirement.Subject.ID,
+			SubjectAddress: address,
+		})
+	}
+	return out, nil
+}
+
 func toNodeJSON(ctx context.Context, v store.View, n store.Node) (nodeJSON, error) {
 	addr, _, err := readsurface.Address(ctx, v, n)
 	if err != nil {
@@ -367,16 +396,17 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 	}[view.Kind]
 
 	payload := struct {
-		Kind    string     `json:"kind"`
-		Node    *nodeJSON  `json:"node,omitempty"`
-		Stage   *stageJSON `json:"stage,omitempty"`
-		Unmet   []nodeJSON `json:"unmet,omitempty"`
-		Met     []nodeJSON `json:"met,omitempty"`
-		Reason  string     `json:"reason,omitempty"`
-		Cand    []nodeJSON `json:"candidates,omitempty"`
-		Blocked []blockedJ `json:"blocked,omitempty"`
-		Backlog int        `json:"backlogUnprocessed,omitempty"`
-		InProg  []nodeJSON `json:"inProgress,omitempty"`
+		Kind    string            `json:"kind"`
+		Node    *nodeJSON         `json:"node,omitempty"`
+		Stage   *stageJSON        `json:"stage,omitempty"`
+		Unmet   []nodeJSON        `json:"unmet,omitempty"`
+		Met     []nodeJSON        `json:"met,omitempty"`
+		Reason  string            `json:"reason,omitempty"`
+		Cand    []nodeJSON        `json:"candidates,omitempty"`
+		Blocked []blockedJ        `json:"blocked,omitempty"`
+		Backlog int               `json:"backlogUnprocessed,omitempty"`
+		InProg  []nodeJSON        `json:"inProgress,omitempty"`
+		Pending []pendingGateJSON `json:"pendingGates,omitempty"`
 	}{Kind: kind, Reason: view.EndedReason, Backlog: view.BacklogCount}
 
 	if view.Kind == readsurface.BareMatter || view.Kind == readsurface.Positioned ||
@@ -389,6 +419,15 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 	}
 	if view.Stage != nil {
 		payload.Stage = &stageJSON{Locator: view.Stage.StageLocator, Index: view.Stage.Index, Total: view.Stage.Total}
+	}
+	if view.Kind == readsurface.BareMatter || view.Kind == readsurface.Positioned {
+		pending, err := pendingGatesJSON(ctx, v, view.Pending)
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			payload.Pending = pending
+		}
 	}
 	if view.Unmet != nil {
 		u, err := toNodeJSONs(ctx, v, view.Unmet)
@@ -436,6 +475,30 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 	}
 	_, err = fmt.Fprintln(streams.Out, string(b))
 	return err
+}
+
+func renderPendingHuman(ctx context.Context, streams *iostreams.Streams, v store.View, pending []store.GateRequirement) error {
+	if len(pending) == 0 {
+		return nil
+	}
+	lines, err := pendingGateLines(ctx, v, pending)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(streams.Out, "  pending gates: "+joinComma(lines))
+	return err
+}
+
+func pendingGateLines(ctx context.Context, v store.View, pending []store.GateRequirement) ([]string, error) {
+	out := make([]string, 0, len(pending))
+	for _, requirement := range pending {
+		address, _, err := readsurface.Address(ctx, v, requirement.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s (%s on %s)", requirement.Gate, requirement.Relationship, address))
+	}
+	return out, nil
 }
 
 type stageJSON struct {
