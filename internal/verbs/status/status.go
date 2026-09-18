@@ -499,7 +499,7 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 		footers = append(footers, fmt.Sprintf("… %s — wip status --full", strings.Join(elided, " · ")))
 	}
 	if backlogCount > 0 {
-		footers = append(footers, fmt.Sprintf("… %d backlog — wip backlog --full", backlogCount))
+		footers = append(footers, fmt.Sprintf("… %d backlog — wip backlog", backlogCount))
 	}
 	if len(footers) > 0 {
 		if _, err := fmt.Fprintf(streams.Out, "\n%s\n", strings.Join(footers, "\n")); err != nil {

@@ -187,7 +187,7 @@ func TestStatusPorcelain_BacklogCountsArePerRepoAndNonEmptyOnly(t *testing.T) {
 	}
 
 	alphaStatus := runIn(t, alpha, dbEnv, "status")
-	if alphaStatus.exitCode != 0 || !strings.Contains(alphaStatus.stdout, "… 3 backlog — wip backlog --full") {
+	if alphaStatus.exitCode != 0 || !strings.Contains(alphaStatus.stdout, "… 3 backlog — wip backlog") {
 		t.Fatalf("alpha status: exit=%d stdout=%q stderr=%q", alphaStatus.exitCode, alphaStatus.stdout, alphaStatus.stderr)
 	}
 	for _, args := range [][]string{{"status", "--full"}, {"plumbing", "status"}} {
@@ -204,7 +204,7 @@ func TestStatusPorcelain_BacklogCountsArePerRepoAndNonEmptyOnly(t *testing.T) {
 			plumbingStatusJSON.exitCode, plumbingStatusJSON.stdout, plumbingStatusJSON.stderr)
 	}
 	betaStatus := runIn(t, beta, dbEnv, "status")
-	if betaStatus.exitCode != 0 || !strings.Contains(betaStatus.stdout, "… 2 backlog — wip backlog --full") {
+	if betaStatus.exitCode != 0 || !strings.Contains(betaStatus.stdout, "… 2 backlog — wip backlog") {
 		t.Fatalf("beta status: exit=%d stdout=%q stderr=%q", betaStatus.exitCode, betaStatus.stdout, betaStatus.stderr)
 	}
 	gammaStatus := runIn(t, gamma, dbEnv, "status")
@@ -219,8 +219,8 @@ func TestStatusPorcelain_BacklogCountsArePerRepoAndNonEmptyOnly(t *testing.T) {
 	alphaHeader := strings.Index(hostWide.stdout, "acme/alpha")
 	betaHeader := strings.Index(hostWide.stdout, "acme/beta")
 	gammaHeader := strings.Index(hostWide.stdout, "acme/gamma")
-	alphaFooter := strings.Index(hostWide.stdout, "… 3 backlog — wip backlog --full")
-	betaFooter := strings.Index(hostWide.stdout, "… 2 backlog — wip backlog --full")
+	alphaFooter := strings.Index(hostWide.stdout, "… 3 backlog — wip backlog")
+	betaFooter := strings.Index(hostWide.stdout, "… 2 backlog — wip backlog")
 	if alphaHeader == -1 || betaHeader == -1 || gammaHeader == -1 ||
 		alphaFooter < alphaHeader || alphaFooter > betaHeader || betaFooter < betaHeader || betaFooter > gammaHeader {
 		t.Fatalf("host-wide status does not keep alpha's count in alpha's block: %q", hostWide.stdout)
