@@ -12,14 +12,14 @@ import (
 )
 
 // porcelainVerbs is D112's own list, in the registration order root.go
-// declares (status, next, init, doctor, install, uninstall, version,
+// declares (status, backlog, next, init, doctor, install, uninstall, version,
 // plumbing, manifest last).
-var porcelainVerbs = []string{"status", "next", "init", "doctor", "install", "uninstall", "version", "plumbing", "manifest"}
+var porcelainVerbs = []string{"status", "backlog", "next", "init", "doctor", "install", "uninstall", "version", "plumbing", "manifest"}
 
-// movedGroups is the workplan's 28-group moved set (step-02 workplan, "The
-// moved set — the exact list").
+// movedGroups is the substrate-only set. Backlog remains under plumbing too,
+// but its read-only porcelain member means it is no longer a moved group.
 var movedGroups = []string{
-	"backlog", "batch", "bind", "body", "brief", "cancel", "clean", "clone",
+	"batch", "bind", "body", "brief", "cancel", "clean", "clone",
 	"depend", "dispatch", "finding", "finish", "gate", "label", "matter",
 	"outbox", "pause", "rebind", "refresh", "resume", "role", "run",
 	"session", "stage", "start", "step", "unbind", "workplan",
@@ -60,10 +60,10 @@ func TestPlumbingNamespace_BarePlumbingListsSubstrateAndExitsZero(t *testing.T) 
 			t.Errorf("bare plumbing does not list %q:\n%s", moved, r.stdout)
 		}
 	}
-	// The pair members (status, next) ARE listed here — their plumbing
+	// The pair members (backlog, status, next) ARE listed here — their plumbing
 	// membership is what keeps them projectable (D112). Porcelain-only
 	// verbs stay absent.
-	for _, pairMember := range []string{"status", "next"} {
+	for _, pairMember := range []string{"backlog", "status", "next"} {
 		if !strings.Contains(r.stdout, "\n  "+pairMember+" ") {
 			t.Errorf("bare plumbing does not list pair member %q:\n%s", pairMember, r.stdout)
 		}
@@ -142,6 +142,39 @@ func TestPlumbingNamespace_FlatInvocationFailsWithMovedVerb(t *testing.T) {
 	}
 	if !strings.Contains(human.stderr, "wip plumbing step") {
 		t.Errorf("human stderr = %q, want it to name the qualified path", human.stderr)
+	}
+}
+
+func TestPlumbingNamespace_BacklogDescendantsKeepMovedVerbGuidance(t *testing.T) {
+	for _, args := range [][]string{
+		{"backlog", "list"},
+		{"backlog", "plan", "entry-id", "matter"},
+	} {
+		r := run(t, nil, args...)
+		if r.exitCode != 1 || r.stdout != "" || !strings.Contains(r.stderr, ": moved") {
+			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, r.exitCode, r.stdout, r.stderr)
+		}
+		want := "wip plumbing " + strings.Join(args, " ")
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("%v: stderr = %q, want it to name %q", args, r.stderr, want)
+		}
+	}
+
+	r := run(t, nil, "--json", "backlog", "list")
+	if r.exitCode != 1 || r.stdout != "" {
+		t.Fatalf("JSON moved backlog list: exit=%d stdout=%q stderr=%q", r.exitCode, r.stdout, r.stderr)
+	}
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(r.stderr), &envelope); err != nil {
+		t.Fatalf("JSON moved backlog list: %v (stderr=%q)", err, r.stderr)
+	}
+	if envelope.Error.Code != "validation.moved-verb" || !strings.Contains(envelope.Error.Message, "wip plumbing backlog list") {
+		t.Fatalf("JSON moved backlog list = %+v", envelope.Error)
 	}
 }
 

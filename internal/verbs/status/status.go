@@ -91,7 +91,11 @@ func PorcelainCommand(streams *iostreams.Streams) *cobra.Command {
 			if full {
 				return renderFull(cmd.Context(), streams, d.s.View, d.view, d.content, d.cursor)
 			}
-			return renderDigest(cmd.Context(), streams, d.s.View, d.view, d.content, d.cursor)
+			backlogCounts, err := activeBacklogCounts(cmd.Context(), d.s.View, d.view)
+			if err != nil {
+				return err
+			}
+			return renderDigest(cmd.Context(), streams, d.s.View, d.view, d.content, d.cursor, backlogCounts)
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "every section — finished and blocked too (human output; --json always emits the complete payload)")
@@ -155,6 +159,22 @@ func contentByRepo(ctx context.Context, s *store.Store, view tiers.StatusView, o
 			return nil, err
 		}
 		out[rs.Repo.ID] = c
+	}
+	return out, nil
+}
+
+func activeBacklogCounts(ctx context.Context, v store.View, view tiers.StatusView) (map[string]int, error) {
+	out := map[string]int{}
+	repos := view.Repos
+	if !view.HostWide {
+		repos = []tiers.RepoStatus{view.Repo}
+	}
+	for _, rs := range repos {
+		entries, err := v.ActiveBacklog(ctx, rs.Repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		out[rs.Repo.ID] = len(entries)
 	}
 	return out, nil
 }
@@ -353,8 +373,9 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 // human checks — what is in progress, what is next, and what is waiting.
 // Rows carry no lifecycle word (the section header already states it);
 // detailed finished and blocked sections never list, while actionable waits
-// are grouped by Matter and the footer counts elided finished history.
-func renderDigest(ctx context.Context, streams *iostreams.Streams, v store.View, view tiers.StatusView, content map[string]readsurface.RepoContent, cursorNode string) error {
+// are grouped by Matter. Footers count elided finished history and any
+// active backlog, each pointing at its own full human view.
+func renderDigest(ctx context.Context, streams *iostreams.Streams, v store.View, view tiers.StatusView, content map[string]readsurface.RepoContent, cursorNode string, backlogCounts map[string]int) error {
 	if view.HostWide {
 		if len(view.Repos) == 0 {
 			_, err := fmt.Fprintln(streams.Out, "no repos known to wip on this host — run `wip init` in a clone")
@@ -366,16 +387,16 @@ func renderDigest(ctx context.Context, streams *iostreams.Streams, v store.View,
 					return err
 				}
 			}
-			if err := renderRepoDigest(ctx, streams, v, rs, content[rs.Repo.ID], cursorNode); err != nil {
+			if err := renderRepoDigest(ctx, streams, v, rs, content[rs.Repo.ID], cursorNode, backlogCounts[rs.Repo.ID]); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return renderRepoDigest(ctx, streams, v, view.Repo, content[view.Repo.Repo.ID], cursorNode)
+	return renderRepoDigest(ctx, streams, v, view.Repo, content[view.Repo.Repo.ID], cursorNode, backlogCounts[view.Repo.Repo.ID])
 }
 
-func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.View, rs tiers.RepoStatus, c readsurface.RepoContent, cursorNode string) error {
+func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.View, rs tiers.RepoStatus, c readsurface.RepoContent, cursorNode string, backlogCount int) error {
 	if _, err := fmt.Fprintln(streams.Out, tiers.RepoHeader(rs.Repo)); err != nil {
 		return err
 	}
@@ -473,8 +494,15 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 	if n := len(c.Finished) + c.HiddenSealedMatters; n > 0 {
 		elided = append(elided, fmt.Sprintf("%d finished", n))
 	}
+	var footers []string
 	if len(elided) > 0 {
-		if _, err := fmt.Fprintf(streams.Out, "\n… %s — wip status --full\n", strings.Join(elided, " · ")); err != nil {
+		footers = append(footers, fmt.Sprintf("… %s — wip status --full", strings.Join(elided, " · ")))
+	}
+	if backlogCount > 0 {
+		footers = append(footers, fmt.Sprintf("… %d backlog — wip backlog --full", backlogCount))
+	}
+	if len(footers) > 0 {
+		if _, err := fmt.Fprintf(streams.Out, "\n%s\n", strings.Join(footers, "\n")); err != nil {
 			return err
 		}
 	}

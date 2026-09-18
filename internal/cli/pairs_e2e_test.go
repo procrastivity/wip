@@ -671,10 +671,9 @@ func TestPair_PorcelainStatusHasNoAllFlag(t *testing.T) {
 	}
 }
 
-// TestPair_ManifestRecordsAliasOf checks the manifest's record of both
-// pairs: `next` carries alias-of pointing at the canonical member, the
-// plumbing member does not, and the split pair's two same-named members
-// appear with no alias link.
+// TestPair_ManifestRecordsAliasOf checks the manifest's record of both pair
+// forms: `next` carries alias-of pointing at the canonical member, the
+// plumbing member does not, and both split pairs appear with no alias link.
 func TestPair_ManifestRecordsAliasOf(t *testing.T) {
 	r := run(t, nil, "manifest", "--json")
 	if r.exitCode != 0 {
@@ -705,6 +704,12 @@ func TestPair_ManifestRecordsAliasOf(t *testing.T) {
 	if byName["status"] != "" {
 		t.Errorf("status alias-of = %q, want empty — a split pair is a different deliverable, not an alias", byName["status"])
 	}
+	if _, ok := byName["plumbing backlog list"]; !ok {
+		t.Error("manifest lacks plumbing backlog list — the backlog split pair's canonical member")
+	}
+	if alias, ok := byName["backlog"]; !ok || alias != "" {
+		t.Errorf("backlog entry = %q (present %v), want present with no alias-of", alias, ok)
+	}
 }
 
 // TestPair_SkillTablesProjectPlumbingMembers: a real install renders the
@@ -722,12 +727,12 @@ func TestPair_SkillTablesProjectPlumbingMembers(t *testing.T) {
 		t.Fatalf("read generated SKILL.md: %v", err)
 	}
 	body := string(skill)
-	for _, want := range []string{"`wip plumbing status`", "`wip plumbing next`"} {
+	for _, want := range []string{"`wip plumbing backlog list`", "`wip plumbing status`", "`wip plumbing next`"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("SKILL.md lacks the projected row %s", want)
 		}
 	}
-	for _, absent := range []string{"`wip status`", "`wip next`"} {
+	for _, absent := range []string{"`wip backlog`", "`wip status`", "`wip next`"} {
 		if strings.Contains(body, absent) {
 			t.Errorf("SKILL.md names the porcelain spelling %s — agents get the plumbing member", absent)
 		}
