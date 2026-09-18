@@ -1,11 +1,13 @@
 // Package backlog implements the `wip plumbing backlog` verb family: `add`, `list`,
-// `plan`, `decline`, `delegate` (MODEL §4). `list` is read-only.
+// `plan`, `decline`, `delegate` (MODEL §4), plus the read-only porcelain
+// `wip backlog` command.
 package backlog
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
+	"github.com/procrastivity/wip/internal/wiperr"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
@@ -26,6 +29,61 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd.AddCommand(addCommand(streams), listCommand(streams), planCommand(streams), declineCommand(streams), delegateCommand(streams))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+// PorcelainCommand constructs the human-facing `wip backlog` member. The
+// compact and full human renders are distinct from the plumbing list, while
+// --json deliberately shares the plumbing command's exact renderer.
+func PorcelainCommand(streams *iostreams.Streams) *cobra.Command {
+	var full bool
+	cmd := &cobra.Command{
+		Use:   "backlog",
+		Short: "review open local backlog entries",
+		Args:  porcelainArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			entries, err := s.ActiveBacklog(cmd.Context(), repo.ID)
+			if err != nil {
+				return err
+			}
+			if flags.JSON {
+				return renderJSON(streams, entries)
+			}
+			if len(entries) == 0 {
+				_, err := fmt.Fprintln(streams.Out, "backlog is empty")
+				return err
+			}
+			if full {
+				return renderFull(streams, entries)
+			}
+			return renderCompact(streams, entries)
+		},
+	}
+	cmd.Flags().BoolVar(&full, "full", false, "show IDs, provenance, state, and supporting details")
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func porcelainArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	switch args[0] {
+	case "add", "list", "plan", "decline", "delegate":
+		invocation := strings.Join(args, " ")
+		return wiperr.New("validation.moved-verb", fmt.Sprintf(
+			"moved — `backlog %s` now lives under the plumbing namespace; run `wip plumbing backlog %s` instead",
+			invocation, invocation,
+		))
+	default:
+		return cobra.NoArgs(cmd, args)
+	}
 }
 
 func openRepo(cmd *cobra.Command) (*store.Store, store.Repo, error) {
@@ -126,18 +184,7 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 				return err
 			}
 			if flags.JSON {
-				out := make([]any, 0, len(entries))
-				for _, e := range entries {
-					out = append(out, entryJSON(e))
-				}
-				b, err := json.Marshal(struct {
-					Entries []any `json:"entries"`
-				}{Entries: out})
-				if err != nil {
-					return err
-				}
-				_, err = fmt.Fprintln(streams.Out, string(b))
-				return err
+				return renderJSON(streams, entries)
 			}
 			if len(entries) == 0 {
 				_, err := fmt.Fprintln(streams.Out, "backlog is empty")
@@ -153,6 +200,72 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func renderJSON(streams *iostreams.Streams, entries []store.BacklogEntry) error {
+	out := make([]any, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, entryJSON(e))
+	}
+	b, err := json.Marshal(struct {
+		Entries []any `json:"entries"`
+	}{Entries: out})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(streams.Out, string(b))
+	return err
+}
+
+func renderCompact(streams *iostreams.Streams, entries []store.BacklogEntry) error {
+	if _, err := fmt.Fprintf(streams.Out, "%s:\n", backlogCount(len(entries))); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		suffix := ""
+		if e.State == "delegated" {
+			suffix = " · delegated"
+		}
+		if _, err := fmt.Fprintf(streams.Out, "  %s%s\n", e.Title, suffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderFull(streams *iostreams.Streams, entries []store.BacklogEntry) error {
+	if _, err := fmt.Fprintf(streams.Out, "%s:\n", backlogCount(len(entries))); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if _, err := fmt.Fprintf(streams.Out, "\n%s\n  id: %s\n  provenance: %s\n  state: %s\n", e.Title, e.ID, e.Provenance, e.State); err != nil {
+			return err
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"detail", e.Detail},
+			{"origin", e.OriginNode},
+			{"matter", e.Matter},
+			{"outbox", e.Outbox},
+		} {
+			if field.value == "" {
+				continue
+			}
+			if _, err := fmt.Fprintf(streams.Out, "  %s: %s\n", field.name, field.value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func backlogCount(n int) string {
+	if n == 1 {
+		return "1 backlog entry"
+	}
+	return fmt.Sprintf("%d backlog entries", n)
 }
 
 func planCommand(streams *iostreams.Streams) *cobra.Command {

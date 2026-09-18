@@ -19,6 +19,7 @@ import (
 	githubtracker "github.com/procrastivity/wip/internal/tracker/github"
 	gitlabtracker "github.com/procrastivity/wip/internal/tracker/gitlab"
 	lineartracker "github.com/procrastivity/wip/internal/tracker/linear"
+	backlogverb "github.com/procrastivity/wip/internal/verbs/backlog"
 	doctorverb "github.com/procrastivity/wip/internal/verbs/doctor"
 	initverb "github.com/procrastivity/wip/internal/verbs/init"
 	installverb "github.com/procrastivity/wip/internal/verbs/install"
@@ -82,12 +83,13 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip plumbing role spawn` behind it")
 
 	// Help lists the porcelain in registration order (D112), not
-	// alphabetically — nine entries, manifest last. Every verb that isn't
-	// one of these nine lives under the plumbing namespace instead
+	// alphabetically — ten entries, manifest last. Every verb that isn't
+	// one of these ten lives under the plumbing namespace instead
 	// (internal/verbs/plumbing), registered alphabetically there since
 	// this global also disables sorting inside that group.
 	cobra.EnableCommandSorting = false
 	root.AddCommand(statusverb.PorcelainCommand(streams))
+	root.AddCommand(backlogverb.PorcelainCommand(streams))
 	root.AddCommand(nextverb.AliasCommand(streams))
 	root.AddCommand(initverb.Command(streams))
 	root.AddCommand(doctorverb.Command(streams, build, root))
