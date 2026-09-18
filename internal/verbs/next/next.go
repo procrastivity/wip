@@ -22,6 +22,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
+	waitingrender "github.com/procrastivity/wip/internal/verbs/waiting"
 )
 
 const canonicalCommandPath = "wip plumbing next"
@@ -187,20 +188,10 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 		if _, err := fmt.Fprintln(streams.Out, "nothing unblocked"); err != nil {
 			return err
 		}
-		for _, b := range view.Blocked {
-			addr, _, err := readsurface.Address(ctx, v, b.Node)
-			if err != nil {
-				return err
-			}
-			names, err := addresses(ctx, v, b.Blockers)
-			if err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintf(streams.Out, "  %-18s blocked-by: %s\n", addr, joinComma(names)); err != nil {
-				return err
-			}
+		if err := renderWaiting(ctx, streams, v, view.Waiting); err != nil {
+			return err
 		}
-		_, err := fmt.Fprintln(streams.Out, "run `wip plumbing status` for the full dependency picture")
+		_, err := fmt.Fprintln(streams.Out, "run `wip status` for the full working set")
 		return err
 
 	case readsurface.NoCursor:
@@ -267,12 +258,34 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 				return err
 			}
 		}
+		if err := renderWaiting(ctx, streams, v, view.Waiting); err != nil {
+			return err
+		}
 		_, err := fmt.Fprintln(streams.Out, "set the cursor: wip next --set <locator> — or leave it open: wip next --clear")
 		return err
 
 	default:
 		return fmt.Errorf("next: unhandled view kind %d", view.Kind)
 	}
+}
+
+func renderWaiting(ctx context.Context, streams *iostreams.Streams, v store.View, groups []readsurface.WaitingMatter) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	lines, err := waitingrender.Lines(ctx, v, groups)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(streams.Out, "waiting:"); err != nil {
+		return err
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(streams.Out, line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func printCandidates(ctx context.Context, streams *iostreams.Streams, v store.View, nodes []store.Node) error {

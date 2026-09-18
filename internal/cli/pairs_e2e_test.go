@@ -103,6 +103,93 @@ func TestPair_NextGoldenSameness(t *testing.T) {
 	}
 }
 
+func TestPair_NextIdleReusesWaitingSummaryWithoutChangingJSONShape(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	m := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Awaiting review", "--json").stdout)
+	for _, verb := range []string{"start", "finish"} {
+		if r := runIn(t, dir, dbEnv, "plumbing", verb, m.Locator); r.exitCode != 0 {
+			t.Fatalf("%s: exit=%d stderr=%q", verb, r.exitCode, r.stderr)
+		}
+	}
+
+	porcelain := runIn(t, dir, dbEnv, "next")
+	plumbing := runIn(t, dir, dbEnv, "plumbing", "next")
+	if porcelain.exitCode != 0 || plumbing.exitCode != 0 {
+		t.Fatalf("next exits = %d/%d, stderr=%q/%q", porcelain.exitCode, plumbing.exitCode, porcelain.stderr, plumbing.stderr)
+	}
+	if porcelain.stdout != plumbing.stdout {
+		t.Fatalf("next aliases differ:\n%s\n%s", porcelain.stdout, plumbing.stdout)
+	}
+	want := "nothing unblocked\n" +
+		"waiting:\n" +
+		"  awaiting-review\n" +
+		"    gate reviewed-local · owner human · open\n" +
+		"run `wip status` for the full working set\n"
+	if porcelain.stdout != want {
+		t.Errorf("next = %q, want %q", porcelain.stdout, want)
+	}
+
+	nextJSON := runIn(t, dir, dbEnv, "next", "--json")
+	if nextJSON.exitCode != 0 {
+		t.Fatalf("next --json: exit=%d stderr=%q", nextJSON.exitCode, nextJSON.stderr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(nextJSON.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["kind"] != "nothing-unblocked" {
+		t.Errorf("next JSON = %v, want the existing nothing-unblocked kind", payload)
+	}
+	if _, exists := payload["waiting"]; exists {
+		t.Errorf("next JSON = %v, want no new waiting field", payload)
+	}
+}
+
+func TestPair_NextEndedCursorIncludesWaitingSummaryWhenIdle(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	ended := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Ended", "--json").stdout)
+	waiting := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Waiting", "--json").stdout)
+	for _, matter := range []nodePayload{ended, waiting} {
+		if r := runIn(t, dir, dbEnv, "plumbing", "start", matter.Locator); r.exitCode != 0 {
+			t.Fatalf("start %s: exit=%d stderr=%q", matter.Locator, r.exitCode, r.stderr)
+		}
+	}
+	if r := runIn(t, dir, dbEnv, "next", "--set", ended.Locator); r.exitCode != 0 {
+		t.Fatalf("next --set: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, args := range [][]string{
+		{"plumbing", "finish", ended.Locator},
+		{"plumbing", "gate", "close", "reviewed-local", ended.Locator},
+		{"plumbing", "finish", waiting.Locator},
+	} {
+		if r := runIn(t, dir, dbEnv, args...); r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+	}
+
+	r := runIn(t, dir, dbEnv, "next")
+	if r.exitCode != 0 {
+		t.Fatalf("next: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	for _, want := range []string{
+		"ended is sealed — choose what's next",
+		"  nothing unblocked",
+		"waiting:\n  waiting\n    gate reviewed-local · owner human · open",
+		"wip next --set <locator>",
+		"wip next --clear",
+	} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("next = %q, want %q", r.stdout, want)
+		}
+	}
+}
+
 func TestPair_NextFailureSameness(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -194,15 +281,130 @@ func TestPair_PorcelainStatusIsTheMinimalWorkingSet(t *testing.T) {
 	if r.exitCode != 0 {
 		t.Fatalf("status: exit=%d stderr=%q", r.exitCode, r.stderr)
 	}
-	for _, want := range []string{"in progress:", "pair-matter · step-02", "next to start:", "pair-matter · step-03", "finished", "blocked", "wip status --full"} {
+	for _, want := range []string{"in progress:", "pair-matter · step-02", "next to start:", "pair-matter · step-03", "waiting:", "blocked-matter", "blocked by pair-matter", "finished", "wip status --full"} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("status = %q, want it to contain %q", r.stdout, want)
 		}
 	}
-	for _, absent := range []string{"Clone · current", "· in-progress", "· planned", "· sealed", "finished:\n", "blocked-by"} {
+	for _, absent := range []string{"Clone · current", "· in-progress", "· planned", "· sealed", "finished:\n", "blocked:\n"} {
 		if strings.Contains(r.stdout, absent) {
 			t.Errorf("status = %q, want %q absent from the minimal render", r.stdout, absent)
 		}
+	}
+}
+
+func TestPair_PorcelainStatusSuppressesReadyPlanWaitsButDetailedStatusKeepsThem(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	gated := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Gated", "--json").stdout)
+	gatedFirst := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", gated.Locator, "--title", "First", "--json").stdout)
+	gatedSecond := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", gated.Locator, "--title", "Second", "--json").stdout)
+	for _, step := range []nodePayload{gatedFirst, gatedSecond} {
+		for _, verb := range []string{"start", "finish"} {
+			if r := runIn(t, dir, dbEnv, "plumbing", verb, gated.Locator+"/"+step.Locator); r.exitCode != 0 {
+				t.Fatalf("%s %s: exit=%d stderr=%q", verb, step.Locator, r.exitCode, r.stderr)
+			}
+		}
+	}
+
+	held := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Held", "--json").stdout)
+	heldFirst := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", held.Locator, "--title", "First held", "--json").stdout)
+	heldSecond := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", held.Locator, "--title", "Second held", "--json").stdout)
+	blockers := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Blockers", "--json").stdout)
+	blocker := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", blockers.Locator, "--title", "External blocker", "--json").stdout)
+	for _, blocked := range []nodePayload{heldFirst, heldSecond} {
+		if r := runIn(t, dir, dbEnv, "plumbing", "depend", "add", held.Locator+"/"+blocked.Locator, "--blocked-by", blockers.Locator+"/"+blocker.Locator); r.exitCode != 0 {
+			t.Fatalf("depend add %s: exit=%d stderr=%q", blocked.Locator, r.exitCode, r.stderr)
+		}
+	}
+
+	status := runIn(t, dir, dbEnv, "status")
+	if status.exitCode != 0 {
+		t.Fatalf("status: exit=%d stderr=%q", status.exitCode, status.stderr)
+	}
+	if strings.Contains(status.stdout, "waiting:\n") {
+		t.Errorf("status = %q, want ready-plan dependencies and the active Matter's inherited gate suppressed", status.stdout)
+	}
+
+	for _, args := range [][]string{{"status", "--full"}, {"plumbing", "status"}} {
+		r := runIn(t, dir, dbEnv, args...)
+		if r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+		for _, want := range []string{"blocked:\n", "held · step-01", "blocked-by: blockers · step-01"} {
+			if !strings.Contains(r.stdout, want) {
+				t.Errorf("%v = %q, want detailed dependency %q retained", args, r.stdout, want)
+			}
+		}
+	}
+}
+
+func TestPair_PorcelainStatusBoundsConciseActionableWaits(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+	if r := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "reviewed-local", "--scale", "matter"); r.exitCode != 0 {
+		t.Fatalf("gate declare: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	review := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Review", "--json").stdout)
+	for _, verb := range []string{"start", "finish"} {
+		if r := runIn(t, dir, dbEnv, "plumbing", verb, review.Locator); r.exitCode != 0 {
+			t.Fatalf("%s review: exit=%d stderr=%q", verb, r.exitCode, r.stderr)
+		}
+	}
+
+	external := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "External", "--json").stdout)
+	stalled := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "matter", "create", "--title", "Stalled", "--json").stdout)
+	stage := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "stage", "create", stalled.Locator, "--title", "Build", "--json").stdout)
+	for _, title := range []string{"Blocked one", "Blocked two", "Blocked three", "Blocked four"} {
+		step := mustJSON[nodePayload](t, runIn(t, dir, dbEnv, "plumbing", "step", "create", stalled.Locator+"/"+stage.Locator, "--title", title, "--json").stdout)
+		if r := runIn(t, dir, dbEnv, "plumbing", "depend", "add", stalled.Locator+"/"+step.Locator, "--blocked-by", external.Locator); r.exitCode != 0 {
+			t.Fatalf("depend add %s: exit=%d stderr=%q", step.Locator, r.exitCode, r.stderr)
+		}
+	}
+	if r := runIn(t, dir, dbEnv, "plumbing", "start", stalled.Locator+"/"+stage.Locator); r.exitCode != 0 {
+		t.Fatalf("start stage: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+
+	status := runIn(t, dir, dbEnv, "status")
+	if status.exitCode != 0 {
+		t.Fatalf("status: exit=%d stderr=%q", status.exitCode, status.stderr)
+	}
+	want := "waiting:\n" +
+		"  review\n" +
+		"    gate reviewed-local · owner human · open\n" +
+		"  stalled\n" +
+		"    “Blocked one” waits for external\n" +
+		"    “Blocked two” waits for external\n" +
+		"    “Blocked three” waits for external\n" +
+		"    … 1 more — wip status --full\n"
+	if !strings.Contains(status.stdout, want) {
+		t.Errorf("status = %q, want bounded actionable summary %q", status.stdout, want)
+	}
+
+	statusJSON := runIn(t, dir, dbEnv, "status", "--json")
+	plumbingJSON := runIn(t, dir, dbEnv, "plumbing", "status", "--json")
+	if statusJSON.exitCode != 0 || plumbingJSON.exitCode != 0 {
+		t.Fatalf("status JSON exits = %d/%d, stderr=%q/%q", statusJSON.exitCode, plumbingJSON.exitCode, statusJSON.stderr, plumbingJSON.stderr)
+	}
+	if statusJSON.stdout != plumbingJSON.stdout {
+		t.Fatalf("status JSON aliases differ:\n%s\n%s", statusJSON.stdout, plumbingJSON.stdout)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(statusJSON.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	repo, ok := payload["repo"].(map[string]any)
+	if !ok {
+		t.Fatalf("status JSON = %v, want a repo object", payload)
+	}
+	content, ok := repo["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("status JSON repo = %v, want a content object", repo)
+	}
+	if _, exists := content["waiting"]; exists {
+		t.Errorf("status JSON content = %v, want no new waiting field", content)
 	}
 }
 

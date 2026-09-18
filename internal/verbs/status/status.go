@@ -23,6 +23,7 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
+	waitingrender "github.com/procrastivity/wip/internal/verbs/waiting"
 )
 
 // Command constructs `wip plumbing status` — the pair's canonical member,
@@ -349,10 +350,10 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 // ---------------------------------------------------------------------------
 
 // renderDigest is the porcelain member's default view: the working set a
-// human checks — what is in progress and what is next. Rows carry no
-// lifecycle word (the section header already states it); finished and
-// blocked never list — when the elided sections hold anything, one footer
-// line counts them and names `--full`.
+// human checks — what is in progress, what is next, and what is waiting.
+// Rows carry no lifecycle word (the section header already states it);
+// detailed finished and blocked sections never list, while actionable waits
+// are grouped by Matter and the footer counts elided finished history.
 func renderDigest(ctx context.Context, streams *iostreams.Streams, v store.View, view tiers.StatusView, content map[string]readsurface.RepoContent, cursorNode string) error {
 	if view.HostWide {
 		if len(view.Repos) == 0 {
@@ -447,6 +448,21 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 			printed = true
 		}
 	}
+	if len(c.Waiting) > 0 {
+		lines, err := waitingrender.Lines(ctx, v, c.Waiting)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(streams.Out, "\nwaiting:"); err != nil {
+			return err
+		}
+		for _, line := range lines {
+			if _, err := fmt.Fprintln(streams.Out, line); err != nil {
+				return err
+			}
+		}
+		printed = true
+	}
 	if !printed {
 		if _, err := fmt.Fprintln(streams.Out, "\nnothing in progress, nothing unblocked"); err != nil {
 			return err
@@ -456,9 +472,6 @@ func renderRepoDigest(ctx context.Context, streams *iostreams.Streams, v store.V
 	var elided []string
 	if n := len(c.Finished) + c.HiddenSealedMatters; n > 0 {
 		elided = append(elided, fmt.Sprintf("%d finished", n))
-	}
-	if len(c.Blocked) > 0 {
-		elided = append(elided, fmt.Sprintf("%d blocked", len(c.Blocked)))
 	}
 	if len(elided) > 0 {
 		if _, err := fmt.Fprintf(streams.Out, "\n… %s — wip status --full\n", strings.Join(elided, " · ")); err != nil {

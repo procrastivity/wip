@@ -75,8 +75,11 @@ type View struct {
 	// NoCursor / ChooseNext's candidate list — the ready frontier, repo-scoped.
 	Candidates []store.Node
 
-	// NothingUnblocked's list: what's still waiting, and on what.
+	// NothingUnblocked's canonical dependency facts and the Matter-grouped
+	// human projection. ChooseNext also carries Waiting when it is otherwise
+	// idle (no candidates and nothing in progress).
 	Blocked []Blocked
+	Waiting []WaitingMatter
 
 	// EverythingSealed's nudge.
 	BacklogCount int
@@ -128,17 +131,17 @@ func next(ctx context.Context, v store.View, cur Current) (View, error) {
 	if err != nil {
 		// Tombstoned or otherwise unresolvable: the target is gone (D44), and
 		// that is exactly the choose-next case, not an error next propagates.
-		return chooseNextView(ctx, v, repo, store.Node{}, "removed", readyInRepo)
+		return chooseNextView(ctx, v, repo, store.Node{}, "removed", readyInRepo, blockedInRepo)
 	}
 	if target.Lifecycle == store.Canceled {
-		return chooseNextView(ctx, v, repo, target, "canceled", readyInRepo)
+		return chooseNextView(ctx, v, repo, target, "canceled", readyInRepo, blockedInRepo)
 	}
 	sealed, err := Sealed(ctx, v, target)
 	if err != nil {
 		return View{}, err
 	}
 	if sealed {
-		return chooseNextView(ctx, v, repo, target, "sealed", readyInRepo)
+		return chooseNextView(ctx, v, repo, target, "sealed", readyInRepo, blockedInRepo)
 	}
 
 	return positionedView(ctx, v, target)
@@ -150,15 +153,22 @@ func next(ctx context.Context, v store.View, cur Current) (View, error) {
 // already computed, plus in-progress work fetched and repo-filtered the same
 // way noCursorView does it, so a choose-next report never omits work already
 // under way just because nothing new is Planned.
-func chooseNextView(ctx context.Context, v store.View, repo string, node store.Node, reason string, candidates []store.Node) (View, error) {
+func chooseNextView(ctx context.Context, v store.View, repo string, node store.Node, reason string, candidates []store.Node, blocked []Blocked) (View, error) {
 	inProgress, err := v.InProgress(ctx)
 	if err != nil {
 		return View{}, err
 	}
-	return View{
+	view := View{
 		Kind: ChooseNext, Node: node, EndedReason: reason,
 		Candidates: candidates, InProgress: filterByRepo(inProgress, repo),
-	}, nil
+	}
+	if len(view.Candidates) == 0 && len(view.InProgress) == 0 {
+		view.Waiting, err = waitingForRepo(ctx, v, repo, blocked)
+		if err != nil {
+			return View{}, err
+		}
+	}
+	return view, nil
 }
 
 func noCursorView(ctx context.Context, v store.View, repo string, ready []store.Node, blocked []Blocked) (View, error) {
@@ -166,7 +176,13 @@ func noCursorView(ctx context.Context, v store.View, repo string, ready []store.
 		return View{Kind: NoCursor, Candidates: ready}, nil
 	}
 	if len(blocked) > 0 {
-		return View{Kind: NothingUnblocked, Blocked: blocked}, nil
+		waiting, err := waitingForRepo(ctx, v, repo, blocked)
+		if err != nil {
+			return View{}, err
+		}
+		if len(waiting) > 0 {
+			return View{Kind: NothingUnblocked, Blocked: blocked, Waiting: waiting}, nil
+		}
 	}
 	inProgress, err := v.InProgress(ctx)
 	if err != nil {
@@ -174,6 +190,13 @@ func noCursorView(ctx context.Context, v store.View, repo string, ready []store.
 	}
 	if inRepo := filterByRepo(inProgress, repo); len(inRepo) > 0 {
 		return View{Kind: InProgressNoCursor, InProgress: inRepo}, nil
+	}
+	waiting, err := waitingForRepo(ctx, v, repo, nil)
+	if err != nil {
+		return View{}, err
+	}
+	if len(waiting) > 0 {
+		return View{Kind: NothingUnblocked, Waiting: waiting}, nil
 	}
 	entries, err := v.Backlog(ctx, repo)
 	if err != nil {
@@ -186,6 +209,22 @@ func noCursorView(ctx context.Context, v store.View, repo string, ready []store.
 		}
 	}
 	return View{Kind: EverythingSealed, BacklogCount: unprocessed}, nil
+}
+
+func waitingForRepo(ctx context.Context, v store.View, repo string, blocked []Blocked) ([]WaitingMatter, error) {
+	inProgress, err := v.InProgress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finished, err := FinishedNodes(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	ready, _, err := Frontier(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	return Waiting(ctx, v, repo, inProgress, ready, finished, blocked)
 }
 
 func positionedView(ctx context.Context, v store.View, target store.Node) (View, error) {
