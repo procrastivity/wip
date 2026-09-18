@@ -39,13 +39,15 @@ type ContentOptions struct {
 
 // RepoContent is one Repo's durable answer to the founding questions: what
 // is in progress, what is finished (sealed vs. locally complete), and what
-// is next to start (the unblocked frontier, plus what's blocking everything
-// else). It emits nothing — a pure read (MODEL §1).
+// is next to start (the unblocked frontier, plus both the detailed blockers
+// and their Matter-grouped waiting projection). It emits nothing — a pure
+// read (MODEL §1).
 type RepoContent struct {
 	InProgress []store.Node
 	Finished   []Finished
 	Ready      []store.Node
 	Blocked    []Blocked
+	Waiting    []WaitingMatter
 	// HiddenSealedMatters counts sealed Matters older than recentSealedWindow
 	// that the default view hid from Finished. Always 0 under ContentOptions.All.
 	HiddenSealedMatters int
@@ -99,8 +101,12 @@ func Content(ctx context.Context, v store.View, repo string, opts ContentOptions
 	if err != nil {
 		return RepoContent{}, err
 	}
+	waiting, err := Waiting(ctx, v, repo, inProgress, ready, finished, blocked)
+	if err != nil {
+		return RepoContent{}, err
+	}
 
-	out := RepoContent{}
+	out := RepoContent{Waiting: waiting}
 	for _, n := range inProgress {
 		if n.Repo == repo {
 			out.InProgress = append(out.InProgress, n)

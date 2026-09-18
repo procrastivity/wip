@@ -155,6 +155,28 @@ func TestNext_NothingUnblocked(t *testing.T) {
 	if len(view.Blocked) != 1 || view.Blocked[0].Node.ID != second {
 		t.Errorf("Blocked = %+v, want render-scratch blocked", view.Blocked)
 	}
+	if len(view.Waiting) != 1 || view.Waiting[0].Matter.ID != second {
+		t.Errorf("Waiting = %+v, want render-scratch grouped once", view.Waiting)
+	}
+}
+
+func TestNext_GateOnlyWaitIsNothingUnblocked(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	m := f.matter("awaiting-review", "Awaiting review")
+	f.start(m)
+	f.finish(m)
+
+	view := nextFor(t, f, f.current())
+	if view.Kind != NothingUnblocked {
+		t.Fatalf("Kind = %v, want NothingUnblocked instead of EverythingSealed", view.Kind)
+	}
+	if len(view.Blocked) != 0 {
+		t.Errorf("Blocked = %+v, want no dependency waits", view.Blocked)
+	}
+	if len(view.Waiting) != 1 || view.Waiting[0].Matter.ID != m || len(view.Waiting[0].Gates) != 1 {
+		t.Fatalf("Waiting = %+v, want one gate wait for awaiting-review", view.Waiting)
+	}
 }
 
 // TestNext_NoCursorSet is vocabulary output 4: no cursor, frontier
@@ -259,6 +281,26 @@ func TestNext_InProgressNoCursor(t *testing.T) {
 	}
 }
 
+func TestNext_InProgressNoCursorSuppressesFutureSiblingWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.matter("active-plan", "A plan with active leaf work")
+	stage := f.stage(m, "build", "Build")
+	current := f.step(stage, "step-01", "Current work")
+	next := f.step(stage, "step-02", "Future work")
+	f.depend(next, current)
+	f.start(m)
+	f.start(stage)
+	f.start(current)
+
+	view := nextFor(t, f, f.current())
+	if view.Kind != InProgressNoCursor {
+		t.Fatalf("view = %+v, want InProgressNoCursor instead of an empty NothingUnblocked summary", view)
+	}
+	if len(view.InProgress) != 3 || view.InProgress[2].ID != current {
+		t.Errorf("InProgress = %+v, want the active Matter, Stage, and current Step", view.InProgress)
+	}
+}
+
 // TestNext_ChooseNext_Sealed is D67: the cursor's target has itself become
 // sealed since it was set — reported as a fact, and the cursor is never
 // moved by a read.
@@ -357,6 +399,34 @@ func TestNext_ChooseNext_ListsInProgress(t *testing.T) {
 	}
 	if len(view.InProgress) != 1 || view.InProgress[0].ID != other {
 		t.Errorf("InProgress = %+v, want [other]", view.InProgress)
+	}
+}
+
+func TestNext_ChooseNext_IdleIncludesWaitingSummary(t *testing.T) {
+	f := newFixture(t)
+	f.declareGate("reviewed-local", store.ScaleMatter)
+	ended := f.matter("ended", "The cursor target")
+	waiting := f.matter("waiting", "Waiting for review")
+	f.start(ended)
+	f.start(waiting)
+
+	cur := f.current()
+	if _, err := SetCursorForTest(f, cur, ended); err != nil {
+		t.Fatal(err)
+	}
+	f.finish(ended)
+	f.closeGate(ended, "reviewed-local", store.ScaleMatter)
+	f.finish(waiting)
+
+	view := nextFor(t, f, cur)
+	if view.Kind != ChooseNext || view.EndedReason != "sealed" {
+		t.Fatalf("view = %+v, want sealed ChooseNext", view)
+	}
+	if len(view.Candidates) != 0 || len(view.InProgress) != 0 {
+		t.Fatalf("Candidates/InProgress = %+v/%+v, want an idle ended-cursor view", view.Candidates, view.InProgress)
+	}
+	if len(view.Waiting) != 1 || view.Waiting[0].Matter.ID != waiting {
+		t.Fatalf("Waiting = %+v, want the waiting Matter summary", view.Waiting)
 	}
 }
 
