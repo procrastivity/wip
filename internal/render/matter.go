@@ -31,44 +31,58 @@ func snapshotNotice(locator string) string {
 // one `workplan-<stage-locator>.md` per Stage with Workplan content, one
 // `workplan-<step-locator>.md` per Step with Workplan content, and one
 // `findings-<locator>.md` per Stage or Step with findings content.
-func renderMatterTree(ctx context.Context, s *store.Store, root string, matter store.Node) error {
+//
+// The returned slice is step-04's contribution to the navigation contract
+// (§4.1): the absolute paths of every file this call actually wrote, in
+// deterministic write order — matter.md, brief.md, workplan.md, roadmap.md,
+// then per node in MatterNodes order, workplan-<locator>.md then
+// findings-<locator>.md when earned. Files pruneStepFiles removes are never
+// included — written-only, per the frozen contract.
+func renderMatterTree(ctx context.Context, s *store.Store, root string, matter store.Node) ([]string, error) {
 	dir := filepath.Join(GeneratedDir(root), matter.Locator)
+	var written []string
 
 	children, err := s.Children(ctx, matter.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	nodes, err := s.MatterNodes(ctx, matter.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	expectedStages := make(map[string]struct{})
 	expectedSteps := make(map[string]struct{})
 
 	if err := renderMatterSummary(ctx, s, dir, matter); err != nil {
-		return err
+		return nil, err
 	}
+	written = append(written, filepath.Join(dir, "matter.md"))
 
 	if brief, has, err := readContentIfAny(ctx, s, matter.ID, store.KindBrief); err != nil {
-		return err
+		return nil, err
 	} else if has {
-		if err := writeGenerated(filepath.Join(dir, "brief.md"), brief); err != nil {
-			return err
+		path := filepath.Join(dir, "brief.md")
+		if err := writeGenerated(path, brief); err != nil {
+			return nil, err
 		}
+		written = append(written, path)
 	}
 
 	if wp, has, err := readContentIfAny(ctx, s, matter.ID, store.KindWorkplan); err != nil {
-		return err
+		return nil, err
 	} else if has {
-		if err := writeGenerated(filepath.Join(dir, "workplan.md"), wp); err != nil {
-			return err
+		path := filepath.Join(dir, "workplan.md")
+		if err := writeGenerated(path, wp); err != nil {
+			return nil, err
 		}
+		written = append(written, path)
 	}
 
 	if len(children) > 0 {
 		if err := renderRoadmap(ctx, s, dir, matter, children); err != nil {
-			return err
+			return nil, err
 		}
+		written = append(written, filepath.Join(dir, "roadmap.md"))
 	}
 
 	for _, node := range nodes {
@@ -81,29 +95,36 @@ func renderMatterTree(ctx context.Context, s *store.Store, root string, matter s
 		}
 		wp, has, err := readContentIfAny(ctx, s, node.ID, store.KindWorkplan)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if has {
 			basename := fmt.Sprintf("workplan-%s.md", node.Locator)
-			if err := writeGenerated(filepath.Join(dir, basename), wp); err != nil {
-				return err
+			path := filepath.Join(dir, basename)
+			if err := writeGenerated(path, wp); err != nil {
+				return nil, err
 			}
 			expected[basename] = struct{}{}
+			written = append(written, path)
 		}
 		findings, has, err := renderNodeFindings(ctx, s, matter, node)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if has {
 			basename := fmt.Sprintf("findings-%s.md", node.Locator)
-			if err := writeGenerated(filepath.Join(dir, basename), findings); err != nil {
-				return err
+			path := filepath.Join(dir, basename)
+			if err := writeGenerated(path, findings); err != nil {
+				return nil, err
 			}
 			expected[basename] = struct{}{}
+			written = append(written, path)
 		}
 	}
 
-	return pruneStepFiles(dir, expectedStages, expectedSteps)
+	if err := pruneStepFiles(dir, expectedStages, expectedSteps); err != nil {
+		return nil, err
+	}
+	return written, nil
 }
 
 var (

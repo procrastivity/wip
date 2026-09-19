@@ -25,7 +25,14 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "refresh [locator]",
 		Short: "open or continue this worktree's dispatch, and (re-)render .wip/generated/",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "With no locator: open or continue this worktree's dispatch and re-render " +
+			"every not-sealed Matter. With a locator: render that node's owning Matter " +
+			"alone — the only way a sealed Matter renders. Either way the result names " +
+			"the files actually written: generatedFiles in JSON (absolute paths, in " +
+			"write order, beside the retained rendered locators); the human locator " +
+			"form lists each file, the bare form prints \"wrote N file(s)\". Read those " +
+			"files — never wip's database — for Matter content.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
 
@@ -56,14 +63,16 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 
 			if flags.JSON {
 				b, err := json.Marshal(struct {
-					Dispatch   string   `json:"dispatch"`
-					ScratchDir string   `json:"scratchDir"`
-					Opened     bool     `json:"opened"`
-					Superseded string   `json:"superseded,omitempty"`
-					Rendered   []string `json:"rendered"`
+					Dispatch       string   `json:"dispatch"`
+					ScratchDir     string   `json:"scratchDir"`
+					Opened         bool     `json:"opened"`
+					Superseded     string   `json:"superseded,omitempty"`
+					Rendered       []string `json:"rendered"`
+					GeneratedFiles []string `json:"generatedFiles"`
 				}{
 					Dispatch: result.DispatchID, ScratchDir: result.ScratchDir,
 					Opened: result.Opened, Superseded: result.Superseded, Rendered: result.Rendered,
+					GeneratedFiles: nonNil(result.GeneratedFiles),
 				})
 				if err != nil {
 					return err
@@ -81,10 +90,37 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 					return err
 				}
 			}
-			_, err = fmt.Fprintf(streams.Out, "rendered %d matter(s)\n", len(result.Rendered))
+			if _, err := fmt.Fprintf(streams.Out, "rendered %d matter(s)\n", len(result.Rendered)); err != nil {
+				return err
+			}
+
+			// Human output diverges here (navigation contract §4.3): the
+			// on-demand path (a locator was given) lists each written file;
+			// the eager (bare) path prints only a summary count, so a
+			// hundred-plus-file eager pass does not bury `status`. JSON
+			// carries the full list on both paths, unconditionally.
+			if len(args) == 1 {
+				for _, path := range result.GeneratedFiles {
+					if _, err := fmt.Fprintf(streams.Out, "  %s\n", path); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			_, err = fmt.Fprintf(streams.Out, "wrote %d file(s)\n", len(result.GeneratedFiles))
 			return err
 		},
 	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+// nonNil turns a nil slice into an empty, non-nil one so it marshals as
+// `[]` rather than `null` (navigation contract §4.1: generatedFiles is
+// always present, never null, matching rendered's own convention).
+func nonNil(paths []string) []string {
+	if paths == nil {
+		return []string{}
+	}
+	return paths
 }

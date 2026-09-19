@@ -7,16 +7,18 @@ package cli_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 type refreshPayload struct {
-	Dispatch   string   `json:"dispatch"`
-	ScratchDir string   `json:"scratchDir"`
-	Opened     bool     `json:"opened"`
-	Superseded string   `json:"superseded"`
-	Rendered   []string `json:"rendered"`
+	Dispatch       string   `json:"dispatch"`
+	ScratchDir     string   `json:"scratchDir"`
+	Opened         bool     `json:"opened"`
+	Superseded     string   `json:"superseded"`
+	Rendered       []string `json:"rendered"`
+	GeneratedFiles []string `json:"generatedFiles"`
 }
 
 // TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing exercises D33's
@@ -62,6 +64,17 @@ func TestRenderScratch_DeleteWipBetweenDispatchesLosesNothing(t *testing.T) {
 	}
 	if secondResult.Dispatch == firstResult.Dispatch {
 		t.Error("second refresh reused the first dispatch's id")
+	}
+
+	// §9 4.11 (D33 cold start): with `.wip/` gone entirely, the cold-start
+	// refresh's generatedFiles reports the full re-written set — matter.md
+	// and brief.md, both back at 0444 — not merely a subset.
+	wantCold := []string{
+		filepath.Join(dir, ".wip", "generated", m.Locator, "matter.md"),
+		briefPath,
+	}
+	if !reflect.DeepEqual(secondResult.GeneratedFiles, wantCold) {
+		t.Errorf("cold-start generatedFiles = %v, want %v", secondResult.GeneratedFiles, wantCold)
 	}
 
 	data, err := os.ReadFile(briefPath)

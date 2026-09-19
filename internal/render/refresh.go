@@ -23,11 +23,12 @@ func NoPrecondition(context.Context, Current) error { return nil }
 
 // Result is what a render pass produced — `wip plumbing refresh`'s success payload.
 type Result struct {
-	DispatchID string
-	ScratchDir string
-	Opened     bool
-	Superseded string
-	Rendered   []string
+	DispatchID     string
+	ScratchDir     string
+	Opened         bool
+	Superseded     string
+	Rendered       []string
+	GeneratedFiles []string
 }
 
 // Refresh implements the eager path: dispatch-open-or-reuse (step-02), then
@@ -52,11 +53,14 @@ func Refresh(ctx context.Context, s *store.Store, cur Current, actor store.Actor
 		return Result{}, err
 	}
 	rendered := make([]string, 0, len(scope))
+	generatedFiles := make([]string, 0, len(scope))
 	for _, matter := range scope {
-		if err := renderMatterTree(ctx, s, cur.Root, matter); err != nil {
+		written, err := renderMatterTree(ctx, s, cur.Root, matter)
+		if err != nil {
 			return Result{}, err
 		}
 		rendered = append(rendered, matter.Locator)
+		generatedFiles = append(generatedFiles, written...)
 	}
 
 	if err := recordRenderPerformed(ctx, s, cur, actor, dispatch.ID, ""); err != nil {
@@ -64,11 +68,12 @@ func Refresh(ctx context.Context, s *store.Store, cur Current, actor store.Actor
 	}
 
 	return Result{
-		DispatchID: dispatch.ID,
-		ScratchDir: ScratchDir(cur.Root, dispatch.ID),
-		Opened:     opened,
-		Superseded: superseded,
-		Rendered:   rendered,
+		DispatchID:     dispatch.ID,
+		ScratchDir:     ScratchDir(cur.Root, dispatch.ID),
+		Opened:         opened,
+		Superseded:     superseded,
+		Rendered:       rendered,
+		GeneratedFiles: generatedFiles,
 	}, nil
 }
 
@@ -98,7 +103,8 @@ func Render(ctx context.Context, s *store.Store, cur Current, actor store.Actor,
 		return Result{}, err
 	}
 
-	if err := renderMatterTree(ctx, s, cur.Root, matter); err != nil {
+	written, err := renderMatterTree(ctx, s, cur.Root, matter)
+	if err != nil {
 		return Result{}, err
 	}
 
@@ -107,11 +113,12 @@ func Render(ctx context.Context, s *store.Store, cur Current, actor store.Actor,
 	}
 
 	return Result{
-		DispatchID: dispatch.ID,
-		ScratchDir: ScratchDir(cur.Root, dispatch.ID),
-		Opened:     opened,
-		Superseded: superseded,
-		Rendered:   []string{matter.Locator},
+		DispatchID:     dispatch.ID,
+		ScratchDir:     ScratchDir(cur.Root, dispatch.ID),
+		Opened:         opened,
+		Superseded:     superseded,
+		Rendered:       []string{matter.Locator},
+		GeneratedFiles: written,
 	}, nil
 }
 
@@ -136,7 +143,8 @@ func Exit(ctx context.Context, s *store.Store, cur Current, node store.Node, pre
 			return err
 		}
 	}
-	return renderMatterTree(ctx, s, cur.Root, matter)
+	_, err := renderMatterTree(ctx, s, cur.Root, matter)
+	return err
 }
 
 // recordRenderPerformed emits render.performed (step-03): exactly one per
