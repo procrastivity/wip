@@ -204,14 +204,12 @@ func ConfirmBacklogDelegation(ctx context.Context, s *store.Store, actor store.A
 }
 
 func backlogEntryByID(ctx context.Context, s *store.Store, repo, id string) (store.BacklogEntry, error) {
-	entries, err := s.Backlog(ctx, repo)
+	e, ok, err := s.BacklogEntry(ctx, repo, id)
 	if err != nil {
 		return store.BacklogEntry{}, err
 	}
-	for _, e := range entries {
-		if e.ID == id {
-			return e, nil
-		}
+	if !ok {
+		return store.BacklogEntry{}, fmt.Errorf("writesurface: no backlog entry %s in %s", id, repo)
 	}
-	return store.BacklogEntry{}, fmt.Errorf("writesurface: no backlog entry %s in %s", id, repo)
+	return e, nil
 }

@@ -450,3 +450,31 @@ points at the Brief and says what it used to say. Nothing else in
 The seal condition — "Brief documents every 1.2 decision; schema + migrations +
 backup-before-migrate implemented; static cycle check tested" — is discharged.
 The `reviewed-local` gate is the user's to close.
+
+## v12: findings widened to backlog entries (2026-09-19)
+
+The `content.node REFERENCES nodes(id)` FK was the only rule keeping content
+off backlog entries, and nothing in either repo had ever recorded that
+narrowing as a decision — it was structural fallout of the entity model. The
+decision is now made explicitly, the other way, and only for findings:
+**findings attach to nodes and to backlog entries; brief, workplan and body
+stay node-only.** Triage evidence accumulates on the entry it is about while
+the entry sits in the funnel, and it stays on the entry through every exit —
+`planned` links onward through the entry's `matter` column, nothing is copied.
+
+The mechanics follow the v5 posture for `outbox_entries.subject`: the v12
+rebuild of `content` replaces the FK with ULID-shape checks, and the existence
+proof moves into the projection (`contentSubjectExists` in `insertContent`),
+which runs on the live path and on every rebuild alike — create-once kinds
+demand a `nodes` row, findings accept `nodes` or `backlog_entries`. No new
+event types; `content.appended` keeps subject = the owning entity. The write
+surface widens only `AppendFinding` (`ResolveFindingSubject`); `WriteOnce`
+keeps the node-only resolver, so the create-once verbs still refuse an entry's
+ULID as an unknown locator before any write. `wip plumbing backlog show` is
+the entry findings' read surface; backlog entries remain unrendered.
+
+Render policy moved in the same change, on the node side: Stage and Step
+findings — stored since P1, visible nowhere — now render as
+`findings-<locator>.md` beside the Step Workplan files, under
+`model-session-plan/handoffs/stage-step-finding-read-surface-contract.md`.
+`matter.md` is unchanged.

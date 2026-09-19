@@ -42,7 +42,7 @@ const SpillThreshold = 1 << 20
 // command can leave an unreferenced file behind. That is deliberate — the
 // alternative is a file the store has already promised to have — and it is why
 // the reaping of unreferenced blobs belongs with `clean`'s crash orphans.
-func (t *Tx) ContentDraft(node string, kind ContentKind, data []byte) (Draft, error) {
+func (t *Tx) ContentDraft(subject string, kind ContentKind, data []byte) (Draft, error) {
 	switch kind {
 	case KindBrief, KindWorkplan, KindBody, KindFindings:
 	default:
@@ -76,7 +76,7 @@ func (t *Tx) ContentDraft(node string, kind ContentKind, data []byte) (Draft, er
 		written.Bytes = data
 	}
 
-	return Draft{Type: eventType, Subject: node, Payload: written}, nil
+	return Draft{Type: eventType, Subject: subject, Payload: written}, nil
 }
 
 // writeBlob puts spilled bytes in the store's sidecar directory.
@@ -123,6 +123,13 @@ func insertContent(ctx context.Context, tx *sql.Tx, ev Event) error {
 			return fmt.Errorf("store: %s carries bytes hashing to %s and records %s", ev.Type, got, p.SHA256)
 		}
 	}
+	// The v1 nodes FK proved a content row's owner existed; v12 widened
+	// ownership (findings on backlog entries), and a two-table membership is
+	// not a constraint SQLite can declare, so the projection proves it here —
+	// on the live path and on every rebuild alike.
+	if err := contentSubjectExists(ctx, tx, ev, p.Kind); err != nil {
+		return err
+	}
 
 	var bytesArg any
 	if p.Bytes != nil {
@@ -137,6 +144,32 @@ func insertContent(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return contentRefusal(ctx, tx, ev, p, err)
 	}
 	return nil
+}
+
+// contentSubjectExists is the FK's replacement since v12: a create-once kind
+// belongs to a node; findings belong to a node or a backlog entry. Tombstoned
+// nodes still count — the FK also accepted them, and content on a tombstoned
+// node is a doctor question, not a projection refusal.
+func contentSubjectExists(ctx context.Context, tx *sql.Tx, ev Event, kind ContentKind) error {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id = ?`, ev.Subject).Scan(&one)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if !kind.AppendOnlyKind() {
+		return fmt.Errorf("store: %s addresses %s, which is not a node; %s content is written on nodes only", ev.Type, ev.Subject, kind)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM backlog_entries WHERE id = ?`, ev.Subject).Scan(&one)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return fmt.Errorf("store: %s addresses %s, which is neither a node nor a backlog entry", ev.Type, ev.Subject)
 }
 
 // contentRefusal attributes a refused content insert to the guard that fired.

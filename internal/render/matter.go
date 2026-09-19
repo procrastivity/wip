@@ -28,8 +28,9 @@ func snapshotNotice(locator string) string {
 // content that has to render somewhere regardless of earned shape. A Matter
 // that has additionally earned a Brief and/or a Matter-grain Workplan also
 // gets `brief.md` / `workplan.md`; one with Stages/Steps gets `roadmap.md`,
-// one `workplan-<stage-locator>.md` per Stage with Workplan content, and one
-// `workplan-<step-locator>.md` per Step with Workplan content.
+// one `workplan-<stage-locator>.md` per Stage with Workplan content, one
+// `workplan-<step-locator>.md` per Step with Workplan content, and one
+// `findings-<locator>.md` per Stage or Step with findings content.
 func renderMatterTree(ctx context.Context, s *store.Store, root string, matter store.Node) error {
 	dir := filepath.Join(GeneratedDir(root), matter.Locator)
 
@@ -74,40 +75,53 @@ func renderMatterTree(ctx context.Context, s *store.Store, root string, matter s
 		if node.Kind != store.ScaleStage && node.Kind != store.ScaleStep {
 			continue
 		}
+		expected := expectedSteps
+		if node.Kind == store.ScaleStage {
+			expected = expectedStages
+		}
 		wp, has, err := readContentIfAny(ctx, s, node.ID, store.KindWorkplan)
 		if err != nil {
 			return err
 		}
-		if !has {
-			continue
+		if has {
+			basename := fmt.Sprintf("workplan-%s.md", node.Locator)
+			if err := writeGenerated(filepath.Join(dir, basename), wp); err != nil {
+				return err
+			}
+			expected[basename] = struct{}{}
 		}
-		basename := fmt.Sprintf("workplan-%s.md", node.Locator)
-		path := filepath.Join(dir, basename)
-		if err := writeGenerated(path, wp); err != nil {
+		findings, has, err := renderNodeFindings(ctx, s, matter, node)
+		if err != nil {
 			return err
 		}
-		if node.Kind == store.ScaleStage {
-			expectedStages[basename] = struct{}{}
-		} else {
-			expectedSteps[basename] = struct{}{}
+		if has {
+			basename := fmt.Sprintf("findings-%s.md", node.Locator)
+			if err := writeGenerated(filepath.Join(dir, basename), findings); err != nil {
+				return err
+			}
+			expected[basename] = struct{}{}
 		}
 	}
 
-	return pruneStepWorkplans(dir, expectedStages, expectedSteps)
+	return pruneStepFiles(dir, expectedStages, expectedSteps)
 }
 
-var canonicalStepWorkplan = regexp.MustCompile(`^workplan-step-(0[1-9]|[1-9][0-9]+)\.md$`)
+var (
+	canonicalStepWorkplan = regexp.MustCompile(`^workplan-step-(0[1-9]|[1-9][0-9]+)\.md$`)
+	canonicalStepFindings = regexp.MustCompile(`^findings-step-(0[1-9]|[1-9][0-9]+)\.md$`)
+)
 
-// pruneStepWorkplans removes only regular files in the renderer-owned Step
-// namespace. Stage paths share the namespace when a Stage locator has the
-// canonical Step shape, so expectedStages is the collision carve-out.
-func pruneStepWorkplans(dir string, expectedStages, expectedSteps map[string]struct{}) error {
+// pruneStepFiles removes only regular files in the renderer-owned Step
+// namespaces (Step Workplans and Step findings). Stage paths share each
+// namespace when a Stage locator has the canonical Step shape, so
+// expectedStages is the collision carve-out.
+func pruneStepFiles(dir string, expectedStages, expectedSteps map[string]struct{}) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("render: scanning generated Matter directory %s: %w", dir, err)
 	}
 	for _, entry := range entries {
-		if !canonicalStepWorkplan.MatchString(entry.Name()) {
+		if !canonicalStepWorkplan.MatchString(entry.Name()) && !canonicalStepFindings.MatchString(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -244,6 +258,27 @@ func renderFindingEntries(ctx context.Context, s *store.Store, node string, b *s
 		}
 	}
 	return nil
+}
+
+// renderNodeFindings builds a Stage's or Step's standalone findings file:
+// a header and the snapshot notice, then the same timestamped entry grammar
+// matter.md's own Findings section uses. The bool reports whether the node
+// has findings content at all — no content, no file.
+func renderNodeFindings(ctx context.Context, s *store.Store, matter, node store.Node) ([]byte, bool, error) {
+	segments, err := s.ContentSegments(ctx, node.ID, store.KindFindings)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(segments) == 0 {
+		return nil, false, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Findings — %s\n\n", node.Locator)
+	b.WriteString(snapshotNotice(matter.Locator))
+	if err := renderFindingEntries(ctx, s, node.ID, &b); err != nil {
+		return nil, false, err
+	}
+	return []byte(b.String()), true, nil
 }
 
 func renderRoadmap(ctx context.Context, s *store.Store, dir string, matter store.Node, children []store.Node) error {

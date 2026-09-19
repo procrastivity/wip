@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	syntheticV3Version = 12
-	syntheticV4Version = 13
+	syntheticV3Version = 13
+	syntheticV4Version = 14
 )
 
 // Tests for the migration framework (step-09): versioned, forward-only,
@@ -582,7 +582,7 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	log := h.rowsOf("events", "")
 	at := time.Now()
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v12")
+	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v13")
 
 	// The backup was taken before anything was attempted, which is the only order
 	// in which it is worth anything.
@@ -628,7 +628,7 @@ func TestAllOrNothingIsPerMigrationAndNotPerOpen(t *testing.T) {
 	before := h.snapshotProjection()
 
 	_, err := h.reopen(reg, syntheticV4Version)
-	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v13")
+	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v14")
 
 	// v5 landed and stayed; v6 did not.
 	stopped, err := h.reopen(reg, syntheticV3Version)
@@ -672,7 +672,7 @@ func TestTheBackupAFailedMigrationLeftRestoresTheStore(t *testing.T) {
 	shape := schemaShape(t, h.Store)
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v12")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v13")
 
 	sidecars := backupsIn(t, dir)
 	if len(sidecars) != 1 {
@@ -719,7 +719,7 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 	log := h.rowsOf("events", "")
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v12")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v13")
 
 	first := backupsIn(t, dir)
 	if len(first) != 1 {
@@ -1170,4 +1170,71 @@ func TestV2RefusesEveryLegacyRunRowWithoutChangingV1(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// v12: backlog-entry findings
+// ---------------------------------------------------------------------------
+
+// TestBacklogEntryFindingsMigrationWidensContentOwnership drives the real v12
+// against a populated v11 store: content rows copy verbatim (a spilled one
+// included), the recreated create-once index still refuses, the projection
+// guard replaces the dropped FK, and the one new capability — findings on a
+// backlog entry — works only after the migration.
+func TestBacklogEntryFindingsMigrationWidensContentOwnership(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wip.db")
+
+	legacy := append([]migration{}, register[:11]...)
+	h := newHarnessAt(t, path, legacy, 11)
+
+	matter := h.matter("widened", "A Matter whose content crosses v12")
+	brief := []byte("# The Brief\n\nWhy this Matter exists.\n")
+	h.write(matter, KindBrief, brief)
+	note := []byte("A finding from before the migration.\n")
+	h.write(matter, KindFindings, note)
+	spilled := generated(SpillThreshold+1, 0x21)
+	h.write(matter, KindFindings, spilled)
+	entry := h.backlogEntry("An entry from before the migration")
+
+	// The v11 floor: the FK still narrows content to nodes, whatever the Go
+	// guard beside it would allow.
+	err := h.writeError(entry, KindFindings, []byte("refused at v11"))
+	refusalMentions(t, "an entry finding at v11", err, "FOREIGN KEY")
+
+	before := h.snapshotProjection()
+	log := h.rowsOf("events", "")
+
+	migrated, err := h.reopen(shipped(), latestVersion(shipped()))
+	if err != nil {
+		t.Fatalf("reopen under v12: %v", err)
+	}
+	if got := migrated.SchemaVersion(); got != latestVersion(shipped()) {
+		t.Errorf("the reopened store reports v%d, want v%d", got, latestVersion(shipped()))
+	}
+	wantSameProjectionThroughMigration(t, "after migrating v11 -> v12", before, migrated.snapshotProjection())
+	wantSameRows(t, "the log after v12", log, migrated.rowsOf("events", ""))
+	migrated.wantContent("a Brief carried across the rebuild", matter, KindBrief, brief)
+	migrated.wantContent("findings carried across the rebuild", matter, KindFindings,
+		append(append([]byte{}, note...), spilled...))
+
+	// The recreated create-once index still refuses a second Brief...
+	err = migrated.writeError(matter, KindBrief, []byte("a second Brief"))
+	refusalMentions(t, "a second Brief after v12", err, "content_create_once")
+
+	// ...the projection guard stands where the FK stood...
+	err = migrated.writeError("01ARZ3NDEKTSV4RRFFQ69G5FAV", KindFindings, []byte("an orphan"))
+	refusalMentions(t, "findings on a subject in neither table after v12", err, "neither a node nor a backlog entry")
+
+	// ...and the capability the migration exists for works on a
+	// pre-migration entry.
+	triage := []byte("Triage: appended after the migration.\n")
+	migrated.write(entry, KindFindings, triage)
+	migrated.wantContent("a finding on a pre-migration entry", entry, KindFindings, triage)
+
+	// The oracle: a store that migrated to v12 is indistinguishable from one
+	// built at v12 directly.
+	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), shipped(), latestVersion(shipped()))
+	wantSameSchema(t, "a store migrated v11 -> v12 against one built at v12",
+		schemaShape(t, migrated.Store), schemaShape(t, direct.Store))
 }

@@ -1236,6 +1236,30 @@ func (v View) Backlog(ctx context.Context, repo string) ([]BacklogEntry, error) 
 	return out, nil
 }
 
+// BacklogEntry reads one entry by identity, scoped to a Repo. The bool
+// reports presence: an absent entry is an ordinary answer here, because the
+// caller owns its own refusal.
+func (v View) BacklogEntry(ctx context.Context, repo, id string) (BacklogEntry, bool, error) {
+	declineReason := "''"
+	if v.schemaVersion >= 10 {
+		declineReason = "decline_reason"
+	}
+	var e BacklogEntry
+	err := v.q.QueryRowContext(ctx,
+		`SELECT id, repo, provenance, state, title, detail, `+declineReason+`,
+		        COALESCE(origin_node, ''), COALESCE(matter, ''), COALESCE(outbox, '')
+		 FROM   backlog_entries WHERE repo = ? AND id = ?`, repo, id).
+		Scan(&e.ID, &e.Repo, &e.Provenance, &e.State, &e.Title,
+			&e.Detail, &e.DeclineReason, &e.OriginNode, &e.Matter, &e.Outbox)
+	if err == sql.ErrNoRows {
+		return BacklogEntry{}, false, nil
+	}
+	if err != nil {
+		return BacklogEntry{}, false, fmt.Errorf("store: read backlog entry %s: %w", id, err)
+	}
+	return e, true, nil
+}
+
 // ActiveBacklog lists entries that still require local action or delivery.
 // A delegated stub retires when its creation entry is flushed. Both projection
 // rows remain available through Backlog and Outbox for audit and rebuild.
