@@ -48,6 +48,38 @@ func ResolveNode(ctx context.Context, v store.View, repo, locator string) (store
 	return n, nil
 }
 
+// FindingSubject is what AppendFinding writes to: a live node, or — findings
+// being the one content kind backlog entries carry (v12) — a backlog entry.
+type FindingSubject struct {
+	ID      string
+	Backlog bool
+}
+
+// ResolveFindingSubject is ResolveNode widened for the findings write path
+// only. A ULID that names no live node is tried against the Repo's backlog
+// before it is refused; every other verb keeps ResolveNode's node-only answer.
+func ResolveFindingSubject(ctx context.Context, v store.View, repo, locator string) (FindingSubject, error) {
+	if store.IsIdentityShaped(locator) {
+		if n, err := v.Node(ctx, locator); err == nil {
+			return FindingSubject{ID: n.ID}, nil
+		}
+		e, ok, err := v.BacklogEntry(ctx, repo, locator)
+		if err != nil {
+			return FindingSubject{}, err
+		}
+		if ok {
+			return FindingSubject{ID: e.ID, Backlog: true}, nil
+		}
+		return FindingSubject{}, wiperr.New("validation.unknown-locator",
+			fmt.Sprintf("no node or backlog entry %s", locator))
+	}
+	n, err := ResolveNode(ctx, v, repo, locator)
+	if err != nil {
+		return FindingSubject{}, err
+	}
+	return FindingSubject{ID: n.ID}, nil
+}
+
 // ResolveMatter is ResolveNode narrowed to a Matter — the shape `wip plumbing gate
 // declare`, `wip plumbing backlog plan` and the bind verb's locator argument need.
 func ResolveMatter(ctx context.Context, v store.View, repo, locator string) (store.Node, error) {

@@ -121,7 +121,7 @@ func BodyCommand(streams *iostreams.Streams) *cobra.Command {
 func FindingCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "finding",
-		Short: "append findings to a node",
+		Short: "append findings to a node or a backlog entry",
 	}
 	cmd.AddCommand(findingAddCommand(streams))
 	surface.Annotate(cmd, surface.Plumbing)
@@ -133,6 +133,7 @@ func findingAddCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <locator> [text]",
 		Short: "append one finding — a positional argument, or stdin/--file for a longer one",
+		Long:  "append one finding — a positional argument, or stdin/--file for a longer one. The locator names a node (Matter, Stage or Step); a ULID may also name a backlog entry, whose findings `wip plumbing backlog show <entry-id>` reads back.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())
@@ -157,7 +158,7 @@ func findingAddCommand(streams *iostreams.Streams) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
-			n, err := writesurface.AppendFinding(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], data)
+			sub, err := writesurface.AppendFinding(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), repo.ID, args[0], data)
 			if err != nil {
 				return err
 			}
@@ -165,7 +166,7 @@ func findingAddCommand(streams *iostreams.Streams) *cobra.Command {
 				b, err := json.Marshal(struct {
 					Node  string `json:"node"`
 					Bytes int    `json:"bytes"`
-				}{Node: n.ID, Bytes: len(data)})
+				}{Node: sub.ID, Bytes: len(data)})
 				if err != nil {
 					return err
 				}
