@@ -226,7 +226,7 @@ func renderCompact(streams *iostreams.Streams, entries []store.BacklogEntry) err
 		if e.State == "delegated" {
 			suffix = " · delegated"
 		}
-		if _, err := fmt.Fprintf(streams.Out, "  %s%s\n", e.Title, suffix); err != nil {
+		if _, err := fmt.Fprintf(streams.Out, "  %-26s %s%s\n", e.ID, e.Title, suffix); err != nil {
 			return err
 		}
 	}
