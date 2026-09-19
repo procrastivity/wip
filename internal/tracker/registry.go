@@ -16,6 +16,9 @@ type FactoryInput struct {
 	// CanceledLabel is the opaque Repo-tier tracker.canceled-label value.
 	// Empty means no label was configured.
 	CanceledLabel string
+	// Project is the opaque Repo-tier tracker.project value. Empty means
+	// none. Read only on the flush/write path.
+	Project string
 }
 
 // Factory constructs one provider seam. Provider packages expose a Factory

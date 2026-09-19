@@ -26,6 +26,11 @@ func TestOutboxSettingsHelpStateEachEffect(t *testing.T) {
 			"auto with no tracker backend behaves as manual",
 			"wip plumbing outbox approve and wip plumbing outbox flush",
 		}},
+		{"project", []string{
+			"github and gitlab: ignore the project.",
+			"linear: when set, every issue wip creates is filed in this project",
+			"Pass none to clear it.",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.verb, func(t *testing.T) {

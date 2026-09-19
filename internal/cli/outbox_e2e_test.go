@@ -101,7 +101,7 @@ func TestManifestIncludesOutboxPlumbing(t *testing.T) {
 	if manifest.exitCode != 0 {
 		t.Fatalf("manifest: exit=%d stderr=%q", manifest.exitCode, manifest.stderr)
 	}
-	for _, name := range []string{"plumbing outbox list", "plumbing outbox level", "plumbing outbox backlog-push", "plumbing outbox backend", "plumbing outbox target", "plumbing outbox canceled-label", "plumbing outbox approve", "plumbing outbox decline", "plumbing outbox retry", "plumbing outbox flush"} {
+	for _, name := range []string{"plumbing outbox list", "plumbing outbox level", "plumbing outbox backlog-push", "plumbing outbox backend", "plumbing outbox target", "plumbing outbox project", "plumbing outbox canceled-label", "plumbing outbox approve", "plumbing outbox decline", "plumbing outbox retry", "plumbing outbox flush"} {
 		if !strings.Contains(manifest.stdout, `"name":"`+name+`"`) {
 			t.Errorf("manifest is missing %q", name)
 		}
@@ -176,6 +176,78 @@ func TestOutboxTargetIsOpaqueLazyConfigAndReachesFlushFactory(t *testing.T) {
 		cleared := runWithProviders(t, providers, "plumbing", "outbox", "target", sentinel)
 		if cleared.exitCode != 0 || cleared.stdout != "none\n" {
 			t.Fatalf("clear target with %q: exit=%d stdout=%q stderr=%q", sentinel, cleared.exitCode, cleared.stdout, cleared.stderr)
+		}
+	}
+}
+
+func TestOutboxProjectIsLazyConfigAndReachesFlushFactory(t *testing.T) {
+	dir := newGitRepo(t, "tracker-project")
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+	dbPath := filepath.Join(t.TempDir(), "wip.db")
+	t.Setenv("WIP_DB_PATH", dbPath)
+
+	reader := &cliAlignmentReader{states: map[string]tracker.LiveState{}}
+	var received tracker.FactoryInput
+	providers := tracker.NewRegistry()
+	providers.Register("fake", func(input tracker.FactoryInput) (tracker.Seam, error) {
+		received = input
+		return reader, nil
+	})
+	if r := runWithProviders(t, providers, "init"); r.exitCode != 0 {
+		t.Fatalf("init: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	initial := runWithProviders(t, providers, "plumbing", "outbox", "project")
+	if initial.exitCode != 0 || initial.stdout != "none\n" {
+		t.Fatalf("initial project: exit=%d stdout=%q stderr=%q", initial.exitCode, initial.stdout, initial.stderr)
+	}
+
+	const project = "  550e8400-e29b-41d4-a716-446655440000  "
+	set := runWithProviders(t, providers, "plumbing", "outbox", "project", project, "--json")
+	if set.exitCode != 0 || mustJSON[struct {
+		Project string `json:"project"`
+	}](t, set.stdout).Project != project {
+		t.Fatalf("set project: exit=%d stdout=%q stderr=%q", set.exitCode, set.stdout, set.stderr)
+	}
+	if r := runWithProviders(t, providers, "plumbing", "outbox", "backend", "fake"); r.exitCode != 0 {
+		t.Fatalf("set backend: exit=%d stderr=%q", r.exitCode, r.stderr)
+	}
+	flush := runWithProviders(t, providers, "plumbing", "outbox", "flush", "--json")
+	if flush.exitCode != 0 {
+		t.Fatalf("flush: exit=%d stdout=%q stderr=%q", flush.exitCode, flush.stdout, flush.stderr)
+	}
+	if received.Repo.ID == "" || received.Project != project {
+		t.Fatalf("flush factory input = %+v, want opaque project %q", received, project)
+	}
+
+	s := openTestStore(t, dbPath)
+	events, err := s.Events(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Type, "tracker") || strings.Contains(event.Type, "outbox") {
+			t.Fatalf("project config or empty flush emitted %s", event.Type)
+		}
+	}
+	entries, err := s.Outbox(context.Background(), received.Repo.ID)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("project config queued %+v, err=%v", entries, err)
+	}
+
+	for _, sentinel := range []string{"none", "  none  "} {
+		if r := runWithProviders(t, providers, "plumbing", "outbox", "project", project); r.exitCode != 0 {
+			t.Fatalf("re-set project: exit=%d stderr=%q", r.exitCode, r.stderr)
+		}
+		cleared := runWithProviders(t, providers, "plumbing", "outbox", "project", sentinel)
+		if cleared.exitCode != 0 || cleared.stdout != "none\n" {
+			t.Fatalf("clear project with %q: exit=%d stdout=%q stderr=%q", sentinel, cleared.exitCode, cleared.stdout, cleared.stderr)
 		}
 	}
 }

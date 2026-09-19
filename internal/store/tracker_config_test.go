@@ -84,6 +84,33 @@ func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	}
 }
 
+func TestTrackerProjectIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+	h := newHarness(t)
+	before, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const project = "  provider-owned project  "
+	if err := h.SetConfig(h.ctx, h.Repo, TrackerProjectKey, project); err != nil {
+		t.Fatal(err)
+	}
+	got, present, err := h.Config(h.ctx, h.Repo, TrackerProjectKey)
+	if err != nil || !present || got != project {
+		t.Fatalf("tracker project = %q, present=%v, err=%v, want %q", got, present, err, project)
+	}
+	after, err := h.Events(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("project config appended %d event(s)", len(after)-len(before))
+	}
+	entries, err := h.Outbox(h.ctx, h.Repo)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("project config queued outbox = %+v, err=%v", entries, err)
+	}
+}
+
 func TestTrackerCanceledLabelIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)

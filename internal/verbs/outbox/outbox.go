@@ -24,7 +24,7 @@ import (
 // injected at the CLI registration point.
 func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Command {
 	cmd := &cobra.Command{Use: "outbox", Short: "inspect and disposition provider-neutral delivery work"}
-	cmd.AddCommand(listCommand(streams), levelCommand(streams), backlogPushCommand(streams), backendCommand(streams, providers), targetCommand(streams), canceledLabelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
+	cmd.AddCommand(listCommand(streams), levelCommand(streams), backlogPushCommand(streams), backendCommand(streams, providers), targetCommand(streams), projectCommand(streams), canceledLabelCommand(streams), approveCommand(streams), declineCommand(streams), retryCommand(streams), flushCommand(streams, providers))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -78,6 +78,59 @@ func targetCommand(streams *iostreams.Streams) *cobra.Command {
 			target = "none"
 		}
 		_, err = fmt.Fprintln(streams.Out, target)
+		return err
+	}
+	return plumbing(cmd)
+}
+
+func projectCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "project [none|project-uuid]",
+		Short: "read or set this repo's tracker project",
+		Long: "read or set this repo's tracker project.\n\n" +
+			"With no argument, prints the stored project, or none. With an argument, stores it raw; the value is an opaque provider token that only the configured backend interprets. Pass none to clear it.\n\n" +
+			"linear: when set, every issue wip creates is filed in this project — a Linear project UUID sent as projectId on issueCreate. Unset means no project.\n\n" +
+			"github and gitlab: ignore the project. Their project comes from the clone's remote URL.\n\n" +
+			"Setting a project contacts no tracker; the backend reads it at wip plumbing outbox flush.",
+		Args: cobra.MaximumNArgs(1),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		s, repo, err := openRepo(cmd)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+
+		project, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerProjectKey)
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 {
+			// The stored value stays raw: the project is an opaque
+			// provider token. Only the "none" sentinel is trimmed.
+			project = args[0]
+			if strings.TrimSpace(project) == "none" {
+				project = ""
+			}
+			if err := s.SetConfig(cmd.Context(), repo.ID, store.TrackerProjectKey, project); err != nil {
+				return err
+			}
+		}
+
+		if cliflags.FromContext(cmd.Context()).JSON {
+			b, err := json.Marshal(struct {
+				Project string `json:"project"`
+			}{project})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, string(b))
+			return err
+		}
+		if project == "" {
+			project = "none"
+		}
+		_, err = fmt.Fprintln(streams.Out, project)
 		return err
 	}
 	return plumbing(cmd)
@@ -449,7 +502,11 @@ func flushCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobr
 		if err != nil {
 			return err
 		}
-		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel})
+		project, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerProjectKey)
+		if err != nil {
+			return err
+		}
+		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel, Project: project})
 		if err != nil {
 			return err
 		}
