@@ -19,6 +19,7 @@ import (
 const (
 	linearCLITeam         = "11111111-1111-4111-8111-111111111111"
 	linearCLIStartedState = "22222222-2222-4222-8222-222222222222"
+	linearCLIProject      = "33333333-3333-4333-8333-333333333333"
 )
 
 type linearCLIRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -82,7 +83,7 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 		case "CreateIssue":
 			mutations++
 			input, ok := body.Variables["input"].(map[string]any)
-			if !ok || input["teamId"] != linearCLITeam || input["stateId"] != linearCLIStartedState || input["title"] != "Reconcile CLI create" {
+			if !ok || input["teamId"] != linearCLITeam || input["stateId"] != linearCLIStartedState || input["title"] != "Reconcile CLI create" || input["projectId"] != linearCLIProject {
 				t.Fatalf("CreateIssue variables = %#v", body.Variables)
 			}
 			// Model an ambiguous server response after Linear accepted the write.
@@ -113,6 +114,7 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 		{"init", "--json"},
 		{"plumbing", "outbox", "backend", "linear"},
 		{"plumbing", "outbox", "target", linearCLITeam},
+		{"plumbing", "outbox", "project", linearCLIProject},
 	} {
 		if result := runWithProviders(t, providers, args...); result.exitCode != 0 {
 			t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
@@ -146,6 +148,9 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 	if result := runWithProviders(t, providers, "plumbing", "outbox", "target"); result.exitCode != 0 || result.stdout != linearCLITeam+"\n" {
 		t.Fatalf("durable target = exit %d, stdout %q, stderr %q", result.exitCode, result.stdout, result.stderr)
 	}
+	if result := runWithProviders(t, providers, "plumbing", "outbox", "project"); result.exitCode != 0 || result.stdout != linearCLIProject+"\n" {
+		t.Fatalf("durable project = exit %d, stdout %q, stderr %q", result.exitCode, result.stdout, result.stderr)
+	}
 
 	s := openTestStore(t, dbPath)
 	repos, err := s.Repos(context.Background())
@@ -159,6 +164,10 @@ func TestLinearCreateConvergesThroughCLIAndPersistsBindingAndConfig(t *testing.T
 	target, _, err := s.Config(context.Background(), repos[0].ID, store.TrackerTargetKey)
 	if err != nil || target != linearCLITeam {
 		t.Fatalf("stored target = %q (err %v)", target, err)
+	}
+	project, _, err := s.Config(context.Background(), repos[0].ID, store.TrackerProjectKey)
+	if err != nil || project != linearCLIProject {
+		t.Fatalf("stored project = %q (err %v)", project, err)
 	}
 	entry, err := s.OutboxEntry(context.Background(), repos[0].ID, delegated.Outbox)
 	if err != nil || entry.State != "flushed" || entry.Attempts != 1 || entry.Reason != "" {
