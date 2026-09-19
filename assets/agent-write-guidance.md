@@ -29,7 +29,7 @@ that queues a tracker item; `wip plumbing backlog decline` drops the entry with 
 reason. When asked to "clean up the backlog", do not guess which one is
 meant — ask.
 
-Configuring a tracker takes five commands, in this order:
+Configuring a tracker takes six commands, in this order:
 
 1. `wip init` attaches the clone to wip.
 2. `wip plumbing outbox backend <name>` picks the tracker; the registered names
@@ -37,10 +37,13 @@ Configuring a tracker takes five commands, in this order:
    with the list.
 3. `wip plumbing outbox target <team-uuid>` is for Linear only; GitHub and GitLab
    read the project from the clone's remote URL and ignore the target.
-4. `wip plumbing outbox level boundary|narrated` is optional; once a backend is
+4. `wip plumbing outbox project <project-uuid>` is optional and Linear-only:
+   when set, every issue wip creates is filed in that project. GitHub and
+   GitLab ignore it and read the project from the clone's remote URL.
+5. `wip plumbing outbox level boundary|narrated` is optional; once a backend is
    set the level defaults to `boundary`, and only `narrated` must be
    chosen on purpose.
-5. `wip plumbing bind <locator> <ref>` records which tracker item a Matter's
+6. `wip plumbing bind <locator> <ref>` records which tracker item a Matter's
    boundary writes address.
 
 Credentials come from the tracker CLI or environment already on the host,

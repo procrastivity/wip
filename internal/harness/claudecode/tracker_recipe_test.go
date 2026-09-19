@@ -17,10 +17,11 @@ func TestGenerate_SkillCarriesTrackerRecipe(t *testing.T) {
 	}
 	skill := string(files["SKILL.md"])
 	for _, want := range []string{
-		"Configuring a tracker takes five commands",
+		"Configuring a tracker takes six commands",
 		"`wip plumbing outbox backend <name>`",
 		"`github`, `gitlab` and `linear`",
 		"is for Linear only; GitHub and GitLab",
+		"`wip plumbing outbox project <project-uuid>` is optional and Linear-only",
 		"`WIP_GITLAB_TOKEN`, `GITLAB_TOKEN`, then",
 		"`WIP_GITHUB_TOKEN`, `GH_TOKEN`,",
 		"`WIP_LINEAR_TOKEN`, `LINEAR_API_KEY`",
