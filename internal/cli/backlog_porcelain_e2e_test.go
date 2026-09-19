@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -79,11 +80,11 @@ func TestBacklogPorcelain_ActiveSetCompactFullJSONAndReadOnly(t *testing.T) {
 	if compact.exitCode != 0 || compact.stderr != "" {
 		t.Fatalf("backlog: exit=%d stdout=%q stderr=%q", compact.exitCode, compact.stdout, compact.stderr)
 	}
-	wantCompact := "2 backlog entries:\n  Active entered\n  Pending delivery · delegated\n"
+	wantCompact := fmt.Sprintf("2 backlog entries:\n  %-26s Active entered\n  %-26s Pending delivery · delegated\n", entered.ID, pending.ID)
 	if compact.stdout != wantCompact {
 		t.Errorf("backlog = %q, want %q", compact.stdout, wantCompact)
 	}
-	for _, absent := range []string{entered.ID, pending.ID, "reproduce after restart", "Already planned", "Already declined", "Already flushed"} {
+	for _, absent := range []string{"reproduce after restart", "Already planned", "Already declined", "Already flushed"} {
 		if strings.Contains(compact.stdout, absent) {
 			t.Errorf("compact backlog = %q, want %q absent", compact.stdout, absent)
 		}
