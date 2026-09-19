@@ -17,6 +17,7 @@ import (
 
 const (
 	testTeam      = "11111111-1111-4111-8111-111111111111"
+	testProject   = "55555555-5555-4555-8555-555555555555"
 	startedState  = "22222222-2222-4222-8222-222222222222"
 	startedState2 = "22222222-2222-4222-8222-222222222223"
 	completeState = "33333333-3333-4333-8333-333333333333"
@@ -52,6 +53,9 @@ func TestCreateUsesDeterministicUUIDAndConvergesOnReplay(t *testing.T) {
 			if input["description"] != "Show in-progress work.\n\nSource: agent" {
 				t.Fatalf("description = %q", input["description"])
 			}
+			if _, present := input["projectId"]; present {
+				t.Fatalf("create input = %#v, want no projectId when no project is configured", input)
+			}
 			created = true
 			return gqlData(map[string]any{"issueCreate": map[string]any{"success": true, "issue": map[string]any{"identifier": "BDS-124"}}})
 		default:
@@ -77,6 +81,38 @@ func TestCreateUsesDeterministicUUIDAndConvergesOnReplay(t *testing.T) {
 		t.Fatalf("create mutations = %d, want 1", mutations)
 	}
 	wantOperations := []string{"FindIssueByClientID", "WorkflowStates", "CreateIssue", "FindIssueByClientID"}
+	if !reflect.DeepEqual(operations, wantOperations) {
+		t.Fatalf("operations = %v, want %v", operations, wantOperations)
+	}
+}
+
+func TestCreateFilesTheIssueInTheConfiguredProject(t *testing.T) {
+	var operations []string
+	adapter := newTestAdapterWithInput(t, tracker.FactoryInput{Target: testTeam, Project: testProject}, func(t *testing.T, request gqlTestRequest) testResponse {
+		operations = append(operations, request.OperationName)
+		switch request.OperationName {
+		case "FindIssueByClientID":
+			return gqlData(map[string]any{"issues": map[string]any{"nodes": []any{}}})
+		case "WorkflowStates":
+			return workflowResponse(workflowState{ID: startedState, Name: "Doing", Type: "started", Position: 1})
+		case "CreateIssue":
+			input := request.input(t)
+			if input["projectId"] != testProject {
+				t.Fatalf("create input = %#v, want projectId %q", input, testProject)
+			}
+			return gqlData(map[string]any{"issueCreate": map[string]any{"success": true, "issue": map[string]any{"identifier": "BDS-124"}}})
+		default:
+			t.Fatalf("unexpected operation %q", request.OperationName)
+			return testResponse{}
+		}
+	})
+	result, err := adapter.Deliver(context.Background(), store.OutboxEntry{
+		Kind: "create", IdempotencyKey: "key", Payload: json.RawMessage(`{"title":"Title"}`),
+	})
+	if err != nil || result.Outcome != tracker.Delivered || result.Ref != "BDS-124" {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	wantOperations := []string{"FindIssueByClientID", "WorkflowStates", "CreateIssue"}
 	if !reflect.DeepEqual(operations, wantOperations) {
 		t.Fatalf("operations = %v, want %v", operations, wantOperations)
 	}
@@ -532,6 +568,12 @@ func TestValidationAndTokenPrecedenceRequireNoNetwork(t *testing.T) {
 	if _, err := New(tracker.FactoryInput{Target: "not-a-uuid"}, Options{Token: "token", Client: client}); err == nil || called {
 		t.Fatalf("malformed target: err = %v, called = %t", err, called)
 	}
+	if _, err := New(tracker.FactoryInput{Target: testTeam, Project: "not-a-uuid"}, Options{Token: "token", Client: client}); err == nil || called {
+		t.Fatalf("malformed project: err = %v, called = %t", err, called)
+	}
+	if adapter, err := New(tracker.FactoryInput{Target: testTeam, Project: ""}, Options{Token: "token", Client: client}); err != nil || adapter.project != "" || called {
+		t.Fatalf("empty project: adapter = %+v, err = %v, called = %t", adapter, err, called)
+	}
 	t.Setenv("WIP_LINEAR_TOKEN", "wip-token")
 	t.Setenv("LINEAR_API_KEY", "linear-key")
 	adapter, err := New(tracker.FactoryInput{Target: testTeam}, Options{Token: "option-token", Client: client})
@@ -606,6 +648,11 @@ type testResponse struct {
 
 func newTestAdapter(t *testing.T, handler func(*testing.T, gqlTestRequest) testResponse) *Adapter {
 	t.Helper()
+	return newTestAdapterWithInput(t, tracker.FactoryInput{Target: testTeam}, handler)
+}
+
+func newTestAdapterWithInput(t *testing.T, input tracker.FactoryInput, handler func(*testing.T, gqlTestRequest) testResponse) *Adapter {
+	t.Helper()
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodPost || request.URL.String() != "https://api.linear.test/graphql" {
 			t.Fatalf("request = %s %s", request.Method, request.URL.String())
@@ -635,7 +682,7 @@ func newTestAdapter(t *testing.T, handler func(*testing.T, gqlTestRequest) testR
 		_, _ = io.WriteString(recorder, provided.body)
 		return recorder.Result(), nil
 	})}
-	adapter, err := New(tracker.FactoryInput{Target: testTeam}, Options{
+	adapter, err := New(input, Options{
 		BaseURL: "https://api.linear.test/graphql", Token: "test-token", Client: client,
 	})
 	if err != nil {

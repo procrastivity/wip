@@ -45,6 +45,7 @@ func Factory(options Options) tracker.Factory {
 // Adapter maps provider-neutral outbox entries to Linear GraphQL operations.
 type Adapter struct {
 	target  string
+	project string // the tracker.project value; empty means create with no project
 	baseURL string
 	token   string
 	client  *http.Client
@@ -57,6 +58,10 @@ func New(input tracker.FactoryInput, options Options) (*Adapter, error) {
 	target := strings.TrimSpace(input.Target)
 	if !validUUID(target) {
 		return nil, fmt.Errorf("linear tracker: target %q is not a team UUID", input.Target)
+	}
+	project := strings.TrimSpace(input.Project)
+	if project != "" && !validUUID(project) {
+		return nil, fmt.Errorf("linear tracker: project %q is not a project UUID", input.Project)
 	}
 	token := strings.TrimSpace(options.Token)
 	if token == "" {
@@ -77,7 +82,7 @@ func New(input tracker.FactoryInput, options Options) (*Adapter, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Adapter{target: strings.ToLower(target), baseURL: baseURL, token: token, client: client}, nil
+	return &Adapter{target: strings.ToLower(target), project: strings.ToLower(project), baseURL: baseURL, token: token, client: client}, nil
 }
 
 // Deliver implements tracker.Seam.
@@ -123,10 +128,14 @@ func (a *Adapter) create(ctx context.Context, entry store.OutboxEntry) (tracker.
 		}
 		description += "Source: " + payload.Provenance
 	}
-	variables := map[string]any{"input": map[string]any{
+	input := map[string]any{
 		"id": clientID, "teamId": a.target, "stateId": started.ID,
 		"title": payload.Title, "description": description,
-	}}
+	}
+	if a.project != "" {
+		input["projectId"] = a.project
+	}
+	variables := map[string]any{"input": input}
 	var data struct {
 		IssueCreate struct {
 			Success bool  `json:"success"`
