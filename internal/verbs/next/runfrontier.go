@@ -19,8 +19,10 @@ import (
 )
 
 // renderRunFrontier reports whether it rendered: false hands the display
-// back to the ordinary outputs.
-func renderRunFrontier(ctx context.Context, streams *iostreams.Streams, s *store.Store, actor store.Actor, dir string, jsonMode bool) (bool, error) {
+// back to the ordinary outputs. root and repo are the invocation's already
+// -resolved worktree root and current Repo (§0 of the navigation
+// contract), threaded down for the Ready nodes' matter/generatedDir.
+func renderRunFrontier(ctx context.Context, streams *iostreams.Streams, s *store.Store, actor store.Actor, dir string, jsonMode bool, root, repo string) (bool, error) {
 	cur, err := readsurface.ResolveCurrent(ctx, s, actor, dir)
 	if err != nil {
 		return false, nil //nolint:nilerr // outside a known clone the ordinary path answers (and refuses) as it always has
@@ -44,7 +46,7 @@ func renderRunFrontier(ctx context.Context, streams *iostreams.Streams, s *store
 		if len(fr.Ready) < 2 {
 			continue
 		}
-		return true, renderFrontier(ctx, streams, s.View, fr, jsonMode)
+		return true, renderFrontier(ctx, streams, s.View, fr, jsonMode, root, repo)
 	}
 	return false, nil
 }
@@ -66,31 +68,34 @@ func batchDisplay(ctx context.Context, v store.View, batchID string) (string, er
 	return "anonymous · " + matter.Locator, nil
 }
 
-func renderFrontier(ctx context.Context, streams *iostreams.Streams, v store.View, fr scheduler.Frontier, jsonMode bool) error {
+func renderFrontier(ctx context.Context, streams *iostreams.Streams, v store.View, fr scheduler.Frontier, jsonMode bool, root, repo string) error {
 	batch, err := batchDisplay(ctx, v, fr.Run.Batch)
 	if err != nil {
 		return err
 	}
 	if jsonMode {
-		type nodeJSON struct {
-			ID      string `json:"id"`
-			Address string `json:"address"`
-			Kind    string `json:"kind"`
-		}
+		// The Run-frontier payload replaces the ordinary next payload
+		// outright (it returns early from next.go's RunE) and, before
+		// this Matter, shared no field with it. kind is the discriminator
+		// a caller needs to tell the two contracts apart (navigation
+		// contract §3.2); Ready entries use the shared nodeJSON of §2
+		// (next.go) rather than a private shape, so id/address/kind stay
+		// byte-identical and lifecycle/matter/generatedDir land for free.
 		out := struct {
+			Kind    string     `json:"kind"`
 			Run     string     `json:"run"`
 			Locator string     `json:"locator"`
 			Batch   string     `json:"batch"`
 			Cap     int        `json:"cap"`
 			Slots   int        `json:"slots"`
 			Ready   []nodeJSON `json:"ready"`
-		}{Run: fr.Run.ID, Locator: fr.Run.Locator, Batch: batch, Cap: fr.Cap, Slots: fr.Slots, Ready: []nodeJSON{}}
+		}{Kind: "run-frontier", Run: fr.Run.ID, Locator: fr.Run.Locator, Batch: batch, Cap: fr.Cap, Slots: fr.Slots, Ready: []nodeJSON{}}
 		for _, n := range fr.Ready {
-			address, _, err := readsurface.Address(ctx, v, n)
+			j, err := toNodeJSON(ctx, v, n, repo, root)
 			if err != nil {
 				return err
 			}
-			out.Ready = append(out.Ready, nodeJSON{ID: n.ID, Address: address, Kind: string(n.Kind)})
+			out.Ready = append(out.Ready, j)
 		}
 		b, err := json.Marshal(out)
 		if err != nil {

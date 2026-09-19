@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/procrastivity/wip/internal/iostreams"
 	"github.com/procrastivity/wip/internal/manifest"
 	"github.com/procrastivity/wip/internal/readsurface"
+	"github.com/procrastivity/wip/internal/render"
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
@@ -45,7 +47,13 @@ func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "next",
 		Short: "the cursor fused with the unblocked frontier — what to work on next",
-		Args:  canonicalNoArgs,
+		Long: "Every node in the result carries its owning Matter's locator (matter) and " +
+			"that Matter's generated directory (generatedDir, absolute) in JSON; the " +
+			"current target's human output prints the same as a \"generated:\" line. A " +
+			"printed Step address is not an accepted locator — pass the matter value " +
+			"to other verbs. To read a Matter's record: wip plumbing refresh <matter>, " +
+			"then read exactly the files it reports.",
+		Args: canonicalNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags := cliflags.FromContext(cmd.Context())
 
@@ -59,29 +67,41 @@ func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 			}
 			defer func() { _ = s.Close() }()
 
+			actor := store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole)
+
 			if set != "" {
-				node, err := readsurface.SetCursor(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir, set)
+				node, err := readsurface.SetCursor(cmd.Context(), s, actor, dir, set)
 				if err != nil {
 					return err
 				}
-				return renderSet(cmd.Context(), streams, s.View, flags.JSON, node)
+				root, err := render.WorktreeRoot(cmd.Context(), dir)
+				if err != nil {
+					return err
+				}
+				return renderSet(cmd.Context(), streams, s.View, flags.JSON, node, root)
 			}
 			if clearCursor {
-				previous, err := readsurface.ClearCursor(cmd.Context(), s, store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole), dir)
+				previous, err := readsurface.ClearCursor(cmd.Context(), s, actor, dir)
 				if err != nil {
 					return err
 				}
 				return renderClear(streams, flags.JSON, previous)
 			}
 
-			actor := store.ActorFor(cliflags.FromContext(cmd.Context()).AsRole)
+			// Root and the current Repo are resolved once per invocation
+			// (§0 of the navigation contract) and threaded down to every
+			// node-rendering site, rather than re-resolved per node.
+			cur, err := render.ResolveCurrent(cmd.Context(), s, actor, dir)
+			if err != nil {
+				return err
+			}
 
 			// An open Run with a parallel frontier takes the display (the
 			// ratified draft in parallelism-decisions.md): the full Ready
 			// set, the cap, the available slots — never a selection, which
 			// is the scheduler's alone. With one Ready node or no open Run,
 			// the existing outputs stand unchanged.
-			if handled, err := renderRunFrontier(cmd.Context(), streams, s, actor, dir, flags.JSON); handled || err != nil {
+			if handled, err := renderRunFrontier(cmd.Context(), streams, s, actor, dir, flags.JSON, cur.Root, cur.Repo.ID); handled || err != nil {
 				return err
 			}
 
@@ -90,9 +110,9 @@ func command(streams *iostreams.Streams, aliasOf string) *cobra.Command {
 				return err
 			}
 			if flags.JSON {
-				return renderJSON(cmd.Context(), streams, s.View, view)
+				return renderJSON(cmd.Context(), streams, s.View, view, cur.Repo.ID, cur.Root)
 			}
-			return renderHuman(cmd.Context(), streams, s.View, view)
+			return renderHuman(cmd.Context(), streams, s.View, view, cur.Root)
 		},
 	}
 	cmd.Flags().StringVar(&set, "set", "", "move the cursor to <locator>, emitting cursor.moved")
@@ -112,16 +132,22 @@ func canonicalNoArgs(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func renderSet(ctx context.Context, streams *iostreams.Streams, v store.View, jsonMode bool, node store.Node) error {
+func renderSet(ctx context.Context, streams *iostreams.Streams, v store.View, jsonMode bool, node store.Node, root string) error {
 	address, _, err := readsurface.Address(ctx, v, node)
 	if err != nil {
 		return err
 	}
 	if jsonMode {
+		matterLocator, err := ownerMatterLocator(ctx, v, node)
+		if err != nil {
+			return err
+		}
 		b, err := json.Marshal(struct {
-			Node    string `json:"node"`
-			Address string `json:"address"`
-		}{Node: node.ID, Address: address})
+			Node         string `json:"node"`
+			Address      string `json:"address"`
+			Matter       string `json:"matter"`
+			GeneratedDir string `json:"generatedDir"`
+		}{Node: node.ID, Address: address, Matter: matterLocator, GeneratedDir: generatedDirFor(root, matterLocator)})
 		if err != nil {
 			return err
 		}
@@ -156,14 +182,17 @@ func renderClear(streams *iostreams.Streams, jsonMode bool, previous string) err
 // Human rendering — vocabulary's five drafted outputs, plus the choose-next case.
 // ---------------------------------------------------------------------------
 
-func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View) error {
+func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View, root string) error {
 	switch view.Kind {
 	case readsurface.BareMatter:
 		if _, err := fmt.Fprintf(streams.Out, "%-34s %s · %s\n  no plan — work it directly\n",
 			view.Address, view.Node.Kind, view.Node.Lifecycle); err != nil {
 			return err
 		}
-		return renderPendingHuman(ctx, streams, v, view.Pending)
+		if err := renderPendingHuman(ctx, streams, v, view.Pending); err != nil {
+			return err
+		}
+		return renderGeneratedLine(ctx, streams, v, view.Node, root)
 
 	case readsurface.Positioned:
 		if _, err := fmt.Fprintf(streams.Out, "%-34s %s · %s\n", view.Address, view.Node.Kind, view.Node.Lifecycle); err != nil {
@@ -178,11 +207,13 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(streams.Out, "  blocked-by: %s\n", bb)
-		if err != nil {
+		if _, err := fmt.Fprintf(streams.Out, "  blocked-by: %s\n", bb); err != nil {
 			return err
 		}
-		return renderPendingHuman(ctx, streams, v, view.Pending)
+		if err := renderPendingHuman(ctx, streams, v, view.Pending); err != nil {
+			return err
+		}
+		return renderGeneratedLine(ctx, streams, v, view.Node, root)
 
 	case readsurface.NothingUnblocked:
 		if _, err := fmt.Fprintln(streams.Out, "nothing unblocked"); err != nil {
@@ -235,6 +266,9 @@ func renderHuman(ctx context.Context, streams *iostreams.Streams, v store.View, 
 				return err
 			}
 			if _, err := fmt.Fprintf(streams.Out, "%s is %s — choose what's next\n", addr, view.EndedReason); err != nil {
+				return err
+			}
+			if err := renderGeneratedLine(ctx, streams, v, view.Node, root); err != nil {
 				return err
 			}
 		}
@@ -346,11 +380,51 @@ func joinComma(items []string) string {
 // JSON rendering
 // ---------------------------------------------------------------------------
 
+// nodeJSON is the shared per-node JSON shape — emitted at every render site
+// in this package and in runfrontier.go's Run-frontier payload (the
+// navigation contract's §2 convergence). matter and generatedDir are
+// omitted together, and only for a node whose Repo differs from the
+// resolved current Repo (a foreign-repo node reached through a
+// ULID-created depend edge, appearing in unmet/met/blocked[].blockedBy):
+// a foreign Matter's locator is ambiguous in this repo, and its
+// generatedDir under this Root would be false.
 type nodeJSON struct {
-	ID        string `json:"id"`
-	Address   string `json:"address"`
-	Kind      string `json:"kind"`
-	Lifecycle string `json:"lifecycle"`
+	ID           string `json:"id"`
+	Address      string `json:"address"`
+	Kind         string `json:"kind"`
+	Lifecycle    string `json:"lifecycle"`
+	Matter       string `json:"matter,omitempty"`
+	GeneratedDir string `json:"generatedDir,omitempty"`
+}
+
+// ownerMatterLocator is the navigation contract's §0 "owning Matter" rule:
+// n itself when n is a Matter, else the Matter n.Matter names.
+func ownerMatterLocator(ctx context.Context, v store.View, n store.Node) (string, error) {
+	if n.Kind == store.ScaleMatter {
+		return n.Locator, nil
+	}
+	m, err := v.Node(ctx, n.Matter)
+	if err != nil {
+		return "", err
+	}
+	return m.Locator, nil
+}
+
+// generatedDirFor is the navigation contract's §0 generatedDir rule:
+// <Root>/.wip/generated/<owning-matter-locator>, absolute (§1).
+func generatedDirFor(root, matterLocator string) string {
+	return filepath.Join(render.GeneratedDir(root), matterLocator)
+}
+
+// renderGeneratedLine prints the one new human line (§3.3) for a target
+// node — always same-repo, so no omission case applies here.
+func renderGeneratedLine(ctx context.Context, streams *iostreams.Streams, v store.View, n store.Node, root string) error {
+	matterLocator, err := ownerMatterLocator(ctx, v, n)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(streams.Out, "  generated: %s (refresh: wip plumbing refresh %s)\n", generatedDirFor(root, matterLocator), matterLocator)
+	return err
 }
 
 type pendingGateJSON struct {
@@ -377,18 +451,32 @@ func pendingGatesJSON(ctx context.Context, v store.View, pending []store.GateReq
 	return out, nil
 }
 
-func toNodeJSON(ctx context.Context, v store.View, n store.Node) (nodeJSON, error) {
+// toNodeJSON builds the shared node shape for n, populating matter and
+// generatedDir when n belongs to repo (the resolved current Repo) and
+// omitting both together otherwise (the foreign-repo carve-out on
+// nodeJSON above).
+func toNodeJSON(ctx context.Context, v store.View, n store.Node, repo, root string) (nodeJSON, error) {
 	addr, _, err := readsurface.Address(ctx, v, n)
 	if err != nil {
 		return nodeJSON{}, err
 	}
-	return nodeJSON{ID: n.ID, Address: addr, Kind: string(n.Kind), Lifecycle: string(n.Lifecycle)}, nil
+	j := nodeJSON{ID: n.ID, Address: addr, Kind: string(n.Kind), Lifecycle: string(n.Lifecycle)}
+	if n.Repo != repo {
+		return j, nil
+	}
+	matterLocator, err := ownerMatterLocator(ctx, v, n)
+	if err != nil {
+		return nodeJSON{}, err
+	}
+	j.Matter = matterLocator
+	j.GeneratedDir = generatedDirFor(root, matterLocator)
+	return j, nil
 }
 
-func toNodeJSONs(ctx context.Context, v store.View, nodes []store.Node) ([]nodeJSON, error) {
+func toNodeJSONs(ctx context.Context, v store.View, nodes []store.Node, repo, root string) ([]nodeJSON, error) {
 	out := make([]nodeJSON, 0, len(nodes))
 	for _, n := range nodes {
-		j, err := toNodeJSON(ctx, v, n)
+		j, err := toNodeJSON(ctx, v, n, repo, root)
 		if err != nil {
 			return nil, err
 		}
@@ -397,7 +485,7 @@ func toNodeJSONs(ctx context.Context, v store.View, nodes []store.Node) ([]nodeJ
 	return out, nil
 }
 
-func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View) error {
+func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, view readsurface.View, repo, root string) error {
 	kind := map[readsurface.Kind]string{
 		readsurface.BareMatter:         "bare-matter",
 		readsurface.Positioned:         "positioned",
@@ -424,7 +512,7 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 
 	if view.Kind == readsurface.BareMatter || view.Kind == readsurface.Positioned ||
 		(view.Kind == readsurface.ChooseNext && view.Node.ID != "") {
-		n, err := toNodeJSON(ctx, v, view.Node)
+		n, err := toNodeJSON(ctx, v, view.Node, repo, root)
 		if err != nil {
 			return err
 		}
@@ -443,39 +531,39 @@ func renderJSON(ctx context.Context, streams *iostreams.Streams, v store.View, v
 		}
 	}
 	if view.Unmet != nil {
-		u, err := toNodeJSONs(ctx, v, view.Unmet)
+		u, err := toNodeJSONs(ctx, v, view.Unmet, repo, root)
 		if err != nil {
 			return err
 		}
 		payload.Unmet = u
 	}
 	if view.Met != nil {
-		m, err := toNodeJSONs(ctx, v, view.Met)
+		m, err := toNodeJSONs(ctx, v, view.Met, repo, root)
 		if err != nil {
 			return err
 		}
 		payload.Met = m
 	}
 	if view.Candidates != nil {
-		c, err := toNodeJSONs(ctx, v, view.Candidates)
+		c, err := toNodeJSONs(ctx, v, view.Candidates, repo, root)
 		if err != nil {
 			return err
 		}
 		payload.Cand = c
 	}
 	if view.InProgress != nil {
-		p, err := toNodeJSONs(ctx, v, view.InProgress)
+		p, err := toNodeJSONs(ctx, v, view.InProgress, repo, root)
 		if err != nil {
 			return err
 		}
 		payload.InProg = p
 	}
 	for _, b := range view.Blocked {
-		n, err := toNodeJSON(ctx, v, b.Node)
+		n, err := toNodeJSON(ctx, v, b.Node, repo, root)
 		if err != nil {
 			return err
 		}
-		blockers, err := toNodeJSONs(ctx, v, b.Blockers)
+		blockers, err := toNodeJSONs(ctx, v, b.Blockers, repo, root)
 		if err != nil {
 			return err
 		}

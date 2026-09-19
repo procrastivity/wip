@@ -10,6 +10,7 @@ package cli_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,6 +24,30 @@ var nodeIDPattern = regexp.MustCompile(`\b01[0-9A-HJKMNP-TV-Z]{24}\b`)
 
 func maskIDs(s string) string {
 	return nodeIDPattern.ReplaceAllString(s, "<id>")
+}
+
+// worktreeRoot resolves dir's own worktree root exactly as the binary does
+// (render.WorktreeRoot: `git rev-parse --path-format=absolute
+// --show-toplevel`), never the raw t.TempDir() string — the navigation
+// contract's test 3.20 requires the substitution to use the root as the
+// binary resolves it, since the two can differ under symlinked temp roots.
+func worktreeRoot(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --show-toplevel (in %s): %v", dir, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// maskRoot substitutes root with the literal token <root> — the navigation
+// contract's cross-root golden normalization (test 3.20), the standing cost
+// of the frozen absolute-path decision (generatedDir is always absolute, so
+// two independently seeded fixtures print two different roots).
+func maskRoot(s, root string) string {
+	return strings.ReplaceAll(s, root, "<root>")
 }
 
 // seedStatusFixture builds the four-section repo the status assertions
@@ -80,13 +105,17 @@ func TestPair_NextGoldenSameness(t *testing.T) {
 			results := make([]result, 2)
 			for i, prefix := range [][]string{nil, {"plumbing"}} {
 				dir, dbEnv := seedStatusFixture(t)
+				root := worktreeRoot(t, dir)
 				if tc.withCursor {
 					if r := runIn(t, dir, dbEnv, "plumbing", "next", "--set", "pair-matter/step-02"); r.exitCode != 0 {
 						t.Fatalf("seeding cursor: exit=%d stderr=%q", r.exitCode, r.stderr)
 					}
 				}
 				args := append(append([]string{}, prefix...), tc.args...)
-				results[i] = runIn(t, dir, dbEnv, args...)
+				r := runIn(t, dir, dbEnv, args...)
+				r.stdout = maskRoot(r.stdout, root)
+				r.stderr = maskRoot(r.stderr, root)
+				results[i] = r
 			}
 			porcelain, plumbing := results[0], results[1]
 			if porcelain.exitCode != plumbing.exitCode {
