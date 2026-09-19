@@ -26,7 +26,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		Use:   "backlog",
 		Short: "one list, one noun, one exit set (MODEL §4)",
 	}
-	cmd.AddCommand(addCommand(streams), listCommand(streams), planCommand(streams), declineCommand(streams), delegateCommand(streams))
+	cmd.AddCommand(addCommand(streams), listCommand(streams), showCommand(streams), planCommand(streams), declineCommand(streams), delegateCommand(streams))
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
 }
@@ -75,7 +75,7 @@ func porcelainArgs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "add", "list", "plan", "decline", "delegate":
+	case "add", "list", "show", "plan", "decline", "delegate":
 		invocation := strings.Join(args, " ")
 		return wiperr.New("validation.moved-verb", fmt.Sprintf(
 			"moved — `backlog %s` now lives under the plumbing namespace; run `wip plumbing backlog %s` instead",
@@ -200,6 +200,116 @@ func listCommand(streams *iostreams.Streams) *cobra.Command {
 	}
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func showCommand(streams *iostreams.Streams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "show <entry-id>",
+		Short: "show one backlog entry and its findings — read-only, emits no event",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flags := cliflags.FromContext(cmd.Context())
+			s, repo, err := openRepo(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = s.Close() }()
+
+			e, ok, err := s.BacklogEntry(cmd.Context(), repo.ID, args[0])
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return wiperr.New("validation.unknown-backlog-entry", fmt.Sprintf("no backlog entry %s in this repo", args[0]))
+			}
+
+			segments, err := s.ContentSegments(cmd.Context(), e.ID, store.KindFindings)
+			if err != nil {
+				return err
+			}
+			type finding struct {
+				At   string `json:"at"`
+				Text string `json:"text"`
+			}
+			findings := make([]finding, 0, len(segments))
+			for _, segment := range segments {
+				data, err := s.SegmentBytes(cmd.Context(), segment.ID)
+				if err != nil {
+					return err
+				}
+				findings = append(findings, finding{
+					At:   segment.OccurredAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+					Text: string(data),
+				})
+			}
+
+			if flags.JSON {
+				b, err := json.Marshal(struct {
+					ID            string    `json:"id"`
+					Provenance    string    `json:"provenance"`
+					State         string    `json:"state"`
+					Title         string    `json:"title"`
+					Detail        string    `json:"detail,omitempty"`
+					DeclineReason string    `json:"declineReason,omitempty"`
+					OriginNode    string    `json:"originNode,omitempty"`
+					Matter        string    `json:"matter,omitempty"`
+					Outbox        string    `json:"outbox,omitempty"`
+					Findings      []finding `json:"findings"`
+				}{
+					ID: e.ID, Provenance: string(e.Provenance), State: e.State, Title: e.Title,
+					Detail: e.Detail, DeclineReason: e.DeclineReason, OriginNode: e.OriginNode,
+					Matter: e.Matter, Outbox: e.Outbox, Findings: findings,
+				})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(streams.Out, string(b))
+				return err
+			}
+
+			if _, err := fmt.Fprintf(streams.Out, "%s\n  id: %s\n  provenance: %s\n  state: %s\n", e.Title, e.ID, e.Provenance, e.State); err != nil {
+				return err
+			}
+			for _, field := range []struct {
+				name  string
+				value string
+			}{
+				{"detail", e.Detail},
+				{"declined", e.DeclineReason},
+				{"origin", e.OriginNode},
+				{"matter", e.Matter},
+				{"outbox", e.Outbox},
+			} {
+				if field.value == "" {
+					continue
+				}
+				if _, err := fmt.Fprintf(streams.Out, "  %s: %s\n", field.name, field.value); err != nil {
+					return err
+				}
+			}
+			if len(findings) == 0 {
+				return nil
+			}
+			if _, err := fmt.Fprintf(streams.Out, "\n%s:\n", findingCount(len(findings))); err != nil {
+				return err
+			}
+			for _, f := range findings {
+				if _, err := fmt.Fprintf(streams.Out, "\n%s\n%s\n", f.At, strings.TrimRight(f.Text, "\n")); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	surface.Annotate(cmd, surface.Plumbing)
+	return cmd
+}
+
+func findingCount(n int) string {
+	if n == 1 {
+		return "1 finding"
+	}
+	return fmt.Sprintf("%d findings", n)
 }
 
 func renderJSON(streams *iostreams.Streams, entries []store.BacklogEntry) error {

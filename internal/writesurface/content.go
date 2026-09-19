@@ -52,21 +52,24 @@ func WriteOnce(ctx context.Context, s *store.Store, actor store.Actor, repo, loc
 
 // AppendFinding writes one more `findings` segment. Each call accumulates —
 // the append counterpart to create-once — and never replaces a prior entry.
-func AppendFinding(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string, data []byte) (store.Node, error) {
-	n, err := ResolveNode(ctx, s.View, repo, locator)
+// Findings alone among the four kinds also accept a backlog entry as their
+// subject (v12): triage evidence accumulates on the entry while it sits in
+// the funnel, and it stays on the entry through every exit.
+func AppendFinding(ctx context.Context, s *store.Store, actor store.Actor, repo, locator string, data []byte) (FindingSubject, error) {
+	sub, err := ResolveFindingSubject(ctx, s.View, repo, locator)
 	if err != nil {
-		return store.Node{}, err
+		return FindingSubject{}, err
 	}
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo}}
 	if _, err := s.Commit(ctx, req, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
-		draft, err := tx.ContentDraft(n.ID, store.KindFindings, data)
+		draft, err := tx.ContentDraft(sub.ID, store.KindFindings, data)
 		if err != nil {
 			return nil, err
 		}
 		return []store.Draft{draft}, nil
 	}); err != nil {
-		return store.Node{}, err
+		return FindingSubject{}, err
 	}
-	return n, nil
+	return sub, nil
 }
