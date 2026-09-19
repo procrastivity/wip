@@ -77,6 +77,45 @@ func TestGenerate_ProjectsHandAuthoredTextVerbatim(t *testing.T) {
 	}
 }
 
+// TestGenerate_ProjectsReadPathGuidanceParagraphVerbatim is the
+// navigation contract's test 5.1: the guidance asset carries §7's
+// canonical read-path paragraph verbatim. The shipped asset reflows the
+// paragraph onto a single line (the contract's own cosmetic note — the
+// frozen wording is unchanged, only its line breaks), so the comparison
+// normalizes whitespace rather than requiring exact newlines.
+func TestGenerate_ProjectsReadPathGuidanceParagraphVerbatim(t *testing.T) {
+	guidance, err := asset.Resolve("agent-write-guidance.md")
+	if err != nil {
+		t.Fatalf("resolving harness-guidance asset: %v", err)
+	}
+	if !strings.Contains(normalizeWhitespace(string(guidance.Bytes())), normalizeWhitespace(wantReadPathGuidanceParagraph)) {
+		t.Errorf("agent-write-guidance.md does not contain the §7 read-path paragraph verbatim (normalized whitespace):\n%s", guidance.Bytes())
+	}
+}
+
+// wantReadPathGuidanceParagraph is the contract's §7 frozen wording,
+// compared on normalized whitespace (see
+// TestGenerate_ProjectsReadPathGuidanceParagraphVerbatim).
+const wantReadPathGuidanceParagraph = "To read a Matter's own record, follow the read path `next` teaches: run " +
+	"`wip plumbing next --json` and take the target's (or your chosen candidate's) " +
+	"`matter` and `generatedDir` fields; run `wip plumbing refresh <matter>` (the " +
+	"locator form also renders a sealed Matter); then read exactly the files " +
+	"that refresh reports — `generatedFiles` in JSON, the indented list in " +
+	"human output. When `next` reports no node at all, take the Matter locator " +
+	"from `wip plumbing status --all` instead and refresh it the same way — " +
+	"plain status hides sealed Matters older than two weeks. A printed Step " +
+	"address is not an accepted locator; the `matter` field is. Never open " +
+	"wip's database or event log to answer a content question, and never " +
+	"read another repo's `.wip/`: the files refresh reports are the whole " +
+	"sanctioned read surface for Matter content."
+
+// normalizeWhitespace collapses any run of whitespace (including
+// newlines from a hard-wrapped source paragraph) to a single space, so a
+// reflow of line breaks never fails a verbatim-wording comparison.
+func normalizeWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func TestGenerate_EverythingElseTracesBackToTheManifest(t *testing.T) {
 	m1 := testManifest()
 	m2 := testManifest()

@@ -299,6 +299,59 @@ func TestPair_NextHelpDiffersOnlyInCommandPath(t *testing.T) {
 	}
 }
 
+// TestNavigation_HelpCarriesTheFrozenLongTexts is the navigation
+// contract's test 5.2: `wip plumbing refresh --help` and both `next --help`
+// spellings carry their §7 Long texts verbatim, and the Shorts (as
+// projected in the parent command's listing) are unchanged.
+func TestNavigation_HelpCarriesTheFrozenLongTexts(t *testing.T) {
+	dir, dbEnv := setupRepo(t)
+
+	const wantNextLong = "Every node in the result carries its owning Matter's locator (matter) and " +
+		"that Matter's generated directory (generatedDir, absolute) in JSON; the " +
+		"current target's human output prints the same as a \"generated:\" line. A " +
+		"printed Step address is not an accepted locator — pass the matter value " +
+		"to other verbs. To read a Matter's record: wip plumbing refresh <matter>, " +
+		"then read exactly the files it reports."
+	const wantRefreshLong = "With no locator: open or continue this worktree's dispatch and re-render " +
+		"every not-sealed Matter. With a locator: render that node's owning Matter " +
+		"alone — the only way a sealed Matter renders. Either way the result names " +
+		"the files actually written: generatedFiles in JSON (absolute paths, in " +
+		"write order, beside the retained rendered locators); the human locator " +
+		"form lists each file, the bare form prints \"wrote N file(s)\". Read those " +
+		"files — never wip's database — for Matter content."
+
+	plumbingNext := runIn(t, dir, dbEnv, "plumbing", "next", "--help")
+	porcelainNext := runIn(t, dir, dbEnv, "next", "--help")
+	refresh := runIn(t, dir, dbEnv, "plumbing", "refresh", "--help")
+	for _, r := range []result{plumbingNext, porcelainNext, refresh} {
+		if r.exitCode != 0 {
+			t.Fatalf("--help: exit=%d stderr=%q", r.exitCode, r.stderr)
+		}
+	}
+	if !strings.Contains(plumbingNext.stdout, wantNextLong) {
+		t.Errorf("wip plumbing next --help missing the frozen Long text:\n%s", plumbingNext.stdout)
+	}
+	if !strings.Contains(porcelainNext.stdout, wantNextLong) {
+		t.Errorf("wip next --help missing the frozen Long text:\n%s", porcelainNext.stdout)
+	}
+	if !strings.Contains(refresh.stdout, wantRefreshLong) {
+		t.Errorf("wip plumbing refresh --help missing the frozen Long text:\n%s", refresh.stdout)
+	}
+
+	plumbingList := runIn(t, dir, dbEnv, "plumbing", "--help")
+	if plumbingList.exitCode != 0 {
+		t.Fatalf("plumbing --help: exit=%d stderr=%q", plumbingList.exitCode, plumbingList.stderr)
+	}
+	for _, wantShort := range []string{
+		"next        the cursor fused with the unblocked frontier — what to work on next",
+		"refresh     open or continue this worktree's dispatch, and (re-)render .wip/generated/",
+	} {
+		if !strings.Contains(plumbingList.stdout, wantShort) {
+			t.Errorf("wip plumbing --help missing unchanged Short %q:\n%s", wantShort, plumbingList.stdout)
+		}
+	}
+}
+
 // TestPair_PorcelainStatusIsTheMinimalWorkingSet pins the split pair's
 // human face: in progress + next to start, a counts footer for the elided
 // sections, and none of the plumbing member's tier internals or
