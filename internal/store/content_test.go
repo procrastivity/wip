@@ -466,6 +466,57 @@ func TestFindingsAccumulateAndNoContentLeaksAcrossKindsOrNodes(t *testing.T) {
 	}
 }
 
+// backlogEntry births one intake entry and returns its identity — the minimal
+// fixture for content whose owner is not a node.
+func (h *harness) backlogEntry(title string) string {
+	h.t.Helper()
+	return h.commitOne(func(_ context.Context, tx *Tx) (Draft, error) {
+		return Draft{
+			Type:    TypeBacklogEntered,
+			Subject: tx.NewID(),
+			Payload: BacklogEntered{Provenance: ProvenanceIntake, Title: title},
+		}, nil
+	})
+}
+
+// TestFindingsAttachToABacklogEntryAndCreateOnceKindsDoNot pins v12's widening
+// from both sides: findings accumulate on a backlog entry exactly as they do
+// on a node, while the three create-once kinds stay node-only — refused by the
+// projection, which is the FK's replacement and runs on the rebuild path too.
+func TestFindingsAttachToABacklogEntryAndCreateOnceKindsDoNot(t *testing.T) {
+	h := newHarness(t)
+	entry := h.backlogEntry("An entry that accumulates triage notes")
+
+	notes := [][]byte{
+		[]byte("Looked into it: blocked on the provider seam.\n"),
+		[]byte("Probably a duplicate of GH-42.\n"),
+	}
+	for _, note := range notes {
+		h.write(entry, KindFindings, note)
+	}
+	h.wantContent("two findings on a backlog entry", entry, KindFindings, bytes.Join(notes, nil))
+	if segs := h.segments(entry, KindFindings); len(segs) != 2 {
+		t.Fatalf("the entry's findings are %d segments, want 2", len(segs))
+	}
+
+	// The entry's findings do not leak onto a node, and a node's do not leak
+	// onto the entry — one table, scoped reads, same as node-to-node.
+	matter := h.matter("beside-the-backlog", "A Matter beside the backlog")
+	h.write(matter, KindFindings, []byte("A node finding.\n"))
+	h.wantContent("the entry's findings beside a node's", entry, KindFindings, bytes.Join(notes, nil))
+
+	for _, kind := range []ContentKind{KindBrief, KindWorkplan, KindBody} {
+		err := h.writeError(entry, kind, []byte("prose that must not land"))
+		refusalMentions(t, string(kind)+" on a backlog entry", err, "is not a node")
+	}
+
+	// A subject in neither table is refused: the guard the FK used to be.
+	err := h.writeError("01ARZ3NDEKTSV4RRFFQ69G5FAV", KindFindings, []byte("an orphan finding"))
+	refusalMentions(t, "findings on a subject in neither table", err, "neither a node nor a backlog entry")
+	h.wantRowCount("after every refused subject", "content",
+		"node = ?", []any{"01ARZ3NDEKTSV4RRFFQ69G5FAV"}, 0)
+}
+
 // ---------------------------------------------------------------------------
 // 4. Spill
 // ---------------------------------------------------------------------------
@@ -691,11 +742,16 @@ func TestRebuildReproducesTheContentTableIncludingASpilledRow(t *testing.T) {
 	h.write(empty, KindBody, nil)
 	spilledBytes := generated(SpillThreshold+1, 0x11)
 	h.write(step, KindFindings, spilledBytes)
+	// A backlog entry's finding, so the rebuild proof covers the one content
+	// owner that is not a node (v12).
+	entry := h.backlogEntry("An entry with a triage note")
+	entryNote := []byte("Triage: worth planning next cycle.\n")
+	h.write(entry, KindFindings, entryNote)
 
 	before := h.snapshotProjection()
 	rows := before["content"]
-	if len(rows) != 7 {
-		t.Fatalf("the content table holds %d rows, want 7; the rebuild assertion is only worth its fixture", len(rows))
+	if len(rows) != 8 {
+		t.Fatalf("the content table holds %d rows, want 8; the rebuild assertion is only worth its fixture", len(rows))
 	}
 	spilledRows := 0
 	for _, row := range rows {
@@ -714,6 +770,7 @@ func TestRebuildReproducesTheContentTableIncludingASpilledRow(t *testing.T) {
 	h.wantContent("a rebuilt spilled row", step, KindFindings,
 		[]byte("The first finding.\nA second finding.\n"+string(spilledBytes)))
 	h.wantContent("a rebuilt zero-length body", empty, KindBody, nil)
+	h.wantContent("a rebuilt backlog-entry finding", entry, KindFindings, entryNote)
 
 	// The row is derivable and the bytes are not, so a rebuild must not depend on
 	// the sidecar file: recovering the projection is exactly the situation in which

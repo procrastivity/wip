@@ -230,7 +230,7 @@ func TestGateDismissalMigrationAddsOnlyTheNewEventType(t *testing.T) {
 	h.finish(matter)
 	log := h.rowsOf("events", "")
 
-	migrated, err := h.reopen(shipped(), latestVersion(shipped()))
+	migrated, err := h.reopen(append([]migration{}, register[:11]...), 11)
 	if err != nil {
 		t.Fatal(err)
 	}
