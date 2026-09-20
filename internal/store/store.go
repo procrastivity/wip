@@ -49,6 +49,15 @@ func ActorFor(asRole string) Actor {
 // rather than a gap in the envelope.
 func SystemActor(source string) Actor { return Actor("system:" + source) }
 
+// ActorMigration is the actor a schema migration stamps on the synthetic
+// events it mints from rows that predate the log (step-03, evented-config):
+// honest because the name says exactly what happened — nobody performed this
+// command, a migration reconstructed it from state the log never saw written.
+// It needs no new rule in (Actor).valid or the events table's actor CHECK:
+// system:<source> already admits it, and this constant exists only so every
+// migration stamps the identical token rather than retyping the source string.
+var ActorMigration = SystemActor("migration")
+
 // Role returns the role name a `role:` actor claims, if it is one.
 func (a Actor) Role() (RoleName, bool) {
 	if len(a) > len("role:") && a[:len("role:")] == "role:" {
@@ -216,7 +225,7 @@ func openAt(path string, reg []migration, target int, clock func() time.Time) (*
 		_ = db.Close()
 		return nil, fmt.Errorf("store: connect %s: %w", path, err)
 	}
-	version, err := migrate(ctx, db, path, reg, target)
+	version, err := migrate(ctx, db, path, reg, target, clock)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -364,7 +373,11 @@ type Tx struct {
 // NewID mints an identity for an entity this command is about to birth.
 func (t *Tx) NewID() string { return t.store.NewID() }
 
-// Commit is the only function in this package that writes.
+// Commit is the only function in this package that appends events on the live
+// write path. (schema v13's migration is the one exception, and for a
+// structural reason rather than a stylistic one: it runs before any Store
+// exists to call Commit, so its synthetic history goes through
+// appendMigrationEvent in migrations.go instead — see schema_v13.go.)
 //
 // A caller hands it a decide function which reads current state and returns the
 // events that follow; Commit stamps them, appends them, and folds each one into
