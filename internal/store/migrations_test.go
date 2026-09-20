@@ -268,6 +268,24 @@ func wantSameRows(t *testing.T, what string, before, after []map[string]string) 
 	}
 }
 
+// wantLogRetainsEveryRow is wantSameRows for the one table a migration may now
+// legitimately grow: schema v13's synthetic-history backfill (schema_v13.go)
+// is the first migration that appends to the log rather than only reshaping
+// projection tables around it, so "unchanged" is no longer the right claim for
+// a store whose config or gate rows predate v13. What must still never happen
+// is a row being rewritten, reordered or dropped — every row a `before` read
+// saw must still be exactly there, in the same position, as a prefix of
+// `after`. Every other projection table keeps the stricter wantSameRows,
+// because nothing but v13's backfill writes new rows during a migration.
+func wantLogRetainsEveryRow(t *testing.T, what string, before, after []map[string]string) {
+	t.Helper()
+	if len(after) < len(before) {
+		t.Errorf("%s: %d rows, was %d (the log lost rows)", what, len(after), len(before))
+		return
+	}
+	wantSameRows(t, what, before, after[:len(before)])
+}
+
 // restore puts a backup back over the database it was taken from — the recovery
 // a person with a store they regret migrating actually performs.
 //
@@ -451,7 +469,7 @@ func TestASyntheticMigrationBacksUpAppliesAndKeepsEverything(t *testing.T) {
 	if got := migrated.columnsOf("events"); !reflect.DeepEqual(got, logColumns) {
 		t.Errorf("the envelope is %v after a migration, was %v", got, logColumns)
 	}
-	wantSameRows(t, "the log after a migration", log, migrated.rowsOf("events", ""))
+	wantLogRetainsEveryRow(t, "the log after a migration", log, migrated.rowsOf("events", ""))
 
 	// --- the oracle ----------------------------------------------------------
 	// A store that got to v2 by migrating is indistinguishable from one built at
@@ -607,7 +625,7 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	directV2 := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), shipped(), latestVersion(shipped()))
 	wantSameSchema(t, "after a v11 that failed partway", schemaShape(t, after.Store), schemaShape(t, directV2.Store))
 	wantMigrationLedger(after, "after a v11 that failed", shipped())
-	wantSameRows(t, "the log after a v3 that failed", log, after.rowsOf("events", ""))
+	wantLogRetainsEveryRow(t, "the log after a v3 that failed", log, after.rowsOf("events", ""))
 	wantSameProjectionThroughMigration(t, "after a v3 that failed", before, after.snapshotProjection())
 }
 
@@ -752,7 +770,7 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 	if !bytes.Equal(again, kept) {
 		t.Errorf("the sidecar %s was overwritten by a later migration", first[0])
 	}
-	wantSameRows(t, "the log after a failed migration and the retry", log, fixed.rowsOf("events", ""))
+	wantLogRetainsEveryRow(t, "the log after a failed migration and the retry", log, fixed.rowsOf("events", ""))
 }
 
 // ---------------------------------------------------------------------------
@@ -936,7 +954,7 @@ func TestTwoMigrationsInOneOpenApplyInOrderUnderOneBackup(t *testing.T) {
 			t.Errorf("node row %d has review_note = %s, want NULL", i, row["review_note"])
 		}
 	}
-	wantSameRows(t, "the log after two migrations", log, migrated.rowsOf("events", ""))
+	wantLogRetainsEveryRow(t, "the log after two migrations", log, migrated.rowsOf("events", ""))
 
 	// --- the three-way oracle ------------------------------------------------
 	direct := newHarnessAt(t, filepath.Join(t.TempDir(), "wip.db"), reg, syntheticV4Version)

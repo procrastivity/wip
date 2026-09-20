@@ -106,7 +106,7 @@ func TestV1MemberlessAnonymousBatchConvertsToSweptLegacyRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrating a store with a memberless legacy Batch: %v", err)
 	}
-	wantSameRows(t, "event log through the legacy conversion", log, migrated.rowsOf("events", ""))
+	wantLogRetainsEveryRow(t, "event log through the legacy conversion", log, migrated.rowsOf("events", ""))
 
 	b, err := migrated.Batch(migrated.ctx, legacy)
 	if err != nil || b.State != "closed" || b.CloseReason != BatchSwept || b.Name != "" || b.Matter != "" || b.ClosedAt == nil {

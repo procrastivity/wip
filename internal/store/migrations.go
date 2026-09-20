@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,13 @@ type migration struct {
 	name      string
 	stmts     []string
 	preflight func(context.Context, *sql.Tx) error
+	// dataMigrate runs after stmts, inside the same transaction, for the rare
+	// migration whose data half is not expressible as SQL — v13's
+	// synthetic-history backfill (schema_v13.go) is the first and, as of P1,
+	// the only one. It sees a *migrationIDs rather than a *Store because no
+	// Store exists yet at migration time (Store.NewID needs the floor
+	// loadFloor establishes after migrate returns).
+	dataMigrate func(context.Context, *sql.Tx, *migrationIDs) error
 }
 
 // register is the ordered migration register, embedded in the binary. Its last
@@ -49,7 +57,7 @@ var register = []migration{
 	{version: 10, name: "backlog-decline-reason", stmts: v10Statements()},
 	{version: 11, name: "emergency-gate-dismissal", stmts: v11Statements()},
 	{version: 12, name: "backlog-entry-findings", stmts: v12Statements()},
-	{version: 13, name: "evented-config", stmts: v13Statements()},
+	{version: 13, name: "evented-config", stmts: v13Statements(), dataMigrate: v13SyntheticHistory},
 }
 
 // latestVersion is the highest migration this binary carries.
@@ -72,16 +80,27 @@ func latestVersion(reg []migration) int {
 // exemptions projections: a bump refolds every existing store at its next open,
 // and until the migration that gives those rows synthetic history there is no
 // event behind the ones a store already carries. The bump belongs with that
-// migration.
-const projectionVersion = 10
+// migration — this one. v13's dataMigrate (schema_v13.go) mints the events
+// first, in the same transaction as the schema statements; this bump is what
+// makes them take effect, because nothing here folds them into config,
+// gate_declarations or gate_exemptions directly (those tables already hold the
+// rows being explained). The very next ensureProjectionVersion call, still
+// inside the same Open, sees an outdated projection, clears all three and
+// refolds the whole log — the synthetic events included — which is where
+// "reproduces state identical to the pre-migration rows" actually happens
+// (see the migration test).
+const projectionVersion = 11
 
 // projectionVersionKey is where the store records the projection version it was
 // last folded under.
 const projectionVersionKey = "projection_version"
 
 // migrate brings the database at path up to the register's latest version and
-// returns the version reached.
-func migrate(ctx context.Context, db *sql.DB, path string, reg []migration, target int) (int, error) {
+// returns the version reached. clock feeds a dataMigrate step's *migrationIDs
+// (see appendMigrationEvent's doc) — production always passes time.Now via
+// openAt; OpenWithClock's test seam reaches it the same way it reaches the
+// live id source.
+func migrate(ctx context.Context, db *sql.DB, path string, reg []migration, target int, clock func() time.Time) (int, error) {
 	if target < 1 || target > latestVersion(reg) {
 		return 0, fmt.Errorf("store: target schema version %d out of range 1..%d", target, latestVersion(reg))
 	}
@@ -137,7 +156,7 @@ func migrate(ctx context.Context, db *sql.DB, path string, reg []migration, targ
 	}
 
 	for _, m := range pending {
-		if err := applyMigration(ctx, db, m); err != nil {
+		if err := applyMigration(ctx, db, m, clock); err != nil {
 			return current, err
 		}
 		current = m.version
@@ -158,8 +177,12 @@ func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 }
 
 // applyMigration runs one numbered unit atomically: either the whole version
-// lands or none of it does.
-func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
+// lands or none of it does. dataMigrate shares that all-or-nothing property
+// with stmts by running inside the same transaction: a row it cannot honestly
+// turn into an event aborts the whole migration rather than committing a
+// truncated log (schema_v2.go's rejectLegacyRuns/rejectLegacyBatches
+// precedent — refuse, never drop).
+func applyMigration(ctx context.Context, db *sql.DB, m migration, clock func() time.Time) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin migration v%d: %w", m.version, err)
@@ -176,6 +199,18 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 			return fmt.Errorf("store: migration v%d (%s) statement %d: %w", m.version, m.name, i+1, err)
 		}
 	}
+	if m.dataMigrate != nil {
+		// After stmts, not before: a type this migration's own taxonomy seed
+		// just added (seedTaxonomy in stmts) has to already be an event_types
+		// row before any event naming it can be appended (events.type's FK).
+		ids, err := newMigrationIDs(ctx, tx, clock)
+		if err != nil {
+			return fmt.Errorf("store: migration v%d (%s) data backfill: %w", m.version, m.name, err)
+		}
+		if err := m.dataMigrate(ctx, tx, ids); err != nil {
+			return fmt.Errorf("store: migration v%d (%s) data backfill: %w", m.version, m.name, err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
 		m.version, m.name, time.Now().UTC().Format(timestampLayout)); err != nil {
@@ -185,6 +220,91 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 		return fmt.Errorf("store: commit migration v%d: %w", m.version, err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Minting events before a Store exists
+// ---------------------------------------------------------------------------
+
+// migrationIDs mints monotonic event identities for a migration's data
+// backfill — Store.NewID's own floor-and-retry discipline (store.go), repeated
+// here because no Store exists yet to own it: a Store is not constructed until
+// migrate returns, and NewID's floor comes from loadFloor, which runs after
+// that.
+type migrationIDs struct {
+	src   *idSource
+	floor string
+}
+
+// newMigrationIDs seeds a migrationIDs from the log's own high-water mark
+// inside the migration's transaction, so a synthetic event can never sort
+// below the history already on disk (events_monotonic, D44, D51).
+func newMigrationIDs(ctx context.Context, tx *sql.Tx, clock func() time.Time) (*migrationIDs, error) {
+	var floor sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&floor); err != nil {
+		return nil, fmt.Errorf("store: read the identity high-water mark for migration: %w", err)
+	}
+	ids := &migrationIDs{src: newIDSourceWithClock(clock)}
+	if floor.Valid {
+		ids.floor = floor.String
+	}
+	return ids, nil
+}
+
+// next mints the next identity, strictly above everything minted so far in
+// this migration or already on disk.
+func (m *migrationIDs) next() string {
+	for {
+		id := m.src.next()
+		if id > m.floor {
+			m.floor = id
+			return id
+		}
+		// Store.NewID's own comment applies verbatim: the floor's timestamp
+		// cannot be ahead of now by more than clock skew, so one tick clears it.
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// appendMigrationEvent stamps and appends one synthetic, self-originating
+// event on a migration's behalf: its own id is its causation and correlation,
+// because a migration reconstructing history did not chain off any command the
+// log records (contrast Store.stamp, which a live command's Commit uses and
+// which chains against the rest of that command's drafts).
+//
+// Store.Commit remains the only append path a live command reaches — this one
+// exists solely because a migration runs before any Store does, so nothing
+// else in this package can append on its behalf. It skips stamp's dimension
+// lookup because every caller today is a durable, Repo-only v13 type; a future
+// dataMigrate that needs the general rule should route through
+// requiredDimensions instead of assuming this shape.
+func appendMigrationEvent(ctx context.Context, tx *sql.Tx, ids *migrationIDs, actor Actor, typ, repo, subject string, payload any) (Event, error) {
+	if len(subject) != IDLen {
+		return Event{}, fmt.Errorf("store: migration event %s names subject %q, which is not an identity", typ, subject)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return Event{}, fmt.Errorf("store: marshal migration payload for %s: %w", typ, err)
+	}
+	id := ids.next()
+	occurredAt, err := timeOfID(id)
+	if err != nil {
+		return Event{}, err
+	}
+	ev := Event{
+		ID:         id,
+		Type:       typ,
+		OccurredAt: occurredAt,
+		Actor:      actor,
+		Repo:       repo,
+		Subject:    subject,
+		Payload:    raw,
+	}
+	ev.Causation, ev.Correlation = ev.ID, ev.ID
+	if err := appendEvent(ctx, tx, ev); err != nil {
+		return Event{}, err
+	}
+	return ev, nil
 }
 
 // clock is time.Now, indirected the way paths.go indirects os.Hostname: the
