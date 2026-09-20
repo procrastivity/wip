@@ -275,6 +275,11 @@ func TestEffectiveGateRequirementsClosedStateWinsOverExemption(t *testing.T) {
 	h.start(matter)
 	h.finish(matter)
 	closed := h.closeGate(matter, "reviewed-local", ScaleMatter)
+	// Deliberately a raw row, not RepairGateExemption: the write surface refuses
+	// to exempt an already-satisfied gate (refusal.gate-already-satisfied), so
+	// "closed and exempt" cannot arise through any real event sequence. This
+	// manufactures the state directly to prove the read side's precedence rule
+	// (closed wins) defensively, for a row a rebuild would never actually fold.
 	if _, err := h.db.ExecContext(h.ctx,
 		`INSERT INTO gate_exemptions (repo, gate, node) VALUES (?, ?, ?)`,
 		h.Repo, "reviewed-local", matter); err != nil {
@@ -718,8 +723,8 @@ func TestProspectiveDeclarationExemptsOnlyAlreadySealedNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("the declaration appended %d events, want none", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Fatalf("the declaration appended %d events, want exactly one gate.declared", len(after)-len(before))
 	}
 
 	for _, tc := range []struct {

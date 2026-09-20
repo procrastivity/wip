@@ -1,7 +1,8 @@
 package cli_test
 
 // End-to-end coverage of `wip outbox backlog-push`: text and JSON reads and
-// writes, the no-backend auto warning, and lazy config (no event, no outbox).
+// writes, the no-backend auto warning, and lazy config (config.set only, no
+// outbox side effect).
 
 import (
 	"context"

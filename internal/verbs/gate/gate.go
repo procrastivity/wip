@@ -365,7 +365,7 @@ func declareCommand(streams *iostreams.Streams) *cobra.Command {
 	var scale string
 	cmd := &cobra.Command{
 		Use:   "declare <gate-name>",
-		Short: "declare a gate at a scale — project config, not a domain event",
+		Short: "declare a gate at a scale — project config, recorded as gate.declared",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cliflags.FromContext(cmd.Context())

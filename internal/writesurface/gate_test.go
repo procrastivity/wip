@@ -10,29 +10,13 @@ import (
 	"github.com/procrastivity/wip/internal/wiperr"
 )
 
-// commitGateConfig writes one config-family event through the store's one write
-// path. Gate declarations and exemption repairs fold from events since store
-// v13, so a fixture that wants them to survive a rebuild has to write them the
-// way the log holds them. The write-surface verbs still write their tables
-// directly; the Step that makes them emit these events follows this one.
-func commitGateConfig(t *testing.T, f batchFixture, subject string, draft store.Draft) {
-	t.Helper()
-	draft.Subject = subject
-	if _, err := f.s.Commit(context.Background(),
-		store.Request{Actor: store.ActorHuman, Env: f.env},
-		func(context.Context, *store.Tx) ([]store.Draft, error) { return []store.Draft{draft}, nil }); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRepairGateExemptionPreservesHistoryAcrossRebuildAndReopen(t *testing.T) {
 	f := newBatchFixture(t, "legacy-sealed")
 	ctx := context.Background()
 	for _, gate := range []string{"reviewed-local", "verified"} {
-		commitGateConfig(t, f, f.env.Repo, store.Draft{
-			Type:    store.TypeGateDeclared,
-			Payload: store.GateDeclared{Gate: gate, Scale: store.ScaleMatter},
-		})
+		if err := DeclareGate(ctx, f.s, f.env.Repo, gate, store.ScaleMatter); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, "legacy-sealed"); err != nil {
 		t.Fatal(err)
@@ -44,7 +28,7 @@ func TestRepairGateExemptionPreservesHistoryAcrossRebuildAndReopen(t *testing.T)
 		t.Fatal(err)
 	}
 
-	before := lenEvents(t, f.s)
+	beforeRepair := lenEvents(t, f.s)
 	n, err := RepairGateExemption(ctx, f.s, f.env.Repo, "verified", "legacy-sealed")
 	if err != nil {
 		t.Fatal(err)
@@ -52,22 +36,22 @@ func TestRepairGateExemptionPreservesHistoryAcrossRebuildAndReopen(t *testing.T)
 	if n.ID != f.matter {
 		t.Fatalf("repaired node = %s, want %s", n.ID, f.matter)
 	}
-	if got := lenEvents(t, f.s); got != before {
-		t.Fatalf("repair changed event count from %d to %d", before, got)
+	// The repair is an ordinary verb since v13: exactly one
+	// gate.exemption-repaired event, not the direct table write it used to be.
+	if got := lenEvents(t, f.s); got != beforeRepair+1 {
+		t.Fatalf("repair appended %d events, want exactly one", got-beforeRepair)
 	}
+	before := lenEvents(t, f.s)
 	if _, err := RepairGateExemption(ctx, f.s, f.env.Repo, "verified", "legacy-sealed"); err != nil {
 		t.Fatalf("repeat repair: %v", err)
 	}
+	// The write surface's own precondition (GateExempt) short-circuits an
+	// already-exempt repair before it ever reaches the store, so a repeat
+	// through the write surface appends nothing — the fold's idempotence over
+	// the row is a second, independent guarantee for callers that bypass it.
 	if got := lenEvents(t, f.s); got != before {
 		t.Fatalf("repeat repair changed event count from %d to %d", before, got)
 	}
-	// The row RepairGateExemption wrote is not durable on its own any more: a
-	// rebuild reconstructs gate_exemptions from the log, so what has to survive
-	// below is the event, and the fold is idempotent over the row already there.
-	commitGateConfig(t, f, f.matter, store.Draft{
-		Type:    store.TypeGateExemptionRepaired,
-		Payload: store.GateExemptionRepaired{Gate: "verified"},
-	})
 
 	wantExempt := func(label string, s *store.Store) {
 		t.Helper()
@@ -96,10 +80,10 @@ func TestRepairGateExemptionPreservesHistoryAcrossRebuildAndReopen(t *testing.T)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	wantExempt("after reopen", reopened)
-	// before + the one gate.exemption-repaired: a rebuild and a reopen append
-	// nothing of their own.
-	if got := lenEvents(t, reopened); got != before+1 {
-		t.Fatalf("rebuild and reopen left %d events, want %d", got, before+1)
+	// A rebuild and a reopen append nothing of their own: the exemption's
+	// event is already in the log, from the real repair above.
+	if got := lenEvents(t, reopened); got != before {
+		t.Fatalf("rebuild and reopen changed event count from %d to %d", before, got)
 	}
 }
 

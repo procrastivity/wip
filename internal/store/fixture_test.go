@@ -399,56 +399,53 @@ func (h *harness) closeGateError(node, gate string, scale Scale) error {
 	})
 }
 
-// declareGate declares a gate through the one write path, which is what a
-// declaration is since v13: an event that folds into gate_declarations, not a
-// row written beside the log.
-//
-// The sealed-node snapshot rides explicitly in the payload, and the harness
-// takes it with the same function the store takes it with — so a test drives the
-// payload a declaring verb produces rather than one a test invented.
+// declareGate declares a gate through the one write path (Store.DeclareGate),
+// which is what a declaration is since v13: an event that folds into
+// gate_declarations, not a row written beside the log. The verb computes its
+// own sealed-node exemption snapshot from Tx state, so the harness needs no
+// throwaway read transaction of its own to hand it one — it just calls the
+// verb and hands the test back the event the verb produced.
 func (h *harness) declareGate(gate string, scale Scale) Event {
 	h.t.Helper()
-	return h.commit(Draft{
-		Type:    TypeGateDeclared,
-		Subject: h.Repo,
-		Payload: GateDeclared{Gate: gate, Scale: scale, Exempt: h.sealedNodesNow(scale)},
-	})[0]
+	before := len(h.eventsOf(h.Repo))
+	if err := h.DeclareGate(h.ctx, h.Repo, gate, scale); err != nil {
+		h.t.Fatalf("declare gate %s: %v", gate, err)
+	}
+	events := h.eventsOf(h.Repo)
+	if len(events) != before+1 || events[len(events)-1].Type != TypeGateDeclared {
+		h.t.Fatalf("declaring %s did not append exactly one gate.declared event", gate)
+	}
+	return events[len(events)-1]
 }
 
-// sealedNodesNow is the exemption snapshot as of right now: every node at scale
-// that is already sealed under the declarations in force.
-func (h *harness) sealedNodesNow(scale Scale) []string {
-	h.t.Helper()
-	tx, err := h.db.BeginTx(h.ctx, nil)
-	if err != nil {
-		h.t.Fatalf("read the sealed-node snapshot: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	nodes, err := sealedNodesAtScale(h.ctx, tx, h.Repo, scale)
-	if err != nil {
-		h.t.Fatalf("read the sealed-node snapshot: %v", err)
-	}
-	return nodes
-}
-
-// repairExemption exempts one node a pre-v8 declaration could not snapshot.
+// repairExemption exempts one node a pre-v8 declaration could not snapshot,
+// through the one write path (Store.RepairGateExemption).
 func (h *harness) repairExemption(node, gate string) Event {
 	h.t.Helper()
-	return h.commit(Draft{
-		Type:    TypeGateExemptionRepaired,
-		Subject: node,
-		Payload: GateExemptionRepaired{Gate: gate},
-	})[0]
+	before := len(h.eventsOf(node))
+	if err := h.RepairGateExemption(h.ctx, h.Repo, gate, node); err != nil {
+		h.t.Fatalf("repair exemption %s on %s: %v", gate, node, err)
+	}
+	events := h.eventsOf(node)
+	if len(events) != before+1 || events[len(events)-1].Type != TypeGateExemptionRepaired {
+		h.t.Fatalf("repairing %s on %s did not append exactly one gate.exemption-repaired event", gate, node)
+	}
+	return events[len(events)-1]
 }
 
-// setConfig writes one Repo-tier config key through the one write path.
+// setConfig writes one Repo-tier config key through the one write path
+// (Store.SetConfig).
 func (h *harness) setConfig(key, value string) Event {
 	h.t.Helper()
-	return h.commit(Draft{
-		Type:    TypeConfigSet,
-		Subject: h.Repo,
-		Payload: ConfigSet{Key: key, Value: value},
-	})[0]
+	before := len(h.eventsOf(h.Repo))
+	if err := h.SetConfig(h.ctx, h.Repo, key, value); err != nil {
+		h.t.Fatalf("set config %s: %v", key, err)
+	}
+	events := h.eventsOf(h.Repo)
+	if len(events) != before+1 || events[len(events)-1].Type != TypeConfigSet {
+		h.t.Fatalf("setting %s did not append exactly one config.set event", key)
+	}
+	return events[len(events)-1]
 }
 
 // wantLifecycle asserts a node is in one state, through the read surface.
