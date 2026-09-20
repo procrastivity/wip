@@ -1010,6 +1010,93 @@ func TestGateStateAndDeclarationsAreBothProjections(t *testing.T) {
 	}
 }
 
+// TestSealingSurvivesAWipeAndReopenForBothExemptionAndClosure is the workplan's
+// named end-to-end scenario for evented-config step-04, at the level the spike
+// report actually named as unreconstructable: sealed-ness, not a table.
+//
+// TestGateStateAndDeclarationsAreBothProjections above already proves gate_state
+// and gate_declarations survive a rebuild, and
+// TestArchivedMattersMatchesCanonicalCompletionAndLegacyView proves the
+// exemption route and the closed-gate route both seal at the read surface. What
+// neither combines is both sealing routes surviving a full wipe (Rebuild clears
+// every projection table, including the three v13 turned into ordinary ones)
+// and a close-and-reopen, in one story — which is the property a rebuild that
+// silently dropped a declaration or an exemption would violate first, because
+// sealing is the read that would go stale with no event saying so.
+func TestSealingSurvivesAWipeAndReopenForBothExemptionAndClosure(t *testing.T) {
+	h := newHarness(t)
+
+	// Sealed before any matter-scale gate exists, so the declaration below has
+	// to carry it in Exempt (the resolved workplan call — GateDeclared's payload
+	// snapshots explicitly rather than leaving a fold to recompute it, D4, D54)
+	// for it to stay sealed: nothing else in the log says so.
+	exempted := h.matter("exempted", "Sealed before the gate existed")
+	h.start(exempted)
+	h.finish(exempted)
+
+	declared := h.declareGate("reviewed-local", ScaleMatter)
+	var payload GateDeclared
+	if err := json.Unmarshal(declared.Payload, &payload); err != nil {
+		t.Fatalf("decode gate.declared: %v", err)
+	}
+	if len(payload.Exempt) != 1 || payload.Exempt[0] != exempted {
+		t.Fatalf("gate.declared Exempt = %v, want exactly [%s]", payload.Exempt, exempted)
+	}
+
+	// Sealed the other way: born after the declaration, so it is subject to the
+	// gate (D12's static boundary), and sealed by closing it (D55's predicate).
+	gated := h.matter("gated", "Sealed through the gate")
+	h.start(gated)
+	h.finish(gated)
+	h.closeGate(gated, "reviewed-local", ScaleMatter)
+
+	// wantBothSealed reads sealed-ness the two ways a caller actually reads it:
+	// the Archive (D55's predicate, what `status` and the archive read surface
+	// both resolve to) and NodeCompletion directly (the canonical result the
+	// Archive is built from).
+	wantBothSealed := func(what string, on *harness) {
+		on.t.Helper()
+		on.wantArchive(what, exempted, gated)
+		for _, tc := range []struct{ node, via string }{
+			{exempted, "exemption"},
+			{gated, "closed gate"},
+		} {
+			node, err := on.Node(on.ctx, tc.node)
+			if err != nil {
+				on.t.Fatalf("%s: read %s: %v", what, tc.node, err)
+			}
+			completion, err := on.NodeCompletion(on.ctx, node)
+			if err != nil {
+				on.t.Fatalf("%s: completion of %s: %v", what, tc.node, err)
+			}
+			if !completion.Sealed {
+				on.t.Errorf("%s: %s (sealed via its %s) completion = %+v, want Sealed",
+					what, node.Locator, tc.via, completion)
+			}
+		}
+	}
+
+	wantBothSealed("before the wipe", h)
+
+	// Wipe projections and rebuild from the log alone (D61): the three tables
+	// this Matter moved into projectionTables are cleared with everything else
+	// and have to come back from gate.declared and gate.exemption-repaired
+	// events, with no table left untouched for the old exception to hide in.
+	if err := h.Rebuild(h.ctx); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	wantBothSealed("after wiping the projection and rebuilding from the log alone", h)
+
+	// And the other direction the spike report names (§3): a closed store that
+	// reopens has to fold the same log into the same answer, not merely a live
+	// process that already held the pre-wipe state in memory somewhere.
+	reopened, err := h.reopen(register, latestVersion(register))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	wantBothSealed("after a close and reopen", reopened)
+}
+
 // A gate close whose subject is not a node at all is refused before it reaches
 // the foreign key, because the projection rule has to read the subject's kind to
 // check the scale — so the refusal names the missing node rather than a
