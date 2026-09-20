@@ -43,9 +43,7 @@ func TestEffectiveGateRequirementsPreserveStatesAndClosureMetadata(t *testing.T)
 		{"reviewed-local", ScaleMatter},
 		{"verified", ScaleStep},
 	} {
-		if err := h.DeclareGate(h.ctx, h.Repo, declaration.gate, declaration.scale); err != nil {
-			t.Fatal(err)
-		}
+		h.declareGate(declaration.gate, declaration.scale)
 	}
 	matter := h.matter("mixed", "Mixed gate states")
 	step := h.step(matter, "step-01", "A step with an own gate")
@@ -54,12 +52,10 @@ func TestEffectiveGateRequirementsPreserveStatesAndClosureMetadata(t *testing.T)
 	h.finish(matter)
 	h.finish(step)
 	closed := h.closeGate(matter, "approved", ScaleMatter)
-	if err := h.RepairGateExemption(h.ctx, h.Repo, "reviewed-local", matter); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.RepairGateExemption(h.ctx, h.Repo, "verified", step); err != nil {
-		t.Fatal(err)
-	}
+	// Declarations and exemptions are events since v13, so this fixture survives
+	// the rebuild at the end of the test the same way gate state does.
+	h.repairExemption(matter, "reviewed-local")
+	h.repairExemption(step, "verified")
 
 	node, err := h.Node(h.ctx, step)
 	if err != nil {
@@ -957,17 +953,15 @@ func TestAGateClosedAgainstARemovedNodeSealsNothing(t *testing.T) {
 	}
 }
 
-// TestGateStateIsAProjectionAndDeclarationsAreNot is the rebuild seam, from the
-// gate side. `rebuild_test.go` owns the assertion that config survives a rebuild;
-// what this adds is the other half of the pair — that gate *state* is rebuilt
-// from the log while the declaration it answers is not, and that sealing, which
-// reads both, is unchanged.
-func TestGateStateIsAProjectionAndDeclarationsAreNot(t *testing.T) {
+// TestGateStateAndDeclarationsAreBothProjections is the rebuild seam, from the
+// gate side. `rebuild_test.go` owns the assertion that config is reconstructed
+// from the log; what this adds is the pair — gate *state* and the declaration it
+// answers both fold from events, and sealing, which reads both, is unchanged
+// across a rebuild that clears them.
+func TestGateStateAndDeclarationsAreBothProjections(t *testing.T) {
 	h := newHarness(t)
 
-	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
-		t.Fatalf("declare the gate: %v", err)
-	}
+	declared := h.declareGate("reviewed-local", ScaleMatter)
 	matter := h.matter("rebuilt", "A Matter sealed before a rebuild")
 	step := h.step(matter, "step-01", "A Step with a gate of its own")
 	h.start(matter)
@@ -993,15 +987,21 @@ func TestGateStateIsAProjectionAndDeclarationsAreNot(t *testing.T) {
 	}
 	h.wantArchive("after the rebuild", matter)
 
-	// The declaration is not in the log and was not folded back — a rebuild that
-	// cleared it would have un-sealed the Matter above without a single event
-	// saying so.
+	// The declaration came back from the log, which is where it now lives. A
+	// rebuild that could not restore it would have un-sealed the Matter above
+	// without a single event saying so.
 	h.wantRow("the declaration after a rebuild", "gate_declarations", "repo = ?", []any{h.Repo},
 		map[string]any{"repo": h.Repo, "gate": "reviewed-local", "scale": ScaleMatter})
+	var declarations int
 	for _, ev := range h.eventsOf(h.Repo) {
-		if strings.Contains(ev.Type, "gate") {
-			t.Errorf("declaring a gate emitted %s; a declaration is config, not an event", ev.Type)
+		if ev.Type == TypeGateDeclared {
+			declarations++
 		}
+	}
+	if declarations != 1 || declared.Type != TypeGateDeclared || declared.Repo != h.Repo ||
+		declared.Subject != h.Repo || declared.Clone != "" || declared.Worktree != "" {
+		t.Errorf("the Repo's history holds %d gate.declared events and the first is %+v; want exactly one durable event subject to the Repo",
+			declarations, declared)
 	}
 }
 

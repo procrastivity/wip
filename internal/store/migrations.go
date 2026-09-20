@@ -49,6 +49,7 @@ var register = []migration{
 	{version: 10, name: "backlog-decline-reason", stmts: v10Statements()},
 	{version: 11, name: "emergency-gate-dismissal", stmts: v11Statements()},
 	{version: 12, name: "backlog-entry-findings", stmts: v12Statements()},
+	{version: 13, name: "evented-config", stmts: v13Statements()},
 }
 
 // latestVersion is the highest migration this binary carries.
@@ -66,6 +67,12 @@ func latestVersion(reg []migration) int {
 // the same log means. Bumping it makes every existing store rebuild its
 // projection at the next open, which is exactly the affordance the event-sourced
 // shape buys and the tables shape cannot offer.
+//
+// It deliberately did not move when v13 made config, gate declarations and gate
+// exemptions projections: a bump refolds every existing store at its next open,
+// and until the migration that gives those rows synthetic history there is no
+// event behind the ones a store already carries. The bump belongs with that
+// migration.
 const projectionVersion = 10
 
 // projectionVersionKey is where the store records the projection version it was

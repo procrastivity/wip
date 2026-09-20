@@ -14,10 +14,11 @@
 //     rows, batches, dispatches, cursors, backlog — is a **projection**,
 //     maintained in the same transaction as the append and rebuildable from
 //     the log alone (Store.Rebuild).
-//   - The one documented exception is Repo-tier *config*, including gate
-//     declarations and their prospective exemptions. Declaring or repairing a
-//     gate boundary is configuration, not an event (D4, D54), so those tables
-//     are primary data and Rebuild leaves them alone.
+//   - Repo-tier *config*, including gate declarations and their prospective
+//     exemptions, was the one documented exception until schema v13 evented it.
+//     A declaration is still configuration and still binds at Repo (D4, D42,
+//     D54); it now arrives as an event like everything else, so those three
+//     tables are projections too and the log is the whole durable truth.
 //
 // Two consequences are the whole point of the shape, and both are structural
 // rather than conventional:

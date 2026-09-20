@@ -121,6 +121,44 @@ type GateDismissed struct {
 	TrackerPushLevel TrackerPushLevel `json:"tracker_push_level,omitempty"`
 }
 
+// GateDeclared is the payload of gate.declared. subject is the Repo, because a
+// declaration binds a gate to a scale for a Repo (D4, D12) and config keys at
+// Repo so clones cannot diverge (D42).
+//
+// Exempt carries the sealed-node snapshot explicitly rather than leaving the
+// fold to recompute it from log state at this point. Both are deterministic, so
+// this is a narratability call and not a correctness one: the log has to narrate
+// a declaration completely, and a reader — or a future seed consumer — sees
+// exactly which nodes the declaration stepped over without replaying fold logic.
+// It is the same fidelity posture MODEL §10 already pays for elsewhere.
+type GateDeclared struct {
+	Gate  string `json:"gate"`
+	Scale Scale  `json:"scale"`
+	// Exempt is every node at Scale that was already sealed under the prior
+	// declaration set. Empty is the ordinary case and is omitted.
+	Exempt []string `json:"exempt,omitempty"`
+}
+
+// GateExemptionRepaired is the payload of gate.exemption-repaired: one node a
+// declaration made before schema v8 could not snapshot. subject is the node, so
+// the exemption reads as a fact about the node rather than about the Repo.
+//
+// It stays a separate type from gate.declared for the reason the two write paths
+// were separate: a repeated declaration must never be able to extend its own
+// original applicability boundary.
+type GateExemptionRepaired struct {
+	Gate string `json:"gate"`
+}
+
+// ConfigSet is the payload of config.set: one Repo-tier key at one value.
+// subject is the Repo (D42, D54). Value is carried verbatim, including empty —
+// "set to empty" and "never set" are different answers the read surface keeps
+// apart, so the payload has to be able to say the first one.
+type ConfigSet struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 // BacklogEntered is the payload of backlog.entered. subject is the entry.
 type BacklogEntered struct {
 	Provenance Provenance `json:"provenance"`

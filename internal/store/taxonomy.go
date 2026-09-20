@@ -48,11 +48,19 @@ const (
 	TypeDependencyAdded   = "dependency.added"
 	TypeDependencyRemoved = "dependency.removed"
 
-	// Gate — declaring a gate is config, not an event (D4, D54). Normal close
-	// and emergency dismissal are separate terminal actions so the exception
-	// remains visible in the event log and read model.
-	TypeGateClosed    = "gate.closed"
-	TypeGateDismissed = "gate.dismissed"
+	// Gate — normal close and emergency dismissal are separate terminal actions
+	// so the exception remains visible in the event log and read model.
+	// Declaration and exemption repair were configuration written outside the
+	// log until v13 evented them; a declaration is still Repo-tier config (D42,
+	// D54), it is now config the log is the source of truth for (D36, D61).
+	TypeGateClosed            = "gate.closed"
+	TypeGateDismissed         = "gate.dismissed"
+	TypeGateDeclared          = "gate.declared"
+	TypeGateExemptionRepaired = "gate.exemption-repaired"
+
+	// Config — one Repo-tier key set to one value. subject = the Repo, because
+	// config keys at Repo and clones may not diverge (D42).
+	TypeConfigSet = "config.set"
 
 	// Intake/backlog.
 	TypeBacklogEntered   = "backlog.entered"
@@ -127,6 +135,7 @@ const (
 	FamilyAmendment  Family = "amendment"
 	FamilyDependency Family = "dependency"
 	FamilyGate       Family = "gate"
+	FamilyConfig     Family = "config"
 	FamilyBacklog    Family = "backlog"
 	FamilyReference  Family = "reference"
 	FamilyTier       Family = "tier"
@@ -291,13 +300,26 @@ var V11Taxonomy = []EventType{
 	durable(TypeGateDismissed, FamilyGate),
 }
 
+// V13Taxonomy closes the one documented persistence exception: config, gate
+// declarations and gate exemptions become projections of the log like
+// everything else. It is exactly one type per write path that exists — the
+// audit found three (SetConfig, DeclareGate, RepairGateExemption) and nothing
+// speculative joins them. There is no `config.unset`, no `gate.undeclared` and
+// no `gate.exemption-removed` because no code path removes any of the three:
+// a fourth type arrives with the write path that forces it.
+var V13Taxonomy = []EventType{
+	durable(TypeConfigSet, FamilyConfig),
+	durable(TypeGateDeclared, FamilyGate),
+	durable(TypeGateExemptionRepaired, FamilyGate),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy, V13Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

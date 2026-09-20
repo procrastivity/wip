@@ -23,9 +23,10 @@ func dismissalPayload(gate string, scale Scale, reason string) GateDismissed {
 
 func TestGateDismissalRoundTripsAsDistinctTerminalSatisfaction(t *testing.T) {
 	h := newHarness(t)
-	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
-		t.Fatal(err)
-	}
+	// The declaration is an event since v13, so it is still there after the
+	// rebuild at the end of this test — which the dismissal rule needs, because
+	// a dismissal names a gate its Repo declares.
+	h.declareGate("reviewed-local", ScaleMatter)
 	matter := h.matter("dismissed", "A Matter with an emergency dismissal")
 	h.start(matter)
 	h.finish(matter)
