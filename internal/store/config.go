@@ -135,19 +135,23 @@ func (s *Store) SetTrackerBacklogPush(ctx context.Context, repo, value string) (
 	return mode, nil
 }
 
-// Project config, and the documented exception to "everything durable is a
+// Project config, which is no longer the exception to "everything durable is a
 // projection of the log."
 //
-// Gates are **declared up front**, per project, statically knowable and never
-// runtime-conditional (D4) — a declaration is configuration, not something that
-// happened, and there is no gate-declaration event in the P1 taxonomy to fold.
-// The same goes for the rest of project config (strategies, and whatever later
-// Matters earn): it binds to the Repo tier and lives in the store (D42, D54),
-// distinct from `chassis`'s tool config on disk.
+// Gates are still **declared up front**, per project, statically knowable and
+// never runtime-conditional (D4), and config still binds to the Repo tier and
+// lives in the store (D42, D54), distinct from `chassis`'s tool config on disk.
+// What changed at schema v13 is where the truth lives: `config.set`,
+// `gate.declared` and `gate.exemption-repaired` are registered event types,
+// project.go folds them into these three tables, and Rebuild clears and refolds
+// them like every other projection. Config is evented like everything else,
+// still Repo-tier, still D42-bound — so D36's "the store is the source of
+// truth" loses its asterisk.
 //
-// These tables are written directly, and Rebuild leaves them untouched.
-// The seam is deliberate and narrow: config says how the project is *set up*,
-// the log says what *happened*, and a rebuild reconstructs only the latter.
+// The three functions below still write their tables directly. Rewiring them
+// into ordinary verbs through Commit, and backfilling synthetic history for the
+// rows a store already carries, are the two Steps that follow this one; until
+// they land, a rebuild between here and there drops directly written rows.
 
 // SetConfig writes one project-config key at the Repo tier. Clones may not
 // diverge (D42), which is exactly what keying it at Repo rather than Clone buys.

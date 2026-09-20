@@ -176,12 +176,32 @@ func richHistory(h *harness) string {
 	h.depend(planned, sealed)
 	h.depend(elsewhere, sealed)
 
-	// --- Gates: declared as config (no event), closed as events --------------
-	if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
-		h.t.Fatalf("declare the matter-scale gate: %v", err)
-	}
-	if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleStep); err != nil {
-		h.t.Fatalf("declare the step-scale gate: %v", err)
+	// --- Gates and config: declared, exempted, set — all as events (v13) -----
+	// The matter-scale declaration lands with `sealed` already Done, so its
+	// payload carries a non-empty exemption snapshot: the case a rebuild has to
+	// reproduce from the log rather than from a table it was told to leave alone.
+	// Below v13 the same state is written the way that version could write it,
+	// because those types are not in that store's taxonomy at all.
+	if h.SchemaVersion() >= 13 {
+		h.declareGate("reviewed-local", ScaleMatter)
+		h.declareGate("verified", ScaleStep)
+		h.repairExemption(waiting, "verified")
+		h.setConfig("strategy", "trunk")
+		h.setConfig("empty-on-purpose", "")
+		h.setConfig("strategy", "release-branch")
+	} else {
+		if err := h.DeclareGate(h.ctx, h.Repo, "reviewed-local", ScaleMatter); err != nil {
+			h.t.Fatalf("declare the matter-scale gate: %v", err)
+		}
+		if err := h.DeclareGate(h.ctx, h.Repo, "verified", ScaleStep); err != nil {
+			h.t.Fatalf("declare the step-scale gate: %v", err)
+		}
+		if err := h.SetConfig(h.ctx, h.Repo, "strategy", "release-branch"); err != nil {
+			h.t.Fatalf("write config: %v", err)
+		}
+		if err := h.SetConfig(h.ctx, h.Repo, "empty-on-purpose", ""); err != nil {
+			h.t.Fatalf("write config: %v", err)
+		}
 	}
 	h.closeGate(sealed, "reviewed-local", ScaleMatter)
 	h.closeGate(first, "verified", ScaleStep)
@@ -394,6 +414,11 @@ func (h *harness) hasProjectionTable(table string) bool {
 		return h.SchemaVersion() >= 5
 	case "tracker_push_records":
 		return h.SchemaVersion() >= 5
+	case "config", "gate_declarations", "gate_exemptions":
+		// config and gate_declarations are v1 tables and gate_exemptions a v8
+		// one, but all three became projections at v13; before that a rebuild
+		// left them alone and they are not part of this comparison.
+		return h.SchemaVersion() >= 13
 	default:
 		return true
 	}
@@ -512,24 +537,19 @@ func TestRebuildRestoresACorruptedProjection(t *testing.T) {
 	h.wantSameProjection("after rebuilding a corrupted projection", sound, h.snapshotProjection())
 }
 
-// TestRebuildLeavesGateConfigurationAlone is the documented exception.
+// TestRebuildReconstructsGateConfigurationFromTheLog is the exception, closed.
 //
-// Declaring a gate is configuration and not something that happened (D4, D54), so
-// there is no event to fold. Prospective gate exemptions record the static
-// declaration boundary and are configuration for the same reason. A rebuild
-// that cleared these tables would destroy data the log cannot restore. The seam:
-// config says how the project is set up, the log says what happened, a rebuild
-// reconstructs only the latter.
-func TestRebuildLeavesGateConfigurationAlone(t *testing.T) {
+// A gate declaration is still configuration (D4, D54) and still binds at Repo
+// (D42) — what changed at v13 is that it arrives as an event, so these three
+// tables are projections like every other. A rebuild that could not restore them
+// would now be a rebuild that lost data the log holds, which is the opposite of
+// what the old seam protected against: the declarations and their prospective
+// exemptions are what sealing is computed from, so one dropped would silently
+// un-seal a Matter.
+func TestRebuildReconstructsGateConfigurationFromTheLog(t *testing.T) {
 	h := newHarness(t)
 	richHistory(h)
 
-	if err := h.SetConfig(h.ctx, h.Repo, "strategy", "trunk"); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if err := h.SetConfig(h.ctx, h.Repo, "empty-on-purpose", ""); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
 	config := h.rowsOf("config", "")
 	declarations := h.rowsOf("gate_declarations", "")
 	exemptions := h.rowsOf("gate_exemptions", "")
@@ -561,11 +581,15 @@ func TestRebuildLeavesGateConfigurationAlone(t *testing.T) {
 		}
 	}
 
-	// And the declarations still mean what they meant: sealing is computed against
-	// them, so a rebuild that dropped one would silently seal a Matter.
+	// And "set to empty" is still not "never set": the fold has to carry a value
+	// the payload deliberately left blank, which `omitempty` would have erased.
 	value, present, err := h.Config(h.ctx, h.Repo, "empty-on-purpose")
 	if err != nil || !present || value != "" {
 		t.Errorf(`config empty-on-purpose = %q (present=%v, err=%v), want "" and present`, value, present, err)
+	}
+	// Last write wins, and the log holds every write before it.
+	if value, _, err := h.Config(h.ctx, h.Repo, "strategy"); err != nil || value != "release-branch" {
+		t.Errorf("config strategy = %q (err=%v) after a rebuild, want release-branch", value, err)
 	}
 }
 

@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	syntheticV3Version = 13
-	syntheticV4Version = 14
+	syntheticV3Version = 14
+	syntheticV4Version = 15
 )
 
 // Tests for the migration framework (step-09): versioned, forward-only,
@@ -582,7 +582,7 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	log := h.rowsOf("events", "")
 	at := time.Now()
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v13")
+	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v14")
 
 	// The backup was taken before anything was attempted, which is the only order
 	// in which it is worth anything.
@@ -628,7 +628,7 @@ func TestAllOrNothingIsPerMigrationAndNotPerOpen(t *testing.T) {
 	before := h.snapshotProjection()
 
 	_, err := h.reopen(reg, syntheticV4Version)
-	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v14")
+	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v15")
 
 	// v5 landed and stayed; v6 did not.
 	stopped, err := h.reopen(reg, syntheticV3Version)
@@ -672,7 +672,7 @@ func TestTheBackupAFailedMigrationLeftRestoresTheStore(t *testing.T) {
 	shape := schemaShape(t, h.Store)
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v13")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v14")
 
 	sidecars := backupsIn(t, dir)
 	if len(sidecars) != 1 {
@@ -719,7 +719,7 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 	log := h.rowsOf("events", "")
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v13")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v14")
 
 	first := backupsIn(t, dir)
 	if len(first) != 1 {

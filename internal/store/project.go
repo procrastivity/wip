@@ -75,6 +75,14 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 			return err
 		}
 		return projectGateCandidates(ctx, tx, ev)
+	case TypeGateDeclared:
+		return declareGateProjection(ctx, tx, ev)
+	case TypeGateExemptionRepaired:
+		return repairGateExemptionProjection(ctx, tx, ev)
+
+	// ---- config ----------------------------------------------------------
+	case TypeConfigSet:
+		return setConfigProjection(ctx, tx, ev)
 
 	// ---- backlog ---------------------------------------------------------
 	case TypeBacklogEntered:
@@ -201,7 +209,11 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 //
 // Order matters only for readability; Rebuild defers foreign-key checks to
 // commit rather than sorting the deletes.
-var projectionTables = append(append([]string{}, v1ProjectionTables...), "run_matters", "roles", "tracker_references", "tracker_push_records")
+var projectionTables = append(append([]string{}, v1ProjectionTables...),
+	"run_matters", "roles", "tracker_references", "tracker_push_records",
+	// v13: config, gate declarations and gate exemptions stopped being the
+	// exception to "everything durable is a projection of the log".
+	"gate_exemptions", "gate_declarations", "config")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -596,6 +608,162 @@ func dismissGate(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) e
 		return fmt.Errorf("store: project %s: %w", ev.Type, err)
 	}
 	return nil
+}
+
+// declareGateProjection folds gate.declared into the declaration table and its
+// exemption snapshot.
+//
+// A declaration binds one gate to one scale for one Repo (D4, D12), once: the
+// first declaration fixes the prospective applicability boundary, so a second
+// event for the same (repo, gate) is refused here rather than allowed to widen
+// or move it. A re-declaration at the same scale is not an event — it changed
+// nothing — and the verb that finds one already there emits nothing.
+//
+// The exemption snapshot is taken from the payload and never recomputed. That is
+// the resolved call: both are deterministic, and carrying it explicitly is what
+// lets the log narrate the declaration without a reader replaying fold logic.
+// What is checked is the snapshot's shape — each node lives in this Repo at the
+// declared scale — because an exemption against something else would satisfy a
+// gate for a node the declaration never covered.
+func declareGateProjection(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p GateDeclared
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Gate == "" {
+		return fmt.Errorf("store: %s must name a gate", ev.Type)
+	}
+	switch p.Scale {
+	case ScaleMatter, ScaleStage, ScaleStep:
+	default:
+		return fmt.Errorf("store: %s names %q, which is not a scale a gate can bind to", ev.Type, p.Scale)
+	}
+	// Config keys at Repo (D42, D54), so the subject is the Repo the envelope
+	// already carries and never a second opinion about which project this is.
+	if ev.Subject != ev.Repo {
+		return fmt.Errorf("store: %s names subject %s, but a gate declaration keys at its Repo (%s)",
+			ev.Type, ev.Subject, ev.Repo)
+	}
+
+	var existing Scale
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT scale FROM gate_declarations WHERE repo=? AND gate=?`, ev.Repo, p.Gate).Scan(&existing); {
+	case err == nil:
+		return fmt.Errorf("store: %s re-declares gate %s for %s, which already binds to %s scale",
+			ev.Type, p.Gate, ev.Repo, existing)
+	case err != sql.ErrNoRows:
+		return fmt.Errorf("store: read gate declaration %s for %s: %w", p.Gate, ev.Repo, err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO gate_declarations (repo, gate, scale) VALUES (?, ?, ?)`,
+		ev.Repo, p.Gate, string(p.Scale)); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	for _, node := range p.Exempt {
+		if err := requireExemptNode(ctx, tx, ev, node, p.Scale); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gate_exemptions (repo,gate,node) VALUES (?,?,?)`, ev.Repo, p.Gate, node); err != nil {
+			return fmt.Errorf("store: project %s exemption for %s: %w", ev.Type, node, err)
+		}
+	}
+	return nil
+}
+
+// repairGateExemptionProjection folds gate.exemption-repaired: one exemption a
+// declaration made before schema v8 could not snapshot.
+//
+// The insert is idempotent because the store method it replaces is, and for the
+// same reason: the write surface owns the incident-repair preconditions, and
+// this rule only makes a validated write land once. exactlyRows is deliberately
+// not asked here — a repeat repair is a legitimate no-op, not a divergence.
+func repairGateExemptionProjection(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p GateExemptionRepaired
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Gate == "" {
+		return fmt.Errorf("store: %s must name a gate", ev.Type)
+	}
+	var scale Scale
+	err := tx.QueryRowContext(ctx,
+		`SELECT scale FROM gate_declarations WHERE repo=? AND gate=?`, ev.Repo, p.Gate).Scan(&scale)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s names gate %s, which is not declared for Repo %s", ev.Type, p.Gate, ev.Repo)
+	}
+	if err != nil {
+		return fmt.Errorf("store: read gate declaration %s for %s: %w", p.Gate, ev.Repo, err)
+	}
+	if err := requireExemptNode(ctx, tx, ev, ev.Subject, scale); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO gate_exemptions (repo,gate,node) VALUES (?,?,?)
+		 ON CONFLICT (repo,gate,node) DO NOTHING`, ev.Repo, p.Gate, ev.Subject); err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return nil
+}
+
+// requireExemptNode holds an exemption to the node it claims to be about: a live
+// node of this Repo, at the scale the gate binds to. A gate is satisfied at the
+// scale of its subject (D12), so an exemption against any other row would
+// satisfy a gate for something the declaration never covered.
+func requireExemptNode(ctx context.Context, tx *sql.Tx, ev Event, node string, scale Scale) error {
+	if !IsIdentityShaped(node) {
+		return fmt.Errorf("store: %s names %q as exempt, which is not an identity", ev.Type, node)
+	}
+	var (
+		kind Scale
+		repo string
+		live bool
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT kind, repo, tombstone_event IS NULL FROM nodes WHERE id=?`, node).Scan(&kind, &repo, &live)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("store: %s exempts %s, which is not a node", ev.Type, node)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	if repo != ev.Repo {
+		return fmt.Errorf("store: %s exempts %s, which belongs to Repo %s", ev.Type, node, repo)
+	}
+	if !live {
+		return fmt.Errorf("store: %s exempts %s, which was removed", ev.Type, node)
+	}
+	if kind != scale {
+		return fmt.Errorf("store: %s exempts %s from a %s-scale gate, and it is a %s (D12)",
+			ev.Type, node, scale, kind)
+	}
+	return nil
+}
+
+// setConfigProjection folds config.set into the Repo-tier config table. Clones
+// may not diverge (D42), which is exactly what keying it at Repo rather than
+// Clone buys — so the subject is the Repo and the key set is last-write-wins,
+// with the whole sequence still readable in the log.
+func setConfigProjection(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p ConfigSet
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	if p.Key == "" {
+		return fmt.Errorf("store: %s must name a config key", ev.Type)
+	}
+	if ev.Subject != ev.Repo {
+		return fmt.Errorf("store: %s names subject %s, but config keys at its Repo (%s)",
+			ev.Type, ev.Subject, ev.Repo)
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO config (repo, key, value) VALUES (?, ?, ?)
+		 ON CONFLICT (repo, key) DO UPDATE SET value = excluded.value`, ev.Repo, p.Key, p.Value)
+	if err != nil {
+		return fmt.Errorf("store: project %s: %w", ev.Type, err)
+	}
+	return exactlyRows(res, 1, ev)
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,6 +2159,11 @@ func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []strin
 	// dispatches — so the rebuild remains valid even when foreign-key
 	// deferral is unavailable on a driver.
 	var out []string
+	if version >= 13 {
+		// Exemptions reference their declaration, and both reference repos,
+		// which v1ProjectionTables clears further down.
+		out = append(out, "gate_exemptions", "gate_declarations", "config")
+	}
 	if version >= 5 {
 		out = append(out, "tracker_push_records", "tracker_references")
 	}
