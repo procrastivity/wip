@@ -29,7 +29,7 @@ func TestTrackerPushLevelResolutionAndValidation(t *testing.T) {
 	}
 }
 
-func TestTrackerPushLevelIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+func TestTrackerPushLevelIsRepoTierConfigAndQueuesNothing(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)
 	if err != nil {
@@ -42,8 +42,10 @@ func TestTrackerPushLevelIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("config change appended %d event(s)", len(after)-len(before))
+	// SetTrackerPushLevel delegates to SetConfig, an ordinary verb since v13:
+	// exactly one config.set, and nothing beyond it (no candidate queued).
+	if len(after) != len(before)+1 {
+		t.Fatalf("config change appended %d event(s), want exactly one config.set", len(after)-len(before))
 	}
 	clone := h.attachClone(CloneAttached{Repo: h.Repo, GitCommonDir: "/tmp/other/.git", Label: "other"})
 	_ = clone
@@ -57,7 +59,7 @@ func TestTrackerPushLevelIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	}
 }
 
-func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+func TestTrackerTargetIsOpaqueRepoTierConfigAndQueuesNothing(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)
 	if err != nil {
@@ -75,8 +77,8 @@ func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("target config appended %d event(s)", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Fatalf("target config appended %d event(s), want exactly one config.set", len(after)-len(before))
 	}
 	entries, err := h.Outbox(h.ctx, h.Repo)
 	if err != nil || len(entries) != 0 {
@@ -84,7 +86,7 @@ func TestTrackerTargetIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	}
 }
 
-func TestTrackerProjectIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+func TestTrackerProjectIsOpaqueRepoTierConfigAndQueuesNothing(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)
 	if err != nil {
@@ -102,8 +104,8 @@ func TestTrackerProjectIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("project config appended %d event(s)", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Fatalf("project config appended %d event(s), want exactly one config.set", len(after)-len(before))
 	}
 	entries, err := h.Outbox(h.ctx, h.Repo)
 	if err != nil || len(entries) != 0 {
@@ -111,7 +113,7 @@ func TestTrackerProjectIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	}
 }
 
-func TestTrackerCanceledLabelIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+func TestTrackerCanceledLabelIsOpaqueRepoTierConfigAndQueuesNothing(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)
 	if err != nil {
@@ -129,8 +131,8 @@ func TestTrackerCanceledLabelIsOpaqueRepoTierConfigAndEmitsNoEvent(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("canceled label config appended %d event(s)", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Fatalf("canceled label config appended %d event(s), want exactly one config.set", len(after)-len(before))
 	}
 	entries, err := h.Outbox(h.ctx, h.Repo)
 	if err != nil || len(entries) != 0 {

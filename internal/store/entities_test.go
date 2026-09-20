@@ -968,8 +968,9 @@ func TestProjectConfigIsKeyedAtTheRepoSoClonesCannotDiverge(t *testing.T) {
 }
 
 // TestDeclareGateValidatesItsScale holds the one storage capability the store
-// offers gates. Declaring is configuration and emits no event (D4, D54); what the
-// store checks is that a declaration binds to a scale that exists (D12).
+// offers gates. Declaring is still configuration (D4, D54), and since v13 it
+// is configuration through an ordinary gate.declared event; what this test
+// checks is that a declaration binds to a scale that exists (D12).
 func TestDeclareGateValidatesItsScale(t *testing.T) {
 	h := newHarness(t)
 

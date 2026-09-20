@@ -346,7 +346,7 @@ func TestGateCommands_ManifestAndHarnessProjection(t *testing.T) {
 	}
 }
 
-func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
+func TestGateDeclare_EmitsOneGateDeclaredEventPerDeclaration(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
 	dir := newGitRepo(t, "widget")
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
@@ -370,8 +370,8 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Errorf("gate declare appended %d events, want 0 (config, not a taxonomy event)", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Errorf("gate declare appended %d events, want exactly one gate.declared", len(after)-len(before))
 	}
 
 	// The verb is general — it can express a forge gate too (the schema
@@ -380,7 +380,7 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	// dogfood is HANDOFF §1.2's operating discipline plus the structural
 	// fact that they can never close without their owning role (MODEL
 	// §2.3) — not a hardcoded refusal here. Declaring one is technically
-	// legal and still emits no event.
+	// legal and emits its own gate.declared like any other declaration.
 	forge := runIn(t, dir, dbEnv, "plumbing", "gate", "declare", "verified", "--scale", "step", "--json")
 	if forge.exitCode != 0 {
 		t.Fatalf("declaring a forge gate should be technically legal (the verb is general): exit=%d stderr=%q", forge.exitCode, forge.stderr)
@@ -390,8 +390,8 @@ func TestGateDeclare_WritesConfigEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(afterForge) != len(before) {
-		t.Errorf("declaring a forge gate appended %d events, want 0", len(afterForge)-len(before))
+	if len(afterForge) != len(before)+2 {
+		t.Errorf("declaring a forge gate appended %d events total, want two", len(afterForge)-len(before))
 	}
 }
 
@@ -458,7 +458,7 @@ func TestGateDeclare_IsProspectiveAndRefusesScaleChanges(t *testing.T) {
 	}
 }
 
-func TestGateRepair_AddsLegacyExemptionWithoutAnEvent(t *testing.T) {
+func TestGateRepair_AddsLegacyExemptionAsOneEvent(t *testing.T) {
 	dbEnv := []string{"WIP_DB_PATH=" + filepath.Join(t.TempDir(), "wip.db")}
 	dir := newGitRepo(t, "widget")
 	if r := runIn(t, dir, dbEnv, "init"); r.exitCode != 0 {
@@ -510,8 +510,8 @@ func TestGateRepair_AddsLegacyExemptionWithoutAnEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("gate repair appended %d events, want none", len(after)-len(before))
+	if len(after) != len(before)+1 {
+		t.Fatalf("gate repair appended %d events, want exactly one gate.exemption-repaired", len(after)-len(before))
 	}
 	repo := repoIDFromWorkingDir(t, s, dir)
 	exempt, err := s.GateExempt(context.Background(), repo, m.ID, "verified")

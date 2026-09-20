@@ -35,7 +35,7 @@ func TestTrackerBacklogPushDefaultsToManualEvenWithABackend(t *testing.T) {
 	want(TrackerBacklogPushManual)
 }
 
-func TestTrackerBacklogPushIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
+func TestTrackerBacklogPushIsRepoTierConfigAndQueuesNothing(t *testing.T) {
 	h := newHarness(t)
 	before, err := h.Events(h.ctx)
 	if err != nil {
@@ -48,8 +48,10 @@ func TestTrackerBacklogPushIsRepoTierConfigAndEmitsNoEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != len(before) {
-		t.Fatalf("config change appended %d event(s)", len(after)-len(before))
+	// SetTrackerBacklogPush delegates to SetConfig, an ordinary verb since v13:
+	// exactly one config.set, and nothing beyond it (no candidate queued).
+	if len(after) != len(before)+1 {
+		t.Fatalf("config change appended %d event(s), want exactly one config.set", len(after)-len(before))
 	}
 	clone := h.attachClone(CloneAttached{Repo: h.Repo, GitCommonDir: "/tmp/other/.git", Label: "other"})
 	_ = clone

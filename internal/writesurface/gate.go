@@ -1,8 +1,9 @@
 package writesurface
 
-// Stage gates-and-dependencies, step-01/step-02: gate declaration (config,
-// no taxonomy event — the one documented seam), normal gate close
-// (`gate.closed`), and emergency dismissal (`gate.dismissed`).
+// Stage gates-and-dependencies, step-01/step-02: gate declaration
+// (`gate.declared`, config that is nonetheless evented since store v13 —
+// evented-config's step-02), normal gate close (`gate.closed`), and
+// emergency dismissal (`gate.dismissed`).
 //
 // Gate-order monotonicity (D12) is a `doctor` check owned by `guards`,
 // called here at declare time as an add-time precondition — the mirror of
@@ -21,8 +22,9 @@ import (
 )
 
 // DeclareGate declares a gate binding at a scale, as project configuration
-// (D4): statically knowable, never runtime-conditional. It writes config and
-// emits no domain event — gate actions are the evented seams.
+// (D4): statically knowable, never runtime-conditional. Since store v13 the
+// declaration itself is a `gate.declared` event through Commit, same as any
+// other gate action.
 func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale store.Scale) error {
 	switch scale {
 	case store.ScaleMatter, store.ScaleStage, store.ScaleStep:
@@ -55,7 +57,8 @@ func DeclareGate(ctx context.Context, s *store.Store, repo, gate string, scale s
 // RepairGateExemption restores one prospective exemption that a declaration
 // made before schema v8 could not snapshot. It accepts only a Done node at the
 // gate's bound scale whose other own and enclosing gates are already satisfied.
-// The repair is configuration and emits no event or false gate close.
+// The repair is configuration, never a false gate close, and since store v13 it
+// is a `gate.exemption-repaired` event rather than a direct table write.
 func RepairGateExemption(ctx context.Context, s *store.Store, repo, gate, locator string) (store.Node, error) {
 	n, err := ResolveNode(ctx, s.View, repo, locator)
 	if err != nil {
