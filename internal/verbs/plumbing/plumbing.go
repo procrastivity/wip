@@ -37,6 +37,7 @@ import (
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
 	stepverb "github.com/procrastivity/wip/internal/verbs/step"
+	trackerverb "github.com/procrastivity/wip/internal/verbs/tracker"
 )
 
 // Command constructs the `wip plumbing` namespace command and registers
@@ -46,9 +47,9 @@ import (
 // it without requiring a kind, the same way it already treats any other
 // command with children.
 //
-// providers is needed because three moved constructors take it
-// (gateverb.Command, lifecycleverb.FinishCommand, outboxverb.Command); no
-// other moved verb needs it.
+// providers is needed because four constructors take it (gateverb.Command,
+// lifecycleverb.FinishCommand, outboxverb.Command, trackerverb.Command); no
+// other verb here needs it.
 //
 // Registered alphabetically: cobra.EnableCommandSorting is a package
 // global, so turning it off in internal/cli/root.go (to get a
@@ -90,6 +91,7 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	cmd.AddCommand(lifecycleverb.StartCommand(streams))
 	cmd.AddCommand(statusverb.Command(streams))
 	cmd.AddCommand(stepverb.Command(streams))
+	cmd.AddCommand(trackerverb.Command(streams, providers))
 	cmd.AddCommand(bindverb.UnbindCommand(streams))
 	cmd.AddCommand(contentverb.WorkplanCommand(streams))
 	return cmd
