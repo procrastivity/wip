@@ -413,6 +413,9 @@ func liveState(observed workflowState, updatedAt string) tracker.LiveState {
 	case "canceled":
 		class = tracker.LiveCanceled
 	case "duplicate":
+		// Kept deliberately, even though it is a no-op (class already
+		// defaults to LiveTerminal): it documents that "duplicate" is a
+		// known Linear workflow type, not an omission.
 		class = tracker.LiveTerminal
 	}
 	return tracker.LiveState{Class: class, Display: observed.Name, Lease: updatedAt}
@@ -434,11 +437,15 @@ type issueContent struct {
 	} `json:"team"`
 }
 
-// readIssueContent is the content read. It enforces only the adapter's two
-// scoping invariants -- the issue answers to the reference asked for, and it
-// belongs to the configured team -- and deliberately does not apply
-// validateIssue, whose state-UUID and updatedAt requirements exist to gate a
-// guarded write and have nothing to say about whether text is readable.
+// readIssueContent is the content read. It enforces the adapter's two scoping
+// invariants -- the issue answers to the reference asked for, and it belongs
+// to the configured team -- plus one classification invariant: the workflow
+// state must carry a name and a type, because liveState falls through to
+// LiveTerminal with a blank display for an unrecognized or absent type, and
+// that is not a readable classification. It deliberately does not apply the
+// rest of validateIssue: the state-UUID and updatedAt requirements exist only
+// to gate a guarded write and have nothing to say about whether text is
+// readable, so a missing state UUID or empty updatedAt still passes.
 func (a *Adapter) readIssueContent(ctx context.Context, ref string) (issueContent, error) {
 	var data struct {
 		Issue *issueContent `json:"issue"`
@@ -458,6 +465,9 @@ func (a *Adapter) readIssueContent(ctx context.Context, ref string) (issueConten
 	if !strings.EqualFold(data.Issue.Team.ID, a.target) {
 		return issueContent{}, permanentError(fmt.Sprintf("issue %q does not belong to target team", ref))
 	}
+	if strings.TrimSpace(data.Issue.State.Name) == "" || strings.TrimSpace(data.Issue.State.Type) == "" {
+		return issueContent{}, permanentError(fmt.Sprintf("issue %q has no workflow state name or type to classify", ref))
+	}
 	return *data.Issue, nil
 }
 
@@ -476,7 +486,7 @@ func (a *Adapter) ReadContent(ctx context.Context, ref string) (tracker.Content,
 		return tracker.Content{}, err
 	}
 	return tracker.Content{
-		Ref:       observed.Identifier,
+		Ref:       ref,
 		Title:     observed.Title,
 		Body:      observed.Description,
 		URL:       observed.URL,

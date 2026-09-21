@@ -82,6 +82,13 @@ func TestProposeRefusesEveryMalformedRequestAndCommitsNothing(t *testing.T) {
 			"validation.missing-body", "needs a body",
 		},
 		{
+			"a comment with a whitespace-only body",
+			func() (store.OutboxEntry, error) {
+				return ProposeTrackerComment(ctx, f.s, store.ActorHuman, f.env.Repo, "GH-7", "   \t\n  ")
+			},
+			"validation.missing-body", "needs a body",
+		},
+		{
 			"a state with no reference",
 			func() (store.OutboxEntry, error) {
 				return ProposeTrackerState(ctx, f.s, store.ActorHuman, f.env.Repo, "", store.TrackerCompleted)

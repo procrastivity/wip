@@ -81,6 +81,19 @@ func TestReadContentStripsTheTrailingIdempotencyMarker(t *testing.T) {
 			name: "look-alike without a digest", body: "Detail <!-- wip-idempotency:not-a-digest -->",
 			want: "Detail <!-- wip-idempotency:not-a-digest -->",
 		},
+		{
+			// A valid-digest marker sharing a line with operator text is not
+			// "on its own line", so it must survive stripping.
+			name: "marker shares a line with operator text", body: "Detail " + marker + " thanks!",
+			want: "Detail " + marker + " thanks!",
+		},
+		{
+			// stripIdempotencyMarker recognizes only a lowercase-hex digest; an
+			// uppercase one is not the marker create writes and must survive.
+			name: "uppercase hex digest is not recognized",
+			body: "Detail\n\n" + markerPrefix + strings.ToUpper(strings.TrimSuffix(strings.TrimPrefix(marker, markerPrefix), markerSuffix)) + markerSuffix,
+			want: "Detail\n\n" + markerPrefix + strings.ToUpper(strings.TrimSuffix(strings.TrimPrefix(marker, markerPrefix), markerSuffix)) + markerSuffix,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response, err := json.Marshal(issue{Body: test.body, State: "open", UpdatedAt: "2026-08-20T12:34:56Z"})
@@ -203,6 +216,17 @@ func TestReadContentLeavesUpdatedAtZeroWhenTheProviderTimeIsUnparsable(t *testin
 	}
 	if got.State.Lease != "old-lease" {
 		t.Fatalf("Lease = %q, want the provider string verbatim", got.State.Lease)
+	}
+}
+
+func TestReadContentFallsBackToTheRequestedReferenceForURL(t *testing.T) {
+	// A GitHub reference is the issue's own HTML URL (issueReference accepts
+	// only those), so when the provider response omits html_url the caller's
+	// ref is still the right address — same justification as gitlab.
+	got, err := contentAdapter(t, `{"title":"t","body":"d","state":"open","updated_at":"2026-08-20T12:34:56Z"}`, nil).
+		ReadContent(context.Background(), contentRef)
+	if err != nil || got.URL != contentRef {
+		t.Fatalf("ReadContent().URL = %q, %v; want %q", got.URL, err, contentRef)
 	}
 }
 

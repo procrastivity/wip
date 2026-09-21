@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -257,11 +258,17 @@ func (a *Adapter) ReadContent(ctx context.Context, ref string) (tracker.Content,
 	if err != nil {
 		return tracker.Content{}, err
 	}
+	target := strings.TrimSpace(observed.HTMLURL)
+	if target == "" {
+		// A GitHub reference is the issue's own HTML URL (issueReference), so
+		// the caller's ref is the right address when the response omits one.
+		target = ref
+	}
 	content := tracker.Content{
 		Ref:   ref,
 		Title: observed.Title,
 		Body:  stripIdempotencyMarker(observed.Body),
-		URL:   observed.HTMLURL,
+		URL:   target,
 		State: live,
 	}
 	// updated_at doubles as the opaque lease, which stays a provider string.
@@ -526,30 +533,23 @@ func idempotencyMarker(key string) string {
 	return markerPrefix + hex.EncodeToString(sum[:]) + markerSuffix
 }
 
+// trailingMarker matches one hidden marker exactly as idempotencyMarker
+// writes it, anchored to its own last line: gitlab.go's trailingMarker, in
+// github's idiom.
+var trailingMarker = regexp.MustCompile(`(?:^|\n)[ \t]*` + regexp.QuoteMeta(markerPrefix) + `[0-9a-f]{64}` + regexp.QuoteMeta(markerSuffix) + `[ \t]*$`)
+
 // stripIdempotencyMarker removes the hidden marker create appends to an issue
 // body (create, above) so a content read returns what a human would see minus
-// wip's own bookkeeping. Only a trailing marker carrying a full-length digest
-// is removed: an operator's body that merely mentions the marker, or that
-// keeps writing after one, is returned untouched.
+// wip's own bookkeeping. Only a lowercase-hex marker trailing on its own line
+// is removed: an operator's body that merely mentions the marker, that keeps
+// writing after one, or that shares a line with one, is returned byte-for-byte.
 func stripIdempotencyMarker(body string) string {
-	index := strings.LastIndex(body, markerPrefix)
-	if index < 0 {
+	trimmed := strings.TrimRight(body, " \t\r\n")
+	loc := trailingMarker.FindStringIndex(trimmed)
+	if loc == nil {
 		return body
 	}
-	rest := body[index+len(markerPrefix):]
-	end := strings.Index(rest, markerSuffix)
-	if end < 0 || !hexDigest(rest[:end]) || strings.TrimSpace(rest[end+len(markerSuffix):]) != "" {
-		return body
-	}
-	return strings.TrimRight(body[:index], " \t\r\n")
-}
-
-func hexDigest(s string) bool {
-	if len(s) != hex.EncodedLen(sha256.Size) {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
+	return strings.TrimRight(trimmed[:loc[0]], " \t\r\n")
 }
 
 func repository(remote string) (string, string, error) {

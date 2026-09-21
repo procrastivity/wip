@@ -33,6 +33,7 @@ package writesurface
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/wiperr"
@@ -57,8 +58,9 @@ func ProposeTrackerComment(ctx context.Context, s *store.Store, actor store.Acto
 	if ref == "" {
 		return store.OutboxEntry{}, wiperr.New("validation.missing-reference", "a proposed comment needs the reference it comments on")
 	}
+	body = strings.TrimSpace(body)
 	if body == "" {
-		return store.OutboxEntry{}, wiperr.New("validation.missing-body", "a proposed comment needs a body")
+		return store.OutboxEntry{}, wiperr.New("validation.missing-body", "a proposed comment needs a body; whitespace alone does not count")
 	}
 	return proposeTracker(ctx, s, actor, repo, store.TrackerAdhocProposed{
 		Kind: store.AdhocComment, Ref: ref, Body: body,
