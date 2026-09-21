@@ -189,6 +189,76 @@ func (v View) TrackerReferences(ctx context.Context, matter string) ([]string, e
 	return refs, nil
 }
 
+// MatterReference is one Matter's live binding to one provider-neutral tracker
+// reference — the (matter, ref) pair, with the Matter named both ways.
+//
+// Matter is the identity every event addresses (D44); Locator is the mutable,
+// human-facing name (see Node) and is what a listing prints. Both travel
+// because the two consumers want different halves: a person reads
+// `matter-slug  ABC-123`, and anything that follows up — TrackerAggregate, a
+// later event, a second read — addresses the Matter by ULID.
+type MatterReference struct {
+	Matter  string
+	Locator string
+	Ref     string
+}
+
+// RepoTrackerReferences lists every live binding in a Repo, in the order the
+// bindings were born.
+//
+// It is TrackerReferences widened from one Matter to one Repo, which is the
+// question a listing asks: which of this Repo's Matters currently claim which
+// references. The Repo is not a column on tracker_references — the reference
+// belongs to a Matter and the Matter belongs to the Repo — so the scope is the
+// join and not a filter.
+//
+// The join carries two liveness conditions, not one. A membership stops being
+// live when its own reference.removed/reference.rebound event retires it
+// (removed_event), and *also* when the Matter holding it is removed: removal
+// tombstones the node and appends no reference event, so the membership row is
+// still removed_event IS NULL and would otherwise read as live against a Matter
+// that no longer exists. Rows are tombstoned and never deleted (D44), which is
+// what makes both filters necessary rather than defensive.
+//
+// Ordering is the reference row's birth_event — the ULID of the event that made
+// the membership, so creation order is a column rather than a sort over derived
+// data, exactly as TrackerReferences and Matters order themselves. A rebind
+// births its destination row under the rebind's own event, so a rebound
+// reference appears once, at the rebind's position, carrying the new ref. ref
+// is the tiebreak so the order is total no matter what a later fold does.
+//
+// Below v5 there is no tracker_references table at all, so the answer is empty
+// rather than an error — the shape Outbox and TrackerReferences both take,
+// because a store that predates the tracker substrate has no bindings rather
+// than a broken read.
+func (v View) RepoTrackerReferences(ctx context.Context, repo string) ([]MatterReference, error) {
+	if v.schemaVersion < 5 {
+		return nil, nil
+	}
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT r.matter,n.locator,r.ref
+		 FROM tracker_references r JOIN nodes n ON n.id=r.matter
+		 WHERE n.repo=? AND n.kind='matter'
+		   AND r.removed_event IS NULL AND n.tombstone_event IS NULL
+		 ORDER BY r.birth_event,r.ref`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("store: read the tracker references in %s: %w", repo, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []MatterReference
+	for rows.Next() {
+		var m MatterReference
+		if err := rows.Scan(&m.Matter, &m.Locator, &m.Ref); err != nil {
+			return nil, fmt.Errorf("store: read the tracker references in %s: %w", repo, err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read the tracker references in %s: %w", repo, err)
+	}
+	return out, nil
+}
+
 // TrackerAggregate returns the expected provider-neutral disposition of one
 // shared tracker reference. The bool reports whether the reference has live
 // local membership. An all-Planned set has membership but no deliverable
