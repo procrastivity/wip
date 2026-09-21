@@ -197,6 +197,22 @@ func TestReadContentStripsTheIdempotencyMarker(t *testing.T) {
 			description: marker + "\n\nAdded later.",
 			want:        marker + "\n\nAdded later.",
 		},
+		{
+			// A valid-digest marker sharing a line with operator text is not
+			// "on its own line", so it must survive stripping.
+			name:        "marker shares a line with operator text",
+			description: "Detail " + marker + " thanks!",
+			want:        "Detail " + marker + " thanks!",
+		},
+		{
+			// stripMarker recognizes only a lowercase-hex digest; an uppercase
+			// one is not the marker create writes and must survive.
+			name: "uppercase hex digest is not recognized",
+			description: "Detail\n\n<!-- wip-idempotency:" +
+				strings.ToUpper(strings.TrimSuffix(strings.TrimPrefix(marker, "<!-- wip-idempotency:"), " -->")) + " -->",
+			want: "Detail\n\n<!-- wip-idempotency:" +
+				strings.ToUpper(strings.TrimSuffix(strings.TrimPrefix(marker, "<!-- wip-idempotency:"), " -->")) + " -->",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			adapter := newTestAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

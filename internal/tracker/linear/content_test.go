@@ -146,6 +146,40 @@ func TestReadContentSucceedsForAnIssueTheWriteGateRefuses(t *testing.T) {
 	}
 }
 
+// TestReadContentRefusesAnUnclassifiableWorkflowState covers the one
+// classification invariant readIssueContent does enforce: an empty
+// state.Name or state.Type is not a write-lease input (a missing state UUID
+// and an empty updatedAt gate writes only, and TestReadContentSucceedsFor
+// AnIssueTheWriteGateRefuses proves those still pass), but liveState falls
+// through to LiveTerminal with a blank display for either, which is not a
+// readable classification.
+func TestReadContentRefusesAnUnclassifiableWorkflowState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state workflowState
+	}{
+		{name: "empty state type", state: workflowState{ID: startedState, Name: "Doing", Type: ""}},
+		{name: "empty state name", state: workflowState{ID: startedState, Name: "", Type: "started"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := newTestAdapter(t, func(t *testing.T, request gqlTestRequest) testResponse {
+				if request.OperationName != "ReadIssueContent" {
+					t.Fatalf("operation = %q", request.OperationName)
+				}
+				return contentResponse(map[string]any{
+					"identifier": "BDS-124", "title": "Title", "description": "Body",
+					"url": "https://linear.app/acme/issue/BDS-124/title", "updatedAt": "2026-09-21T17:04:05Z",
+					"team": map[string]any{"id": testTeam}, "state": test.state,
+				})
+			})
+			got, err := adapter.ReadContent(context.Background(), "BDS-124")
+			if err == nil || got != (tracker.Content{}) {
+				t.Fatalf("ReadContent() = %+v, err = %v; want a refusal", got, err)
+			}
+		})
+	}
+}
+
 func TestReadContentRefusesForeignReferencesWithoutWideningTheWriteGate(t *testing.T) {
 	t.Run("malformed reference makes no request", func(t *testing.T) {
 		called := false

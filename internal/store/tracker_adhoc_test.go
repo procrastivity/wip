@@ -204,6 +204,11 @@ func TestAdhocProposalsRefuseEveryMalformedPerKindPayload(t *testing.T) {
 			"must carry a body",
 		},
 		{
+			"a comment with a whitespace-only body", h.Repo,
+			TrackerAdhocProposed{Kind: AdhocComment, Ref: "GH-7", Body: "   \t\n  "},
+			"must carry a body",
+		},
+		{
 			"a comment carrying a title", h.Repo,
 			TrackerAdhocProposed{Kind: AdhocComment, Ref: "GH-7", Body: "b", Title: "t"},
 			"carries a title, a detail or a disposition",

@@ -1310,7 +1310,7 @@ func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
 		if p.Ref == "" {
 			return fmt.Errorf("store: %s of kind comment must name the reference it comments on", ev.Type)
 		}
-		if p.Body == "" {
+		if strings.TrimSpace(p.Body) == "" {
 			return fmt.Errorf("store: %s of kind comment must carry a body", ev.Type)
 		}
 		if p.Title != "" || p.Detail != "" || p.Disposition != "" {
