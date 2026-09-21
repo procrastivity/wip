@@ -255,6 +255,48 @@ type TrackerItemCreated struct {
 	Ref string `json:"ref"`
 }
 
+// AdhocKind discriminates what an operator-authored proposal becomes at the
+// seam. The three tokens are the three outbox kinds, because a proposal *is* a
+// candidate — one a human wrote rather than one a lifecycle fact produced.
+type AdhocKind string
+
+// The three ad-hoc proposal kinds.
+const (
+	// AdhocCreate proposes a new external item. It carries a title, optionally
+	// a detail, and names no reference: there is nothing to name until the
+	// provider answers.
+	AdhocCreate AdhocKind = "create"
+	// AdhocComment proposes free body text on an existing external item. It is
+	// the free-body variant the Stage-closure narration is not: no stage, no
+	// action, just prose an operator wrote.
+	AdhocComment AdhocKind = "comment"
+	// AdhocState proposes one provider-neutral disposition on an existing
+	// external item.
+	AdhocState AdhocKind = "state"
+)
+
+// TrackerAdhocProposed is one operator-authored tracker candidate.
+//
+// The subject is the Repo, because a proposal is Repo-tier and node-less: it is
+// not a consequence of any node's lifecycle, so there is no node for it to be
+// about (the `config.set` and `gate.declared` precedent — see
+// setConfigProjection and declareGateProjection in project.go).
+//
+// Kind discriminates which fields are required: create needs Title and must not
+// name a Ref, comment needs Ref and Body, state needs Ref and one of the three
+// dispositions. projectAdhocCandidate (project.go) refuses every other
+// combination at the fold, so a malformed proposal never reaches the outbox and
+// — on the live path, where a refused fold rolls the command back — never
+// reaches the log either.
+type TrackerAdhocProposed struct {
+	Kind        AdhocKind          `json:"kind"`
+	Title       string             `json:"title,omitempty"`
+	Detail      string             `json:"detail,omitempty"`
+	Ref         string             `json:"ref,omitempty"`
+	Body        string             `json:"body,omitempty"`
+	Disposition TrackerDisposition `json:"disposition,omitempty"`
+}
+
 // OutboxApproved records the human boundary before a provider seam call.
 type OutboxApproved struct{}
 

@@ -58,6 +58,7 @@ var register = []migration{
 	{version: 11, name: "emergency-gate-dismissal", stmts: v11Statements()},
 	{version: 12, name: "backlog-entry-findings", stmts: v12Statements()},
 	{version: 13, name: "evented-config", stmts: v13Statements(), dataMigrate: v13SyntheticHistory},
+	{version: 14, name: "tracker-adhoc", stmts: v14Statements()},
 }
 
 // latestVersion is the highest migration this binary carries.
