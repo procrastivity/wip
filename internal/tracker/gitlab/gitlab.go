@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tracker"
@@ -44,7 +46,10 @@ type Adapter struct {
 	client        *http.Client
 }
 
-var _ tracker.StateReader = (*Adapter)(nil)
+var (
+	_ tracker.StateReader   = (*Adapter)(nil)
+	_ tracker.ContentReader = (*Adapter)(nil)
+)
 
 // New constructs an adapter for the repository identified by
 // input.Repo.RemoteURL. input.Target is ignored (G2).
@@ -147,10 +152,15 @@ func (a *Adapter) create(ctx context.Context, entry store.OutboxEntry) (tracker.
 	return tracker.Result{Outcome: tracker.Delivered, Ref: response.WebURL}, nil
 }
 
+// commentPayload reads both comment shapes the store queues: the Stage
+// lifecycle shape (stage, title, action) queueStageComments writes, and the
+// free-body shape ({"body":…}) an ad-hoc proposal writes. Exactly one of Body
+// and Title is populated in practice; Body wins when both are.
 type commentPayload struct {
 	Stage  string `json:"stage"`
 	Title  string `json:"title"`
 	Action string `json:"action"`
+	Body   string `json:"body"`
 }
 
 func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker.Result, error) {
@@ -159,7 +169,8 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: err.Error()}, nil
 	}
 	var payload commentPayload
-	if err := json.Unmarshal(entry.Payload, &payload); err != nil || strings.TrimSpace(payload.Title) == "" {
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil ||
+		(strings.TrimSpace(payload.Body) == "" && strings.TrimSpace(payload.Title) == "") {
 		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "gitlab tracker: malformed comment payload"}, nil
 	}
 	marker := idempotencyMarker(entry.IdempotencyKey)
@@ -170,7 +181,11 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 	if found {
 		return tracker.Result{Outcome: tracker.Converged}, nil
 	}
-	text := fmt.Sprintf("Stage %q %s.\n\n%s", payload.Title, payload.Action, marker)
+	text := strings.TrimSpace(payload.Body)
+	if text == "" {
+		text = fmt.Sprintf("Stage %q %s.", payload.Title, payload.Action)
+	}
+	text += "\n\n" + marker
 	request := struct {
 		Body string `json:"body"`
 	}{Body: text}
@@ -182,6 +197,7 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 
 type issue struct {
 	IID         int      `json:"iid"`
+	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	WebURL      string   `json:"web_url"`
 	State       string   `json:"state"` // "opened" | "closed"
@@ -226,6 +242,22 @@ func (a *Adapter) readIssue(ctx context.Context, iid int) (issue, error) {
 	return response, err
 }
 
+// liveState classifies one issue read into the provider-neutral observation.
+// ReadState and ReadContent both go through it, so the two read verbs cannot
+// disagree about what "closed with the canceled label" means.
+func (a *Adapter) liveState(observed issue) (tracker.LiveState, error) {
+	if strings.TrimSpace(observed.UpdatedAt) == "" || (observed.State != "opened" && observed.State != "closed") {
+		return tracker.LiveState{}, fmt.Errorf("gitlab tracker: issue read returned malformed state or updated_at")
+	}
+	if observed.State == "opened" {
+		return tracker.LiveState{Class: tracker.LiveNonterminal, Display: "opened", Lease: observed.UpdatedAt}, nil
+	}
+	if a.canceledLabel != "" && hasLabel(observed, a.canceledLabel) {
+		return tracker.LiveState{Class: tracker.LiveCanceled, Display: "closed (" + a.canceledLabel + ")", Lease: observed.UpdatedAt}, nil
+	}
+	return tracker.LiveState{Class: tracker.LiveCompleted, Display: "closed", Lease: observed.UpdatedAt}, nil
+}
+
 // ReadState implements tracker.StateReader.
 func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState, error) {
 	iid, err := a.issueReference(ref)
@@ -236,17 +268,50 @@ func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState,
 	if err != nil {
 		return tracker.LiveState{}, err
 	}
-	if strings.TrimSpace(observed.UpdatedAt) == "" || (observed.State != "opened" && observed.State != "closed") {
-		return tracker.LiveState{}, fmt.Errorf("gitlab tracker: issue read returned malformed state or updated_at")
-	}
+	return a.liveState(observed)
+}
 
-	if observed.State == "opened" {
-		return tracker.LiveState{Class: tracker.LiveNonterminal, Display: "opened", Lease: observed.UpdatedAt}, nil
+// ReadContent implements tracker.ContentReader. It reuses the one issue read
+// ReadState uses and classifies the result through the same helper, so the
+// content a caller renders and the state it reports come from one observation.
+func (a *Adapter) ReadContent(ctx context.Context, ref string) (tracker.Content, error) {
+	iid, err := a.issueReference(ref)
+	if err != nil {
+		return tracker.Content{}, err
 	}
-	if a.canceledLabel != "" && hasLabel(observed, a.canceledLabel) {
-		return tracker.LiveState{Class: tracker.LiveCanceled, Display: "closed (" + a.canceledLabel + ")", Lease: observed.UpdatedAt}, nil
+	observed, err := a.readIssue(ctx, iid)
+	if err != nil {
+		return tracker.Content{}, err
 	}
-	return tracker.LiveState{Class: tracker.LiveCompleted, Display: "closed", Lease: observed.UpdatedAt}, nil
+	state, err := a.liveState(observed)
+	if err != nil {
+		return tracker.Content{}, err
+	}
+	target := strings.TrimSpace(observed.WebURL)
+	if target == "" {
+		// A GitLab reference is the issue's own web URL (issueReference), so
+		// the caller's ref is the right address when the response omits one.
+		target = ref
+	}
+	return tracker.Content{
+		Ref:       ref,
+		Title:     observed.Title,
+		Body:      stripMarker(observed.Description),
+		URL:       target,
+		State:     state,
+		UpdatedAt: updatedAt(observed.UpdatedAt),
+	}, nil
+}
+
+// updatedAt parses the provider's last-modified stamp. An unparseable stamp
+// yields the zero time, which tracker.Content documents as "not reported"; the
+// exact provider text still reaches the caller as LiveState.Lease.
+func updatedAt(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func (a *Adapter) writeIssueState(ctx context.Context, iid int, update issueStateUpdate) (issue, error) {
@@ -563,6 +628,23 @@ func isRateLimited(header http.Header) bool {
 func idempotencyMarker(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return "<!-- wip-idempotency:" + hex.EncodeToString(sum[:]) + " -->"
+}
+
+// trailingMarker matches one hidden marker exactly as idempotencyMarker writes
+// it, anchored to its own last line.
+var trailingMarker = regexp.MustCompile(`(?:^|\n)[ \t]*<!-- wip-idempotency:[0-9a-f]{64} -->[ \t]*$`)
+
+// stripMarker removes the hidden idempotency marker create appends to an issue
+// description, so a read shows the body an operator wrote rather than the
+// bookkeeping wip added. A description with no trailing marker is returned
+// byte-for-byte.
+func stripMarker(description string) string {
+	trimmed := strings.TrimRight(description, " \t\r\n")
+	loc := trailingMarker.FindStringIndex(trimmed)
+	if loc == nil {
+		return description
+	}
+	return strings.TrimRight(trimmed[:loc[0]], " \t\r\n")
 }
 
 // project parses a store-normalized or raw GitLab remote into a lower-case
