@@ -105,6 +105,9 @@ func TestReadSeamConfigReadsEveryTrackerKeyThenTheRepoRow(t *testing.T) {
 	if !reflect.DeepEqual(config, want) {
 		t.Fatalf("seam config = %+v, want %+v; only the backend is trimmed", config, want)
 	}
+	if !config.Configured() {
+		t.Errorf("Configured() = false for backend %q, want true", config.Backend)
+	}
 }
 
 func TestReadSeamConfigStopsAtAnUnconfiguredBackend(t *testing.T) {
@@ -128,6 +131,9 @@ func TestReadSeamConfigStopsAtAnUnconfiguredBackend(t *testing.T) {
 			}
 			if config.Target != "" || config.CanceledLabel != "" || config.Project != "" || config.Repo != (store.Repo{}) {
 				t.Fatalf("unconfigured seam config = %+v, want the remaining fields zero", config)
+			}
+			if config.Configured() {
+				t.Errorf("Configured() = true for backend %q, want false", backend)
 			}
 		})
 	}
