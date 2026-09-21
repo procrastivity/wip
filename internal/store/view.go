@@ -1366,6 +1366,60 @@ func (v View) OutboxEntry(ctx context.Context, repo, id string) (OutboxEntry, er
 	return e, nil
 }
 
+// OutboxEntryByBirth returns the entry one event minted, within its Repo.
+//
+// A candidate's identity is derived inside the fold — insertTrackerCandidate
+// hashes the idempotency key it builds — so a verb that has just committed a
+// proposal knows the event's id and nothing else. This is the read that turns
+// the one into the other, and it is deliberately the `birth_event` column
+// rather than a "newest queued entry" heuristic: birth_event is written by the
+// same INSERT that makes the row, and a trigger has made it immutable since v5
+// (outbox_entries_immutable_birth, schema_v5.go), so it names exactly the event
+// that caused the row and goes on naming it for the row's whole life.
+//
+// Absence is an error in the same words OutboxEntry uses, because every caller
+// has just written the event it is asking about: a missing row is a broken
+// fold, not a state worth reporting. More than one row is an error too, rather
+// than a silent first-of-N — one event can legitimately mint several candidates
+// (a Stage closure fans a comment out across every live reference), and a
+// caller that wanted one and got three should hear about it.
+func (v View) OutboxEntryByBirth(ctx context.Context, repo, eventID string) (OutboxEntry, error) {
+	if v.schemaVersion < 5 {
+		return OutboxEntry{}, fmt.Errorf("store: outbox reads require schema v5")
+	}
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT o.id,o.repo,o.kind,o.state,o.subject,COALESCE(o.ref,''),
+		        CASE WHEN o.kind='state' THEN COALESCE((SELECT p.lease FROM tracker_push_records p WHERE p.ref=o.ref),'') ELSE '' END,
+		        o.idempotency_key,o.payload,o.reason,o.attempts
+		 FROM outbox_entries o WHERE o.repo=? AND o.birth_event=? ORDER BY o.id`, repo, eventID)
+	if err != nil {
+		return OutboxEntry{}, fmt.Errorf("store: read the outbox entry born by %s: %w", eventID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []OutboxEntry
+	for rows.Next() {
+		var e OutboxEntry
+		var payload string
+		if err := rows.Scan(&e.ID, &e.Repo, &e.Kind, &e.State, &e.Subject, &e.Ref, &e.Lease,
+			&e.IdempotencyKey, &payload, &e.Reason, &e.Attempts); err != nil {
+			return OutboxEntry{}, fmt.Errorf("store: read the outbox entry born by %s: %w", eventID, err)
+		}
+		e.Payload = json.RawMessage(payload)
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return OutboxEntry{}, fmt.Errorf("store: read the outbox entry born by %s: %w", eventID, err)
+	}
+	switch len(out) {
+	case 1:
+		return out[0], nil
+	case 0:
+		return OutboxEntry{}, fmt.Errorf("store: no outbox entry born by %s in %s", eventID, repo)
+	default:
+		return OutboxEntry{}, fmt.Errorf("store: event %s minted %d outbox entries in %s, not one", eventID, len(out), repo)
+	}
+}
+
 // TrackerPushRecord is the last successful monotonic state write for one
 // provider-neutral reference.
 type TrackerPushRecord struct {
