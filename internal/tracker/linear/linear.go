@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tracker"
@@ -51,7 +52,10 @@ type Adapter struct {
 	client  *http.Client
 }
 
-var _ tracker.StateReader = (*Adapter)(nil)
+var (
+	_ tracker.StateReader   = (*Adapter)(nil)
+	_ tracker.ContentReader = (*Adapter)(nil)
+)
 
 // New constructs an adapter for one configured Linear team UUID.
 func New(input tracker.FactoryInput, options Options) (*Adapter, error) {
@@ -163,6 +167,7 @@ type commentPayload struct {
 	Stage  string `json:"stage"`
 	Title  string `json:"title"`
 	Action string `json:"action"`
+	Body   string `json:"body"`
 }
 
 func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker.Result, error) {
@@ -170,7 +175,7 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 		return refusal(fmt.Sprintf("reference %q is not a Linear issue identifier", entry.Ref)), nil
 	}
 	var payload commentPayload
-	if err := json.Unmarshal(entry.Payload, &payload); err != nil || strings.TrimSpace(payload.Title) == "" || strings.TrimSpace(entry.IdempotencyKey) == "" {
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil || (strings.TrimSpace(payload.Body) == "" && strings.TrimSpace(payload.Title) == "") || strings.TrimSpace(entry.IdempotencyKey) == "" {
 		return refusal("malformed comment payload"), nil
 	}
 	clientID := deterministicUUID("comment", entry.IdempotencyKey)
@@ -182,9 +187,12 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 	if _, err := a.readIssue(ctx, entry.Ref); err != nil {
 		return resultForError(err)
 	}
+	body := payload.Body
+	if strings.TrimSpace(body) == "" {
+		body = fmt.Sprintf("Stage %q %s.", payload.Title, payload.Action)
+	}
 	variables := map[string]any{"input": map[string]any{
-		"id": clientID, "issueId": entry.Ref,
-		"body": fmt.Sprintf("Stage %q %s.", payload.Title, payload.Action),
+		"id": clientID, "issueId": entry.Ref, "body": body,
 	}}
 	var data struct {
 		CommentCreate struct {
@@ -387,8 +395,15 @@ func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState,
 	if err != nil {
 		return tracker.LiveState{}, err
 	}
+	return liveState(observed.State, observed.UpdatedAt), nil
+}
+
+// liveState is the one classification both ReadState and ReadContent use, so a
+// content read cannot report a different lifecycle class than a state read of
+// the same workflow state.
+func liveState(observed workflowState, updatedAt string) tracker.LiveState {
 	class := tracker.LiveTerminal
-	switch observed.State.Type {
+	switch observed.Type {
 	case "triage", "backlog", "unstarted":
 		class = tracker.LiveBacklog
 	case "started":
@@ -400,7 +415,85 @@ func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState,
 	case "duplicate":
 		class = tracker.LiveTerminal
 	}
-	return tracker.LiveState{Class: class, Display: observed.State.Name, Lease: observed.UpdatedAt}, nil
+	return tracker.LiveState{Class: class, Display: observed.Name, Lease: updatedAt}
+}
+
+// issueContent is the read-only projection ReadContent needs. It is separate
+// from issue on purpose: the write gate reads issue through readIssue and
+// validateIssue, and widening either to carry display text would put content
+// fields on the path that decides whether a write may proceed.
+type issueContent struct {
+	Identifier  string        `json:"identifier"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	URL         string        `json:"url"`
+	UpdatedAt   string        `json:"updatedAt"`
+	State       workflowState `json:"state"`
+	Team        struct {
+		ID string `json:"id"`
+	} `json:"team"`
+}
+
+// readIssueContent is the content read. It enforces only the adapter's two
+// scoping invariants -- the issue answers to the reference asked for, and it
+// belongs to the configured team -- and deliberately does not apply
+// validateIssue, whose state-UUID and updatedAt requirements exist to gate a
+// guarded write and have nothing to say about whether text is readable.
+func (a *Adapter) readIssueContent(ctx context.Context, ref string) (issueContent, error) {
+	var data struct {
+		Issue *issueContent `json:"issue"`
+	}
+	err := a.request(ctx, "ReadIssueContent", `query ReadIssueContent($ref: String!) {
+  issue(id: $ref) { identifier title description url updatedAt team { id } state { id name type } }
+}`, map[string]any{"ref": ref}, &data)
+	if err != nil {
+		return issueContent{}, err
+	}
+	if data.Issue == nil {
+		return issueContent{}, permanentError(fmt.Sprintf("issue %q was not found", ref))
+	}
+	if !strings.EqualFold(data.Issue.Identifier, ref) {
+		return issueContent{}, permanentError(fmt.Sprintf("issue content read returned identifier %q for reference %q", data.Issue.Identifier, ref))
+	}
+	if !strings.EqualFold(data.Issue.Team.ID, a.target) {
+		return issueContent{}, permanentError(fmt.Sprintf("issue %q does not belong to target team", ref))
+	}
+	return *data.Issue, nil
+}
+
+// ReadContent implements tracker.ContentReader.
+//
+// Linear carries no idempotency marker in issue descriptions or comment
+// bodies -- convergence rides the deterministic client-supplied UUID that
+// deterministicUUID derives -- so the description is returned verbatim with
+// nothing to strip.
+func (a *Adapter) ReadContent(ctx context.Context, ref string) (tracker.Content, error) {
+	if !validIdentifier(ref) {
+		return tracker.Content{}, fmt.Errorf("linear tracker: reference %q is not a Linear issue identifier", ref)
+	}
+	observed, err := a.readIssueContent(ctx, ref)
+	if err != nil {
+		return tracker.Content{}, err
+	}
+	return tracker.Content{
+		Ref:       observed.Identifier,
+		Title:     observed.Title,
+		Body:      observed.Description,
+		URL:       observed.URL,
+		State:     liveState(observed.State, observed.UpdatedAt),
+		UpdatedAt: updatedAt(observed.UpdatedAt),
+	}, nil
+}
+
+// updatedAt reads Linear's ISO-8601 updatedAt. An absent or unparsable
+// value yields the zero time, which tracker.Content documents as "the provider
+// did not report one"; a content read is not a lease and must not fail on it.
+func updatedAt(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func (a *Adapter) state(ctx context.Context, entry store.OutboxEntry) (tracker.Result, error) {
