@@ -71,14 +71,11 @@ func (stubSeam) Deliver(context.Context, store.OutboxEntry) (Result, error) {
 // factoryCapture records what the registry handed the provider factory.
 type factoryCapture struct{ inputs []FactoryInput }
 
-func capturingRegistry(name string, factoryErr error) (*Registry, *factoryCapture) {
+func capturingRegistry(name string) (*Registry, *factoryCapture) {
 	capture := &factoryCapture{}
 	registry := NewRegistry()
 	registry.Register(name, func(input FactoryInput) (Seam, error) {
 		capture.inputs = append(capture.inputs, input)
-		if factoryErr != nil {
-			return nil, factoryErr
-		}
 		return stubSeam{}, nil
 	})
 	return registry, capture
@@ -140,7 +137,7 @@ func TestResolveSeamReturnsErrNoBackendForUnsetAndNone(t *testing.T) {
 	for _, backend := range []string{"", "none", "  none  "} {
 		t.Run(fmt.Sprintf("backend %q", backend), func(t *testing.T) {
 			view := configuredSeamView(backend)
-			registry, capture := capturingRegistry("fake", nil)
+			registry, capture := capturingRegistry("fake")
 
 			seam, _, err := ResolveSeam(context.Background(), view, registry, "repo-1")
 			if !errors.Is(err, ErrNoBackend) {
@@ -161,7 +158,7 @@ func TestResolveSeamReturnsErrNoBackendForUnsetAndNone(t *testing.T) {
 
 func TestResolveSeamHandsEveryConfiguredValueToTheFactory(t *testing.T) {
 	view := configuredSeamView("fake")
-	registry, capture := capturingRegistry("fake", nil)
+	registry, capture := capturingRegistry("fake")
 
 	seam, config, err := ResolveSeam(context.Background(), view, registry, "repo-1")
 	if err != nil || seam == nil {
@@ -220,7 +217,7 @@ func TestResolveSeamSurfacesConstructionAndReadFailures(t *testing.T) {
 	t.Run("config read failure", func(t *testing.T) {
 		view := configuredSeamView("fake")
 		view.configErr[store.TrackerCanceledLabelKey] = errors.New("config table is gone")
-		registry, capture := capturingRegistry("fake", nil)
+		registry, capture := capturingRegistry("fake")
 
 		seam, _, err := ResolveSeam(context.Background(), view, registry, "repo-1")
 		if err == nil || !strings.Contains(err.Error(), "config table is gone") || seam != nil {
@@ -234,7 +231,7 @@ func TestResolveSeamSurfacesConstructionAndReadFailures(t *testing.T) {
 	t.Run("repo read failure", func(t *testing.T) {
 		view := configuredSeamView("fake")
 		view.repoErr = errors.New("store: no repo repo-1")
-		registry, capture := capturingRegistry("fake", nil)
+		registry, capture := capturingRegistry("fake")
 
 		seam, _, err := ResolveSeam(context.Background(), view, registry, "repo-1")
 		if err == nil || !strings.Contains(err.Error(), "no repo repo-1") || seam != nil {
@@ -247,7 +244,7 @@ func TestResolveSeamSurfacesConstructionAndReadFailures(t *testing.T) {
 
 	t.Run("unregistered backend", func(t *testing.T) {
 		view := configuredSeamView("jira")
-		registry, _ := capturingRegistry("fake", nil)
+		registry, _ := capturingRegistry("fake")
 
 		seam, config, err := ResolveSeam(context.Background(), view, registry, "repo-1")
 		if err == nil || seam != nil {

@@ -17,7 +17,9 @@ type FactoryInput struct {
 	// Empty means no label was configured.
 	CanceledLabel string
 	// Project is the opaque Repo-tier tracker.project value. Empty means
-	// none. Read only on the flush/write path.
+	// none. It reaches the factory on every seam construction, flush and
+	// post-seal alignment checks alike, and is interpreted only by
+	// backends that use it.
 	Project string
 }
 
