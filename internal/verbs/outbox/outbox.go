@@ -487,26 +487,7 @@ func flushCommand(streams *iostreams.Streams, providers *tracker.Registry) *cobr
 			return err
 		}
 		defer func() { _ = s.Close() }()
-		backend, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerBackendKey)
-		if err != nil {
-			return err
-		}
-		if backend == "" {
-			return fmt.Errorf("tracker: no provider seam configured")
-		}
-		target, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerTargetKey)
-		if err != nil {
-			return err
-		}
-		canceledLabel, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerCanceledLabelKey)
-		if err != nil {
-			return err
-		}
-		project, _, err := s.Config(cmd.Context(), repo.ID, store.TrackerProjectKey)
-		if err != nil {
-			return err
-		}
-		seam, err := providers.Resolve(backend, tracker.FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel, Project: project})
+		seam, _, err := tracker.ResolveSeam(cmd.Context(), s, providers, repo.ID)
 		if err != nil {
 			return err
 		}

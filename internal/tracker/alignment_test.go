@@ -19,6 +19,7 @@ type fakeAlignmentView struct {
 	backend       string
 	target        string
 	canceledLabel string
+	project       string
 	configKeys    []string
 }
 
@@ -49,6 +50,9 @@ func (f *fakeAlignmentView) Config(_ context.Context, _, key string) (string, bo
 	}
 	if key == store.TrackerCanceledLabelKey && f.canceledLabel != "" {
 		return f.canceledLabel, true, nil
+	}
+	if key == store.TrackerProjectKey && f.project != "" {
+		return f.project, true, nil
 	}
 	return "", false, nil
 }
@@ -90,6 +94,7 @@ func coordinatorFixture(reader *fakeAlignmentReader) (*AlignmentCoordinator, *fa
 		backend:       "fake",
 		target:        "team-1",
 		canceledLabel: "wf::canceled",
+		project:       "project-1",
 	}
 	return NewAlignmentCoordinator(registry), view
 }
@@ -105,11 +110,13 @@ func TestAlignmentCoordinatorReadsEveryReferenceOnceInStableOrderWithPushOffIrre
 	if !reflect.DeepEqual(reader.reads, []string{"R-2", "R-1"}) {
 		t.Fatalf("reads = %v, want each active reference once in store order", reader.reads)
 	}
-	if !reflect.DeepEqual(view.configKeys, []string{store.TrackerBackendKey, store.TrackerTargetKey, store.TrackerCanceledLabelKey}) {
+	if !reflect.DeepEqual(view.configKeys, []string{store.TrackerBackendKey, store.TrackerTargetKey, store.TrackerCanceledLabelKey, store.TrackerProjectKey}) {
 		t.Fatalf("config reads = %v; push level must not suppress live reads", view.configKeys)
 	}
-	if len(reader.factoryInputs) != 1 || reader.factoryInputs[0].Repo.ID != view.node.Repo || reader.factoryInputs[0].Target != view.target || reader.factoryInputs[0].CanceledLabel != view.canceledLabel {
-		t.Fatalf("factory inputs = %+v, want repo %q, target %q and canceled label %q", reader.factoryInputs, view.node.Repo, view.target, view.canceledLabel)
+	if len(reader.factoryInputs) != 1 || reader.factoryInputs[0].Repo.ID != view.node.Repo || reader.factoryInputs[0].Target != view.target ||
+		reader.factoryInputs[0].CanceledLabel != view.canceledLabel || reader.factoryInputs[0].Project != view.project {
+		t.Fatalf("factory inputs = %+v, want repo %q, target %q, canceled label %q and project %q",
+			reader.factoryInputs, view.node.Repo, view.target, view.canceledLabel, view.project)
 	}
 	if len(report.Items) != 2 || report.Items[0].Classification != AlignmentAligned || report.Items[1].Classification != AlignmentBehind {
 		t.Fatalf("report = %+v", report)
