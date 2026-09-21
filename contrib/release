@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# contrib/release — cut a release. Runs the local twin of the CI gate,
+# writes the git-cliff release notes into the annotated tag message, and
+# pushes. The tag push starts .github/workflows/release.yml, which
+# re-runs the gate, cross-compiles, writes the checksums, and creates
+# the GitHub release.
+#
+# The notes travel in the tag and in the release body CI regenerates,
+# never in a committed CHANGELOG.md: nothing in the repo can disagree
+# with the tag it was built from. The tag sits on an ordinary commit;
+# this script creates no commit of its own.
+set -Eeuo pipefail
+
+DIR=$(cd "$(dirname "${0}")" && pwd)
+PROJECT_ROOT=$(cd "$DIR/.." && pwd)
+cd "$PROJECT_ROOT"
+
+usage() {
+	echo "Usage: contrib/release --major | --minor | --patch | vX.Y.Z"
+	echo
+	echo "Runs make check, generates the release notes with git-cliff,"
+	echo "tags the current commit with the notes as the annotated tag"
+	echo "message, and pushes the branch and the tag (CI publishes the"
+	echo "release from the tag push)."
+	exit 1
+}
+
+# --- Parse arguments ---
+
+BUMP=""
+EXPLICIT_TAG=""
+case "${1:-}" in
+--major | --minor | --patch) BUMP="${1#--}" ;;
+v[0-9]*)
+	# Must match cliff.toml's tag_pattern and the Makefile's --match glob,
+	# or the tag would be invisible to the changelog and version stamp.
+	[[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+	EXPLICIT_TAG="$1"
+	;;
+*) usage ;;
+esac
+
+# --- Preconditions ---
+
+for tool in git git-cliff go golangci-lint shellcheck; do
+	command -v "$tool" >/dev/null || {
+		echo "error: '$tool' not found on PATH (are you in the dev shell? 'direnv allow' / 'nix develop')" >&2
+		exit 1
+	}
+done
+
+# Refuse to release from a dirty tree: the tag must name exactly the
+# tree that passed the gate below. Untracked files are ignored.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+	echo "error: working tree has uncommitted changes; commit or stash them first." >&2
+	git status --short
+	exit 1
+fi
+
+# wip's release branch is `go`, not `main`: main and go are unrelated
+# histories, and release.yml only exists on go.
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" != "go" ]]; then
+	echo "warning: releasing from branch '$BRANCH', not 'go'" >&2
+fi
+
+# --- Compute the new tag from the latest release tag ---
+
+# Empty when no release tag exists yet: a real v0.0.0 is a valid tag, so
+# it cannot double as the "no tags" sentinel.
+CURRENT=$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo "")
+if [[ -n "$EXPLICIT_TAG" ]]; then
+	TAG="$EXPLICIT_TAG"
+else
+	IFS=. read -r MAJOR MINOR PATCH <<<"${CURRENT#v}"
+	: "${MAJOR:=0}" "${MINOR:=0}" "${PATCH:=0}"
+	case "$BUMP" in
+	major) TAG="v$((MAJOR + 1)).0.0" ;;
+	minor) TAG="v${MAJOR}.$((MINOR + 1)).0" ;;
+	patch) TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+	esac
+fi
+
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+	echo "error: tag $TAG already exists" >&2
+	exit 1
+fi
+
+if [[ -n "$CURRENT" ]] && [[ "$(git rev-list "$CURRENT"..HEAD --count)" -eq 0 ]]; then
+	echo "error: no commits since $CURRENT; nothing to release." >&2
+	exit 1
+fi
+
+echo "Releasing ${CURRENT:-(no previous tag)} -> ${TAG} on branch ${BRANCH}"
+
+# --- Gate: the local twin of what CI verifies on the tag pipeline ---
+
+make check
+
+# --- Generate the release notes (they become the tag message) ---
+
+echo "Generating release notes for ${TAG}..."
+make release-notes TAG="$TAG"
+if ! [[ -s dist/RELEASE_NOTES.md ]]; then
+	echo "error: dist/RELEASE_NOTES.md is empty; git-cliff produced no notes." >&2
+	exit 1
+fi
+
+# --- Tag and push ---
+#
+# --cleanup=whitespace is load-bearing: the default (strip) deletes every
+# line that starts with '#', and git-cliff notes start with '## [x.y.z]'.
+git tag -a --cleanup=whitespace -F dist/RELEASE_NOTES.md "$TAG"
+
+# Branch first, then the tag: the branch push runs a normal verify
+# pipeline for any unpushed commits, and the tag push starts the release
+# pipeline on a commit the remote already has.
+#
+# --no-follow-tags is load-bearing on BOTH pushes: with
+# push.followTags=true in the environment, every push — including an
+# explicit tag push — also sends every reachable annotated tag missing
+# from the remote. Verified: a bare `git push origin "$TAG"` under
+# followTags pushed a local-only baseline tag plus every historical
+# release tag alongside the new one. This driver pushes only the branch
+# and the tag it just created, explicitly.
+echo "Pushing ${BRANCH}, then ${TAG}..."
+git push --no-follow-tags origin "$BRANCH"
+git push --no-follow-tags origin "$TAG"
+
+WEB_URL=$(git remote get-url origin)
+WEB_URL="${WEB_URL%.git}"
+if [[ "$WEB_URL" =~ ^git@([^:]+):(.+)$ ]]; then
+	WEB_URL="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+fi
+
+cat <<EOF
+
+Pushed ${TAG}. release.yml will re-run the gate, cross-compile, write
+the checksums, and create the GitHub release with the generated notes
+as its body.
+
+Watch the run:
+  ${WEB_URL}/actions
+Once released:
+  ${WEB_URL}/releases/tag/${TAG}
+EOF

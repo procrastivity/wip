@@ -9,12 +9,18 @@ COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+# Every shell script the repo carries. wip's pre-commit hooks check no
+# shell files at all, so this list is the only shell gate — `make lint`,
+# and so CI's lint job, checks it in full.
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release
+
 .PHONY: fmt lint test check hooks build cross-compile changelog release-notes
 
 fmt:
 	gofumpt -w .
 
 lint:
+	shellcheck $(SHELLCHECK_FILES)
 	golangci-lint run
 
 test:

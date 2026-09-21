@@ -67,6 +67,7 @@
             git-cliff
             gnumake
             pre-commit
+            shellcheck
           ];
 
           shellHook = ''
