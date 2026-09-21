@@ -24,6 +24,14 @@ unless the user asked for it in the current turn. A queued outbox row is a
 decision waiting for a person, not unfinished work — leave it queued and
 say so.
 
+`wip plumbing tracker propose create|comment|state` queues the same kind of
+outbox work from an explicit request rather than from a Matter's lifecycle.
+It contacts no tracker and approves nothing: the entry stays queued until a
+person runs `wip plumbing outbox approve` and `wip plumbing outbox flush`.
+`wip plumbing tracker read` is the one verb in that group that contacts the
+tracker; `wip plumbing tracker refs` and `wip plumbing tracker capabilities`
+are local reads that do not.
+
 The backlog is local by default. `wip plumbing backlog delegate` is an explicit exit
 that queues a tracker item; `wip plumbing backlog decline` drops the entry with a
 reason. When asked to "clean up the backlog", do not guess which one is
