@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/tracker"
@@ -45,7 +46,10 @@ type Adapter struct {
 	client  *http.Client
 }
 
-var _ tracker.StateReader = (*Adapter)(nil)
+var (
+	_ tracker.StateReader   = (*Adapter)(nil)
+	_ tracker.ContentReader = (*Adapter)(nil)
+)
 
 // New constructs an adapter for the repository identified by repo.RemoteURL.
 func New(repo store.Repo, options Options) (*Adapter, error) {
@@ -134,10 +138,15 @@ func (a *Adapter) create(ctx context.Context, entry store.OutboxEntry) (tracker.
 	return tracker.Result{Outcome: tracker.Delivered, Ref: response.HTMLURL}, nil
 }
 
+// commentPayload reads both comment candidate shapes the fold writes: the
+// Stage-closure narration (store.queueStageComments — stage, title, action)
+// and an operator's ad-hoc free body (store.projectAdhocCandidate — body).
+// Exactly one of the two arrives populated; commentText prefers the body.
 type commentPayload struct {
 	Stage  string `json:"stage"`
 	Title  string `json:"title"`
 	Action string `json:"action"`
+	Body   string `json:"body"`
 }
 
 func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker.Result, error) {
@@ -146,7 +155,8 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: err.Error()}, nil
 	}
 	var payload commentPayload
-	if err := json.Unmarshal(entry.Payload, &payload); err != nil || strings.TrimSpace(payload.Title) == "" {
+	if err := json.Unmarshal(entry.Payload, &payload); err != nil ||
+		(strings.TrimSpace(payload.Body) == "" && strings.TrimSpace(payload.Title) == "") {
 		return tracker.Result{Outcome: tracker.PermanentRefusal, Reason: "github tracker: malformed comment payload"}, nil
 	}
 	marker := idempotencyMarker(entry.IdempotencyKey)
@@ -158,7 +168,7 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 	if found {
 		return tracker.Result{Outcome: tracker.Converged}, nil
 	}
-	text := fmt.Sprintf("Stage %q %s.\n\n%s", payload.Title, payload.Action, marker)
+	text := commentText(payload) + "\n\n" + marker
 	if err := a.request(ctx, http.MethodPost, path, struct {
 		Body string `json:"body"`
 	}{text}, nil); err != nil {
@@ -167,11 +177,23 @@ func (a *Adapter) comment(ctx context.Context, entry store.OutboxEntry) (tracker
 	return tracker.Result{Outcome: tracker.Delivered}, nil
 }
 
+// commentText renders the operator's own body when the candidate carries one
+// and falls back to the Stage-closure narration otherwise. The hidden marker
+// is appended by the caller either way: an ad-hoc comment is deduplicated by
+// exactly the mechanism a lifecycle comment is.
+func commentText(payload commentPayload) string {
+	if body := strings.TrimSpace(payload.Body); body != "" {
+		return body
+	}
+	return fmt.Sprintf("Stage %q %s.", payload.Title, payload.Action)
+}
+
 type issue struct {
 	Body        string `json:"body"`
 	HTMLURL     string `json:"html_url"`
 	State       string `json:"state"`
 	StateReason string `json:"state_reason"`
+	Title       string `json:"title"`
 	UpdatedAt   string `json:"updated_at"`
 }
 
@@ -213,10 +235,52 @@ func (a *Adapter) ReadState(ctx context.Context, ref string) (tracker.LiveState,
 	if err != nil {
 		return tracker.LiveState{}, err
 	}
+	return liveState(observed)
+}
+
+// ReadContent implements tracker.ContentReader.
+//
+// The observation is the one readIssue already makes for ReadState: a caller
+// that reads content learns the lifecycle class without a second round trip,
+// and the class it learns is the same one the post-seal alignment check
+// compares, because both go through liveState.
+func (a *Adapter) ReadContent(ctx context.Context, ref string) (tracker.Content, error) {
+	owner, name, number, err := issueReference(ref)
+	if err != nil {
+		return tracker.Content{}, err
+	}
+	observed, err := a.readIssue(ctx, owner, name, number)
+	if err != nil {
+		return tracker.Content{}, err
+	}
+	live, err := liveState(observed)
+	if err != nil {
+		return tracker.Content{}, err
+	}
+	content := tracker.Content{
+		Ref:   ref,
+		Title: observed.Title,
+		Body:  stripIdempotencyMarker(observed.Body),
+		URL:   observed.HTMLURL,
+		State: live,
+	}
+	// updated_at doubles as the opaque lease, which stays a provider string.
+	// A time wip cannot parse leaves UpdatedAt zero — the absence the Content
+	// doc comment describes — rather than failing an otherwise good read.
+	if updated, err := time.Parse(time.RFC3339, strings.TrimSpace(observed.UpdatedAt)); err == nil {
+		content.UpdatedAt = updated
+	}
+	return content, nil
+}
+
+// liveState maps one observed issue onto the provider-neutral live state.
+// ReadState and ReadContent are its only callers, which is the point: the
+// GitHub lifecycle vocabulary is spelled out once, so a content read and the
+// alignment check cannot drift apart.
+func liveState(observed issue) (tracker.LiveState, error) {
 	if strings.TrimSpace(observed.UpdatedAt) == "" || (observed.State != "open" && observed.State != "closed") {
 		return tracker.LiveState{}, fmt.Errorf("github tracker: issue read returned malformed state or updated_at")
 	}
-
 	live := tracker.LiveState{
 		Class:   tracker.LiveNonterminal,
 		Display: observed.State,
@@ -452,9 +516,40 @@ func isRateLimited(header http.Header, body []byte) bool {
 	return strings.Contains(strings.ToLower(response.Message), "secondary rate limit")
 }
 
+const (
+	markerPrefix = "<!-- wip-idempotency:"
+	markerSuffix = " -->"
+)
+
 func idempotencyMarker(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return "<!-- wip-idempotency:" + hex.EncodeToString(sum[:]) + " -->"
+	return markerPrefix + hex.EncodeToString(sum[:]) + markerSuffix
+}
+
+// stripIdempotencyMarker removes the hidden marker create appends to an issue
+// body (create, above) so a content read returns what a human would see minus
+// wip's own bookkeeping. Only a trailing marker carrying a full-length digest
+// is removed: an operator's body that merely mentions the marker, or that
+// keeps writing after one, is returned untouched.
+func stripIdempotencyMarker(body string) string {
+	index := strings.LastIndex(body, markerPrefix)
+	if index < 0 {
+		return body
+	}
+	rest := body[index+len(markerPrefix):]
+	end := strings.Index(rest, markerSuffix)
+	if end < 0 || !hexDigest(rest[:end]) || strings.TrimSpace(rest[end+len(markerSuffix):]) != "" {
+		return body
+	}
+	return strings.TrimRight(body[:index], " \t\r\n")
+}
+
+func hexDigest(s string) bool {
+	if len(s) != hex.EncodedLen(sha256.Size) {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func repository(remote string) (string, string, error) {
