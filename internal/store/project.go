@@ -1305,7 +1305,7 @@ func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
 			Provenance string `json:"provenance"`
 			Title      string `json:"title"`
 			Detail     string `json:"detail,omitempty"`
-		}{"create", "adhoc", p.Title, p.Detail})
+		}{"create", ProvenanceAdhoc, p.Title, p.Detail})
 	case AdhocComment:
 		if p.Ref == "" {
 			return fmt.Errorf("store: %s of kind comment must name the reference it comments on", ev.Type)

@@ -23,6 +23,12 @@ package writesurface
 // while these checks exist to turn the refusal into a coded, operator-facing
 // wiperr before a transaction is opened. If the two ever disagree, the fold wins
 // and this file is the bug.
+//
+// An error any of the three exported functions return after the commit has
+// already succeeded — the read-back in proposeTracker failing to find the
+// minted candidate — does not mean the proposal was refused: the event and
+// its queued candidate are already durably committed. Only the coded
+// validation refusals above guarantee nothing was written.
 
 import (
 	"context"

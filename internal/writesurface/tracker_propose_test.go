@@ -139,14 +139,14 @@ func TestProposeQueuesOneCandidatePerKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantProposed(t, "ProposeTrackerCreate", created, f.env.Repo, "create", "",
-		`{"kind":"create","provenance":"adhoc","title":"Publish the runbook","detail":"Operators need it"}`)
+		`{"kind":"create","provenance":"`+store.ProvenanceAdhoc+`","title":"Publish the runbook","detail":"Operators need it"}`)
 
 	bare, err := ProposeTrackerCreate(ctx, f.s, store.ActorHuman, f.env.Repo, "No detail at all", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantProposed(t, "ProposeTrackerCreate with no detail", bare, f.env.Repo, "create", "",
-		`{"kind":"create","provenance":"adhoc","title":"No detail at all"}`)
+		`{"kind":"create","provenance":"`+store.ProvenanceAdhoc+`","title":"No detail at all"}`)
 
 	commented, err := ProposeTrackerComment(ctx, f.s, store.ActorHuman, f.env.Repo, "GH-7", "Rolled the release back")
 	if err != nil {
@@ -290,5 +290,74 @@ func TestOutboxEntryByBirthFindsTheMintedCandidateAndRefusesOtherwise(t *testing
 		t.Fatalf("a lookup in another Repo found the entry")
 	} else if !strings.Contains(err.Error(), "no outbox entry born by "+proposal.ID) {
 		t.Fatalf("err = %q, want the view's not-found wording", err)
+	}
+}
+
+// TestOutboxEntryByBirthRefusesAGenuineMultiRowBirth covers the third branch
+// OutboxEntryByBirth's switch has to take: more than one row born by the same
+// event. A propose call never produces that shape — it always mints exactly
+// one candidate — so this drives the one write path in the store that
+// legitimately does: a narrated Stage closure fans its comment out across
+// every live tracker reference on the Matter, one candidate per reference,
+// all born by the single stage.finished event (queueStageComments,
+// internal/store/project.go). Two live references make that birth genuinely
+// plural, which is what TestOffSuppressesCandidatesButBoundaryAndNarratedFanOut
+// (tracker_candidates_test.go) already exercises for the fan-out itself; this
+// test mirrors that setup and reads the same birth back through
+// OutboxEntryByBirth to prove the "not one" branch.
+func TestOutboxEntryByBirthRefusesAGenuineMultiRowBirth(t *testing.T) {
+	f := newBatchFixture(t, "multi-birth")
+	ctx := context.Background()
+
+	if _, err := f.s.SetTrackerPushLevel(ctx, f.env.Repo, "narrated"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, "multi-birth", "T-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Bind(ctx, f.s, store.ActorHuman, f.env.Repo, "multi-birth", "T-b"); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := CreateStage(ctx, f.s, store.ActorHuman, f.env.Repo, "multi-birth", "Review stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(ctx, f.s, store.ActorHuman, f.env.Repo, "multi-birth/"+stage.Locator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Finish(ctx, f.s, store.ActorHuman, f.env.Repo, "multi-birth/"+stage.Locator); err != nil {
+		t.Fatal(err)
+	}
+
+	log, err := f.s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finished store.Event
+	for _, ev := range log {
+		if ev.Type == store.TypeStageFinished {
+			finished = ev
+		}
+	}
+	if finished.ID == "" {
+		t.Fatalf("the log is missing the stage.finished event this test reads: %+v", log)
+	}
+
+	var comments int
+	for _, e := range trackerEntries(t, f.s, f.env.Repo) {
+		if e.Kind == "comment" {
+			comments++
+		}
+	}
+	if comments != 2 {
+		t.Fatalf("the Stage closure queued %d comment candidates, want one for each of two references: %+v", comments, trackerEntries(t, f.s, f.env.Repo))
+	}
+
+	_, err = f.s.OutboxEntryByBirth(ctx, f.env.Repo, finished.ID)
+	if err == nil {
+		t.Fatalf("a genuinely plural birth found one entry")
+	}
+	if !strings.Contains(err.Error(), "minted 2") || !strings.Contains(err.Error(), "not one") {
+		t.Fatalf("err = %q, want it to mention \"minted 2\" and \"not one\"", err)
 	}
 }

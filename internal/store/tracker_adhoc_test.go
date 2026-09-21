@@ -61,7 +61,7 @@ func TestAdhocProposalsQueueOneCandidatePerKind(t *testing.T) {
 			"subject":         h.Repo,
 			"ref":             nil,
 			"idempotency_key": createKey,
-			"payload":         `{"kind":"create","provenance":"adhoc","title":"Publish the runbook","detail":"Operators need it"}`,
+			"payload":         `{"kind":"create","provenance":"` + ProvenanceAdhoc + `","title":"Publish the runbook","detail":"Operators need it"}`,
 			"reason":          "",
 			"attempts":        0,
 			"birth_event":     created.ID,
