@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -128,33 +129,19 @@ func (c *AlignmentCoordinator) Check(ctx context.Context, v AlignmentView, matte
 		return AlignmentReport{}
 	}
 
-	backend, present, err := v.Config(ctx, matter.Repo, store.TrackerBackendKey)
+	// The shared resolver is what makes this check construct the same seam
+	// flush does, tracker.project included: a malformed project value now
+	// surfaces here as unavailable instead of being silently dropped.
+	seam, config, err := ResolveSeam(ctx, v, c.providers, matter.Repo)
 	if err != nil {
-		return unavailableForRefs(refs, err.Error())
-	}
-	backend = strings.TrimSpace(backend)
-	if !present || backend == "" || backend == "none" {
-		return unavailableForRefs(refs, "tracker backend is none")
-	}
-	target, _, err := v.Config(ctx, matter.Repo, store.TrackerTargetKey)
-	if err != nil {
-		return unavailableForRefs(refs, err.Error())
-	}
-	canceledLabel, _, err := v.Config(ctx, matter.Repo, store.TrackerCanceledLabelKey)
-	if err != nil {
-		return unavailableForRefs(refs, err.Error())
-	}
-	repo, err := v.Repo(ctx, matter.Repo)
-	if err != nil {
-		return unavailableForRefs(refs, err.Error())
-	}
-	seam, err := c.providers.Resolve(backend, FactoryInput{Repo: repo, Target: target, CanceledLabel: canceledLabel})
-	if err != nil {
+		if errors.Is(err, ErrNoBackend) {
+			return unavailableForRefs(refs, "tracker backend is none")
+		}
 		return unavailableForRefs(refs, err.Error())
 	}
 	reader, ok := seam.(StateReader)
 	if !ok || reader == nil {
-		return unavailableForRefs(refs, fmt.Sprintf("tracker backend %q does not support live-state reads", backend))
+		return unavailableForRefs(refs, fmt.Sprintf("tracker backend %q does not support live-state reads", config.Backend))
 	}
 
 	report := AlignmentReport{Items: make([]Alignment, 0, len(refs))}
