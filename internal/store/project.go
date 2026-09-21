@@ -120,6 +120,8 @@ func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion 
 		return projectReferenceCandidates(ctx, tx, ev)
 
 	// ---- tracker ---------------------------------------------------------
+	case TypeTrackerAdhocProposed:
+		return projectAdhocCandidate(ctx, tx, ev)
 	case TypeTrackerItemCreated:
 		return recordTrackerItemCreated(ctx, tx, ev)
 	case TypeTrackerStatePushed:
@@ -1238,13 +1240,107 @@ func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, sub
 	var raw [16]byte
 	copy(raw[:], sum[:16])
 	id := encodeCrockford(raw)
+	// outbox_entries has carried CHECK ((kind = 'create') = (ref IS NULL))
+	// since v7 (schema_v7.go): a create names no external item, because the
+	// item does not exist until the provider answers, and every other kind
+	// names one. An empty Go string is not NULL to SQLite, so the bind goes
+	// through nullable() — a no-op for the state and comment candidates, which
+	// have always arrived with a reference, and the whole reason an ad-hoc
+	// create is expressible here at all.
 	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_entries
 		(id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
-		VALUES (?,?,?,'queued',?,?,?,?,?,?)`, id, ev.Repo, kind, subject, ref, key, payload, ev.ID, ev.ID)
+		VALUES (?,?,?,'queued',?,?,?,?,?,?)`, id, ev.Repo, kind, subject, nullable(ref), key, payload, ev.ID, ev.ID)
 	if err != nil {
 		return fmt.Errorf("store: project %s tracker candidate: %w", ev.Type, err)
 	}
 	return nil
+}
+
+// projectAdhocCandidate folds one operator-authored proposal into exactly one
+// queued outbox candidate.
+//
+// The per-kind validation here is the only validation there is, and that is
+// deliberate: a proposal arrives from a human, so the fold is where "a create
+// names no reference" and "a comment carries a body" become facts the substrate
+// keeps rather than rules a verb remembered. A refused fold on the live path
+// rolls the whole command back, so a malformed proposal never enters the log.
+//
+// The provider-facing payloads are the shapes the adapters already read. A
+// create is the adapters' createPayload shape (internal/tracker/*/: title,
+// detail, provenance) with `adhoc` as the provenance they render as
+// `Source: adhoc`, so an operator-authored item is visibly one. A state is
+// byte-identical to the lifecycle state candidate queueMatterStateCandidates
+// writes, so the flush path cannot tell them apart and does not need to. A
+// comment is the one new shape — a free body, with none of the Stage-closure
+// narration queueStageComments writes — and the adapters gain support for it in
+// a later step; this fold's whole job is to store it.
+func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
+	var p TrackerAdhocProposed
+	if err := decodeStrict(ev, &p); err != nil {
+		return err
+	}
+	// A proposal is Repo-tier and node-less, so the subject is the Repo the
+	// envelope already carries and never a second opinion about which project
+	// this is (setConfigProjection and declareGateProjection, above).
+	if ev.Subject != ev.Repo {
+		return fmt.Errorf("store: %s names subject %s, but an ad-hoc proposal keys at its Repo (%s)",
+			ev.Type, ev.Subject, ev.Repo)
+	}
+
+	var payload []byte
+	var err error
+	switch p.Kind {
+	case AdhocCreate:
+		if p.Title == "" {
+			return fmt.Errorf("store: %s of kind create must carry a title", ev.Type)
+		}
+		if p.Ref != "" {
+			return fmt.Errorf("store: %s of kind create must not name a reference: the item it proposes does not exist yet", ev.Type)
+		}
+		if p.Body != "" || p.Disposition != "" {
+			return fmt.Errorf("store: %s of kind create carries a body or a disposition, which only a comment or a state proposal can deliver", ev.Type)
+		}
+		payload, err = json.Marshal(struct {
+			Kind       string `json:"kind"`
+			Provenance string `json:"provenance"`
+			Title      string `json:"title"`
+			Detail     string `json:"detail,omitempty"`
+		}{"create", "adhoc", p.Title, p.Detail})
+	case AdhocComment:
+		if p.Ref == "" {
+			return fmt.Errorf("store: %s of kind comment must name the reference it comments on", ev.Type)
+		}
+		if p.Body == "" {
+			return fmt.Errorf("store: %s of kind comment must carry a body", ev.Type)
+		}
+		if p.Title != "" || p.Detail != "" || p.Disposition != "" {
+			return fmt.Errorf("store: %s of kind comment carries a title, a detail or a disposition, none of which a comment can deliver", ev.Type)
+		}
+		payload, err = json.Marshal(struct {
+			Body string `json:"body"`
+		}{p.Body})
+	case AdhocState:
+		if p.Ref == "" {
+			return fmt.Errorf("store: %s of kind state must name the reference it moves", ev.Type)
+		}
+		switch p.Disposition {
+		case TrackerActive, TrackerCompleted, TrackerCanceled:
+		default:
+			return fmt.Errorf("store: %s names disposition %q, which is not a provider-neutral disposition", ev.Type, p.Disposition)
+		}
+		if p.Title != "" || p.Detail != "" || p.Body != "" {
+			return fmt.Errorf("store: %s of kind state carries a title, a detail or a body, none of which a state push can deliver", ev.Type)
+		}
+		payload, err = json.Marshal(struct {
+			Disposition TrackerDisposition `json:"disposition"`
+		}{p.Disposition})
+	default:
+		return fmt.Errorf("store: %s names kind %q, which is not create, comment or state", ev.Type, p.Kind)
+	}
+	if err != nil {
+		return fmt.Errorf("store: project %s payload: %w", ev.Type, err)
+	}
+	return insertTrackerCandidate(ctx, tx, ev, string(p.Kind), ev.Subject, p.Ref, string(payload), "")
 }
 
 func trackerAggregate(ctx context.Context, tx *sql.Tx, ref string) (TrackerDisposition, bool, error) {
@@ -1315,9 +1411,17 @@ func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
 		return fmt.Errorf("store: %s requires a non-empty reference", ev.Type)
 	}
 
-	var backlog string
+	// Which backlog entry this creation retires is a fact of the *payload*, not
+	// of the row's subject. A delegated create names its entry in both places —
+	// delegateBacklogEntry writes subject and payload.backlog from the same
+	// ev.Subject — so reading the payload changes nothing for any creation that
+	// could already exist, which is why no projectionVersion bump belongs with
+	// this change. An ad-hoc create has no backlog entry behind it at all: its
+	// subject is the Repo and its payload carries no `backlog` key, so
+	// json_extract answers NULL and there is no stub to retire.
+	var backlog sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT subject FROM outbox_entries
+		`SELECT json_extract(payload,'$.backlog') FROM outbox_entries
 		 WHERE id=? AND repo=? AND kind='create' AND state IN ('queued','approved')`,
 		ev.Subject, ev.Repo).Scan(&backlog)
 	if err == sql.ErrNoRows {
@@ -1337,10 +1441,13 @@ func recordTrackerItemCreated(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if err := exactlyRows(res, 1, ev); err != nil {
 		return err
 	}
+	if !backlog.Valid {
+		return nil
+	}
 	res, err = tx.ExecContext(ctx,
 		`UPDATE backlog_entries SET last_event=?
 		 WHERE id=? AND repo=? AND state='delegated' AND outbox=?`,
-		ev.ID, backlog, ev.Repo, ev.Subject)
+		ev.ID, backlog.String, ev.Repo, ev.Subject)
 	if err != nil {
 		return fmt.Errorf("store: project %s stub: %w", ev.Type, err)
 	}

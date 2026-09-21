@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	syntheticV3Version = 14
-	syntheticV4Version = 15
+	// These sit above every shipped version, so `through(...)` never produces a
+	// register with two entries at one version. Bump them when a migration
+	// ships (v14, tracker-adhoc, is what moved them last).
+	syntheticV3Version = 15
+	syntheticV4Version = 16
 )
 
 // Tests for the migration framework (step-09): versioned, forward-only,
@@ -600,7 +603,7 @@ func TestAMigrationThatFailsPartwayLeavesNothingBehind(t *testing.T) {
 	log := h.rowsOf("events", "")
 	at := time.Now()
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v14")
+	refusalMentions(t, "a synthetic migration whose second statement names no table", err, "migration v15")
 
 	// The backup was taken before anything was attempted, which is the only order
 	// in which it is worth anything.
@@ -646,7 +649,7 @@ func TestAllOrNothingIsPerMigrationAndNotPerOpen(t *testing.T) {
 	before := h.snapshotProjection()
 
 	_, err := h.reopen(reg, syntheticV4Version)
-	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v15")
+	refusalMentions(t, "a synthetic v4 that names no table", err, "migration v16")
 
 	// v5 landed and stayed; v6 did not.
 	stopped, err := h.reopen(reg, syntheticV3Version)
@@ -690,7 +693,7 @@ func TestTheBackupAFailedMigrationLeftRestoresTheStore(t *testing.T) {
 	shape := schemaShape(t, h.Store)
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v14")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v15")
 
 	sidecars := backupsIn(t, dir)
 	if len(sidecars) != 1 {
@@ -737,7 +740,7 @@ func TestABackupNeverOverwritesTheOneAlreadyThere(t *testing.T) {
 	log := h.rowsOf("events", "")
 
 	_, err := h.reopen(through(brokenV3), syntheticV3Version)
-	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v14")
+	refusalMentions(t, "a synthetic migration that fails partway", err, "migration v15")
 
 	first := backupsIn(t, dir)
 	if len(first) != 1 {

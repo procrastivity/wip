@@ -115,6 +115,7 @@ const (
 	TypeTrackerItemCreated   = "tracker.item-created"
 	TypeTrackerStatePushed   = "tracker.state-pushed"
 	TypeTrackerStateObserved = "tracker.state-observed"
+	TypeTrackerAdhocProposed = "tracker.adhoc-proposed"
 	TypeOutboxApproved       = "outbox.approved"
 	TypeOutboxDeclined       = "outbox.declined"
 	TypeOutboxWithheld       = "outbox.withheld"
@@ -313,13 +314,23 @@ var V13Taxonomy = []EventType{
 	durable(TypeGateExemptionRepaired, FamilyGate),
 }
 
+// V14Taxonomy adds the operator-authored tracker proposal: a candidate a human
+// wrote by hand, rather than one a lifecycle fact produced. It is one type and
+// not three, because the three things a proposal can become (create, comment,
+// state) are the three outbox kinds and the payload already has to say which —
+// a `kind` in the payload is the discriminator every other multi-shape family
+// here uses (content.created's `kind`, the outbox's own column).
+var V14Taxonomy = []EventType{
+	durable(TypeTrackerAdhocProposed, FamilyTracker),
+}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy, V13Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy, V13Taxonomy, V14Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.
