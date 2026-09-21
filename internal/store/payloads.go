@@ -275,6 +275,19 @@ const (
 	AdhocState AdhocKind = "state"
 )
 
+// ProvenanceAdhoc marks a create payload whose item exists because an
+// operator proposed it directly, with no backlog entry behind it —
+// projectAdhocCandidate (project.go) writes it into the create candidate's
+// `provenance` field, and the tracker adapters render it as `Source: adhoc`.
+//
+// It is a plain string, not a Provenance value, and deliberately so: that
+// field is free text on the outbox create payload, not the BacklogEntry
+// Provenance column the schema CHECK constrains to intake, found or deferred
+// (schema_v1.go, schema_v5.go). Giving this token the Provenance type would
+// suggest it belongs to that enum and is one of the values backlog.entered
+// accepts, which it is not and must never become.
+const ProvenanceAdhoc = "adhoc"
+
 // TrackerAdhocProposed is one operator-authored tracker candidate.
 //
 // The subject is the Repo, because a proposal is Repo-tier and node-less: it is
