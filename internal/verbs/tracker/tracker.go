@@ -32,10 +32,19 @@ import (
 	"github.com/procrastivity/wip/internal/writesurface"
 )
 
+// outboxApproveVerb and outboxFlushVerb are the two commands that move a
+// queued proposal into effect. Named once so approvalSentence and the
+// propose Shorts (which must each name them, F1) share one source of truth
+// and cannot drift apart.
+const (
+	outboxApproveVerb = "wip plumbing outbox approve"
+	outboxFlushVerb   = "wip plumbing outbox flush"
+)
+
 // approvalSentence is the one thing every propose verb's help has to say, and
 // the group's Long repeats: a proposal is local until a person approves and
 // flushes it. Written once so the four copies cannot drift.
-const approvalSentence = "Nothing reaches the tracker until a person runs wip plumbing outbox approve and wip plumbing outbox flush."
+const approvalSentence = "Nothing reaches the tracker until a person runs " + outboxApproveVerb + " and " + outboxFlushVerb + "."
 
 // refFormats is the addressing note every ref-taking verb carries. The verbs
 // themselves treat a reference as opaque — only the configured backend
@@ -299,12 +308,12 @@ type refsJSON struct {
 func refsCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "refs [node-locator]",
-		Short: "list this repo's live tracker bindings — local only, contacts no tracker",
+		Short: "list this repo's live tracker bindings, local only, contacts no tracker — read-only, emits no event",
 		Long: "list this repo's live tracker bindings.\n\n" +
 			"With no argument, every live (Matter, reference) binding in this repo. With a node " +
 			"locator, the bindings of that node's Matter — a Stage or Step resolves to the Matter " +
 			"that owns it, because a reference binds to a Matter (D44).\n\n" +
-			"The disposition is what this repo's own model expects the reference to be in, not what " +
+			"The disposition is what this store's own model expects the reference to be in, not what " +
 			"the tracker says: this verb constructs no provider seam and contacts no tracker. " +
 			"An empty disposition means every Matter bound to that reference is still planned.",
 		Args: cobra.MaximumNArgs(1),
@@ -398,6 +407,11 @@ func matterBindings(cmd *cobra.Command, s *store.Store, repoID, locator string) 
 // here, not a failure of this verb: the whole point is to be able to ask what
 // is wrong, so constructed is false, error carries the provider's own words,
 // and the exit code stays 0.
+//
+// Deliver is always true once constructed: the Seam interface requires a
+// Deliver method, so every constructed seam has one. It is reported for
+// shape completeness alongside readState/readContent, not because it ever
+// discriminates one backend from another.
 type seamStatusJSON struct {
 	Constructed bool   `json:"constructed"`
 	Error       string `json:"error,omitempty"`
@@ -420,7 +434,7 @@ type capabilitiesJSON struct {
 func capabilitiesCommand(streams *iostreams.Streams, providers *seam.Registry) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "capabilities",
-		Short: "report this repo's tracker configuration and what the backend can do — contacts no tracker",
+		Short: "report this repo's tracker configuration and what the backend can do, contacts no tracker — read-only, emits no event",
 		Long: "report this repo's tracker configuration and what the configured backend can do.\n\n" +
 			"The seam is constructed locally, which is where a missing token or an unusable remote " +
 			"shows up. That is reported as data — seam.constructed is false and seam.error carries " +
@@ -456,9 +470,10 @@ func capabilitiesCommand(streams *iostreams.Streams, providers *seam.Registry) *
 			PushLevel: string(level), BacklogPush: string(mode),
 		}
 		// ReadSeamConfig returns early with only Backend set when no backend
-		// is configured, so "" and the "none" sentinel both mean there is
-		// nothing to construct.
-		if config.Backend != "" && config.Backend != "none" {
+		// is configured, so Configured() (which folds the "" and "none"
+		// sentinel together) reports false and there is nothing to
+		// construct.
+		if config.Configured() {
 			payload.Seam = seamStatus(providers, config)
 		}
 
@@ -505,6 +520,8 @@ func seamStatus(providers *seam.Registry, config seam.SeamConfig) seamStatusJSON
 	_, readsState := provider.(seam.StateReader)
 	_, readsContent := provider.(seam.ContentReader)
 	return seamStatusJSON{
+		// Deliver is constant-true for any constructed seam: the Seam
+		// interface requires it, so there is nothing to type-assert.
 		Constructed: true, Deliver: true,
 		ReadState: readsState, ReadContent: readsContent,
 	}
@@ -552,7 +569,17 @@ func proposeRunE(streams *iostreams.Streams, propose proposer) func(*cobra.Comma
 		defer func() { _ = s.Close() }()
 		entry, err := propose(cmd, args, s, repo)
 		if err != nil {
-			return err
+			// A coded refusal (blank title, unknown disposition, ...) is a
+			// clean rejection nothing was queued for, and passes through
+			// untouched. Anything else travelled far enough that the write
+			// may already have landed, so it gets one sentence of context —
+			// the two are not distinguishable by type, only by whether they
+			// carry a *wiperr.Error.
+			var werr *wiperr.Error
+			if errors.As(err, &werr) {
+				return err
+			}
+			return fmt.Errorf("%w (the proposal may already be committed; check wip plumbing outbox list before retrying)", err)
 		}
 		payload := proposalJSON{
 			ID: entry.ID, Kind: entry.Kind, State: entry.State, Subject: entry.Subject,
@@ -572,7 +599,7 @@ func proposeCreateCommand(streams *iostreams.Streams) *cobra.Command {
 	var title, detail string
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "propose a new tracker item — nothing is created until it is approved and flushed",
+		Short: "propose a new tracker item; nothing reaches the tracker until " + outboxApproveVerb + " and " + outboxFlushVerb,
 		Long: "propose a new tracker item.\n\n" +
 			"The proposal names no reference: the item does not exist until a provider answers, and " +
 			"the reference arrives on the creation confirmation. " + approvalSentence,
@@ -591,7 +618,7 @@ func proposeCommentCommand(streams *iostreams.Streams) *cobra.Command {
 	var body string
 	cmd := &cobra.Command{
 		Use:   "comment <ref>",
-		Short: "propose free body text on an existing tracker item — nothing is posted until it is approved and flushed",
+		Short: "propose free body text on an existing tracker item; nothing reaches the tracker until " + outboxApproveVerb + " and " + outboxFlushVerb,
 		Long: "propose free body text on an existing tracker item.\n\n" +
 			refFormats + "\n\n" + approvalSentence,
 		Args: cobra.ExactArgs(1),
@@ -608,7 +635,7 @@ func proposeStateCommand(streams *iostreams.Streams) *cobra.Command {
 	var disposition string
 	cmd := &cobra.Command{
 		Use:   "state <ref>",
-		Short: "propose one provider-neutral disposition on an existing tracker item — nothing moves until it is approved and flushed",
+		Short: "propose one provider-neutral disposition on an existing tracker item; nothing reaches the tracker until " + outboxApproveVerb + " and " + outboxFlushVerb,
 		Long: "propose one provider-neutral disposition on an existing tracker item.\n\n" +
 			"The disposition is active, completed or canceled; the configured backend maps it to its " +
 			"own state vocabulary. There is no lease to pass: the flush path reads the lease it " +

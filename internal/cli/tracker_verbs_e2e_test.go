@@ -364,6 +364,36 @@ func TestTrackerProposeApproveFlushRoundTripsEveryKindWithoutTouchingTheBacklog(
 	}
 }
 
+// -- 3b: propose, human output (F5) -----------------------------------------
+
+// The round trip above only ever asks for --json. proposeRunE's other branch
+// — the format string a human actually reads (tracker.go's "proposed
+// tracker %s as outbox %s (%s); approve with %s") — gets its own pass here,
+// with the minted id read back out of the line itself since there is no
+// --json alongside it to hand the id over any other way.
+func TestTrackerProposeHumanOutputMatchesTheApproveLine(t *testing.T) {
+	trackerVerbRepo(t, "tracker-propose-human")
+	providers := tracker.NewRegistry()
+	trackerVerbRun(t, providers, "init", "--json")
+
+	human := trackerVerbRun(t, providers,
+		"plumbing", "tracker", "propose", "create", "--title", "Investigate flake")
+
+	const prefix = "proposed tracker create as outbox "
+	const marker = " (queued); approve with wip plumbing outbox approve "
+	markerAt := strings.Index(human.stdout, marker)
+	if !strings.HasPrefix(human.stdout, prefix) || markerAt < 0 {
+		t.Fatalf("human propose output = %q, want it to start with %q and contain %q", human.stdout, prefix, marker)
+	}
+	id := human.stdout[len(prefix):markerAt]
+	if id == "" {
+		t.Fatalf("human propose output = %q, extracted an empty outbox id", human.stdout)
+	}
+	if want := prefix + id + marker + id + "\n"; human.stdout != want {
+		t.Errorf("human propose output = %q, want %q", human.stdout, want)
+	}
+}
+
 // -- 4: read ---------------------------------------------------------------
 
 // read prefers ContentReader, falls back to StateReader, and reports the
@@ -371,13 +401,20 @@ func TestTrackerProposeApproveFlushRoundTripsEveryKindWithoutTouchingTheBacklog(
 // from a differently-capable seam registered under the same stored backend
 // name, which is the whole discrimination the `capability` field exists for.
 func TestTrackerReadPrefersContentFallsBackToStateAndRefusesWhenNeitherExists(t *testing.T) {
-	trackerVerbRepo(t, "tracker-read")
+	dbPath := trackerVerbRepo(t, "tracker-read")
 	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	content := &trackerVerbSeam{content: map[string]tracker.Content{
 		"FAKE-1": {
 			Ref: "FAKE-1", Title: "Investigate flake", Body: "seen twice\n", URL: "https://fake.test/items/1",
 			State:     tracker.LiveState{Class: tracker.LiveActive, Display: "In Progress", Lease: "lease-1"},
 			UpdatedAt: updated,
+		},
+		// No body, no url, and a Display that echoes its Class — the minimal
+		// shape displayState's collapse branch and writeRead's empty-body/
+		// no-url branch exist for.
+		"FAKE-2": {
+			Ref: "FAKE-2", Title: "Minimal item",
+			State: tracker.LiveState{Class: tracker.LiveActive, Display: "active"},
 		},
 	}}
 	contentProviders := trackerVerbRegistry(content)
@@ -386,6 +423,17 @@ func TestTrackerReadPrefersContentFallsBackToStateAndRefusesWhenNeitherExists(t 
 		{"plumbing", "outbox", "backend", "fake"},
 	} {
 		trackerVerbRun(t, contentProviders, args...)
+	}
+
+	// read's package doc claims it emits no event: this repo's log is what
+	// gets to say so, snapshotted before and checked once the read
+	// invocations below (content, fallback, unsupported, blank ref) are
+	// done.
+	s := openTestStore(t, dbPath)
+	ctx := context.Background()
+	beforeReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	read := mustJSON[trackerReadPayload](t, trackerVerbRun(t, contentProviders,
@@ -418,6 +466,15 @@ func TestTrackerReadPrefersContentFallsBackToStateAndRefusesWhenNeitherExists(t 
 		"  url: https://fake.test/items/1\n  updated: 2026-01-02T03:04:05Z\n\nseen twice\n"
 	if human.stdout != wantHuman {
 		t.Errorf("human read = %q, want %q", human.stdout, wantHuman)
+	}
+
+	// displayState collapses to the class alone when the provider's own word
+	// matches it exactly, and writeRead skips both the url and body sections
+	// when the provider reports neither.
+	minimalHuman := trackerVerbRun(t, contentProviders, "plumbing", "tracker", "read", "FAKE-2")
+	wantMinimalHuman := "Minimal item\n  ref: FAKE-2\n  state: active\n"
+	if minimalHuman.stdout != wantMinimalHuman {
+		t.Errorf("human read (collapsed state, no url/body) = %q, want %q", minimalHuman.stdout, wantMinimalHuman)
 	}
 
 	// The same stored backend, behind a seam that reads lifecycle only.
@@ -457,6 +514,14 @@ func TestTrackerReadPrefersContentFallsBackToStateAndRefusesWhenNeitherExists(t 
 	blank := runWithProviders(t, contentProviders, "plumbing", "tracker", "read", "   ", "--json")
 	wantWipError(t, blank, 1, "validation.missing-reference")
 
+	afterReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterReads) != len(beforeReads) {
+		t.Errorf("tracker read emitted an event: before=%d after=%d", len(beforeReads), len(afterReads))
+	}
+
 	// And no backend at all is the refusal a person can act on.
 	trackerVerbRun(t, contentProviders, "plumbing", "outbox", "backend", "none")
 	none := runWithProviders(t, contentProviders, "plumbing", "tracker", "read", "FAKE-1", "--json")
@@ -479,6 +544,15 @@ func TestTrackerRefsListsLiveBindingsWithAggregateDispositionAndScopesByLocator(
 
 	s := openTestStore(t, dbPath)
 	repo := trackerVerbRepoID(t, s)
+	ctx := context.Background()
+
+	// refs's Long claims it constructs no provider seam and contacts no
+	// tracker; snapshotted around the one pair of invocations here that has
+	// no Matter/bind writes on either side to confound the count.
+	beforeReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	empty := mustJSON[trackerRefsPayload](t, trackerVerbRun(t, providers, "plumbing", "tracker", "refs", "--json").stdout)
 	if empty.Repo != repo || empty.References == nil || len(empty.References) != 0 {
@@ -486,6 +560,14 @@ func TestTrackerRefsListsLiveBindingsWithAggregateDispositionAndScopesByLocator(
 	}
 	if human := trackerVerbRun(t, providers, "plumbing", "tracker", "refs"); human.stdout != "no live tracker references\n" {
 		t.Errorf("empty human refs = %q", human.stdout)
+	}
+
+	afterReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterReads) != len(beforeReads) {
+		t.Errorf("tracker refs emitted an event: before=%d after=%d", len(beforeReads), len(afterReads))
 	}
 
 	for _, args := range [][]string{
@@ -558,6 +640,17 @@ func TestTrackerCapabilitiesReportsConfigurationAndConstructedSeamCapabilities(t
 
 	s := openTestStore(t, dbPath)
 	repo := trackerVerbRepoID(t, s)
+	ctx := context.Background()
+
+	// capabilities's Long claims no tracker is contacted; nothing here says
+	// it emits no event either, but the package doc's "refs and
+	// capabilities are local reads" carries the same read-only promise, so
+	// it gets the same guard, snapshotted around the one pair of
+	// invocations below that has no config-setting writes on either side.
+	beforeReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	unconfiguredRaw := trackerVerbRun(t, providers, "plumbing", "tracker", "capabilities", "--json").stdout
 	unconfigured := mustJSON[trackerCapabilitiesPayload](t, unconfiguredRaw)
@@ -574,6 +667,14 @@ func TestTrackerCapabilitiesReportsConfigurationAndConstructedSeamCapabilities(t
 		"push-level: off\nbacklog-push: manual\nseam: not constructed (no tracker backend configured)\n"
 	if human := trackerVerbRun(t, providers, "plumbing", "tracker", "capabilities"); human.stdout != wantHuman {
 		t.Errorf("unconfigured human capabilities = %q, want %q", human.stdout, wantHuman)
+	}
+
+	afterReads, err := s.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterReads) != len(beforeReads) {
+		t.Errorf("tracker capabilities emitted an event: before=%d after=%d", len(beforeReads), len(afterReads))
 	}
 
 	for _, args := range [][]string{
@@ -751,5 +852,79 @@ func TestManifestIncludesTrackerPlumbing(t *testing.T) {
 	unbind := strings.Index(help.stdout, "\n  unbind ")
 	if step < 0 || trackerAt < 0 || unbind < 0 || step >= trackerAt || trackerAt >= unbind {
 		t.Fatalf("plumbing --help does not list tracker between step and unbind:\n%s", help.stdout)
+	}
+}
+
+// -- help-text locks (F1/F2) ------------------------------------------------
+
+// The manifest is the only help string an agent sees (the package doc), so
+// the approval sentence's substance — naming the two verbs a proposal still
+// needs — has to survive in each propose leaf's Short, not just in the
+// group's Long. This locks both: the fragments the group Long has always
+// carried, and the fragments F1 put into the three Shorts, read back through
+// `manifest --json` the way an agent would.
+func TestTrackerHelpNamesTheApprovalVerbsInTheGroupLongAndEveryProposeShort(t *testing.T) {
+	help := run(t, nil, "plumbing", "tracker", "--help")
+	if help.exitCode != 0 {
+		t.Fatalf("plumbing tracker --help: exit=%d stderr=%q", help.exitCode, help.stderr)
+	}
+	for _, fragment := range []string{"outbox approve", "outbox flush"} {
+		if !strings.Contains(help.stdout, fragment) {
+			t.Errorf("group --help = %q, want it to mention %q", help.stdout, fragment)
+		}
+	}
+
+	manifest := run(t, nil, "manifest", "--json")
+	if manifest.exitCode != 0 {
+		t.Fatalf("manifest: exit=%d stderr=%q", manifest.exitCode, manifest.stderr)
+	}
+	var m struct {
+		Verbs []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"verbs"`
+	}
+	if err := json.Unmarshal([]byte(manifest.stdout), &m); err != nil {
+		t.Fatalf("manifest JSON = %q, err=%v", manifest.stdout, err)
+	}
+	shorts := make(map[string]string, len(m.Verbs))
+	for _, v := range m.Verbs {
+		shorts[v.Name] = v.Description
+	}
+	for _, name := range []string{
+		"plumbing tracker propose create",
+		"plumbing tracker propose comment",
+		"plumbing tracker propose state",
+	} {
+		short, ok := shorts[name]
+		if !ok {
+			t.Fatalf("manifest does not register %q", name)
+		}
+		for _, fragment := range []string{"outbox approve", "outbox flush"} {
+			if !strings.Contains(short, fragment) {
+				t.Errorf("%s Short = %q, want it to mention %q", name, short, fragment)
+			}
+		}
+	}
+}
+
+// The addressing note (refFormats) is the only place a person learns which
+// spelling their backend wants, so it has to actually reach every ref-taking
+// verb's help — not just exist as a constant one of them forgot to use.
+func TestTrackerHelpCarriesTheRefFormatExamplesOnEveryRefTakingVerb(t *testing.T) {
+	for _, args := range [][]string{
+		{"plumbing", "tracker", "read", "--help"},
+		{"plumbing", "tracker", "propose", "comment", "--help"},
+		{"plumbing", "tracker", "propose", "state", "--help"},
+	} {
+		r := run(t, nil, args...)
+		if r.exitCode != 0 {
+			t.Fatalf("%v: exit=%d stderr=%q", args, r.exitCode, r.stderr)
+		}
+		for _, fragment := range []string{"ABC-123", "github.com"} {
+			if !strings.Contains(r.stdout, fragment) {
+				t.Errorf("%v --help = %q, want it to mention %q", args, r.stdout, fragment)
+			}
+		}
 	}
 }

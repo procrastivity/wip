@@ -107,3 +107,11 @@ func ResolveSeam(ctx context.Context, v SeamView, providers *Registry, repoID st
 func backendConfigured(backend string) bool {
 	return backend != "" && backend != "none"
 }
+
+// Configured reports whether c names a provider backend to construct a seam
+// from. It is the same test ReadSeamConfig and ResolveSeam apply to Backend
+// internally, exposed so a caller holding a SeamConfig (capabilities, for
+// one) need not repeat the "" / "none" sentinel check by hand.
+func (c SeamConfig) Configured() bool {
+	return backendConfigured(c.Backend)
+}
