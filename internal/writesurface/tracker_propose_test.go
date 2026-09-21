@@ -68,6 +68,13 @@ func TestProposeRefusesEveryMalformedRequestAndCommitsNothing(t *testing.T) {
 			"validation.missing-title", "needs a title",
 		},
 		{
+			"a create with a whitespace-only title",
+			func() (store.OutboxEntry, error) {
+				return ProposeTrackerCreate(ctx, f.s, store.ActorHuman, f.env.Repo, "   \t\n  ", "a detail with nothing to detail")
+			},
+			"validation.missing-title", "needs a title",
+		},
+		{
 			"a comment with no reference",
 			func() (store.OutboxEntry, error) {
 				return ProposeTrackerComment(ctx, f.s, store.ActorHuman, f.env.Repo, "", "a body")

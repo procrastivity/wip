@@ -24,10 +24,12 @@ type Content struct {
 //
 // It is optional, exactly as StateReader is: callers type-assert a Seam to
 // ContentReader and a seam that does not implement it is not an error, it is
-// the absence of the capability. The read verb reports that absence as
-// unsupported for the configured backend rather than failing the command, and
-// an error returned from ReadContent stays a real read failure for that one
-// reference.
+// the absence of the capability. The read verb degrades that absence to a
+// coded capability refusal naming the configured backend, rather than
+// letting it surface as an opaque provider error; the command still exits
+// with that coded failure. Only the capabilities verb treats the absence as
+// pure data. An error returned from ReadContent stays a real read failure
+// for that one reference.
 type ContentReader interface {
 	ReadContent(context.Context, string) (Content, error)
 }

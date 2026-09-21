@@ -133,6 +133,27 @@ func TestAdhocProposalsQueueOneCandidatePerKind(t *testing.T) {
 	}
 }
 
+// TestAdhocProposalsQueueRegardlessOfPushLevel pins projectAdhocCandidate's
+// deliberate asymmetry with the lifecycle folds: tracker.push-level gates
+// queueMatterStateCandidates and queueStageComments because those read the
+// level stamped into their own events, but an ad-hoc proposal is an
+// operator's explicit ask, not a lifecycle consequence, so push-level off
+// must not suppress it. The human boundary for an ad-hoc proposal is outbox
+// approve (D15), not the repo's ambient push policy.
+func TestAdhocProposalsQueueRegardlessOfPushLevel(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.SetTrackerPushLevel(h.ctx, h.Repo, string(TrackerPushOff)); err != nil {
+		t.Fatalf("set push-level off: %v", err)
+	}
+
+	proposed := h.proposeAdhoc(TrackerAdhocProposed{
+		Kind: AdhocCreate, Title: "Queued despite push-level off",
+	})
+	key := adhocKey(proposed, "create", "")
+	h.wantRowCount("an ad-hoc create with push-level off", "outbox_entries",
+		"idempotency_key=? AND state='queued'", []any{key}, 1)
+}
+
 // TestAdhocStateCandidateIsByteIdenticalToALifecycleOne holds the seam's one
 // non-negotiable payload claim: the flush path must not be able to tell an
 // operator's state proposal from one a Matter's lifecycle produced, because
@@ -176,6 +197,11 @@ func TestAdhocProposalsRefuseEveryMalformedPerKindPayload(t *testing.T) {
 		{
 			"a create with no title", h.Repo,
 			TrackerAdhocProposed{Kind: AdhocCreate, Detail: "why"},
+			"must carry a title",
+		},
+		{
+			"a create with a whitespace-only title", h.Repo,
+			TrackerAdhocProposed{Kind: AdhocCreate, Title: "   \t\n  ", Detail: "why"},
 			"must carry a title",
 		},
 		{
