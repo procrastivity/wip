@@ -440,8 +440,9 @@ func capabilitiesCommand(streams *iostreams.Streams, providers *seam.Registry) *
 			"shows up. That is reported as data — seam.constructed is false and seam.error carries " +
 			"the reason — and the verb still exits 0: a broken configuration is exactly what this " +
 			"verb exists to describe.\n\n" +
-			"No tracker is contacted. The three capability flags are read off the constructed seam's " +
-			"own type, not from a request.",
+			"No tracker is contacted. readState and readContent are read off the constructed seam's " +
+			"own type, not from a request; deliver is constant true for any constructed seam " +
+			"because delivery is what a seam is.",
 		Args: cobra.NoArgs,
 	}
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
@@ -640,6 +641,10 @@ func proposeStateCommand(streams *iostreams.Streams) *cobra.Command {
 			"The disposition is active, completed or canceled; the configured backend maps it to its " +
 			"own state vocabulary. There is no lease to pass: the flush path reads the lease it " +
 			"needs from the repo's own push records at delivery time.\n\n" +
+			"At flush, a recorded newer provider state withholds a locally-regressive proposal " +
+			"(the monotonicity guard), and among several approved state entries for the same " +
+			"reference, the newest one supersedes the rest. So a deliberate reopen proposed here " +
+			"can still be withheld at delivery, not at propose time.\n\n" +
 			refFormats + "\n\n" + approvalSentence,
 		Args: cobra.ExactArgs(1),
 	}

@@ -43,8 +43,9 @@ import (
 // because the item it proposes does not exist until a provider answers; the
 // reference arrives later, on the creation confirmation.
 func ProposeTrackerCreate(ctx context.Context, s *store.Store, actor store.Actor, repo, title, detail string) (store.OutboxEntry, error) {
+	title = strings.TrimSpace(title)
 	if title == "" {
-		return store.OutboxEntry{}, wiperr.New("validation.missing-title", "a proposed tracker item needs a title")
+		return store.OutboxEntry{}, wiperr.New("validation.missing-title", "a proposed tracker item needs a title; whitespace alone does not count")
 	}
 	return proposeTracker(ctx, s, actor, repo, store.TrackerAdhocProposed{
 		Kind: store.AdhocCreate, Title: title, Detail: detail,

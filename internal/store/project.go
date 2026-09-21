@@ -1274,6 +1274,15 @@ func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, sub
 // comment is the one new shape — a free body, with none of the Stage-closure
 // narration queueStageComments writes — and the adapters gain support for it in
 // a later step; this fold's whole job is to store it.
+//
+// tracker.push-level deliberately does not gate here, unlike
+// projectTransitionCandidates and projectGateCandidates above: those folds
+// read the level stamped into their own lifecycle events, because a push-level
+// of off there means the lifecycle itself asked for nothing to be queued. An
+// ad-hoc proposal is not a lifecycle consequence — it is an operator's
+// explicit ask — and its human boundary is outbox approve (D15), so a
+// push-level of off still queues it; only an explicit approve, not the
+// repo's ambient push policy, decides whether it ever reaches a provider.
 func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var p TrackerAdhocProposed
 	if err := decodeStrict(ev, &p); err != nil {
@@ -1291,7 +1300,7 @@ func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
 	var err error
 	switch p.Kind {
 	case AdhocCreate:
-		if p.Title == "" {
+		if strings.TrimSpace(p.Title) == "" {
 			return fmt.Errorf("store: %s of kind create must carry a title", ev.Type)
 		}
 		if p.Ref != "" {
