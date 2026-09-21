@@ -41,7 +41,10 @@ type SeamConfig struct {
 // ReadSeamConfig reads the four tracker.* config keys and the Repo row for one
 // repo. It reads the backend first and returns immediately when no backend is
 // configured, so an unconfigured repo costs one read and never fails on an
-// unrelated missing row.
+// unrelated missing row. The returned SeamConfig is only meaningful when the
+// error is nil; on a read failure it is the zero SeamConfig. ResolveSeam, by
+// contrast, returns the populated config alongside a factory construction
+// error.
 func ReadSeamConfig(ctx context.Context, v SeamView, repoID string) (SeamConfig, error) {
 	backend, _, err := v.Config(ctx, repoID, store.TrackerBackendKey)
 	if err != nil {
@@ -98,8 +101,9 @@ func ResolveSeam(ctx context.Context, v SeamView, providers *Registry, repoID st
 }
 
 // backendConfigured reports whether a trimmed tracker.backend value names a
-// provider. The "none" sentinel is how the verb surface clears the key, so it
-// means the same as unset.
+// provider. The "none" sentinel is accepted defensively and means the same
+// as unset; the verb surface itself stores the empty string, rewriting
+// "none" to "" before storing.
 func backendConfigured(backend string) bool {
 	return backend != "" && backend != "none"
 }
