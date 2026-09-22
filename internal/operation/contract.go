@@ -1,6 +1,7 @@
 // Package operation defines wip's transport-neutral semantic operation
-// boundary. It deliberately contains no dispatcher, transport, store handle,
-// terminal stream, or process-global environment lookup.
+// boundary and its in-process dispatcher. It deliberately contains no
+// transport, store handle, terminal stream, or process-global environment
+// lookup.
 package operation
 
 import "context"
@@ -96,6 +97,7 @@ const (
 	ProblemInvalidRequest     ProblemCode = "operation.invalid-request"
 	ProblemUnknownOperation   ProblemCode = "operation.unknown"
 	ProblemUnsupportedVersion ProblemCode = "operation.unsupported-version"
+	ProblemInvalidResult      ProblemCode = "internal.invalid-result"
 )
 
 // ProblemInvalidTitle and the other matter.create constants retain the current
