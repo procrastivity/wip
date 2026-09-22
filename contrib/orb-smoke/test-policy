@@ -26,13 +26,16 @@ reject_mutation() {
 }
 
 reject_mutation privileged '.services["authority-env"].privileged = true'
+reject_mutation missing-no-new-privileges '.services["authority-env"].security_opt = []'
 reject_mutation host-network '.services["authority-env"].network_mode = "host"'
 reject_mutation host-pid '.services["authority-env"].pid = "host"'
 reject_mutation bind-mount '.services["authority-env"].volumes[0] = {"type":"bind","source":"/home/user/.wip","target":"/var/lib/wip-smoke"}'
 reject_mutation docker-socket '.services["authority-env"].volumes[0] = {"type":"bind","source":"/var/run/docker.sock","target":"/var/run/docker.sock"}'
+reject_mutation shared-state '.services["client-env"].volumes[0].source = "authority-state"'
 reject_mutation published-port '.services["authority-env"].ports = [{"target":8080,"published":"8080"}]'
 reject_mutation inherited-credential '.services["authority-env"].environment.GH_TOKEN = "forbidden"'
 reject_mutation legacy-route '.services["client-env"].environment.WIP_AUTHORITY_URL = "https://legacy.example"'
+reject_mutation extra-service '.services.extra = .services["client-env"]'
 reject_mutation external-network '.networks.lab.internal = false'
 
 printf 'orb policy: PASS\n'
