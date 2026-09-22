@@ -5,6 +5,7 @@
 # one machine's git config (C6.8): .wip/ is per-clone working state, and
 # wip doctor itself refuses to render into a tracked .wip/.
 /.wip/
+/.amp/portals/
 
 # Build artifacts
 /bin/

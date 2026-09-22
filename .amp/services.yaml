@@ -1,0 +1,7 @@
+services:
+  docker-daemon:
+    command: >-
+      sudo dockerd
+      --group="$(id -gn)"
+      --host=unix:///var/run/docker.sock
+      --host=tcp://127.0.0.1:$PORT

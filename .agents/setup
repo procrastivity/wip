@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+run_as_root() {
+  if [ "${EUID}" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+step() {
+  local name="$1"
+  shift
+  printf 'orb setup: %s\n' "$name" >&2
+  time "$@"
+}
+
+install_system_packages() {
+  if command -v direnv >/dev/null 2>&1; then
+    return
+  fi
+
+  run_as_root apt-get update
+  run_as_root apt-get install -y --no-install-recommends direnv
+}
+
+docker_packages_installed() {
+  local package status
+  local -a packages=(
+    docker-ce
+    docker-ce-cli
+    containerd.io
+    docker-buildx-plugin
+    docker-compose-plugin
+  )
+
+  for package in "${packages[@]}"; do
+    status="$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)"
+    if [ "$status" != 'install ok installed' ]; then
+      return 1
+    fi
+  done
+}
+
+install_docker() {
+  if docker_packages_installed; then
+    return
+  fi
+
+  local architecture codename repo_file repo_line
+  architecture="$(dpkg --print-architecture)"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  codename="$VERSION_CODENAME"
+  repo_file=/etc/apt/sources.list.d/docker.list
+  repo_line="deb [arch=${architecture} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable"
+
+  run_as_root install -m 0755 -d /etc/apt/keyrings
+  if [ ! -s /etc/apt/keyrings/docker.asc ]; then
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      https://download.docker.com/linux/debian/gpg \
+      | run_as_root tee /etc/apt/keyrings/docker.asc >/dev/null
+    run_as_root chmod a+r /etc/apt/keyrings/docker.asc
+  fi
+  if ! grep -Fqx "$repo_line" "$repo_file" 2>/dev/null; then
+    printf '%s\n' "$repo_line" | run_as_root tee "$repo_file" >/dev/null
+  fi
+
+  run_as_root apt-get update
+  run_as_root apt-get install -y --no-install-recommends \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_nix() {
+  if command -v nix >/dev/null 2>&1 \
+    || [ -x /nix/var/nix/profiles/default/bin/nix ] \
+    || [ -x "$HOME/.nix-profile/bin/nix" ]; then
+    return
+  fi
+
+  curl --proto '=https' --tlsv1.2 -sSfL \
+    https://install.determinate.systems/nix \
+    | sh -s -- install linux --no-confirm
+}
+
+load_nix() {
+  local profile
+  for profile in \
+    /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh \
+    "$HOME/.nix-profile/etc/profile.d/nix.sh"; do
+    if [ -f "$profile" ]; then
+      # shellcheck disable=SC1090
+      source "$profile"
+      break
+    fi
+  done
+
+  if ! command -v nix >/dev/null 2>&1; then
+    export PATH="/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$PATH"
+  fi
+
+  command -v nix >/dev/null 2>&1
+}
+
+install_nix_direnv() {
+  local nix_bin
+  nix_bin="$(command -v nix)"
+  if [ ! -f "$HOME/.nix-profile/share/nix-direnv/direnvrc" ]; then
+    "$nix_bin" --extra-experimental-features 'nix-command flakes' \
+      profile install nixpkgs#nix-direnv
+  fi
+
+  mkdir -p "$HOME/.config/direnv"
+  local direnvrc="$HOME/.config/direnv/direnvrc"
+  local hook="source \"\$HOME/.nix-profile/share/nix-direnv/direnvrc\""
+  if ! grep -Fqx "$hook" "$direnvrc" 2>/dev/null; then
+    printf '\n%s\n' "$hook" >>"$direnvrc"
+  fi
+}
+
+allow_direnv() {
+  direnv allow "$repo_root"
+}
+
+persist_nix_environment() {
+  local nix_bin nix_bin_dir profile="$HOME/.bash_profile" nix_profile
+  nix_bin="$(command -v nix)"
+  nix_bin_dir="$(dirname "$nix_bin")"
+  nix_profile=/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+  if [ ! -f "$nix_profile" ]; then
+    nix_profile="$HOME/.nix-profile/etc/profile.d/nix.sh"
+  fi
+  local marker='# wip Nix development shell'
+  if grep -Fqx "$marker" "$profile" 2>/dev/null; then
+    return
+  fi
+
+  cat >>"$profile" <<EOF
+
+$marker
+if [ -f "$nix_profile" ]; then
+  # shellcheck disable=SC1090
+  source "$nix_profile"
+fi
+if [[ -z "\${IN_NIX_SHELL:-}" && "\${PWD}" == "$repo_root" ]]; then
+  eval "\$("$nix_bin" print-dev-env "$repo_root")"
+  export PATH="$nix_bin_dir:\${PATH}"
+fi
+EOF
+}
+
+verify_dev_shell() {
+  # shellcheck disable=SC2016
+  nix develop "$repo_root" --command bash -c '
+    for tool in docker go golangci-lint gofumpt jq shellcheck git-cliff gh make pre-commit; do
+      command -v "$tool" >/dev/null || {
+        printf "orb setup: missing dev-shell tool: %s\n" "$tool" >&2
+        exit 1
+      }
+    done
+    docker compose version >/dev/null
+    make lint orb-policy-test
+  '
+}
+
+step 'installing direnv' install_system_packages
+step 'installing Docker Engine' install_docker
+step 'installing Nix' install_nix
+step 'loading Nix into this setup process' load_nix
+step 'installing nix-direnv' install_nix_direnv
+step 'allowing the repository direnv configuration' allow_direnv
+step 'persisting the Nix dev shell for login shells' persist_nix_environment
+step 'warming and verifying the locked dev shell' verify_dev_shell
+
+printf 'orb setup: ready (%s)\n' "$repo_root" >&2

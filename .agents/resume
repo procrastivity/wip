@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Setup persists the complete flake environment in ~/.bash_profile. Resume is
+# intentionally a fast, non-installing health check; the login shell restores
+# the toolchain before Amp or a supervised service starts.
+nix_bin="$(command -v nix || true)"
+if [ -z "$nix_bin" ] && [ -x /nix/var/nix/profiles/default/bin/nix ]; then
+  nix_bin=/nix/var/nix/profiles/default/bin/nix
+fi
+if [ -n "$nix_bin" ]; then
+  "$nix_bin" --version >/dev/null
+fi
+
+docker --version >/dev/null
+docker compose version >/dev/null
