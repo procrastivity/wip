@@ -33,6 +33,7 @@ func newRepo(t *testing.T) string {
 	run(t, resolved, "init", "-q")
 	run(t, resolved, "config", "user.email", "test@example.com")
 	run(t, resolved, "config", "user.name", "test")
+	run(t, resolved, "config", "commit.gpgsign", "false")
 	run(t, resolved, "commit", "--allow-empty", "-q", "-m", "init")
 	return resolved
 }

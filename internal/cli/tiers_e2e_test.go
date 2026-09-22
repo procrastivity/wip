@@ -46,6 +46,13 @@ func gitIn(t *testing.T, dir string, args ...string) {
 	}
 }
 
+func configureTestGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	gitIn(t, dir, "config", "user.email", "test@example.com")
+	gitIn(t, dir, "config", "user.name", "test")
+	gitIn(t, dir, "config", "commit.gpgsign", "false")
+}
+
 func newGitRepo(t *testing.T, name string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
@@ -53,8 +60,7 @@ func newGitRepo(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	gitIn(t, dir, "init", "-q")
-	gitIn(t, dir, "config", "user.email", "test@example.com")
-	gitIn(t, dir, "config", "user.name", "test")
+	configureTestGitRepo(t, dir)
 	return dir
 }
 
