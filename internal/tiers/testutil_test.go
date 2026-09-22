@@ -21,6 +21,7 @@ func newRepo(t *testing.T, name string) string {
 	run(t, dir, "init", "-q")
 	run(t, dir, "config", "user.email", "test@example.com")
 	run(t, dir, "config", "user.name", "test")
+	run(t, dir, "config", "commit.gpgsign", "false")
 	return dir
 }
 

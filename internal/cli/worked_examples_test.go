@@ -40,8 +40,7 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitIn(t, a, "init", "-q")
-	gitIn(t, a, "config", "user.email", "test@example.com")
-	gitIn(t, a, "config", "user.name", "test")
+	configureTestGitRepo(t, a)
 	gitIn(t, a, "remote", "add", "origin", "git@github.com:acme/widget.git")
 	if r := runIn(t, a, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init widget-a: exit=%d stderr=%q", r.exitCode, r.stderr)
@@ -53,8 +52,7 @@ func TestWorkedExample1_ThreeClonesOneRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitIn(t, b, "init", "-q")
-	gitIn(t, b, "config", "user.email", "test@example.com")
-	gitIn(t, b, "config", "user.name", "test")
+	configureTestGitRepo(t, b)
 	gitIn(t, b, "remote", "add", "origin", "https://github.com/acme/widget.git")
 	if r := runIn(t, b, dbEnv, "init"); r.exitCode != 0 {
 		t.Fatalf("init widget-b: exit=%d stderr=%q", r.exitCode, r.stderr)
@@ -127,8 +125,7 @@ func TestWorkedExample2_LinkedWorktreeThenMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitIn(t, main, "init", "-q")
-	gitIn(t, main, "config", "user.email", "test@example.com")
-	gitIn(t, main, "config", "user.name", "test")
+	configureTestGitRepo(t, main)
 	gitIn(t, main, "remote", "add", "origin", "git@github.com:acme/widget.git")
 	gitIn(t, main, "commit", "-q", "--allow-empty", "-m", "init")
 	if r := runIn(t, main, dbEnv, "init"); r.exitCode != 0 {
@@ -197,8 +194,7 @@ func TestWorkedExample3_MovedCloneSameCommonDir(t *testing.T) {
 	externalGit := filepath.Join(root, "external-git")
 	detached := filepath.Join(root, "detached")
 	gitInitSeparate(t, root, "detached", externalGit)
-	gitIn(t, detached, "config", "user.email", "test@example.com")
-	gitIn(t, detached, "config", "user.name", "test")
+	configureTestGitRepo(t, detached)
 	gitIn(t, detached, "remote", "add", "origin", "git@github.com:acme/detached.git")
 
 	before := runIn(t, detached, dbEnv, "init", "--json")

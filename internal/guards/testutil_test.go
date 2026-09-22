@@ -39,6 +39,7 @@ func newRepo(t *testing.T, s *store.Store) string {
 	run(t, dir, "init", "-q")
 	run(t, dir, "config", "user.email", "test@example.com")
 	run(t, dir, "config", "user.name", "test")
+	run(t, dir, "config", "commit.gpgsign", "false")
 	result, err := tiers.Init(ctx, s, store.ActorHuman, dir, "")
 	if err != nil {
 		t.Fatalf("tiers.Init: %v", err)
