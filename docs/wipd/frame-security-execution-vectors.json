@@ -1,0 +1,258 @@
+{
+  "notation": "wipd.frame-security-vector/1",
+  "limits": {
+    "bootstrap_frame_body": 65536,
+    "max_frame_body": 1048576,
+    "max_chunk_data": 65536,
+    "default_stream_bytes": 8589934592,
+    "absolute_stream_bytes": 1099511627776,
+    "max_concurrent_exchanges": 64,
+    "default_concurrent_exchanges": 32,
+    "default_receive_window_bytes": 1048576,
+    "absolute_receive_window_bytes": 16777216
+  },
+  "frame_vectors": [
+    {
+      "name": "client-hello-frame",
+      "kind": "client.hello",
+      "request_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "sequence": 0,
+      "payload_hex": "a6686665617475726573816c776970642e6672616d652f316a6f7065726174696f6e7381a3646e616d656d6d61747465722e6372656174656876657273696f6e738101706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f316c70726f746f636f6c5f6d61788201006c70726f746f636f6c5f6d696e8201006d73746f72655f736368656d6173816c776970642e73746f72652f31706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f31",
+      "frame_body_hex": "a5646b696e646c636c69656e742e68656c6c6f66736368656d616c776970642e6672616d652f31677061796c6f616458c1a6686665617475726573816c776970642e6672616d652f316a6f7065726174696f6e7381a3646e616d656d6d61747465722e6372656174656876657273696f6e738101706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f316c70726f746f636f6c5f6d61788201006c70726f746f636f6c5f6d696e8201006d73746f72655f736368656d6173816c776970642e73746f72652f31706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f316873657175656e6365006a726571756573745f6964781a30314b3556384a51464d3651335130585a3646315a3741324243",
+      "body_length": 291,
+      "wire_hex": "00000123a5646b696e646c636c69656e742e68656c6c6f66736368656d616c776970642e6672616d652f31677061796c6f616458c1a6686665617475726573816c776970642e6672616d652f316a6f7065726174696f6e7381a3646e616d656d6d61747465722e6372656174656876657273696f6e738101706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f316c70726f746f636f6c5f6d61788201006c70726f746f636f6c5f6d696e8201006d73746f72655f736368656d6173816c776970642e73746f72652f31706964656e746974795f736368656d6173816e776970642e636f6d6d616e642f316873657175656e6365006a726571756573745f6964781a30314b3556384a51464d3651335130585a3646315a3741324243",
+      "body_sha256": "sha256:e56090859488bb61850bf385f2639598bdb3bbd45ae8b2cb5b0f29b8d43acd71",
+      "expected": "protocol-negotiation-only-no-command-identity"
+    }
+  ],
+  "identity_independence_vectors": [
+    {
+      "name": "same-command-different-transport",
+      "canonical_vector": "matter-create-v1-origin",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "attempts": [
+        {
+          "request_id": "01K6A000000000000000000001",
+          "deadline": "2026-09-22T18:00:00Z",
+          "http2_data_splits": [4, 17, 274]
+        },
+        {
+          "request_id": "01K6A000000000000000000002",
+          "deadline": null,
+          "http2_data_splits": [1, 1, 2, 291]
+        }
+      ],
+      "expected_request_hashes": [
+        "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+        "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503"
+      ],
+      "expected": "frame-request-deadline-and-chunking-excluded-from-command-identity"
+    }
+  ],
+  "security_vectors": [
+    {
+      "name": "local-peer-owner-match",
+      "boundary": "local-before-http",
+      "facts": ["socket-owner=uid:1000", "peer-effective=uid:1000"],
+      "expected_code": "authenticated",
+      "submitted": false,
+      "effects": "negotiation-may-begin"
+    },
+    {
+      "name": "local-peer-owner-mismatch",
+      "boundary": "local-before-http",
+      "facts": ["socket-owner=uid:1000", "peer-effective=uid:1001", "header-x-peer-uid=1000"],
+      "expected_code": "auth.local-peer-mismatch",
+      "submitted": false,
+      "effects": "close-no-parse-no-state"
+    },
+    {
+      "name": "remote-authority-pin-mismatch",
+      "boundary": "remote-tls-server-auth",
+      "facts": ["hostname-valid=true", "domain-binding-valid=true", "spki-pin-match=false"],
+      "expected_code": "auth.authority-pin-mismatch",
+      "submitted": false,
+      "effects": "close-no-client-credential-no-state"
+    },
+    {
+      "name": "remote-environment-domain-mismatch",
+      "boundary": "remote-mtls-before-protocol",
+      "facts": ["profile-domain=01K5V8K1Q5VX6Y0J8C9W3M4N5P", "certificate-domain=01K6B000000000000000000001", "certificate-owner-root-match=true"],
+      "expected_code": "auth.environment-domain-mismatch",
+      "submitted": false,
+      "effects": "close-no-protocol-no-state"
+    },
+    {
+      "name": "remote-environment-revoked-on-retained-connection",
+      "boundary": "remote-before-new-exchange",
+      "facts": ["tls-established=true", "certificate-revoked-since-last-exchange=true"],
+      "expected_code": "auth.environment-revoked",
+      "submitted": false,
+      "effects": "refuse-new-exchange-no-rollback-of-prior-submission"
+    },
+    {
+      "name": "enrollment-grant-reuse-with-different-key",
+      "boundary": "remote-enrollment",
+      "facts": ["grant-consumed=true", "csr-spki-digest-match-original=false"],
+      "expected_code": "auth.grant-consumed",
+      "submitted": false,
+      "effects": "no-certificate-issued-no-state-change"
+    },
+    {
+      "name": "application-signature-cannot-replace-mtls",
+      "boundary": "remote-before-protocol",
+      "facts": ["client-certificate-present=false", "application-signature-present=true"],
+      "expected_code": "auth.environment-certificate-required",
+      "submitted": false,
+      "effects": "close-no-protocol-no-state"
+    }
+  ],
+  "limit_vectors": [
+    {
+      "name": "fragmented-length-prefix",
+      "facts": ["prefix-bytes-received=3", "end-of-stream=false"],
+      "expected_code": "need-more-data",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "zero-length-frame",
+      "facts": ["declared-frame-body=0"],
+      "expected_code": "protocol.invalid-frame",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "oversized-frame-before-allocation",
+      "facts": ["effective-max-frame-body=1048576", "declared-frame-body=1048577"],
+      "expected_code": "protocol.frame-too-large",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "oversized-chunk",
+      "facts": ["effective-max-chunk-data=65536", "chunk-data=65537"],
+      "expected_code": "protocol.chunk-too-large",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "noncontiguous-stream-offset",
+      "facts": ["expected-offset=65536", "received-offset=65535"],
+      "expected_code": "protocol.stream-offset",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "declared-stream-over-limit",
+      "facts": ["effective-max-stream-bytes=8589934592", "declared-stream-bytes=8589934593"],
+      "expected_code": "protocol.stream-too-large",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "bounded-backpressure",
+      "facts": ["receive-window-bytes=1048576", "queued-bytes=1048576", "consumer-progress=false"],
+      "expected_code": "withhold-http2-window-credit",
+      "allocation_bytes": 0,
+      "submitted": false
+    },
+    {
+      "name": "concurrency-overload",
+      "facts": ["effective-max-concurrent-exchanges=32", "active-exchanges=32"],
+      "expected_code": "transport.overloaded",
+      "allocation_bytes": 0,
+      "submitted": false
+    }
+  ],
+  "execution_vectors": [
+    {
+      "name": "cancel-wins-before-submission",
+      "events": ["command.received", "command.validating", "cancel.received", "submission.not-crossed"],
+      "expected_code": "transport.cancelled-before-submission",
+      "client_outcome": "unavailable",
+      "submitted": false,
+      "effects": "no-journal-no-receipt-no-model-effect"
+    },
+    {
+      "name": "deadline-wins-before-submission",
+      "events": ["command.received", "deadline.expired", "submission.not-crossed"],
+      "expected_code": "transport.deadline-before-submission",
+      "client_outcome": "unavailable",
+      "submitted": false,
+      "effects": "no-journal-no-receipt-no-model-effect"
+    },
+    {
+      "name": "cancel-after-submission",
+      "events": ["command.received", "submission.crossed", "submission.accepted", "cancel.received", "terminal.not-observed"],
+      "expected_code": "transport.wait-cancelled",
+      "client_outcome": "outcome-unknown",
+      "submitted": true,
+      "effects": "command-continues-no-rollback-dependent-commands-block"
+    },
+    {
+      "name": "disconnect-after-bytes-before-ack",
+      "events": ["command.bytes-written", "stream.lost", "submission-ack.not-observed", "terminal.not-observed"],
+      "expected_code": "outcome-unknown",
+      "client_outcome": "outcome-unknown",
+      "submitted": null,
+      "effects": "do-not-reclassify-unavailable-query-or-retry-same-command-id"
+    },
+    {
+      "name": "query-cancel",
+      "events": ["query.started", "cancel.received", "snapshot.released"],
+      "expected_code": "query.cancelled",
+      "client_outcome": "query.cancelled",
+      "submitted": false,
+      "effects": "no-model-effect"
+    }
+  ],
+  "redaction_vectors": [
+    {
+      "name": "routine-command-log",
+      "input": {
+        "event": "command.wait-ended",
+        "stable_code": "transport.wait-cancelled",
+        "transport": "remote",
+        "selected_protocol": "1.0",
+        "request_id": "01K6A000000000000000000002",
+        "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+        "authority_epoch": 7,
+        "environment_id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+        "operation": "matter.create@v1",
+        "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+        "actor": "role:builder",
+        "title": "Café protocol identity",
+        "requested_locator": "protocol-identity",
+        "blob_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authorization": "Bearer secret-token",
+        "certificate_pem": "-----BEGIN CERTIFICATE-----secret",
+        "private_key": "secret-private-key"
+      },
+      "expected_routine": {
+        "event": "command.wait-ended",
+        "stable_code": "transport.wait-cancelled",
+        "transport": "remote",
+        "selected_protocol": "1.0",
+        "request_id": "01K6A000000000000000000002",
+        "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+        "authority_epoch": 7,
+        "environment_id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+        "operation": "matter.create@v1"
+      },
+      "forbidden_routine_fields": [
+        "request_hash",
+        "actor",
+        "title",
+        "requested_locator",
+        "blob_digest",
+        "authorization",
+        "certificate_pem",
+        "private_key"
+      ]
+    }
+  ]
+}
