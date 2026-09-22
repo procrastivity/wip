@@ -12,9 +12,10 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # Every shell script the repo carries. wip's pre-commit hooks check no
 # shell files at all, so this list is the only shell gate — `make lint`,
 # and so CI's lint job, checks it in full.
-SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release
+ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release $(ORB_SHELLCHECK_FILES)
 
-.PHONY: fmt lint test check hooks build cross-compile changelog release-notes
+.PHONY: fmt lint test check orb-lint orb-policy-test orb-smoke hooks build cross-compile changelog release-notes
 
 fmt:
 	gofumpt -w .
@@ -27,6 +28,15 @@ test:
 	go test ./...
 
 check: lint test
+
+orb-lint:
+	shellcheck $(ORB_SHELLCHECK_FILES)
+
+orb-policy-test: orb-lint
+	./contrib/orb-smoke/test-policy
+
+orb-smoke: orb-policy-test
+	./contrib/orb-smoke/run
 
 # Both stages explicitly: .pre-commit-config.yaml declares a commit-msg
 # hook, and a bare `pre-commit install` wires only the pre-commit stage,

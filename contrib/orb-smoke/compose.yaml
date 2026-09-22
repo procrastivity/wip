@@ -1,0 +1,57 @@
+x-service: &service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${WIP_ORB_SMOKE_IMAGE:?set WIP_ORB_SMOKE_IMAGE}
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    WIP_SMOKE_RUN_ID: ${WIP_SMOKE_RUN_ID:?set WIP_SMOKE_RUN_ID}
+  networks:
+    - lab
+
+services:
+  authority-env:
+    <<: *service
+    command: authority
+    environment:
+      WIP_SMOKE_ROLE: authority
+      WIP_SMOKE_RUN_ID: ${WIP_SMOKE_RUN_ID:?set WIP_SMOKE_RUN_ID}
+    tmpfs:
+      - /run/wip-smoke:size=1m,mode=0700,uid=65532,gid=65532
+    volumes:
+      - authority-state:/var/lib/wip-smoke
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -qO- http://127.0.0.1:8080/authority-prefix |
+          grep -Fqx "authority:${WIP_SMOKE_RUN_ID}"
+      interval: 1s
+      timeout: 1s
+      retries: 20
+
+  client-env:
+    <<: *service
+    command: client
+    environment:
+      WIP_SMOKE_ROLE: client
+      WIP_SMOKE_RUN_ID: ${WIP_SMOKE_RUN_ID:?set WIP_SMOKE_RUN_ID}
+    depends_on:
+      authority-env:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1m,mode=0700,uid=65532,gid=65532
+    volumes:
+      - client-state:/var/lib/wip-smoke
+
+networks:
+  lab:
+    internal: true
+
+volumes:
+  authority-state:
+  client-state:

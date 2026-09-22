@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+reject_inherited_state() {
+  for name in \
+    DOCKER_HOST \
+    GH_TOKEN \
+    GITHUB_TOKEN \
+    LINEAR_API_KEY \
+    SSH_AUTH_SOCK \
+    WIP_AUTHORITY_URL \
+    WIP_DB \
+    WIP_HOME \
+    WIP_REMOTE \
+    WIP_STATE_DIR \
+    WIP_STORE; do
+    if printenv "$name" >/dev/null 2>&1; then
+      printf 'orb smoke: forbidden inherited variable: %s\n' "$name" >&2
+      exit 1
+    fi
+  done
+}
+
+reject_inherited_state
+
+expected="authority:${WIP_SMOKE_RUN_ID:?missing WIP_SMOKE_RUN_ID}"
+
+case "${1:-}" in
+  authority)
+    [ "${WIP_SMOKE_ROLE:-}" = authority ]
+    printf '%s\n' "$expected" > /var/lib/wip-smoke/authority-prefix
+    cp /var/lib/wip-smoke/authority-prefix /run/wip-smoke/authority-prefix
+    body=/run/wip-smoke/authority-prefix
+    length="$(wc -c <"$body")"
+    while :; do
+      {
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' "$length"
+        cat "$body"
+      } | nc -l -p 8080
+    done
+    ;;
+  client)
+    [ "${WIP_SMOKE_ROLE:-}" = client ]
+    actual="$(wget -qO- http://authority-env:8080/authority-prefix)"
+    [ "$actual" = "$expected" ]
+    printf '%s\n' "$actual" > /var/lib/wip-smoke/client-prefix
+    printf 'orb smoke: client-ok %s\n' "$actual"
+    ;;
+  *)
+    printf 'usage: %s authority|client\n' "$0" >&2
+    exit 2
+    ;;
+esac

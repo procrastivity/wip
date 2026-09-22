@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+compose_file="$root/contrib/orb-smoke/compose.yaml"
+policy="$root/contrib/orb-smoke/policy.jq"
+project="wip-orb-smoke-${UID}-$$"
+export WIP_SMOKE_RUN_ID="${project}"
+export WIP_ORB_SMOKE_IMAGE="${project}:local"
+
+tmp_dir="$(mktemp -d)"
+cleaned=false
+
+cleanup() {
+  if [ "$cleaned" = true ]; then
+    return
+  fi
+  docker compose -p "$project" -f "$compose_file" down \
+    --volumes --remove-orphans --rmi local >/dev/null 2>&1 || true
+  rm -rf "$tmp_dir"
+  cleaned=true
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+  printf 'orb smoke: %s\n' "$*" >&2
+  exit 1
+}
+
+command -v docker >/dev/null || fail 'docker CLI is unavailable'
+command -v jq >/dev/null || fail 'jq is unavailable'
+docker info >/dev/null || fail 'Docker daemon is unavailable; run amp orb services ensure'
+docker compose version >/dev/null || fail 'Docker Compose v2 is unavailable'
+
+config="$tmp_dir/compose.json"
+docker compose -p "$project" -f "$compose_file" config --format json >"$config"
+
+jq -e -f "$policy" "$config" >/dev/null \
+  || fail 'Compose config violates the orb isolation policy'
+
+docker compose -p "$project" -f "$compose_file" up -d --build
+
+authority_id="$(docker compose -p "$project" -f "$compose_file" ps -q authority-env)"
+client_id="$(docker compose -p "$project" -f "$compose_file" ps -q --all client-env)"
+[ -n "$authority_id" ] || fail 'authority container was not created'
+[ -n "$client_id" ] || fail 'client container was not created'
+[ "$authority_id" != "$client_id" ] || fail 'authority and client share one container identity'
+
+docker inspect "$authority_id" "$client_id" >"$tmp_dir/containers.json"
+jq -e '
+  all(.[];
+    .HostConfig.Privileged == false and
+    .HostConfig.NetworkMode != "host" and
+    .HostConfig.PidMode != "host" and
+    .HostConfig.ReadonlyRootfs == true and
+    ((.HostConfig.CapAdd // []) | length) == 0 and
+    ((.HostConfig.CapDrop // []) | index("ALL")) != null and
+    ((.HostConfig.SecurityOpt // []) | index("no-new-privileges:true")) != null and
+    all(.Mounts[];
+      .Type == "volume" and
+      (.Source | contains("docker.sock") | not) and
+      (.Destination | contains("docker.sock") | not)) and
+    all(.Config.Env[];
+      test("^(PATH|WIP_SMOKE_ROLE|WIP_SMOKE_RUN_ID)=") != false))
+' "$tmp_dir/containers.json" >/dev/null || fail 'runtime container isolation differs from the reviewed Compose config'
+
+mapfile -t volumes < <(jq -r '.[].Mounts[] | select(.Type == "volume") | .Name' "$tmp_dir/containers.json" | sort -u)
+[ "${#volumes[@]}" -eq 2 ] || fail "expected two distinct named volumes, found ${#volumes[@]}"
+
+network_name="$(docker network ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}')"
+[ -n "$network_name" ] || fail 'Compose network was not created'
+[ "$(docker network inspect "$network_name" --format '{{.Internal}}')" = true ] \
+  || fail 'Compose network is not internal'
+
+docker wait "$client_id" >/dev/null
+[ "$(docker inspect "$client_id" --format '{{.State.ExitCode}}')" -eq 0 ] \
+  || fail "client failed: $(docker logs "$client_id" 2>&1)"
+docker logs "$client_id" | grep -Fq "orb smoke: client-ok authority:$WIP_SMOKE_RUN_ID" \
+  || fail 'client did not report the expected authority prefix'
+
+docker cp "$authority_id:/var/lib/wip-smoke/authority-prefix" "$tmp_dir/authority-prefix"
+docker cp "$client_id:/var/lib/wip-smoke/client-prefix" "$tmp_dir/client-prefix"
+cmp -s "$tmp_dir/authority-prefix" "$tmp_dir/client-prefix" \
+  || fail 'authority and client volumes do not contain the same prefix bytes'
+
+cleanup
+trap - EXIT INT TERM
+
+[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] \
+  || fail 'teardown left project containers behind'
+[ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ] \
+  || fail 'teardown left project volumes behind'
+[ -z "$(docker network ls -q --filter "label=com.docker.compose.project=$project")" ] \
+  || fail 'teardown left project networks behind'
+
+printf 'orb smoke: PASS (%s)\n' "$project"

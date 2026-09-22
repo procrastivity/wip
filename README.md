@@ -34,6 +34,28 @@ make check        # lint + test
 make hooks        # pre-commit, both stages
 ```
 
+### Amp orbs
+
+Project orbs install the locked Nix development shell and Docker Engine from
+`.agents/setup`. Docker runs as the supervised `docker-daemon` service declared
+in `.amp/services.yaml`; start or repair it with:
+
+```
+amp orb services ensure
+make orb-smoke
+```
+
+`make orb-smoke` builds and runs two hardened containers on an internal Compose
+network with separate named volumes, verifies their byte exchange, and removes
+all runtime resources. The smoke refuses bind mounts, Docker-socket mounts,
+privileged or host-network containers, inherited credentials, and legacy-store
+routes.
+
+Orb files and Docker state are disposable. GitHub commits and Linear roadmap
+state are the recovery anchors. If dogfooding needs a legacy WIP store, create a
+fresh orb-local store; never import, mount, copy, or route to a live store from
+another machine.
+
 Version stamps come from release tags (`git describe --match 'v[0-9]*'`);
 pushing an annotated `vX.Y.Z` tag is the only human release action.
 CHANGELOG.md is generated per release, never committed.
