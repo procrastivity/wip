@@ -2,8 +2,23 @@
 set -euo pipefail
 
 # Setup persists the complete flake environment in ~/.bash_profile. Resume is
-# intentionally a fast, non-installing health check; the login shell restores
-# the toolchain before Amp or a supervised service starts.
+# intentionally a fast, non-installing repair and health check. Amp writes the
+# current thread environment after setup; keep the Nix hook after that block so
+# its PATH value cannot replace the dev shell's PATH.
+profile="$HOME/.bash_profile"
+activation="$HOME/.config/wip/orb-dev-shell.sh"
+marker='# wip Nix development shell'
+temporary="$(mktemp)"
+touch "$profile"
+awk -v marker="$marker" '
+  $0 == marker { skipping = 1; next }
+  skipping && $0 == "" { skipping = 0; next }
+  !skipping { print }
+' "$profile" >"$temporary"
+cat "$temporary" >"$profile"
+rm -f "$temporary"
+printf '\n%s\nsource %q\n' "$marker" "$activation" >>"$profile"
+
 nix_bin="$(command -v nix || true)"
 if [ -z "$nix_bin" ] && [ -x /nix/var/nix/profiles/default/bin/nix ]; then
   nix_bin=/nix/var/nix/profiles/default/bin/nix
