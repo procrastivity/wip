@@ -98,6 +98,7 @@ const (
 	ProblemUnknownOperation   ProblemCode = "operation.unknown"
 	ProblemUnsupportedVersion ProblemCode = "operation.unsupported-version"
 	ProblemInvalidResult      ProblemCode = "internal.invalid-result"
+	ProblemExecutionFailed    ProblemCode = "internal.execution-failed"
 )
 
 // ProblemInvalidTitle and the other matter.create constants retain the current
