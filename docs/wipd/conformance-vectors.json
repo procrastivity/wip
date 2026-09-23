@@ -1,0 +1,204 @@
+{
+  "notation": "wipd.conformance-vector/1",
+  "protocol_schema": "docs/wipd/conformance-schemas.cddl",
+  "source_vectors": [
+    {
+      "path": "docs/wipd/frame-security-execution-vectors.json",
+      "notation": "wipd.frame-security-vector/1",
+      "sha256": "7d379a104ed279120eb51201a82757d2389487aa25e978f542f46d8be20368f7"
+    },
+    {
+      "path": "docs/wipd/result-receipt-idempotency-vectors.json",
+      "notation": "wipd.result-receipt-vector/1",
+      "sha256": "d8b07e79dc75af6013108cc31abfbab623cf48ecb5484db86a283c76fe05f52e"
+    },
+    {
+      "path": "docs/wipd/read-transfer-snapshot-vectors.json",
+      "notation": "wipd.read-transfer-vector/1",
+      "sha256": "4f2f92f84decd524b43acb8615035074a876e379c8c698268a5c790e91f49812"
+    },
+    {
+      "path": "docs/wipd/claim-lifecycle-vectors.json",
+      "notation": "wipd.claim-lifecycle-vector/1",
+      "sha256": "5fd638a7a0a1255d851a24ec3fb8f4da97e915f477396c4c09737778fede1419"
+    }
+  ],
+  "canonical_vectors": [
+    {
+      "name": "matter-create-v1-origin",
+      "source": "internal/operation/command_identity_test.go:TestCanonicalCommandGoldenVector",
+      "schema": "wipd.command/1",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503"
+    },
+    {
+      "name": "client-hello-frame",
+      "source": "docs/wipd/frame-security-execution-vectors.json#/frame_vectors/0",
+      "schema": "wipd.frame/1",
+      "body_sha256": "sha256:e56090859488bb61850bf385f2639598bdb3bbd45ae8b2cb5b0f29b8d43acd71"
+    },
+    {
+      "name": "pinned-page-token",
+      "source": "docs/wipd/read-transfer-snapshot-vectors.json#/pagination",
+      "schema": "wipd.page-token/1",
+      "body_sha256": "sha256:27d28ec4db45c821f3aaf21b0bd73f97c88828feb78c779d75b7a962d4502684"
+    },
+    {
+      "name": "legacy-migration-group",
+      "source": "docs/wipd/conformance-vectors.json#/migration_vector",
+      "schema": "wipd.migration-command/1",
+      "request_hash": "sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab"
+    }
+  ],
+  "agreement_vectors": [
+    {
+      "name": "accepted-command",
+      "family": "accepted command",
+      "script": [
+        {"op": "submit", "id": "c1", "hash": "h1", "result": "result.succeeded"}
+      ],
+      "expected": ["terminal:result.succeeded:executions=1:effects=1"]
+    },
+    {
+      "name": "guard-refusal",
+      "family": "refusal",
+      "script": [
+        {"op": "submit", "id": "c2", "hash": "h2", "result": "result.refused"}
+      ],
+      "expected": ["terminal:result.refused:executions=1:effects=0"]
+    },
+    {
+      "name": "same-id-retry",
+      "family": "same-ID retry",
+      "script": [
+        {"op": "submit", "id": "c1", "hash": "h1", "result": "result.succeeded"},
+        {"op": "retry", "id": "c1", "hash": "h1"}
+      ],
+      "expected": [
+        "terminal:result.succeeded:executions=1:effects=1",
+        "replay:result.succeeded:executions=1:effects=1"
+      ]
+    },
+    {
+      "name": "lost-response-query",
+      "family": "lost-response receipt query",
+      "script": [
+        {"op": "submit-lost", "id": "c3", "hash": "h3", "result": "result.succeeded"},
+        {"op": "receipt-query", "id": "c3", "hash": "h3"}
+      ],
+      "expected": [
+        "outcome-unknown:executions=1:effects=1",
+        "terminal:result.succeeded:executions=1:effects=1"
+      ]
+    },
+    {
+      "name": "pinned-read",
+      "family": "read snapshot",
+      "script": [
+        {"op": "snapshot-open", "id": "s1", "items": ["a", "b", "c"]},
+        {"op": "snapshot-mutate", "items": ["d"]},
+        {"op": "snapshot-page", "id": "s1", "offset": 0, "length": 2},
+        {"op": "snapshot-page", "id": "s1", "offset": 2, "length": 2}
+      ],
+      "expected": ["snapshot:s1:count=3", "state:count=4", "page:s1:a,b", "page:s1:c"]
+    },
+    {
+      "name": "blob-upload",
+      "family": "blob upload",
+      "script": [
+        {"op": "blob-upload", "id": "blob", "content": "step-six-blob\n", "hash": "sha256:bad911cc7ba775864b2e271c46584395ada33b55436c5d23ecdbeb079038ef85", "length": 14},
+        {"op": "blob-upload", "id": "blob", "content": "step-six-blob\n", "hash": "sha256:bad911cc7ba775864b2e271c46584395ada33b55436c5d23ecdbeb079038ef85", "length": 14},
+        {"op": "blob-upload", "id": "bad-hash", "content": "step-six-blob\n", "hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "length": 14},
+        {"op": "blob-upload", "id": "bad-length", "content": "step-six-blob\n", "hash": "sha256:bad911cc7ba775864b2e271c46584395ada33b55436c5d23ecdbeb079038ef85", "length": 13}
+      ],
+      "expected": ["blob.staged", "blob.available", "blob.digest-mismatch", "blob.length-mismatch"]
+    },
+    {
+      "name": "claim-cycle",
+      "family": "claim cycle",
+      "script": [
+        {"op": "claim-acquire", "id": "k1", "epoch": 3},
+        {"op": "claim-append", "id": "k1", "epoch": 3},
+        {"op": "claim-hydrate", "id": "k1", "epoch": 3},
+        {"op": "claim-append", "id": "k1", "epoch": 3},
+        {"op": "claim-fold", "id": "k1", "epoch": 3},
+        {"op": "claim-release", "id": "k1", "epoch": 3}
+      ],
+      "expected": ["claim:hydrating", "claim.not-ready", "claim:offline-ready", "journal:pending=1", "journal:terminal=1", "claim:closed"]
+    },
+    {
+      "name": "incompatible-and-reseed",
+      "family": "incompatible versions/reseed",
+      "script": [
+        {"op": "negotiate", "client_major": 2, "server_major": 1},
+        {"op": "operation-version", "requested": 2, "supported": 1},
+        {"op": "reseed", "preserve": ["journal", "terminal-receipts", "staged-blobs", "local-evidence"]}
+      ],
+      "expected": ["protocol.incompatible-version", "operation.unsupported-version", "store.reseed-required:preserved=4"]
+    }
+  ],
+  "migration_vector": {
+    "name": "one-event-correlation-group",
+    "correlation_origin": "01K6E000000000000000000001",
+    "command_id": "01K6E000000000000000000001",
+    "environment_sequence": 1,
+    "canonical_cbor_hex": "a566736368656d617818776970642e6d6967726174696f6e2d636f6d6d616e642f316d6c65676163795f6576656e747381ac626964781a30314b3645303030303030303030303030303030303030303031647265706f781a30314b3556384b474433463648394a324d344e3751305235545764747970656e6d61747465722e63726561746564656163746f726568756d616e65636c6f6e65f666736368656d6173776970642e6c65676163792d6576656e742f31677061796c6f6164a1657469746c65664c6567616379677375626a656374781a30314b364d30303030303030303030303030303030303030303168776f726b74726565f669636175736174696f6ef66b636f7272656c6174696f6ef66b6f636375727265645f617474323032362d30392d32325431373a30303a30305a6e656e7669726f6e6d656e745f6964781a30314b3556384b3841344a324e37523954305633583659385a4272636f7272656c6174696f6e5f6f726967696e781a30314b364530303030303030303030303030303030303030303173617574686f726974795f646f6d61696e5f6964781a30314b3556384b31513556583659304a38433957334d344e3550",
+    "request_hash": "sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab",
+    "rollback_after_new_write": "migration.rollback-forbidden"
+  },
+  "exits": [
+    {"id": "V01", "family": "accepted command", "title": "accepted command and terminal receipt", "sources": ["result-receipt-idempotency-vectors.json#/vectors/accepted-command"], "assertions": ["one execution", "atomic events/projections/receipt", "typed output and exact event range"], "step9_review": []},
+    {"id": "V02", "family": "refusal", "title": "malformed and semantic rejection", "sources": ["result-receipt-idempotency-vectors.json#/vectors/malformed-command", "result-receipt-idempotency-vectors.json#/vectors/semantic-rejected-command"], "assertions": ["malformed input never submits", "semantic rejection commits receipt only"], "step9_review": []},
+    {"id": "V03", "family": "refusal", "title": "valid guard refusal", "sources": ["result-receipt-idempotency-vectors.json#/vectors/valid-guard-refusal"], "assertions": ["terminal refusal receipt", "no model effect", "distinct from admission refusal"], "step9_review": []},
+    {"id": "V04", "family": "same-ID retry", "title": "same ID and hash replay", "sources": ["result-receipt-idempotency-vectors.json#/vectors/same-id-same-hash-retry"], "assertions": ["stored receipt replayed", "execution count remains one"], "step9_review": []},
+    {"id": "V05", "family": "same-ID retry", "title": "same ID and changed hash", "sources": ["result-receipt-idempotency-vectors.json#/vectors/same-id-different-hash-refusal"], "assertions": ["command.id-conflict", "original unchanged", "no conflict receipt"], "step9_review": []},
+    {"id": "V06", "family": "refusal", "title": "definitely unsent", "sources": ["result-receipt-idempotency-vectors.json#/vectors/definitely-unsent-unavailable"], "assertions": ["unavailable", "no future-execution queue", "no receipt"], "step9_review": []},
+    {"id": "V07", "family": "lost-response receipt query", "title": "lost response recovery", "sources": ["result-receipt-idempotency-vectors.json#/vectors/lost-response-receipt-query"], "assertions": ["outcome unknown blocks dependents", "query returns exact receipt", "no duplicate execution"], "step9_review": []},
+    {"id": "V08", "family": "read snapshot", "title": "explicit read snapshot", "sources": ["read-transfer-snapshot-vectors.json#/read_snapshot"], "assertions": ["domain epoch as-of and provenance explicit", "overlay remains explicit"], "step9_review": []},
+    {"id": "V09", "family": "read snapshot", "title": "pinned pagination", "sources": ["read-transfer-snapshot-vectors.json#/pagination"], "assertions": ["underlying mutation cannot alter pages", "scope and MAC failures are distinct"], "step9_review": []},
+    {"id": "V10", "family": "blob upload", "title": "blob idempotency and integrity", "sources": ["read-transfer-snapshot-vectors.json#/blob"], "assertions": ["digest and length independently verified", "duplicate upload idempotent", "promotion waits for success"], "step9_review": []},
+    {"id": "V11", "family": "claim cycle", "title": "seed lazy hydration and claim pin", "sources": ["read-transfer-snapshot-vectors.json#/seed", "read-transfer-snapshot-vectors.json#/hydration", "claim-lifecycle-vectors.json#/hydration"], "assertions": ["prefix and manifest complete", "claim blocked until durable verified pin"], "step9_review": []},
+    {"id": "V12", "family": "claim cycle", "title": "claim acquire return fold release", "sources": ["claim-lifecycle-vectors.json#/acquire_grant", "claim-lifecycle-vectors.json#/claim_command", "claim-lifecycle-vectors.json#/release"], "assertions": ["one Matter exclusion", "contiguous journal", "terminal receipt release barrier", "old epoch fenced"], "step9_review": []},
+    {"id": "V13", "family": "claim cycle", "title": "claim contention and footprint refusal", "sources": ["claim-lifecycle-vectors.json#/acquire_refusals"], "assertions": ["local lock grants no authority", "cross-Matter and aggregate footprints refuse"], "step9_review": []},
+    {"id": "V14", "family": "claim cycle", "title": "cross-Environment stand-down", "sources": ["claim-lifecycle-vectors.json#/stand_down"], "assertions": ["wrong epoch refuses", "reason mandatory", "loss acknowledgment mandatory", "accepted close fences old epoch"], "step9_review": ["owner-attestation ceremony"]},
+    {"id": "V15", "family": "accepted command", "title": "provisional locator collision", "sources": ["conformance-vectors.json#/exits/V15"], "assertions": ["requested=alpha", "assigned=alpha--01K6M0", "identity=01K6M000000000000000000015", "locator-repair-required=true", "only authority rename or explicit accept clears repair"], "step9_review": ["final event and M1 DTO shape"]},
+    {"id": "V16", "family": "accepted command", "title": "Environment cursor move to provisional target", "sources": ["conformance-vectors.json#/exits/V16"], "assertions": ["worktree=01K5V8KGD3F6H9J2M4N7Q0R5TW", "environment-sequence=71", "target=01K6M000000000000000000016", "target-state=provisional", "target birth precedes cursor move in same stream"], "step9_review": ["cursor operation/event schema"]},
+    {"id": "V17", "family": "claim cycle", "title": "return refusal quarantine and repair", "sources": ["read-transfer-snapshot-vectors.json#/pull_with_pending", "read-transfer-snapshot-vectors.json#/return_refusal", "claim-lifecycle-vectors.json#/return_refusal_and_repair"], "assertions": ["eligible return precedes pull", "refused head stops suffix", "replace uses new identity", "abandon needs safe proof"], "step9_review": []},
+    {"id": "V18", "family": "incompatible versions/reseed", "title": "incompatible protocol operation and compatible reseed", "sources": ["version-compatibility-contract.md#V18-A", "version-compatibility-contract.md#V18-B", "read-transfer-snapshot-vectors.json#/reseed"], "assertions": ["major 2 versus 1 is protocol.incompatible-version", "matter.create@v2 is operation.unsupported-version", "reseed preserves journal receipts staged blobs and local evidence byte-for-byte"], "step9_review": []},
+    {"id": "V19", "family": "refusal", "title": "local and remote trust refusal", "sources": ["frame-security-execution-vectors.json#/security_vectors"], "assertions": ["OS peer mismatch closes before parse", "wrong pin owner domain revocation and grant reuse refuse without state effect", "application signature cannot replace mTLS"], "step9_review": ["certificate and grant ceremony review"]},
+    {"id": "V20", "family": "incompatible versions/reseed", "title": "handoff and disaster restore", "sources": ["claim-lifecycle-vectors.json#/handoff_promotion", "conformance-vectors.json#/exits/V20"], "assertions": ["active claim blocks planned handoff", "conflicting prefix=transfer.prefix-mismatch", "missing blob=transfer.incomplete-closure", "old unresolved command=never-execute-after-promotion", "ahead client=store.history-regressed", "promotion epoch=8 fences epoch=7"], "step9_review": ["owner attestation", "portable bundle signature", "activation ceremony"]},
+    {"id": "V21", "family": "accepted command", "title": "deterministic legacy migration", "sources": ["conformance-vectors.json#/migration_vector"], "assertions": ["command ID equals correlation origin", "group ordering follows preserved event ULIDs", "request_hash=sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab", "rollback after new write=migration.rollback-forbidden"], "step9_review": ["grouping audit", "migration binding proof"]},
+    {"id": "V22", "family": "read snapshot", "title": "redacted observability and provenance", "sources": ["frame-security-execution-vectors.json#/redaction_vectors", "read-transfer-snapshot-vectors.json#/read_snapshot"], "assertions": ["payload secrets hashes tokens and blob IDs absent from routine log", "reachability and as-of never guessed", "metrics never authorize correctness"], "step9_review": ["final privacy retention and access review"]}
+  ],
+  "decision_coverage": {
+    "D115": ["V18", "V19"], "D116": ["V13", "V20"], "D117": ["V19"],
+    "D118": ["V19"], "D119": ["V08", "V10", "V11", "V20"],
+    "D120": ["V01", "V02", "V03", "V05", "V15", "V16"],
+    "D121": ["V11", "V12", "V13"], "D122": ["V12", "V17"],
+    "D123": ["V01", "V03", "V04", "V05", "V07", "V10", "V12"],
+    "D124": ["V01", "V08", "V21"], "D125": ["V16"], "D126": ["V12", "V14"],
+    "D127": ["V15"], "D128": ["V08", "V09", "V17", "V18"],
+    "D129": ["V07", "V20"], "D130": ["V21"], "D131": ["V08", "V22"]
+  },
+  "question_coverage": {
+    "Q01": ["canonical/matter-create-v1-origin"], "Q02": ["property/hash-identity"],
+    "Q03": ["V18"], "Q04": ["canonical/client-hello-frame"], "Q05": ["fuzz/frame-parsers"],
+    "Q06": ["V01", "V02", "V03"], "Q07": ["V04", "V05"], "Q08": ["V07"],
+    "Q09": ["V10"], "Q10": ["V11"], "Q11": ["V17"], "Q12": ["V12", "V17"],
+    "Q13": ["V08"], "Q14": ["V09"], "Q15": ["V11", "V12"], "Q16": ["V12", "V17"],
+    "Q17": ["V12", "V14"], "Q18": ["V19"], "Q19": ["V19"],
+    "Q20": ["frame-security-execution-vectors.json#/execution_vectors"],
+    "Q21": ["V07", "claim-lifecycle-vectors.json#/cancellation"], "Q22": ["V18"],
+    "Q23": ["V22", "deferred/final-privacy-review"],
+    "Q24": ["canonical/matter-create-v1-origin", "V19", "deferred/portable-signatures"],
+    "Q25": ["agreement/all-eight-families", "V01-V22"]
+  },
+  "deferred_step9": [
+    "final D115-D131 cross-contract and M3/M4 implementability review",
+    "portable receipt grant and bundle signature decision",
+    "owner attestation handoff restore and stand-down ceremonies",
+    "certificate enrollment renewal rotation and revocation security review",
+    "final payload digest identifier retention access and privacy review",
+    "D127 final event/output shape and cursor operation/event schema",
+    "D130 grouping audit synthetic binding and migration proof"
+  ]
+}

@@ -1,0 +1,387 @@
+; WIP M2 protocol-1 standalone conformance schema catalogue.
+; Maps are closed: entries not written here are invalid unless an owning
+; negotiated protocol profile explicitly declares an extension point.
+
+ulid = tstr .regexp "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+digest = tstr .regexp "^sha256:[0-9a-f]{64}$"
+token = tstr
+positive = uint .gt 0
+nullable-ulid = ulid / null
+
+operation = { "name": tstr, "version": positive }
+environment = { "id": ulid, "sequence": positive }
+claim = { "id": ulid, "epoch": positive }
+context = { "repo_id": nullable-ulid, "clone_id": nullable-ulid, "worktree_id": nullable-ulid }
+blob-ref = { "name": tstr, "digest": digest, "byte_length": uint }
+
+frame = {
+  "schema": "wipd.frame/1",
+  "request_id": ulid,
+  "sequence": uint,
+  "kind": tstr,
+  "payload": bstr
+}
+stream-chunk = { "offset": uint, "data": bstr }
+
+version = [uint, uint]
+operation-capability = {
+  "name": tstr,
+  "versions": [* positive],
+  "identity_schemas": [* tstr]
+}
+client-hello = {
+  "protocol_min": version,
+  "protocol_max": version,
+  "identity_schemas": [* tstr],
+  "operations": [* operation-capability],
+  "store_schemas": [* tstr],
+  "features": [* tstr]
+}
+server-hello = {
+  "selected_protocol": version,
+  "identity_schemas": [* tstr],
+  "operations": [* operation-capability],
+  "store_schemas": [* tstr],
+  "features": [* tstr]
+}
+
+matter-create-input = { "title": tstr, "requested_locator": tstr }
+claim-acquire-input = {
+  "matter_id": ulid,
+  "worktree_id": ulid,
+  "dispatch_mode": "anonymous-matter",
+  "requested_dispatch_id": ulid
+}
+claim-repair-proof = {
+  "terminal_receipt": terminal-receipt / null,
+  "not_submitted_proof": "definitely-unsent" / "same-epoch-receipt-not-found" / null
+}
+claim-repair-action =
+  { "kind": "abandon", "proof": claim-repair-proof } /
+  {
+    "kind": "replace",
+    "proof": claim-repair-proof,
+    "replacement_canonical_command": bstr,
+    "replacement_request_hash": digest
+  }
+claim-journal-repair-input = {
+  "journal_id": ulid,
+  "head_position": positive,
+  "head_command_id": ulid,
+  "head_request_hash": digest,
+  "action": claim-repair-action
+}
+claim-release-input = { "barrier": journal-barrier }
+claim-stand-down-input = {
+  "target": {
+    "claim_id": ulid,
+    "claim_epoch": positive,
+    "owner_environment_id": ulid
+  },
+  "reason": tstr,
+  "acknowledge_unreturned_work_loss": true
+}
+command-input = matter-create-input / claim-acquire-input /
+                claim-journal-repair-input / claim-release-input /
+                claim-stand-down-input
+command = {
+  "schema": "wipd.command/1",
+  "command_id": ulid,
+  "authority": { "domain_id": ulid, "expected_epoch": positive },
+  "environment": environment,
+  "acted_at": tstr,
+  "actor": tstr,
+  "causation_command_id": nullable-ulid,
+  "correlation_command_id": ulid,
+  "operation": operation,
+  "context": context,
+  "claim": claim / null,
+  "input": command-input,
+  "blobs": [* blob-ref]
+}
+command-submit = {
+  "schema": "wipd.command-submit/1",
+  "canonical_command": bstr,
+  "request_hash": digest,
+  "deadline": tstr / null
+}
+query-request = {
+  "schema": "wipd.query-request/1",
+  "query": operation,
+  "query_payload": bstr,
+  "deadline": tstr / null
+}
+submission-accepted = {
+  "schema": "wipd.submission-accepted/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "command_id": ulid,
+  "request_hash": digest
+}
+
+event-range = { "first_event_id": ulid, "last_event_id": ulid, "event_count": positive }
+terminal-result = {
+  "code": "result.succeeded" / "result.rejected" / "result.refused" / "result.failed",
+  "output": bstr / null,
+  "problem_code": tstr / null
+}
+terminal-receipt = {
+  "schema": "wipd.terminal-receipt/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "identity_schema": "wipd.command/1",
+  "command_id": ulid,
+  "request_hash": digest,
+  "operation": operation,
+  "environment": environment,
+  "result": terminal-result,
+  "accepted_events": event-range / null
+}
+receipt-query = {
+  "schema": "wipd.receipt-query/1",
+  "domain_id": ulid,
+  "command_id": ulid,
+  "request_hash": digest
+}
+
+prefix-anchor = {
+  "event_count": uint,
+  "high_water_event_id": nullable-ulid,
+  "prefix_digest": digest
+}
+prefix-record = { "event_id": ulid, "record": bstr }
+prefix-delta = { "start": prefix-anchor, "end": prefix-anchor, "events": [* prefix-record] }
+blob-manifest-entry = {
+  "digest": digest,
+  "byte_length": uint,
+  "requirement": "lazy" / "pin-before-use"
+}
+blob-manifest = {
+  "schema": "wipd.blob-manifest/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "as_of": prefix-anchor,
+  "entries": [* blob-manifest-entry],
+  "manifest_digest": digest
+}
+blob-upload-start = {
+  "schema": "wipd.blob-upload/1",
+  "domain_id": ulid,
+  "digest": digest,
+  "byte_length": uint,
+  "resume_offset": uint
+}
+
+read-query = {
+  "schema": "wipd.read-query/1",
+  "domain_id": ulid,
+  "expected_epoch": positive,
+  "source": "authority" / "environment",
+  "filter": {* tstr => any},
+  "overlay_policy": "folded-only" / "folded-and-provisional" / "all-local-evidence",
+  "page_size": uint,
+  "page_token": token / null
+}
+snapshot = {
+  "id": ulid,
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "as_of": prefix-anchor,
+  "overlay_policy": "folded-only" / "folded-and-provisional" / "all-local-evidence",
+  "expires_at": tstr
+}
+provenance = {
+  "source": "authority" / "environment",
+  "authority_reachability": "reachable" / "unavailable" / "not-attempted",
+  "authority_as_of": prefix-anchor / null,
+  "local_base_as_of": prefix-anchor / null,
+  "pending_journal_count": uint,
+  "provisional_item_count": uint,
+  "quarantined_item_count": uint,
+  "history_state": "current" / "behind" / "history-regressed"
+}
+read-item = {
+  "value": bstr,
+  "state": "folded" / "provisional" / "quarantined",
+  "environment_sequence": positive / null
+}
+read-response = {
+  "schema": "wipd.read-response/1",
+  "query": operation,
+  "filter_hash": digest,
+  "snapshot": snapshot,
+  "provenance": provenance,
+  "items": [* read-item],
+  "next_page_token": token / null,
+  "complete": bool
+}
+page-token-claims = {
+  "schema": "wipd.page-token/1",
+  "issuer": "authority" / "environment",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "query_name": tstr,
+  "query_version": positive,
+  "filter_hash": digest,
+  "snapshot_id": ulid,
+  "as_of_event_count": uint,
+  "as_of_event_id": nullable-ulid,
+  "as_of_prefix_digest": digest,
+  "overlay_policy": "folded-only" / "folded-and-provisional" / "all-local-evidence",
+  "page_size": uint,
+  "cursor": bstr,
+  "expires_at": tstr
+}
+
+seed-request = {
+  "schema": "wipd.seed-request/1",
+  "domain_id": ulid,
+  "expected_epoch": positive,
+  "store_schema": tstr,
+  "resume_token": token / null
+}
+seed-start = {
+  "schema": "wipd.seed-start/1",
+  "transfer_id": ulid,
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "store_schema": tstr,
+  "snapshot_id": ulid,
+  "prefix": { "start": prefix-anchor, "end": prefix-anchor },
+  "event_count": uint,
+  "event_byte_length": uint,
+  "blob_manifest_digest": digest
+}
+seed-end = {
+  "schema": "wipd.seed-end/1",
+  "transfer_id": ulid,
+  "verified_prefix": prefix-anchor,
+  "verified_blob_manifest_digest": digest,
+  "complete": true
+}
+pull-request = {
+  "schema": "wipd.pull-request/1",
+  "domain_id": ulid,
+  "expected_epoch": positive,
+  "installed": prefix-anchor,
+  "resume_token": token / null
+}
+return-command = {
+  "schema": "wipd.return-command/1",
+  "domain_id": ulid,
+  "expected_epoch": positive,
+  "journal": {
+    "id": ulid,
+    "delivery": "claim" / "provisional" / "capture" / "environment",
+    "position": positive,
+    "claim_id": nullable-ulid,
+    "claim_epoch": positive / null
+  },
+  "base_as_of": prefix-anchor,
+  "canonical_command": bstr,
+  "request_hash": digest
+}
+fold-result = {
+  "schema": "wipd.fold-result/1",
+  "journal_id": ulid,
+  "journal_position": positive,
+  "receipt": terminal-receipt,
+  "prefix_delta": prefix-delta,
+  "blob_manifest": blob-manifest,
+  "fold_as_of": prefix-anchor,
+  "continue": bool
+}
+reseed-required = {
+  "code": "store.reseed-required",
+  "authority_domain_id": ulid,
+  "authority_epoch": positive,
+  "required_prefix": prefix-anchor,
+  "high_water": prefix-anchor,
+  "required_blobs": [* blob-manifest-entry],
+  "preserve": ["journal", "terminal-receipts", "staged-blobs", "local-evidence"]
+}
+
+claim-acquire = {
+  "schema": "wipd.claim-acquire/1",
+  "canonical_command": bstr,
+  "request_hash": digest,
+  "installed": prefix-anchor,
+  "deadline": tstr / null
+}
+claim-grant-start = {
+  "schema": "wipd.claim-grant-start/1",
+  "grant_id": ulid,
+  "acquire_command_id": ulid,
+  "acquire_request_hash": digest,
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "owner_environment_id": ulid,
+  "claim": claim,
+  "matter_id": ulid,
+  "batch_id": ulid,
+  "dispatch_id": ulid,
+  "receipt": terminal-receipt,
+  "prefix": { "start": prefix-anchor, "end": prefix-anchor },
+  "blob_manifest_digest": digest
+}
+claim-grant-end = {
+  "schema": "wipd.claim-grant-end/1",
+  "grant_id": ulid,
+  "verified_prefix": prefix-anchor,
+  "verified_blob_manifest_digest": digest,
+  "complete": true
+}
+journal-barrier = {
+  "schema": "wipd.journal-barrier/1",
+  "journal_id": ulid,
+  "claim": claim,
+  "entry_count": uint,
+  "last_position": uint,
+  "terminal_receipt_count": uint,
+  "entries_digest": digest,
+  "sealed": true,
+  "unresolved_count": uint,
+  "quarantined_count": uint
+}
+claim-release = {
+  "schema": "wipd.claim-release/1",
+  "canonical_command": bstr,
+  "request_hash": digest,
+  "barrier": journal-barrier,
+  "deadline": tstr / null
+}
+claim-stand-down = {
+  "schema": "wipd.claim-stand-down/1",
+  "canonical_command": bstr,
+  "request_hash": digest,
+  "target": {
+    "claim_id": ulid,
+    "claim_epoch": positive,
+    "owner_environment_id": ulid
+  },
+  "reason": tstr,
+  "acknowledge_unreturned_work_loss": true,
+  "deadline": tstr / null
+}
+
+legacy-event = {
+  "schema": "wipd.legacy-event/1",
+  "id": ulid,
+  "type": tstr,
+  "occurred_at": tstr,
+  "actor": tstr,
+  "causation": nullable-ulid,
+  "correlation": nullable-ulid,
+  "repo": nullable-ulid,
+  "clone": nullable-ulid,
+  "worktree": nullable-ulid,
+  "subject": ulid,
+  "payload": {* tstr => any}
+}
+migration-command = {
+  "schema": "wipd.migration-command/1",
+  "authority_domain_id": ulid,
+  "environment_id": ulid,
+  "correlation_origin": ulid,
+  "legacy_events": [+ legacy-event]
+}
