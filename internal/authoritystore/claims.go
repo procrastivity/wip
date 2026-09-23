@@ -16,7 +16,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// LifecycleCommand is the protocol-1 command identity, independent of the M1
+// lifecycleCommand is the protocol-1 command identity, independent of the M1
 // operation catalogue. The exact received bytes are retained; no field is
 // normalized or reconstructed before hashing or submission.
 type lifecycleCommand struct {
@@ -245,7 +245,7 @@ func parseLifecycle(raw []byte, hash string) (*lifecycleCommand, error) {
 	default:
 		return nil, ErrInvalidProof
 	}
-	c.commandIdentity.lifecycle = c
+	c.lifecycle = c
 	return c, nil
 }
 
@@ -266,7 +266,19 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 		if len(ownerAuthorization) != 0 {
 			return CommandStatus{}, ErrInvalidProof
 		}
-		return s.submitIdentity(ctx, c.commandIdentity, peer, at, nil)
+		return s.submitIdentity(ctx, c.commandIdentity, peer, at, func(tx *sql.Tx) error {
+			x, err := loadClaim(ctx, tx, c, c.claimID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrFenced
+			}
+			if err != nil {
+				return err
+			}
+			if x.closed.Valid || x.authority != c.epoch || x.epoch != c.claimEpoch || x.owner != c.environment || x.repo != c.repo || x.worktree != c.worktree {
+				return ErrFenced
+			}
+			return nil
+		})
 	}
 	if len(ownerAuthorization) == 0 {
 		return CommandStatus{}, ErrInvalidProof
@@ -336,8 +348,8 @@ func verifyStandDownAuthorization(ctx context.Context, tx *sql.Tx, c *lifecycleC
 	return nil
 }
 
-// Recovery uses the exact proof admitted at submission and its original
-// verification time; later expiration cannot revoke the durable submission.
+// RecoverClaimLifecycle uses the exact proof admitted at submission and its
+// original verification time; later expiration cannot revoke the submission.
 func (s *Store) RecoverClaimLifecycle(ctx context.Context, raw []byte, hash string, ownerAuthorization ...[]byte) (*Execution, error) {
 	c, err := parseLifecycle(raw, hash)
 	if err != nil || c.name == "claim.acquire" {
@@ -500,8 +512,10 @@ func parseJournalCommand(raw []byte, hash string) (journalCommand, error) {
 	return journalCommand{w.Authority.Domain, w.ID, hash, w.Environment.ID, contextFields.Repo, contextFields.Worktree, w.Claim.ID, w.Authority.Epoch, w.Claim.Epoch, w.Environment.Sequence}, nil
 }
 
-// AppendClaimJournalEntry durably admits one exact command at the next position.
-// Local footprint, pin and negotiation checks remain the caller's responsibility.
+// AppendClaimJournalEntry persists one exact command at the next position.
+// This is an internal journal primitive, not claim-delivery admission: the
+// trusted caller must check operation delivery, negotiation, footprint, and
+// pins before calling it. No claim-delivery operation is registered yet.
 func (s *Store) AppendClaimJournalEntry(ctx context.Context, journal string, position uint64, raw []byte, hash string) error {
 	c, err := parseJournalCommand(raw, hash)
 	if err != nil || !ulid.MatchString(journal) || position == 0 {
@@ -649,7 +663,7 @@ func (s *Store) SealClaimJournal(ctx context.Context, domain, journal string) er
 // CompleteClaimNoEffect commits only a terminal receipt. It cannot mutate a
 // claim or append events, even if a caller supplies purported allocation IDs.
 func (s *Store) CompleteClaimNoEffect(ctx context.Context, owner *Execution, code, problem string, occurred time.Time, sign Signer) (CommandStatus, error) {
-	if owner == nil || owner.store != s || owner.lifecycle == nil || sign == nil || occurred.IsZero() || problem == "" || (code != "result.rejected" && code != "result.refused" && code != "result.failed") {
+	if owner == nil || owner.store != s || owner.lifecycle == nil || sign == nil || occurred.IsZero() || !validResultProblem(code, problem) {
 		return CommandStatus{}, ErrInvalidProof
 	}
 	c := owner.lifecycle
@@ -695,7 +709,9 @@ func checkLifecycleOwner(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, h
 }
 
 // AcquireAllocation supplies fresh authority IDs in event order. The Batch ID
-// is used only if the Matter does not already have an anonymous Batch.
+// is used only if the Matter does not already have an anonymous Batch. The
+// trusted authority caller supplies the required blob closure; the current
+// operation catalogue has no claim-delivery operation or blob inputs.
 type AcquireAllocation struct {
 	ClaimID, BatchID, GrantID, SnapshotID, JournalID string
 	EventIDs                                         []string     // batch-created (if needed), acquired, dispatch-opened
@@ -703,6 +719,7 @@ type AcquireAllocation struct {
 	RequiredDigests                                  []string
 }
 
+// ClaimGrant holds the retained acquisition receipt's pinned transfer product.
 type ClaimGrant struct {
 	ID                  string
 	Snapshot            PinnedSnapshot
@@ -835,7 +852,7 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 		return CommandStatus{}, grant, err
 	}
 	rangeValue := map[string]any{"first_event_id": a.EventIDs[0], "last_event_id": a.EventIDs[len(a.EventIDs)-1], "event_count": uint64(len(a.EventIDs))}
-	status, err := s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", output, nil, rangeValue, first, last, occurred, sign, func(receipt, wrapper []byte, generation, sequence uint64) error {
+	status, err := s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", output, nil, rangeValue, first, last, occurred, sign, func(receipt, _ []byte, generation, sequence uint64) error {
 		snapshot, e := pinSnapshotTx(ctx, tx, c.domain, c.epoch, a.Installed, a.SnapshotID, occurred, maxSnapshotLife, a.RequiredDigests)
 		if e != nil {
 			return e
@@ -1023,7 +1040,7 @@ func barrierDigest(ctx context.Context, tx *sql.Tx, domain, journal string) (str
 	if err != nil {
 		return "", 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var pos uint64
 		var id, hash, state string
@@ -1268,7 +1285,7 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 		return CommandStatus{}, err
 	}
 	rangeValue := map[string]any{"first_event_id": eventIDs[0], "last_event_id": eventIDs[len(eventIDs)-1], "event_count": uint64(len(eventIDs))}
-	return s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", encoded, nil, rangeValue, first, last, occurred, sign, func(_, _ []byte, _, _ uint64) error {
+	return s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", encoded, nil, rangeValue, first, last, occurred, sign, func(_ []byte, _ []byte, _, _ uint64) error {
 		if c.repair != nil {
 			if _, e = tx.ExecContext(ctx, `UPDATE claim_journals SET state='quarantined',repair_command_id=? WHERE domain_id=? AND journal_id=?`, c.id, c.domain, x.journal); e != nil {
 				return e

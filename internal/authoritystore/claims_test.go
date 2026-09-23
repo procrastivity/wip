@@ -290,15 +290,12 @@ func TestClaimReleaseEmptySealedJournalReopenAndEpochFence(t *testing.T) {
 		t.Fatalf("release replay after reopen: %+v %v", replayed, err)
 	}
 	oldRaw, oldHash := f.command(t, 14, 5, "claim.release", ref, map[string]any{"barrier": barrier})
-	old, err := f.s.SubmitClaimLifecycle(ctx, oldRaw, oldHash, f.peer, f.now, nil)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := f.s.SubmitClaimLifecycle(ctx, oldRaw, oldHash, f.peer, f.now, nil); !errors.Is(err, ErrFenced) {
+		t.Fatalf("closed claim release crossed submission: %v", err)
 	}
-	closed, err := f.s.CompleteClaimLifecycle(ctx, old.Owner, "", []string{claimTestID(106), claimTestID(107)}, f.now, signWith(f.key))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := f.s.QueryCommand(ctx, domainA, claimTestID(14), oldHash, 7, f.peer, envA, f.now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("closed claim release has receipt or submission: %v", err)
 	}
-	claimTestReceipt(t, closed, "result.refused", nil)
 	if _, err = f.s.QueryCommand(ctx, domainA, claimTestID(12), badHash, 7, f.peer, envA, f.now); err != nil {
 		t.Fatalf("mismatched barrier receipt lost: %v", err)
 	}
@@ -306,12 +303,12 @@ func TestClaimReleaseEmptySealedJournalReopenAndEpochFence(t *testing.T) {
 	// acquisition events are permitted and the old claim cannot become active.
 	next := claimTestAllocation(15, f.anchor(t), 106, 107)
 	next.BatchID = "" // must not be consulted on reuse
-	_, nextHash, acquired, _ := f.acquire(t, 15, 6, next.Installed, next)
+	_, nextHash, acquired, _ := f.acquire(t, 15, 5, next.Installed, next)
 	claimTestReceipt(t, acquired, "result.succeeded", map[string]any{
 		"claim":     map[string]any{"id": next.ClaimID, "epoch": uint64(2)},
 		"matter_id": f.matter, "batch_id": a.BatchID, "dispatch_id": claimTestID(55),
 	}, 106, 107)
-	claimTestEvent(t, f, 7, 106, 15, nextHash, "claim.acquired", next.ClaimID, 6, map[string]any{
+	claimTestEvent(t, f, 7, 106, 15, nextHash, "claim.acquired", next.ClaimID, 5, map[string]any{
 		"claim_id": next.ClaimID, "claim_epoch": uint64(2), "matter_id": f.matter,
 		"batch_id": a.BatchID, "dispatch_id": claimTestID(55), "owner_environment_id": envA,
 		"worktree_id": f.worktree,
@@ -355,6 +352,57 @@ func TestClaimAcquireSignerFailureRollsBackEveryEffect(t *testing.T) {
 	completed, _, err := f.s.CompleteClaimAcquire(ctx, pending.Owner, a, f.now, signWith(f.key))
 	if err != nil || completed.Pending {
 		t.Fatalf("retry terminal after rollback: %+v %v", completed, err)
+	}
+}
+
+func TestClaimNoEffectProblemNamespaceBeforePersistence(t *testing.T) {
+	for _, tc := range []struct {
+		code, invalid, valid string
+	}{
+		{"result.rejected", "refusal.claim-contended", "validation.matter-not-found"},
+		{"result.refused", "validation.matter-not-found", "refusal.claim-contended"},
+		{"result.failed", "refusal.claim-contended", "internal.unavailable"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			f := newClaimTestFixture(t)
+			ctx := context.Background()
+			raw, hash := f.command(t, 11, 2, "claim.acquire", nil, map[string]any{
+				"matter_id": f.matter, "worktree_id": f.worktree, "dispatch_mode": "anonymous-matter", "requested_dispatch_id": claimTestID(51),
+			})
+			pending, err := f.s.SubmitClaimAcquire(ctx, raw, hash, f.anchor(t), f.peer, f.now)
+			if err != nil || pending.Owner == nil {
+				t.Fatalf("submit: %+v %v", pending, err)
+			}
+			if _, err := f.s.CompleteClaimNoEffect(ctx, pending.Owner, tc.code, tc.invalid, f.now, signWith(f.key)); !errors.Is(err, ErrInvalidProof) {
+				t.Fatalf("invalid namespace persisted: %v", err)
+			}
+			status, err := f.s.QueryCommand(ctx, domainA, claimTestID(11), hash, 7, f.peer, envA, f.now)
+			if err != nil || !status.Pending || len(status.Receipt) != 0 {
+				t.Fatalf("invalid namespace terminated submission: %+v %v", status, err)
+			}
+			var events, claims int
+			if err := f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=?`, domainA).Scan(&events); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.s.db.QueryRow(`SELECT count(*) FROM claims WHERE domain_id=?`, domainA).Scan(&claims); err != nil {
+				t.Fatal(err)
+			}
+			if events != 1 || claims != 0 {
+				t.Fatalf("invalid namespace mutated state: events=%d claims=%d", events, claims)
+			}
+			completed, err := f.s.CompleteClaimNoEffect(ctx, pending.Owner, tc.code, tc.valid, f.now, signWith(f.key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimTestReceipt(t, completed, tc.code, nil)
+			if err := f.s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			f.s, err = OpenExisting(f.root)
+			if err != nil {
+				t.Fatalf("valid namespace did not reopen: %v", err)
+			}
+		})
 	}
 }
 
@@ -487,6 +535,14 @@ func TestClaimJournalPendingRepairProofAndGeneration(t *testing.T) {
 		}
 	}
 	wrongProof := map[string]any{"terminal_receipt": nil, "not_submitted_proof": "same-epoch-receipt-not-found"}
+	staleRef := map[string]any{"id": a.ClaimID, "epoch": uint64(2)}
+	staleRaw, staleHash := f.command(t, 14, 3, "claim.journal-repair", staleRef, input(wrongProof))
+	if _, err := f.s.SubmitClaimLifecycle(ctx, staleRaw, staleHash, f.peer, f.now, nil); !errors.Is(err, ErrFenced) {
+		t.Fatalf("wrong-epoch repair crossed submission: %v", err)
+	}
+	if _, err := f.s.QueryCommand(ctx, domainA, claimTestID(14), staleHash, 7, f.peer, envA, f.now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-epoch repair has receipt or submission: %v", err)
+	}
 	badRaw, badHash := f.command(t, 13, 3, "claim.journal-repair", ref, input(wrongProof))
 	pending, err := f.s.SubmitClaimLifecycle(ctx, badRaw, badHash, f.peer, f.now, nil)
 	if err != nil || pending.Owner == nil {
