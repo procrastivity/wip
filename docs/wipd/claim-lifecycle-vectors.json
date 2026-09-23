@@ -1,0 +1,399 @@
+{
+  "notation": "wipd.claim-lifecycle-vector/1",
+  "schemas": {
+    "identity": "wipd.command/1",
+    "receipt": "wipd.terminal-receipt/1",
+    "acquire": "wipd.claim-acquire/1",
+    "grant_start": "wipd.claim-grant-start/1",
+    "grant_end": "wipd.claim-grant-end/1",
+    "readiness": "wipd.claim-readiness/1",
+    "return_command": "wipd.return-command/1",
+    "fold_result": "wipd.fold-result/1",
+    "release": "wipd.claim-release/1",
+    "barrier": "wipd.journal-barrier/1",
+    "stand_down": "wipd.claim-stand-down/1"
+  },
+  "identity": {
+    "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+    "authority_epoch": 7,
+    "owner_environment_id": "01K5V8M0000000000000000001",
+    "acting_environment_id": "01K5V8M0000000000000000002",
+    "matter_id": "01K6M000000000000000000001",
+    "batch_id": "01K7B000000000000000000001",
+    "dispatch_id": "01K7D000000000000000000001",
+    "claim_id": "01K7K000000000000000000001",
+    "claim_epoch": 3,
+    "journal_id": "01K7J000000000000000000001"
+  },
+  "acquire_grant": {
+    "name": "existing-matter-anonymous-batch-acquire",
+    "command_id": "01K7C000000000000000000001",
+    "request_hash": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+    "operation": "claim.acquire@v1",
+    "claim_field": null,
+    "installed_anchor": "one",
+    "as_of_anchor": "three",
+    "grant_id": "01K7G000000000000000000001",
+    "anonymous_batch_action": "reuse-or-create-atomically",
+    "dispatch_mode": "anonymous-matter",
+    "message_order": [
+      "submission.accepted",
+      "claim.grant-start",
+      "event:01K6E000000000000000000002",
+      "event:01K6E000000000000000000003",
+      "blob.manifest",
+      "claim.grant-end"
+    ],
+    "receipt": {
+      "schema": "wipd.terminal-receipt/1",
+      "command_id": "01K7C000000000000000000001",
+      "request_hash": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+      "operation": "claim.acquire@v1",
+      "result": "result.succeeded",
+      "first_event_id": "01K6E000000000000000000002",
+      "last_event_id": "01K6E000000000000000000003",
+      "event_count": 2
+    },
+    "manifest_digest": "sha256:9eec5fa099cd2f20721e4c22dfc963fef7f6578146b4cb0411d828ee9c67fdc9",
+    "pin_before_use_digests": [
+      "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "atomic_local_install": [
+      "receipt",
+      "complete-prefix-delta",
+      "complete-manifest",
+      "claim-metadata",
+      "empty-journal"
+    ],
+    "expected_state": "hydrating"
+  },
+  "acquire_refusals": [
+    {
+      "name": "contended-matter",
+      "presented_local_lock": true,
+      "footprint": "one-matter",
+      "result": "result.refused",
+      "problem_code": "refusal.claim-contended",
+      "terminal_receipt": true,
+      "effects": "none"
+    },
+    {
+      "name": "cross-matter-footprint",
+      "presented_local_lock": true,
+      "footprint": "two-matters",
+      "result": "result.refused",
+      "problem_code": "refusal.claim-cross-boundary",
+      "terminal_receipt": true,
+      "effects": "none"
+    },
+    {
+      "name": "batch-aggregate-footprint",
+      "presented_local_lock": true,
+      "footprint": "named-batch-aggregate",
+      "result": "result.refused",
+      "problem_code": "refusal.claim-aggregate-authority-required",
+      "terminal_receipt": true,
+      "effects": "none"
+    }
+  ],
+  "hydration": {
+    "name": "grant-not-ready-until-complete-verified-durable-pin",
+    "grant_id": "01K7G000000000000000000001",
+    "as_of_anchor": "three",
+    "manifest_digest": "sha256:9eec5fa099cd2f20721e4c22dfc963fef7f6578146b4cb0411d828ee9c67fdc9",
+    "required_entry_count": 1,
+    "transitions": [
+      {
+        "evidence": "manifest-installed-by-count-only",
+        "verified_pinned_entry_count": 0,
+        "state": "hydrating",
+        "claim_command_admitted": false
+      },
+      {
+        "evidence": "full-digest-and-length-verified-not-durable",
+        "verified_pinned_entry_count": 1,
+        "state": "hydrating",
+        "claim_command_admitted": false
+      },
+      {
+        "evidence": "full-digest-and-length-verified-durably-pinned",
+        "verified_pinned_entry_count": 1,
+        "state": "offline-ready",
+        "claim_command_admitted": true
+      }
+    ],
+    "cancel_during_hydration_state": "held-not-ready"
+  },
+  "claim_command": {
+    "name": "one-exact-claim-command-returned-and-folded",
+    "command_id": "01K7C000000000000000000002",
+    "request_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "operation": "step.create@v1",
+    "claim_id": "01K7K000000000000000000001",
+    "claim_epoch": 3,
+    "environment_sequence": 70,
+    "journal_position": 1,
+    "local_acceptance": [
+      "readiness-verified",
+      "exact-claim-verified",
+      "command-and-overlay-durable",
+      "pending-return"
+    ],
+    "return": {
+      "schema": "wipd.return-command/1",
+      "journal_id": "01K7J000000000000000000001",
+      "delivery": "claim",
+      "position": 1,
+      "base_as_of_anchor": "three"
+    },
+    "fold": {
+      "schema": "wipd.fold-result/1",
+      "receipt": {
+        "schema": "wipd.terminal-receipt/1",
+        "command_id": "01K7C000000000000000000002",
+        "request_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "operation": "step.create@v1",
+        "result": "result.succeeded",
+        "first_event_id": "01K7E000000000000000000001",
+        "last_event_id": "01K7E000000000000000000001",
+        "event_count": 1
+      },
+      "prefix_start_anchor": "three",
+      "prefix_end": {
+        "event_count": 4,
+        "high_water_event_id": "01K7E000000000000000000001",
+        "prefix_digest": "sha256:2323232323232323232323232323232323232323232323232323232323232323"
+      },
+      "manifest_digest": "sha256:2424242424242424242424242424242424242424242424242424242424242424",
+      "continue": false,
+      "install": "receipt-prefix-manifest-atomic-before-journal-ack"
+    }
+  },
+  "exact_claim_guards": [
+    {
+      "name": "wrong-claim-id",
+      "claim_id": "01K7K000000000000000000009",
+      "claim_epoch": 3,
+      "authority_submission": false,
+      "terminal_receipt": false,
+      "problem_code": "claim.fenced"
+    },
+    {
+      "name": "wrong-claim-epoch",
+      "claim_id": "01K7K000000000000000000001",
+      "claim_epoch": 2,
+      "authority_submission": false,
+      "terminal_receipt": false,
+      "problem_code": "claim.fenced"
+    },
+    {
+      "name": "wrong-holder",
+      "claim_id": "01K7K000000000000000000001",
+      "claim_epoch": 3,
+      "authority_submission": false,
+      "terminal_receipt": false,
+      "problem_code": "claim.fenced"
+    }
+  ],
+  "return_refusal_and_repair": {
+    "name": "refused-head-stops-generation-and-requires-explicit-repair",
+    "journal_id": "01K7J000000000000000000002",
+    "head_position": 2,
+    "head_result": "result.refused",
+    "fold_continue": false,
+    "quarantined_positions": [2, 3],
+    "blocked": [
+      "return-position-3",
+      "pull",
+      "dependent-admission",
+      "release"
+    ],
+    "controls": [
+      {
+        "action": "abandon",
+        "safe_proof": "terminal-non-success-receipt",
+        "old_generation": "archived-immutable",
+        "new_generation": "empty"
+      },
+      {
+        "action": "replace",
+        "safe_proof": "terminal-non-success-receipt",
+        "old_generation": "archived-immutable",
+        "new_generation": "replacement-at-position-1-new-id-hash-sequence"
+      },
+      {
+        "action": "replace",
+        "safe_proof": "outcome-unknown",
+        "old_generation": "unchanged-quarantined",
+        "new_generation": "none-refusal.journal-repair-proof"
+      }
+    ],
+    "forbidden": [
+      "mutate-refused-command",
+      "skip-head",
+      "copy-dependent-suffix",
+      "reuse-command-id-or-hash"
+    ]
+  },
+  "release": {
+    "name": "terminal-receipt-barrier-before-normal-owner-release",
+    "command_id": "01K7C000000000000000000003",
+    "request_hash": "sha256:2525252525252525252525252525252525252525252525252525252525252525",
+    "claim_id": "01K7K000000000000000000001",
+    "claim_epoch": 3,
+    "attempts": [
+      {
+        "name": "missing-terminal-receipt",
+        "entry_count": 1,
+        "terminal_receipt_count": 0,
+        "sealed": true,
+        "unresolved_count": 1,
+        "quarantined_count": 0,
+        "result": "result.refused",
+        "problem_code": "refusal.claim-release-barrier",
+        "claim_state_after": "active"
+      },
+      {
+        "name": "quarantined-terminal-head",
+        "entry_count": 1,
+        "terminal_receipt_count": 1,
+        "sealed": true,
+        "unresolved_count": 0,
+        "quarantined_count": 1,
+        "result": "result.refused",
+        "problem_code": "refusal.claim-release-barrier",
+        "claim_state_after": "active"
+      },
+      {
+        "name": "complete-receipt-barrier",
+        "entry_count": 1,
+        "terminal_receipt_count": 1,
+        "sealed": true,
+        "unresolved_count": 0,
+        "quarantined_count": 0,
+        "entries_digest": "sha256:b2648fe6c67fb48dfd42847a910a1f5d291e7f3c34dff46a9a757c818396a35f",
+        "result": "result.succeeded",
+        "problem_code": null,
+        "claim_state_after": "closed-epoch-3-invalid"
+      }
+    ],
+    "post_close_old_epoch_problem": "claim.fenced"
+  },
+  "stand_down": {
+    "name": "cross-environment-stand-down-refusal-and-loss-close",
+    "owner_environment_id": "01K5V8M0000000000000000001",
+    "acting_environment_id": "01K5V8M0000000000000000002",
+    "claim_id": "01K7K000000000000000000001",
+    "claim_epoch": 3,
+    "attempts": [
+      {
+        "name": "wrong-epoch",
+        "presented_epoch": 2,
+        "reason_present": true,
+        "loss_acknowledgment_present": true,
+        "loss_acknowledgment": true,
+        "result": "result.refused",
+        "problem_code": "refusal.claim-stand-down-fenced",
+        "claim_state_after": "active"
+      },
+      {
+        "name": "missing-reason",
+        "presented_epoch": 3,
+        "reason_present": false,
+        "loss_acknowledgment_present": true,
+        "loss_acknowledgment": true,
+        "result": "no-submission",
+        "problem_code": "protocol.malformed-message",
+        "claim_state_after": "active"
+      },
+      {
+        "name": "loss-not-acknowledged",
+        "presented_epoch": 3,
+        "reason_present": true,
+        "loss_acknowledgment_present": true,
+        "loss_acknowledgment": false,
+        "result": "result.refused",
+        "problem_code": "refusal.claim-loss-not-acknowledged",
+        "claim_state_after": "active"
+      },
+      {
+        "name": "accepted-loss-close",
+        "presented_epoch": 3,
+        "reason_present": true,
+        "loss_acknowledgment_present": true,
+        "loss_acknowledgment": true,
+        "result": "result.succeeded",
+        "problem_code": null,
+        "claim_state_after": "closed-epoch-3-invalid"
+      }
+    ],
+    "success_records": [
+      "owner-environment",
+      "acting-environment",
+      "exact-claim-and-epoch",
+      "restricted-reason",
+      "accepted-loss-acknowledgment",
+      "dispatch-close"
+    ],
+    "old_owner_evidence": "preserved-not-executed"
+  },
+  "handoff_promotion": {
+    "name": "active-claim-blocks-handoff-and-old-epoch-is-fenced-after-promotion",
+    "planned_handoff_with_active_claim": "refused-not-quiescent",
+    "planned_handoff_after_close": "eligible-for-step-9-ceremony",
+    "source_authority_epoch": 7,
+    "promoted_authority_epoch": 8,
+    "old_claim_id": "01K7K000000000000000000001",
+    "old_claim_epoch": 3,
+    "old_return_problem": "claim.fenced",
+    "old_release_problem": "claim.fenced",
+    "old_grant_state": "invalid-history-evidence-only",
+    "unresolved_old_command": "never-execute-after-promotion",
+    "reacquired_claim_id": "01K7K000000000000000000002",
+    "reacquired_claim_epoch": 4
+  },
+  "cancellation": [
+    {
+      "name": "acquire-before-authority-submission",
+      "boundary_crossed": false,
+      "outcome": "transport.cancelled-before-submission",
+      "durable_state": "no-claim-no-receipt-no-grant"
+    },
+    {
+      "name": "acquire-after-authority-submission-before-grant-install",
+      "boundary_crossed": true,
+      "outcome": "transport.wait-cancelled",
+      "durable_state": "claim-active-query-or-resume-same-grant"
+    },
+    {
+      "name": "claim-command-before-journal-commit",
+      "boundary_crossed": false,
+      "outcome": "transport.cancelled-before-submission",
+      "durable_state": "no-entry-no-overlay-no-receipt"
+    },
+    {
+      "name": "claim-command-after-journal-commit",
+      "boundary_crossed": true,
+      "outcome": "transport.wait-cancelled",
+      "durable_state": "immutable-pending-return-entry"
+    },
+    {
+      "name": "return-after-possible-authority-submission",
+      "boundary_crossed": true,
+      "outcome": "outcome-unknown",
+      "durable_state": "entry-unresolved-dependent-and-release-blocked"
+    },
+    {
+      "name": "release-after-authority-submission",
+      "boundary_crossed": true,
+      "outcome": "transport.wait-cancelled",
+      "durable_state": "query-same-command-no-implicit-open-or-close"
+    },
+    {
+      "name": "hydration-cancelled",
+      "boundary_crossed": false,
+      "outcome": "transfer-cancelled",
+      "durable_state": "claim-held-not-ready-verified-ranges-may-resume"
+    }
+  ]
+}
