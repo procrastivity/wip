@@ -404,11 +404,9 @@ func TestStep4ExplicitUpgradeAndIncompleteBackup(t *testing.T) {
 		t.Fatalf("v2 backup: %v", err)
 	}
 	_ = b.Close()
-	s, err := OpenExisting(root)
-	if err != nil {
+	if err := checkV3Root(root); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Close()
 }
 
 func TestStep4UpgradeRejectsUnrelatedValidBackup(t *testing.T) {

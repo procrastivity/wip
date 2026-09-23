@@ -157,7 +157,7 @@ func UpgradeV2(root string) error {
 	if err = installStep4(db); err != nil {
 		return err
 	}
-	return checkSchema(db)
+	return checkSchemaVersion(db, 3)
 }
 
 // sameV2StoreContents proves that an existing schema-valid backup is the
