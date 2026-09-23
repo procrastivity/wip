@@ -1,5 +1,6 @@
-// Package authoritystore persists fresh authority domain identity and Repo
-// membership. It does not open or import the legacy WIP store.
+// Package authoritystore persists fresh authority domain identity, Repo
+// membership, artifact keys, and Environment certificate registries. It does
+// not open or import the legacy WIP store.
 package authoritystore
 
 import (
@@ -23,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type schemaObject struct {
 	name string
@@ -120,6 +121,9 @@ func CreateEmpty(root string) (*Store, error) {
 		err = os.Chmod(file, 0o600)
 		if err == nil {
 			err = installBaseline(db)
+			if err == nil {
+				err = installStep3(db)
+			}
 		}
 		if err == nil {
 			err = checkSchema(db)
@@ -234,8 +238,9 @@ func (s *Store) BootstrapDomain(ctx context.Context, d Domain, repoID string) er
 	return tx.Commit()
 }
 
-// AttachRepo only attaches to a history-empty domain. In v1 no history can
-// yet be written; later migrations must add the history guard in this method.
+// AttachRepo only attaches to a command/event history-empty domain. Neither
+// v1 nor v2 writes that history; the migration that enables it must add a
+// history guard here.
 func (s *Store) AttachRepo(ctx context.Context, domainID, repoID string) error {
 	if !ulid.MatchString(domainID) || !ulid.MatchString(repoID) {
 		return errors.New("authoritystore: invalid domain or Repo ID")
@@ -427,17 +432,19 @@ func connect(path, mode string, create bool) (*sql.DB, error) {
 	return db, nil
 }
 
-func checkSchema(db *sql.DB) error {
+func checkSchema(db *sql.DB) error { return checkSchemaVersion(db, schemaVersion) }
+
+func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 	var version int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
-		return fmt.Errorf("schema version %d (expected %d): %v", version, schemaVersion, err)
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != expectedVersion {
+		return fmt.Errorf("schema version %d (expected %d): %v", version, expectedVersion, err)
 	}
 	var name string
 	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 1`).Scan(&name); err != nil || name != "baseline" {
 		return fmt.Errorf("migration marker: %v", err)
 	}
 	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil || n != 1 {
+	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil || n != expectedVersion {
 		return fmt.Errorf("migration count: %v", err)
 	}
 	var journal string
@@ -447,6 +454,15 @@ func checkSchema(db *sql.DB) error {
 	expected := make(map[string]schemaObject, len(baselineSchema))
 	for _, object := range baselineSchema {
 		expected[object.name] = object
+	}
+	if expectedVersion == 2 {
+		expected["schema_migrations"] = step3MigrationMarker
+		for _, object := range step3Schema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 2`).Scan(&name); err != nil || name != "environment-and-artifacts" {
+			return fmt.Errorf("step 3 migration marker: %v", err)
+		}
 	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
@@ -562,7 +578,16 @@ func checkSchema(db *sql.DB) error {
 			return errors.New("invalid Repo membership identity")
 		}
 	}
-	return members.Err()
+	if err := members.Err(); err != nil {
+		return err
+	}
+	if err := members.Close(); err != nil {
+		return err
+	}
+	if expectedVersion == 2 {
+		return checkStep3State(db)
+	}
+	return nil
 }
 
 func validDigest(value string) bool {

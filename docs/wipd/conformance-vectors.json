@@ -25,7 +25,7 @@
     {
       "path": "docs/wipd/design-security-privacy-vectors.json",
       "notation": "wipd.design-security-privacy-vector/1",
-      "sha256": "35418c78a66d9371c3d59fc135ea758831bf36bb8514e9dcd87e3b1e80fa6e1a"
+      "sha256": "6d144dabe55769b6f2850f7b6410cce787aa25e380614f073434b2d321d8ff5a"
     }
   ],
   "canonical_vectors": [
@@ -207,7 +207,7 @@
   "step9_seal": {
     "status": "sealed-for-m3-m4",
     "review": "docs/wipd/design-security-privacy-review.md",
-    "review_sha256": "376929fbad1fa23f7c3c8c3e071f3ce55541e961242fb32495bcf5357a8621fc",
+    "review_sha256": "2f12fef49714e5a3ce91a16ea32b22a12c67520db84a7381004d0af86ac87d5b",
     "vectors": "docs/wipd/design-security-privacy-vectors.json",
     "unresolved_findings": []
   }

@@ -54,7 +54,17 @@
     "authority_uri": "wipd://authority/01K5V8K1Q5VX6Y0J8C9W3M4N5P?epoch=7&owner=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "environment_uri": "wipd://environment/01K5V8K8A4J2N7R9T0V3X6Y8ZB?domain=01K5V8K1Q5VX6Y0J8C9W3M4N5P&epoch=7&owner=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "required": ["critical-standard-san", "server-hostname-and-spki-pin", "client-auth-eku", "exact-binding", "revocation-each-exchange"],
-    "refused": ["duplicate-wip-uri", "unknown-query-key", "wrong-domain", "wrong-epoch", "wrong-owner", "wrong-environment", "revoked-generation", "grant-reuse-with-different-csr"]
+    "refused": ["duplicate-wip-uri", "unknown-query-key", "wrong-domain", "wrong-epoch", "wrong-owner", "wrong-environment", "revoked-generation", "grant-reuse-with-different-csr"],
+    "delegated_ca": {
+      "owner_anchor": "raw-ed25519-der-spki",
+      "delegation_schema": "wipd.environment-ca-delegation/1",
+      "fence_schema": "wipd.environment-ca-fence/1",
+      "trust_anchor": "owner-signed-self-signed-ed25519-ca",
+      "chain_order": ["environment-leaf", "delegated-ca"],
+      "max_leaf_hours": 24,
+      "clock_skew_seconds": 0,
+      "refused": ["owner-x509-root", "public-ca", "intermediate-ca", "unfenced-ca-rotation", "ca-key-reused-as-leaf", "leaf-outside-delegation-interval", "expired-delegation", "revoked-ca-on-retained-connection"]
+    }
   },
   "d127": {
     "locator_collision": {

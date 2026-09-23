@@ -252,6 +252,53 @@ or unknown parameter. The digest omits the `sha256:` prefix. Multiple WIP
 binding URIs are invalid. Authorities still require hostname validation and an
 exact configured server SPKI pin; the URI does not replace either check.
 
+**M3 Step 3 delegated-issuer amendment.** The immutable offline owner root is
+the raw Ed25519 public key whose DER-SPKI digest is the stored owner key ID; it
+is not an X.509 root certificate. Owner-role wrappers are verified directly
+against that public key using §2.3. A separate Ed25519 Environment issuing CA
+is authorized only by an owner-role `environment-ca-delegation` wrapper with
+the closed `wipd.environment-ca-delegation/1` payload. It binds the domain,
+authority epoch, owner key ID, positive contiguous CA generation, CA DER-SPKI
+key ID, exact DER CA certificate, and `not_before`/`not_after`. The DER bytes,
+not a separately resolved object, are signed. The CA certificate is
+self-signed, with critical BasicConstraints `CA=true, pathLen=0`, critical
+KeyUsage `keyCertSign` only, Ed25519 public key, no leaf EKU or SAN, and exact
+NotBefore/NotAfter equality to the signed UTC times. Its key differs from the
+owner root, authority artifact key, and any Environment leaf. Its private key
+stays in a restricted signing facility, never in the store. The signed
+delegation is the sole trust decision for this X.509 anchor; system/public
+roots, owner-root X.509 certificates, and intermediates are not accepted.
+
+CA generations start at 1 and increase by one within `(domain, epoch)`. A
+successor can be installed only after the predecessor's immutable owner-role
+`environment-ca-fence` wrapper is committed. Its closed
+`wipd.environment-ca-fence/1` payload binds domain, epoch, owner key ID, CA
+generation/key ID, digest of the exact complete delegation artifact, effective
+UTC time no later than application, and a reason digest. Application stops all
+leaves issued under that generation immediately, including retained TLS
+connections. Old-epoch CA and leaf identities fail whenever the active epoch
+changes, even without a separate fence. Fences and delegations survive for
+historical verification; they cannot be overwritten.
+
+The returned `certificate_chain_der` is **exactly two** DER certificates in
+order: Environment leaf, then its active delegated CA. The leaf is signed
+directly by that CA, has critical BasicConstraints `CA=false`, critical
+KeyUsage `digitalSignature` only, exactly clientAuth EKU, and exactly one
+critical canonical Environment URI SAN, with no other SAN name. Its serial is
+unique under that CA. Its CSR must prove possession of the exact DER-SPKI
+named by the grant. The leaf interval lies wholly inside the delegation
+interval and lasts at most 24 hours. CA/leaf validity is `[NotBefore,
+NotAfter)`; enrollment grants last at most ten minutes. Signed interval times
+are canonical UTC RFC3339Nano (`Z`), and certificate times have X.509
+second precision. No clock skew is permitted at issuance or before an
+exchange; the authority clock must be synchronized rather than accepting an
+otherwise expired or not-yet-valid credential. Renewal and key rotation
+commit the new certificate/registry generation and old leaf revocation in one
+transaction. Every exchange rechecks the active domain/epoch, canonical URI,
+owner, exact registered DER chain/generation, certificate validity, CA fence,
+leaf revocation, and TLS handshake proof-of-possession. Registry and grant
+consumption retain public evidence and digests, never bearer or private keys.
+
 ### 4.2 Grant, enrollment, renewal, and rotation
 
 An operator enrollment grant is an owner-signed artifact whose payload binds

@@ -74,6 +74,16 @@ type step9Certificate struct {
 	EnvironmentURI string   `json:"environment_uri"`
 	Required       []string `json:"required"`
 	Refused        []string `json:"refused"`
+	DelegatedCA    struct {
+		OwnerAnchor      string   `json:"owner_anchor"`
+		DelegationSchema string   `json:"delegation_schema"`
+		FenceSchema      string   `json:"fence_schema"`
+		TrustAnchor      string   `json:"trust_anchor"`
+		ChainOrder       []string `json:"chain_order"`
+		MaxLeafHours     int      `json:"max_leaf_hours"`
+		ClockSkewSeconds int      `json:"clock_skew_seconds"`
+		Refused          []string `json:"refused"`
+	} `json:"delegated_ca"`
 }
 
 type step9D127 struct {
@@ -284,6 +294,15 @@ func TestStep9ReviewVectorsCloseSecurityPrivacyAndImplementability(t *testing.T)
 		!slices.Contains(cert.Required, "revocation-each-exchange") ||
 		!slices.Contains(cert.Refused, "grant-reuse-with-different-csr") {
 		t.Fatalf("certificate security vector = %#v", cert)
+	}
+	if cert.DelegatedCA.OwnerAnchor != "raw-ed25519-der-spki" ||
+		cert.DelegatedCA.DelegationSchema != "wipd.environment-ca-delegation/1" ||
+		cert.DelegatedCA.FenceSchema != "wipd.environment-ca-fence/1" ||
+		cert.DelegatedCA.TrustAnchor != "owner-signed-self-signed-ed25519-ca" ||
+		!reflect.DeepEqual(cert.DelegatedCA.ChainOrder, []string{"environment-leaf", "delegated-ca"}) ||
+		cert.DelegatedCA.MaxLeafHours != 24 || cert.DelegatedCA.ClockSkewSeconds != 0 ||
+		!slices.Contains(cert.DelegatedCA.Refused, "revoked-ca-on-retained-connection") {
+		t.Fatalf("delegated CA vector = %#v", cert.DelegatedCA)
 	}
 
 	collision := fixture.D127.LocatorCollision

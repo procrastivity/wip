@@ -415,7 +415,8 @@ signed-artifact = {
           "bundle-manifest" / "authority-relinquishment" /
           "authority-activation" / "migration-proof" /
           "authority-artifact-key" / "authority-key-fence" /
-          "owner-attestation" / "enrollment-grant",
+          "owner-attestation" / "enrollment-grant" /
+          "environment-ca-delegation" / "environment-ca-fence",
   "domain_id": ulid,
   "authority_epoch": positive,
   "signer_role": "owner" / "authority",
@@ -447,6 +448,28 @@ authority-key-fence = {
   "key_id": digest,
   "final_sequence": uint,
   "final_artifact_digest": digest / null,
+  "effective_at": tstr,
+  "reason_digest": digest
+}
+environment-ca-delegation = {
+  "schema": "wipd.environment-ca-delegation/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "owner_key_id": digest,
+  "ca_generation": positive,
+  "ca_key_id": digest,
+  "ca_certificate_der": bstr,
+  "not_before": tstr,
+  "not_after": tstr
+}
+environment-ca-fence = {
+  "schema": "wipd.environment-ca-fence/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "owner_key_id": digest,
+  "ca_generation": positive,
+  "ca_key_id": digest,
+  "delegation_artifact_digest": digest,
   "effective_at": tstr,
   "reason_digest": digest
 }
