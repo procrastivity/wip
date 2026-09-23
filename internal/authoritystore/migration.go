@@ -188,7 +188,7 @@ func UpgradeV1(root string) error {
 	if err = installStep3(db); err != nil {
 		return err
 	}
-	if err = checkSchema(db); err != nil {
+	if err = checkSchemaVersion(db, 2); err != nil {
 		return fmt.Errorf("%w: upgraded schema: %v", ErrInvalidStore, err)
 	}
 	return nil

@@ -235,6 +235,9 @@ func TestV1ExplicitUpgradeAndRecovery(t *testing.T) {
 		t.Fatalf("v1 backup: %v", err)
 	}
 	_ = b.Close()
+	if err = UpgradeV2(root); err != nil {
+		t.Fatal(err)
+	}
 	s, err := OpenExisting(root)
 	if err != nil {
 		t.Fatal(err)
@@ -787,14 +790,10 @@ func TestRetainedArtifactChainAndFinalFence(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err := OpenExisting(root)
-	if err != nil {
-		t.Fatalf("reopen complete chain: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	k, err := s.LookupArtifactKey(ctx, domainA, 7, 1)
-	if err != nil || k.FinalSequence != 2 || k.FinalDigest != final {
-		t.Fatalf("retained final head %+v: %v", k, err)
+	// Step 4 refuses a standalone signed product, even one with a valid
+	// signature and fence, because it has no owning terminal transaction.
+	if _, err := OpenExisting(root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("accepted orphan chain: %v", err)
 	}
 }
 
@@ -839,7 +838,7 @@ func TestReopenRejectsTamperedOwnerDelegationWithExactSchema(t *testing.T) {
 			}
 		}
 	}
-	if err = checkSchemaVersion(db, 2); err == nil {
+	if err = checkSchemaVersion(db, 3); err == nil {
 		t.Fatal("accepted tampered delegation under exact schema")
 	}
 	if err = db.Close(); err != nil {

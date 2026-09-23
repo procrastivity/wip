@@ -291,7 +291,7 @@ func verifyPeer(ctx context.Context, tx *sql.Tx, domain, environment string, epo
 	if err != nil {
 		return out, err
 	}
-	if out.Revoked || !bytes.Equal(out.Chain[0], peer.PeerCertificates[0].Raw) || !bytes.Equal(out.Chain[1], peer.PeerCertificates[1].Raw) {
+	if out.Revoked || !peer.HandshakeComplete || len(peer.PeerCertificates) != 2 || !bytes.Equal(out.Chain[0], peer.PeerCertificates[0].Raw) || !bytes.Equal(out.Chain[1], peer.PeerCertificates[1].Raw) {
 		return out, ErrFenced
 	}
 	_, caGeneration, caDER, err := currentCA(ctx, tx, domain, epoch, at)
@@ -425,7 +425,7 @@ func checkEnvironments(db *sql.DB) error {
 		if err := rows.Scan(&domain, &id, &epoch, &current, &head, &gen, &caEpoch, &caGen, &serial, &spki, &leaf, &ca, &before, &after, &revoked, &retainedCA, &ownerID, &active); err != nil {
 			return err
 		}
-		if !ulid.MatchString(id) || head != 0 || epoch > active || caEpoch != epoch || !bytes.Equal(ca, retainedCA) || (lastDomain == domain && lastID == id && (!previousRevoked || gen != int64(lastGen)+1)) || ((lastDomain != domain || lastID != id) && gen != 1) {
+		if !ulid.MatchString(id) || head < 0 || epoch > active || caEpoch != epoch || !bytes.Equal(ca, retainedCA) || (lastDomain == domain && lastID == id && (!previousRevoked || gen != int64(lastGen)+1)) || ((lastDomain != domain || lastID != id) && gen != 1) {
 			return ErrInvalidStore
 		}
 		cert, gotSPKI, err := verifyLeaf(leaf, ca, domain, id, ownerID, uint64(epoch), time.Time{})

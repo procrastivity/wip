@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type schemaObject struct {
 	name string
@@ -93,14 +93,15 @@ type Domain struct {
 // Store holds one exclusive host-local writer lease for the lifetime of its DB.
 // Close releases the lease; a process exit releases it even without Close.
 type Store struct {
-	mu   sync.Mutex
-	db   *sql.DB
-	lock *os.File
+	mu     sync.Mutex
+	db     *sql.DB
+	lock   *os.File
+	owners map[string]bool
 }
 
-// CreateEmpty creates a dedicated, absent root and an atomic v1 baseline.
-// Failed initialization leaves an incomplete root that must be inspected and
-// explicitly removed, never completed by OpenExisting.
+// CreateEmpty creates a dedicated, absent root and installs each schema
+// version before returning. Failed initialization leaves an incomplete root
+// that must be inspected and explicitly removed, never completed by OpenExisting.
 func CreateEmpty(root string) (*Store, error) {
 	path, err := cleanRoot(root)
 	if err != nil {
@@ -123,6 +124,9 @@ func CreateEmpty(root string) (*Store, error) {
 			err = installBaseline(db)
 			if err == nil {
 				err = installStep3(db)
+				if err == nil {
+					err = installStep4(db)
+				}
 			}
 		}
 		if err == nil {
@@ -136,7 +140,7 @@ func CreateEmpty(root string) (*Store, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("authoritystore: initialize: %w", err)
 	}
-	return &Store{db: db, lock: lock}, nil
+	return &Store{db: db, lock: lock, owners: make(map[string]bool)}, nil
 }
 
 // installBaseline commits schema objects and both version markers together.
@@ -192,7 +196,7 @@ func OpenExisting(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: %v", ErrInvalidStore, err)
 	}
-	store := &Store{db: db, lock: lock}
+	store := &Store{db: db, lock: lock, owners: make(map[string]bool)}
 	lock = nil
 	return store, nil
 }
@@ -238,9 +242,8 @@ func (s *Store) BootstrapDomain(ctx context.Context, d Domain, repoID string) er
 	return tx.Commit()
 }
 
-// AttachRepo only attaches to a command/event history-empty domain. Neither
-// v1 nor v2 writes that history; the migration that enables it must add a
-// history guard here.
+// AttachRepo only attaches to a command/event history-empty domain. Step 4's
+// submission table is the durable history boundary and blocks later changes.
 func (s *Store) AttachRepo(ctx context.Context, domainID, repoID string) error {
 	if !ulid.MatchString(domainID) || !ulid.MatchString(repoID) {
 		return errors.New("authoritystore: invalid domain or Repo ID")
@@ -261,6 +264,13 @@ func (s *Store) AttachRepo(ctx context.Context, domainID, repoID string) error {
 	}
 	if count == 0 {
 		return ErrNotFound
+	}
+	var history int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM submissions WHERE domain_id = ?`, domainID).Scan(&history); err != nil {
+		return err
+	}
+	if history != 0 {
+		return ErrFenced
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO repo_memberships(repo_id, domain_id) VALUES (?, ?)`, repoID, domainID); err != nil {
 		return writeError(err)
@@ -455,13 +465,23 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 	for _, object := range baselineSchema {
 		expected[object.name] = object
 	}
-	if expectedVersion == 2 {
+	if expectedVersion >= 2 {
 		expected["schema_migrations"] = step3MigrationMarker
 		for _, object := range step3Schema {
 			expected[object.name] = object
 		}
 		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 2`).Scan(&name); err != nil || name != "environment-and-artifacts" {
 			return fmt.Errorf("step 3 migration marker: %v", err)
+		}
+	}
+	if expectedVersion >= 3 {
+		expected["schema_migrations"] = step4MigrationMarker
+		delete(expected, "environment_sequence_no_advance")
+		for _, object := range step4Schema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 3`).Scan(&name); err != nil || name != "submissions-and-receipts" {
+			return fmt.Errorf("step 4 migration marker: %v", err)
 		}
 	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
@@ -584,8 +604,19 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 	if err := members.Close(); err != nil {
 		return err
 	}
-	if expectedVersion == 2 {
-		return checkStep3State(db)
+	if expectedVersion >= 2 {
+		if err := checkStep3State(db); err != nil {
+			return err
+		}
+		if expectedVersion == 2 {
+			var advanced int
+			if err := db.QueryRow(`SELECT count(*) FROM environments WHERE sequence_head != 0`).Scan(&advanced); err != nil || advanced != 0 {
+				return ErrInvalidStore
+			}
+		}
+		if expectedVersion >= 3 {
+			return checkStep4State(db)
+		}
 	}
 	return nil
 }
