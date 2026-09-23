@@ -20,7 +20,7 @@ var step6Schema = []schemaObject{
   PRIMARY KEY(domain_id,digest), CHECK(verified=0 OR verified_offset=byte_length)
 ) STRICT`},
 	{"blob_chunks", "table", `CREATE TABLE blob_chunks (
-  domain_id TEXT NOT NULL, digest TEXT NOT NULL, offset INTEGER NOT NULL CHECK(offset >= 0), data BLOB NOT NULL CHECK(length(data) BETWEEN 1 AND 65536),
+  domain_id TEXT NOT NULL, digest TEXT NOT NULL, offset INTEGER NOT NULL CHECK(offset >= 0), chunk_hash BLOB NOT NULL CHECK(length(chunk_hash)=32), byte_length INTEGER NOT NULL CHECK(byte_length BETWEEN 1 AND 65536),
   PRIMARY KEY(domain_id,digest,offset), FOREIGN KEY(domain_id,digest) REFERENCES blob_products(domain_id,digest) ON DELETE CASCADE
 ) STRICT`},
 	{"blob_chunks_immutable", "trigger", `CREATE TRIGGER blob_chunks_immutable BEFORE UPDATE ON blob_chunks BEGIN SELECT RAISE(ABORT,'immutable blob chunk'); END`},
@@ -170,6 +170,9 @@ func UpgradeV3(root string) error {
 		return err
 	}
 	if err = errors.Join(dir.Sync(), dir.Close()); err != nil {
+		return err
+	}
+	if err = initBlobDir(path); err != nil {
 		return err
 	}
 	if err = installStep6(db); err != nil {

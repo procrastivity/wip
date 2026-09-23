@@ -1,14 +1,14 @@
 package authoritystore
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
-	"hash"
-	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -132,9 +132,20 @@ func (s *Store) StageBlobChunk(ctx context.Context, domain string, epoch uint64,
 		return head, ErrBlobRange
 	}
 	if offset < head {
-		var old []byte
-		err = tx.QueryRowContext(ctx, `SELECT data FROM blob_chunks WHERE domain_id=? AND digest=? AND offset=?`, domain, digest, offset).Scan(&old)
-		if err != nil || string(old) != string(chunk) {
+		var sum []byte
+		var size uint64
+		err = tx.QueryRowContext(ctx, `SELECT chunk_hash,byte_length FROM blob_chunks WHERE domain_id=? AND digest=? AND offset=?`, domain, digest, offset).Scan(&sum, &size)
+		if errors.Is(err, sql.ErrNoRows) {
+			return head, ErrBlobOffset
+		}
+		if err != nil {
+			return head, err
+		}
+		old, err := readChunk(s.blobs, chunkName(domain, digest, offset, sum), size, sum)
+		if err != nil {
+			return head, err
+		}
+		if !bytes.Equal(old, chunk) {
 			return head, ErrBlobOffset
 		}
 		return head, nil
@@ -142,7 +153,11 @@ func (s *Store) StageBlobChunk(ctx context.Context, domain string, epoch uint64,
 	if offset != head {
 		return head, ErrBlobOffset
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO blob_chunks VALUES(?,?,?,?)`, domain, digest, offset, chunk); err != nil {
+	sum, err := durableChunk(s.blobs, domain, digest, offset, chunk)
+	if err != nil {
+		return head, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO blob_chunks VALUES(?,?,?,?,?)`, domain, digest, offset, sum, len(chunk)); err != nil {
 		return head, err
 	}
 	head += uint64(len(chunk))
@@ -191,12 +206,11 @@ func (s *Store) FinishBlob(ctx context.Context, domain string, epoch uint64, dig
 	if offset != length {
 		bad = ErrBlobLength
 	} else {
-		h := sha256.New()
-		if err = hashChunks(ctx, tx, domain, digest, length, h); err != nil {
-			return err
-		}
-		if digestRawBytes(h.Sum(nil)) != digest {
-			bad = ErrBlobDigest
+		if err = durableProduct(ctx, tx, s.blobs, domain, digest, length); err != nil {
+			if !errors.Is(err, ErrBlobDigest) {
+				return err
+			}
+			bad = err
 		}
 	}
 	if bad != nil {
@@ -211,35 +225,10 @@ func (s *Store) FinishBlob(ctx context.Context, domain string, epoch uint64, dig
 	if _, err = tx.ExecContext(ctx, `UPDATE blob_products SET verified=1 WHERE domain_id=? AND digest=?`, domain, digest); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM blob_chunks WHERE domain_id=? AND digest=?`, domain, digest); err != nil {
+		return err
+	}
 	return tx.Commit()
-}
-
-func hashChunks(ctx context.Context, q *sql.Tx, domain, digest string, length uint64, h hash.Hash) error {
-	rows, err := q.QueryContext(ctx, `SELECT offset,data FROM blob_chunks WHERE domain_id=? AND digest=? ORDER BY offset`, domain, digest)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	var at uint64
-	for rows.Next() {
-		var off uint64
-		var b []byte
-		if err = rows.Scan(&off, &b); err != nil {
-			return err
-		}
-		if off != at || len(b) == 0 || len(b) > maxBlobChunk || uint64(len(b)) > length-at {
-			return ErrInvalidStore
-		}
-		_, _ = h.Write(b)
-		at += uint64(len(b))
-	}
-	if err = rows.Err(); err != nil {
-		return err
-	}
-	if at != length {
-		return ErrInvalidStore
-	}
-	return nil
 }
 
 // promoteBlobsTx is reserved for a successful terminal fold in the caller's
@@ -259,25 +248,23 @@ func promoteBlobsTx(ctx context.Context, tx *sql.Tx, domain string, position uin
 	if err != nil {
 		return err
 	}
-	if len(lengths) != len(refs) {
-		return ErrFenced
-	}
+	seen := make(map[string]bool, len(lengths))
 	for _, digest := range refs {
 		length, ok := lengths[digest]
 		if !ok {
 			return ErrFenced
 		}
-		delete(lengths, digest)
 		var verified int
 		var stored uint64
 		if err := tx.QueryRowContext(ctx, `SELECT verified,byte_length FROM blob_products WHERE domain_id=? AND digest=?`, domain, digest).Scan(&verified, &stored); err != nil || verified != 1 || stored != length {
 			return ErrBlobAbsent
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_references VALUES(?,?,?)`, domain, digest, position); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_references VALUES(?,?,?) ON CONFLICT(domain_id,digest) DO NOTHING`, domain, digest, position); err != nil {
 			return err
 		}
+		seen[digest] = true
 	}
-	if len(lengths) != 0 {
+	if len(seen) != len(lengths) {
 		return ErrFenced
 	}
 	return nil
@@ -311,6 +298,9 @@ func commandBlobLengths(command []byte) (map[string]uint64, error) {
 // BlobRange returns authenticated manifest-scoped bytes and their independent
 // range digest. It never claims Environment hydration or a durable local pin.
 func (s *Store) BlobRange(ctx context.Context, domain string, epoch uint64, snapshotID, manifestDigest, digest string, length, offset, count uint64, now time.Time) ([]byte, string, error) {
+	if now.IsZero() {
+		return nil, "", ErrInvalidProof
+	}
 	if count > maxBlobChunk || offset > math.MaxInt64 || count > math.MaxInt64 || offset > math.MaxUint64-count {
 		return nil, "", ErrBlobRange
 	}
@@ -342,38 +332,19 @@ func (s *Store) BlobRange(ctx context.Context, domain string, epoch uint64, snap
 	if expected != length || offset+count > expected {
 		return nil, "", ErrBlobRange
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT offset,data FROM blob_chunks WHERE domain_id=? AND digest=? ORDER BY offset`, domain, digest)
+	if err := verifyProduct(s.blobs, digest, expected); err != nil {
+		return nil, "", err
+	}
+	f, err := os.Open(filepath.Join(s.blobs, productName(digest)))
 	if err != nil {
 		return nil, "", err
 	}
-	defer func() { _ = rows.Close() }()
-	result := make([]byte, 0, count)
-	covered := offset
-	for rows.Next() {
-		var start uint64
-		var b []byte
-		if err = rows.Scan(&start, &b); err != nil {
+	defer func() { _ = f.Close() }()
+	result := make([]byte, count)
+	if count > 0 {
+		if _, err = f.ReadAt(result, int64(offset)); err != nil {
 			return nil, "", err
 		}
-		if start >= offset+count {
-			break
-		}
-		end := start + uint64(len(b))
-		if end <= offset {
-			continue
-		}
-		lo, hi := max(start, offset), min(end, offset+count)
-		if lo != covered {
-			return nil, "", io.ErrUnexpectedEOF
-		}
-		result = append(result, b[lo-start:hi-start]...)
-		covered = hi
-	}
-	if err = rows.Err(); err != nil {
-		return nil, "", err
-	}
-	if uint64(len(result)) != count {
-		return nil, "", io.ErrUnexpectedEOF
 	}
 	return result, digestBytes(result), nil
 }
@@ -395,11 +366,14 @@ func (s *Store) CollectExpired(ctx context.Context, now time.Time) error {
 	stamp := now.UnixNano()
 	for _, query := range []string{
 		`DELETE FROM snapshots WHERE expires_at<=?`,
-		`DELETE FROM blob_products WHERE expires_at<=? AND NOT EXISTS(SELECT 1 FROM blob_references r WHERE r.domain_id=blob_products.domain_id AND r.digest=blob_products.digest)`,
+		`DELETE FROM blob_products WHERE expires_at<=? AND NOT EXISTS(SELECT 1 FROM blob_references r WHERE r.domain_id=blob_products.domain_id AND r.digest=blob_products.digest) AND NOT EXISTS(SELECT 1 FROM snapshot_entries e JOIN snapshots s USING(snapshot_id) WHERE s.domain_id=blob_products.domain_id AND e.digest=blob_products.digest)`,
 	} {
 		if _, err = tx.ExecContext(ctx, query, stamp); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return collectBlobFiles(s.db, s.blobs)
 }

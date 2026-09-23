@@ -153,6 +153,9 @@ type TransferBoundary struct {
 }
 
 func transferState(ctx context.Context, tx *sql.Tx, token string, now time.Time) (transferClaims, uint64, uint64, error) {
+	if now.IsZero() {
+		return transferClaims{}, 0, 0, ErrInvalidProof
+	}
 	var key []byte
 	if err := tx.QueryRowContext(ctx, `SELECT key FROM transfer_secret WHERE purpose='transfer'`).Scan(&key); err != nil {
 		return transferClaims{}, 0, 0, err
@@ -166,13 +169,17 @@ func transferState(ctx context.Context, tx *sql.Tx, token string, now time.Time)
 	var startID sql.NullString
 	var event, entry uint64
 	var expiresAt int64
-	err = tx.QueryRowContext(ctx, `SELECT t.kind,t.transfer_id,s.domain_id,s.epoch,t.snapshot_id,t.start_count,t.start_event_id,t.start_digest,s.event_count,s.event_id,s.prefix_digest,s.manifest_digest,t.next_event,t.next_entry,t.store_schema,t.expires_at FROM transfers t JOIN snapshots s USING(snapshot_id) WHERE t.transfer_id=?`, c.ID).
-		Scan(&stored.Kind, &stored.ID, &stored.Domain, &stored.Epoch, &stored.SnapshotID, &stored.StartCount, &startID, &stored.StartDigest, &stored.EndCount, &eventID, &stored.EndDigest, &stored.Manifest, &event, &entry, &stored.StoreSchema, &expiresAt)
+	var activeEpoch uint64
+	err = tx.QueryRowContext(ctx, `SELECT t.kind,t.transfer_id,s.domain_id,s.epoch,t.snapshot_id,t.start_count,t.start_event_id,t.start_digest,s.event_count,s.event_id,s.prefix_digest,s.manifest_digest,t.next_event,t.next_entry,t.store_schema,t.expires_at,d.active_epoch FROM transfers t JOIN snapshots s USING(snapshot_id) JOIN domains d ON d.domain_id=s.domain_id WHERE t.transfer_id=?`, c.ID).
+		Scan(&stored.Kind, &stored.ID, &stored.Domain, &stored.Epoch, &stored.SnapshotID, &stored.StartCount, &startID, &stored.StartDigest, &stored.EndCount, &eventID, &stored.EndDigest, &stored.Manifest, &event, &entry, &stored.StoreSchema, &expiresAt, &activeEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, 0, 0, ErrResumeInvalid
 	}
 	if err != nil {
 		return c, 0, 0, err
+	}
+	if stored.Epoch != activeEpoch {
+		return c, 0, 0, ErrFenced
 	}
 	stored.Schema = "wipd.transfer-token/1"
 	if startID.Valid {

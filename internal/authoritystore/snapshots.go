@@ -299,6 +299,9 @@ func (s *Store) PinSnapshot(ctx context.Context, domain string, epoch uint64, st
 // caller's continuation boundary is an ordinal scoped to this snapshot; a
 // future query adapter must wrap it in the sealed page-token claims/MAC.
 func (s *Store) SnapshotPage(ctx context.Context, domain string, epoch uint64, id string, offset, size uint64, now time.Time) ([]SnapshotItem, bool, error) {
+	if now.IsZero() {
+		return nil, false, ErrInvalidProof
+	}
 	if size == 0 {
 		size = 100
 	}
@@ -370,49 +373,7 @@ func checkStep6State(db *sql.DB) error {
 	if err := db.QueryRow(`SELECT count(*) FROM transfer_secret`).Scan(&n); err != nil || n != 1 {
 		return ErrInvalidStore
 	}
-	rows, err := db.Query(`SELECT domain_id,digest,byte_length,verified_offset,verified FROM blob_products`)
-	if err != nil {
-		return err
-	}
-	type product struct {
-		domain, digest string
-		length, offset uint64
-		verified       int
-	}
-	var products []product
-	for rows.Next() {
-		var p product
-		if err = rows.Scan(&p.domain, &p.digest, &p.length, &p.offset, &p.verified); err != nil {
-			break
-		}
-		products = append(products, p)
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	_ = rows.Close()
-	if err != nil {
-		return err
-	}
-	for _, p := range products {
-		if !ulid.MatchString(p.domain) || !validDigest(p.digest) || p.offset > p.length {
-			return ErrInvalidStore
-		}
-		tx, e := db.Begin()
-		if e != nil {
-			return e
-		}
-		h := sha256.New()
-		e = hashChunks(context.Background(), tx, p.domain, p.digest, p.offset, h)
-		_ = tx.Rollback()
-		if e != nil {
-			return e
-		}
-		if p.verified == 1 && (p.offset != p.length || digestRawBytes(h.Sum(nil)) != p.digest) {
-			return ErrInvalidStore
-		}
-	}
-	rows, err = db.Query(`SELECT domain_id,digest,first_position FROM blob_references`)
+	rows, err := db.Query(`SELECT domain_id,digest,first_position FROM blob_references`)
 	if err != nil {
 		return err
 	}

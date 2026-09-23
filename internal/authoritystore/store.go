@@ -96,6 +96,7 @@ type Store struct {
 	mu     sync.Mutex
 	db     *sql.DB
 	lock   *os.File
+	blobs  string
 	owners map[string]bool
 }
 
@@ -133,7 +134,10 @@ func CreateEmpty(root string) (*Store, error) {
 			}
 		}
 		if err == nil {
-			err = checkSchema(db)
+			err = initBlobDir(path)
+			if err == nil {
+				err = checkSchema(db)
+			}
 		}
 	}
 	if err != nil {
@@ -143,7 +147,7 @@ func CreateEmpty(root string) (*Store, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("authoritystore: initialize: %w", err)
 	}
-	return &Store{db: db, lock: lock, owners: make(map[string]bool)}, nil
+	return &Store{db: db, lock: lock, blobs: filepath.Join(path, "blobs"), owners: make(map[string]bool)}, nil
 }
 
 // installBaseline commits schema objects and both version markers together.
@@ -199,7 +203,11 @@ func OpenExisting(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: %v", ErrInvalidStore, err)
 	}
-	store := &Store{db: db, lock: lock, owners: make(map[string]bool)}
+	if err := checkBlobFiles(db, filepath.Join(path, "blobs")); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: blobs: %v", ErrInvalidStore, err)
+	}
+	store := &Store{db: db, lock: lock, blobs: filepath.Join(path, "blobs"), owners: make(map[string]bool)}
 	lock = nil
 	return store, nil
 }
