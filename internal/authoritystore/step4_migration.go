@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var step4MigrationMarker = schemaObject{"schema_migrations", "table", `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK (version IN (1, 2, 3)), name TEXT NOT NULL CHECK ((version = 1 AND name = 'baseline') OR (version = 2 AND name = 'environment-and-artifacts') OR (version = 3 AND name = 'submissions-and-receipts'))) STRICT`}
@@ -135,6 +137,9 @@ func UpgradeV2(root string) error {
 	if err != nil {
 		return fmt.Errorf("%w: backup validation: %v", ErrInvalidStore, err)
 	}
+	if err = sameV2StoreContents(db, backup); err != nil {
+		return fmt.Errorf("%w: backup does not match source: %v", ErrInvalidStore, err)
+	}
 	f, err := os.Open(backup)
 	if err != nil {
 		return err
@@ -153,4 +158,50 @@ func UpgradeV2(root string) error {
 		return err
 	}
 	return checkSchema(db)
+}
+
+// sameV2StoreContents proves that an existing schema-valid backup is the
+// retained snapshot of this source, rather than an unrelated v2 store.
+func sameV2StoreContents(db *sql.DB, backup string) error {
+	u := url.URL{Scheme: "file", Path: backup}
+	q := u.Query()
+	q.Set("mode", "ro")
+	u.RawQuery = q.Encode()
+	if _, err := db.Exec(`ATTACH DATABASE ? AS retained_v2_backup`, u.String()); err != nil {
+		return err
+	}
+	defer func() { _, _ = db.Exec(`DETACH DATABASE retained_v2_backup`) }()
+	rows, err := db.Query(`SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return err
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err = rows.Scan(&table); err != nil {
+			break
+		}
+		tables = append(tables, table)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	if closeErr := rows.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	for _, table := range tables {
+		name := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		var differs int
+		query := fmt.Sprintf(`SELECT EXISTS(SELECT * FROM main.%s EXCEPT SELECT * FROM retained_v2_backup.%s) OR EXISTS(SELECT * FROM retained_v2_backup.%s EXCEPT SELECT * FROM main.%s)`, name, name, name, name)
+		if err = db.QueryRow(query).Scan(&differs); err != nil {
+			return err
+		}
+		if differs != 0 {
+			return fmt.Errorf("table %s differs", table)
+		}
+	}
+	return nil
 }

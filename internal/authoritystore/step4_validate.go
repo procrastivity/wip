@@ -372,5 +372,9 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 			return ErrInvalidStore
 		}
 	}
+	var invalidPending int
+	if err = db.QueryRow(`SELECT count(*) FROM submissions s JOIN environments e USING(domain_id,environment_id) WHERE s.state='submitted' AND s.environment_sequence - 1 != e.sequence_head`).Scan(&invalidPending); err != nil || invalidPending != 0 {
+		return ErrInvalidStore
+	}
 	return nil
 }

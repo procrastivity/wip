@@ -312,6 +312,50 @@ func TestCommandRollbackOnProjectionAndReopenTamper(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsPendingBeyondNextSequence(t *testing.T) {
+	s, root, peer, _, now := commandFixture(t)
+	original := matterCommand(domainB, 1, "alpha")
+	if _, err := s.SubmitCommand(context.Background(), original, hashCommand(t, original), peer, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := connect(filepath.Join(root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head uint64
+	if err = db.QueryRow(`SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, domainA, envA).Scan(&head); err != nil || head != 0 {
+		t.Fatalf("corrupt-state fixture head=%d: %v", head, err)
+	}
+	corrupt := matterCommand(domainB, 2, "alpha")
+	encoded, err := corrupt.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := hashCommand(t, corrupt)
+	if _, err = db.Exec(`DROP TRIGGER submissions_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE submissions SET request_hash=?,command=?,environment_sequence=? WHERE domain_id=? AND command_id=?`, hash, encoded, corrupt.EnvironmentSequence, domainA, corrupt.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range step4Schema {
+		if object.name == "submissions_immutable" {
+			if _, err = db.Exec(object.sql); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("accepted pending sequence 2 at head 0: %v", err)
+	}
+}
+
 func TestStep4ExplicitUpgradeAndIncompleteBackup(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "authority")
 	if err := os.Mkdir(root, 0o700); err != nil {
@@ -365,6 +409,77 @@ func TestStep4ExplicitUpgradeAndIncompleteBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = s.Close()
+}
+
+func TestStep4UpgradeRejectsUnrelatedValidBackup(t *testing.T) {
+	makeV2 := func(root, domain, repo string) {
+		t.Helper()
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(root, "authority.db")
+		db, err := connect(file, "rwc", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Chmod(file, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err = installBaseline(db); err != nil {
+			t.Fatal(err)
+		}
+		if err = installStep3(db); err != nil {
+			t.Fatal(err)
+		}
+		d, _ := identity(domain, 7)
+		if _, err = db.Exec(`INSERT INTO domains(domain_id,owner_public_key,owner_key_id,initial_epoch,active_epoch) VALUES(?,?,?,?,?)`, d.ID, []byte(d.OwnerPublicKey), d.OwnerKeyID, d.ActiveEpoch, d.ActiveEpoch); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO repo_memberships(repo_id,domain_id) VALUES(?,?)`, repo, domain); err != nil {
+			t.Fatal(err)
+		}
+		if err = db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		check, err := connect(file, "rw", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = checkSchemaVersion(check, 2); err != nil {
+			t.Fatalf("invalid v2 fixture %s: %v", domain, err)
+		}
+		if err = check.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	base := t.TempDir()
+	source := filepath.Join(base, "source")
+	other := filepath.Join(base, "other")
+	makeV2(source, domainA, repoA)
+	makeV2(other, domainB, repoB)
+	backup, err := os.ReadFile(filepath.Join(other, "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(source, "authority-v2.backup.db"), backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV2(source); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("accepted unrelated valid v2 backup: %v", err)
+	}
+	db, err := connect(filepath.Join(source, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err = checkSchemaVersion(db, 2); err != nil {
+		t.Fatalf("refusal mutated source schema: %v", err)
+	}
+	var stored string
+	if err = db.QueryRow(`SELECT domain_id FROM domains`).Scan(&stored); err != nil || stored != domainA {
+		t.Fatalf("refusal mutated source identity: %q %v", stored, err)
+	}
 }
 
 func TestCommandSequenceOwnershipAndConflict(t *testing.T) {
