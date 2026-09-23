@@ -18,6 +18,8 @@
     "authority_epoch": 7,
     "owner_environment_id": "01K5V8M0000000000000000001",
     "acting_environment_id": "01K5V8M0000000000000000002",
+    "repo_id": "01K6R000000000000000000001",
+    "worktree_id": "01K6W000000000000000000001",
     "matter_id": "01K6M000000000000000000001",
     "batch_id": "01K7B000000000000000000001",
     "dispatch_id": "01K7D000000000000000000001",
@@ -66,6 +68,83 @@
       "empty-journal"
     ],
     "expected_state": "hydrating"
+  },
+  "lifecycle_success_contract": {
+    "notation_only": "Diagnostic JSON describes decoded deterministic-CBOR receipt output and event maps; it is not wire input, canonical bytes, or a hash preimage.",
+    "event_envelope": {
+      "schema": "wipd.event/1",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "repo_id": "01K6R000000000000000000001",
+      "fields_in_every_event": ["schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload"],
+      "environment": "submitted command Environment ID and sequence (acting Environment on stand-down)",
+      "command_id_request_hash_acted_at": "exact submitted command values",
+      "occurred_at": "authority event timestamp",
+      "event_ids": "strictly increasing across prefix and within each accepted range",
+      "receipt_accepted_events": "first and last event IDs and count equal exactly the listed events for each independent branch"
+    },
+    "independent_success_branches": [
+      {
+        "name": "acquire-reusing-anonymous-batch",
+        "operation": "claim.acquire@v1",
+        "receipt_output_decoded": {"claim": {"id": "01K7K000000000000000000001", "epoch": 3}, "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "dispatch_id": "01K7D000000000000000000001"},
+        "events": [
+          {"event_id": "01K6E000000000000000000002", "kind": "claim.acquired", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "dispatch_id": "01K7D000000000000000000001", "owner_environment_id": "01K5V8M0000000000000000001", "worktree_id": "01K6W000000000000000000001"}},
+          {"event_id": "01K6E000000000000000000003", "kind": "dispatch.opened", "subject_id": "01K7D000000000000000000001", "payload": {"dispatch_id": "01K7D000000000000000000001", "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "claim_id": "01K7K000000000000000000001", "worktree_id": "01K6W000000000000000000001"}}
+        ],
+        "projection_correspondence": ["reuse-existing-anonymous-batch-with-one-matter-membership", "active-claim-id-epoch-owner-and-matter-match-output", "one-open-dispatch-matches-claim-matter-batch-worktree"]
+      },
+      {
+        "name": "acquire-creating-anonymous-batch-alternative-prefix",
+        "operation": "claim.acquire@v1",
+        "receipt_output_decoded": {"claim": {"id": "01K7K000000000000000000001", "epoch": 3}, "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "dispatch_id": "01K7D000000000000000000001"},
+        "events": [
+          {"event_id": "01K6E000000000000000000001", "kind": "batch.anonymous-created", "subject_id": "01K7B000000000000000000001", "payload": {"batch_id": "01K7B000000000000000000001", "matter_id": "01K6M000000000000000000001"}},
+          {"event_id": "01K6E000000000000000000002", "kind": "claim.acquired", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "dispatch_id": "01K7D000000000000000000001", "owner_environment_id": "01K5V8M0000000000000000001", "worktree_id": "01K6W000000000000000000001"}},
+          {"event_id": "01K6E000000000000000000003", "kind": "dispatch.opened", "subject_id": "01K7D000000000000000000001", "payload": {"dispatch_id": "01K7D000000000000000000001", "matter_id": "01K6M000000000000000000001", "batch_id": "01K7B000000000000000000001", "claim_id": "01K7K000000000000000000001", "worktree_id": "01K6W000000000000000000001"}}
+        ],
+        "projection_correspondence": ["create-anonymous-batch-with-exactly-one-matter-membership", "active-claim-id-epoch-owner-and-matter-match-output", "one-open-dispatch-matches-claim-matter-batch-worktree"]
+      },
+      {
+        "name": "repair-abandon-blocked-generation",
+        "operation": "claim.journal-repair@v1",
+        "receipt_output_decoded": {"claim_id": "01K7K000000000000000000001", "archived_journal_id": "01K7J000000000000000000002", "new_journal_id": "01K7J000000000000000000003", "action": "abandon"},
+        "events": [
+          {"event_id": "01K7E000000000000000000002", "kind": "claim.journal-repaired", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "archived_journal_id": "01K7J000000000000000000002", "new_journal_id": "01K7J000000000000000000003", "action": "abandon"}}
+        ],
+        "projection_correspondence": ["blocked-generation-archived-immutable", "new-generation-empty", "proof-retained-separately-not-event-payload"]
+      },
+      {
+        "name": "repair-replace-blocked-generation",
+        "operation": "claim.journal-repair@v1",
+        "receipt_output_decoded": {"claim_id": "01K7K000000000000000000001", "archived_journal_id": "01K7J000000000000000000002", "new_journal_id": "01K7J000000000000000000004", "action": "replace"},
+        "events": [
+          {"event_id": "01K7E000000000000000000002", "kind": "claim.journal-repaired", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "archived_journal_id": "01K7J000000000000000000002", "new_journal_id": "01K7J000000000000000000004", "action": "replace"}}
+        ],
+        "projection_correspondence": ["blocked-generation-archived-immutable", "new-generation-position-1-new-command-id-hash-sequence", "proof-retained-separately-not-event-payload"]
+      },
+      {
+        "name": "release-after-complete-barrier",
+        "operation": "claim.release@v1",
+        "receipt_output_decoded": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "dispatch_id": "01K7D000000000000000000001", "barrier_digest": "sha256:b2648fe6c67fb48dfd42847a910a1f5d291e7f3c34dff46a9a757c818396a35f"},
+        "events": [
+          {"event_id": "01K7E000000000000000000002", "kind": "dispatch.closed", "subject_id": "01K7D000000000000000000001", "payload": {"dispatch_id": "01K7D000000000000000000001", "claim_id": "01K7K000000000000000000001", "claim_epoch": 3}},
+          {"event_id": "01K7E000000000000000000003", "kind": "claim.released", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "dispatch_id": "01K7D000000000000000000001", "barrier_digest": "sha256:b2648fe6c67fb48dfd42847a910a1f5d291e7f3c34dff46a9a757c818396a35f"}}
+        ],
+        "projection_correspondence": ["dispatch-closed", "claim-inactive-epoch-3-fenced", "barrier-digest-equals-verified-entries-digest"]
+      },
+      {
+        "name": "stand-down-alternative-to-release",
+        "operation": "claim.stand-down@v1",
+        "receipt_output_decoded": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "dispatch_id": "01K7D000000000000000000001", "reason_digest": "sha256:2626262626262626262626262626262626262626262626262626262626262626"},
+        "events": [
+          {"event_id": "01K7E000000000000000000002", "kind": "dispatch.closed", "subject_id": "01K7D000000000000000000001", "payload": {"dispatch_id": "01K7D000000000000000000001", "claim_id": "01K7K000000000000000000001", "claim_epoch": 3}},
+          {"event_id": "01K7E000000000000000000003", "kind": "claim.stood-down", "subject_id": "01K7K000000000000000000001", "payload": {"claim_id": "01K7K000000000000000000001", "claim_epoch": 3, "dispatch_id": "01K7D000000000000000000001", "owner_environment_id": "01K5V8M0000000000000000001", "acting_environment_id": "01K5V8M0000000000000000002", "reason_digest": "sha256:2626262626262626262626262626262626262626262626262626262626262626", "loss_accepted": true}}
+        ],
+        "projection_correspondence": ["dispatch-closed", "claim-inactive-epoch-3-fenced", "both-environments-and-loss-recorded", "reason-text-restricted-audit-only-owner-proof-retained-separately"]
+      }
+    ],
+    "success_requires_nonempty_exact_event_range": true,
+    "same_id_hash_replay_appends_events": false
   },
   "acquire_refusals": [
     {

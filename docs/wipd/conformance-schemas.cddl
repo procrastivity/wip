@@ -384,6 +384,109 @@ claim-stand-down = {
   "deadline": tstr / null
 }
 
+; Protocol-1 lifecycle controls, not M1 catalogue operations. A successful
+; terminal-result.output is a bstr containing deterministic CBOR of precisely
+; the applicable closed output map. No lifecycle success is a no-op.
+claim-acquire-output = {
+  "claim": claim,
+  "matter_id": ulid,
+  "batch_id": ulid,
+  "dispatch_id": ulid
+}
+claim-journal-repair-output = {
+  "claim_id": ulid,
+  "archived_journal_id": ulid,
+  "new_journal_id": ulid,
+  "action": "abandon" / "replace"
+}
+claim-release-output = {
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "dispatch_id": ulid,
+  "barrier_digest": digest
+}
+claim-stand-down-output = {
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "dispatch_id": ulid,
+  "reason_digest": digest
+}
+
+; Same generic wipd.event/1 envelope as authoritystore commands.go. The
+; subject_id and payload identity correspondence is normative in the lifecycle
+; contract; repo_id is the existing Matter Repo for every event here.
+lifecycle-event-fields = (
+  "schema": "wipd.event/1",
+  "event_id": ulid,
+  "domain_id": ulid,
+  "command_id": ulid,
+  "request_hash": digest,
+  "environment": environment,
+  "acted_at": tstr,
+  "occurred_at": tstr,
+  "subject_id": ulid,
+  "repo_id": ulid
+)
+batch-anonymous-created-payload = { "batch_id": ulid, "matter_id": ulid }
+claim-acquired-payload = {
+  "claim_id": ulid, "claim_epoch": positive, "matter_id": ulid,
+  "batch_id": ulid, "dispatch_id": ulid,
+  "owner_environment_id": ulid, "worktree_id": ulid
+}
+dispatch-opened-payload = {
+  "dispatch_id": ulid, "matter_id": ulid, "batch_id": ulid,
+  "claim_id": ulid, "worktree_id": ulid
+}
+claim-journal-repaired-payload = claim-journal-repair-output
+dispatch-closed-payload = {
+  "dispatch_id": ulid, "claim_id": ulid, "claim_epoch": positive
+}
+claim-released-payload = claim-release-output
+claim-stood-down-payload = {
+  "claim_id": ulid, "claim_epoch": positive, "dispatch_id": ulid,
+  "owner_environment_id": ulid, "acting_environment_id": ulid,
+  "reason_digest": digest, "loss_accepted": true
+}
+batch-anonymous-created-event = {
+  lifecycle-event-fields,
+  "kind": "batch.anonymous-created",
+  "payload": batch-anonymous-created-payload
+}
+claim-acquired-event = {
+  lifecycle-event-fields,
+  "kind": "claim.acquired",
+  "payload": claim-acquired-payload
+}
+dispatch-opened-event = {
+  lifecycle-event-fields,
+  "kind": "dispatch.opened",
+  "payload": dispatch-opened-payload
+}
+claim-journal-repaired-event = {
+  lifecycle-event-fields,
+  "kind": "claim.journal-repaired",
+  "payload": claim-journal-repaired-payload
+}
+dispatch-closed-event = {
+  lifecycle-event-fields,
+  "kind": "dispatch.closed",
+  "payload": dispatch-closed-payload
+}
+claim-released-event = {
+  lifecycle-event-fields,
+  "kind": "claim.released",
+  "payload": claim-released-payload
+}
+claim-stood-down-event = {
+  lifecycle-event-fields,
+  "kind": "claim.stood-down",
+  "payload": claim-stood-down-payload
+}
+lifecycle-event = batch-anonymous-created-event / claim-acquired-event /
+                  dispatch-opened-event / claim-journal-repaired-event /
+                  dispatch-closed-event / claim-released-event /
+                  claim-stood-down-event
+
 matter-create-v1-output = { "id": ulid, "locator": tstr, "title": tstr }
 matter-locator-repair-required-event = {
   "requested_locator": tstr,

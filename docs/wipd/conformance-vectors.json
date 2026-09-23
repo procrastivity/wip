@@ -20,7 +20,7 @@
     {
       "path": "docs/wipd/claim-lifecycle-vectors.json",
       "notation": "wipd.claim-lifecycle-vector/1",
-      "sha256": "d67315ca3f20ca8e2a676670527b1da68e4234df16e09e88c87ece85a11ae589"
+      "sha256": "d7a9db99835f48767dc66459070a614a31abcd28a179518f735a174a2ab1983b"
     },
     {
       "path": "docs/wipd/design-security-privacy-vectors.json",

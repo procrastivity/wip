@@ -29,9 +29,10 @@ var (
 // Execution is an unforgeable in-process owner for one durable submission. A
 // recovered owner requires the exact retained command and a new writer lease.
 type Execution struct {
-	store   *Store
-	command operation.Command
-	hash    string
+	store     *Store
+	command   operation.Command
+	lifecycle *lifecycleCommand
+	hash      string
 }
 
 // CommandStatus carries either a pending acknowledgment and optional new owner,
@@ -59,6 +60,27 @@ func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, as
 	if command.Request.Operation != operation.MatterCreateV1.Metadata().Operation || command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
 	}
+	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, nil)
+}
+
+type commandIdentity struct {
+	domain      string
+	epoch       uint64
+	environment string
+	sequence    uint64
+	id, name    string
+	version     uint64
+	repo        string
+	encoded     []byte
+	hash        string
+	m1          *operation.Command
+	lifecycle   *lifecycleCommand
+}
+
+// before runs after authentication and replay detection but before the durable
+// submission point. It may only read the caller-owned transaction.
+func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.ConnectionState, at time.Time, before func(*sql.Tx) error) (CommandStatus, error) {
+	var out CommandStatus
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
@@ -69,14 +91,14 @@ func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, as
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	d, err := domainOwner(ctx, tx, command.AuthorityDomainID)
+	d, err := domainOwner(ctx, tx, c.domain)
 	if err != nil {
 		return out, err
 	}
-	if d.ActiveEpoch != command.ExpectedAuthorityEpoch {
+	if d.ActiveEpoch != c.epoch {
 		return out, ErrFenced
 	}
-	if _, err = verifyPeer(ctx, tx, d.ID, command.EnvironmentID, d.ActiveEpoch, peer, at); err != nil {
+	if _, err = verifyPeer(ctx, tx, d.ID, c.environment, d.ActiveEpoch, peer, at); err != nil {
 		return out, err
 	}
 	// Authenticate the active Environment before revealing whether a command
@@ -84,39 +106,47 @@ func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, as
 	// payload, and is reserved for an admitted exchange.
 	var priorHash string
 	var priorBytes []byte
-	err = tx.QueryRowContext(ctx, `SELECT request_hash,command FROM submissions WHERE domain_id=? AND command_id=?`, command.AuthorityDomainID, command.ID).Scan(&priorHash, &priorBytes)
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,command FROM submissions WHERE domain_id=? AND command_id=?`, c.domain, c.id).Scan(&priorHash, &priorBytes)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return out, err
 	}
-	if err == nil && (priorHash != asserted || !bytes.Equal(priorBytes, encoded)) {
+	if err == nil && (priorHash != c.hash || !bytes.Equal(priorBytes, c.encoded)) {
 		return out, ErrConflict
 	}
 	if priorHash != "" { // replay never re-enters semantic guards
-		return s.status(ctx, tx, command)
+		return s.status(ctx, tx, operation.Command{ID: c.id, AuthorityDomainID: c.domain})
+	}
+	if before != nil {
+		if err = before(tx); err != nil {
+			return out, err
+		}
 	}
 	var member int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM repo_memberships WHERE repo_id=? AND domain_id=?`, command.Request.Context.Repo, d.ID).Scan(&member); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM repo_memberships WHERE repo_id=? AND domain_id=?`, c.repo, d.ID).Scan(&member); err != nil {
 		return out, err
 	}
 	if member != 1 {
 		return out, ErrFenced
 	}
 	var head uint64
-	if err = tx.QueryRowContext(ctx, `SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, d.ID, command.EnvironmentID).Scan(&head); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, d.ID, c.environment).Scan(&head); err != nil {
 		return out, err
 	}
-	if command.EnvironmentSequence != head+1 {
+	if c.sequence != head+1 {
 		return out, ErrPending
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state) VALUES(?,?,?,?,?,?,?,?,?,'submitted')`, d.ID, command.ID, asserted, encoded, d.ActiveEpoch, command.EnvironmentID, command.EnvironmentSequence, command.Request.Operation.Name, command.Request.Operation.Version); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state) VALUES(?,?,?,?,?,?,?,?,?,'submitted')`, d.ID, c.id, c.hash, c.encoded, d.ActiveEpoch, c.environment, c.sequence, c.name, c.version); err != nil {
 		return out, writeError(err)
 	}
 	if err = tx.Commit(); err != nil {
 		return out, err
 	}
-	s.owners[ownerKey(d.ID, command.ID)] = true
+	s.owners[ownerKey(d.ID, c.id)] = true
 	out.Pending = true
-	out.Owner = &Execution{s, command, asserted}
+	out.Owner = &Execution{store: s, hash: c.hash, lifecycle: c.lifecycle}
+	if c.m1 != nil {
+		out.Owner.command = *c.m1
+	}
 	return out, nil
 }
 
@@ -206,7 +236,7 @@ func (s *Store) RecoverCommand(ctx context.Context, command operation.Command, h
 		return nil, ErrNotOwner
 	}
 	s.owners[key] = true
-	return &Execution{s, command, hash}, nil
+	return &Execution{store: s, command: command, hash: hash}, nil
 }
 
 // Signer holds the restricted authority private key outside SQLite. It signs
@@ -290,37 +320,9 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 		if err != nil {
 			return out, err
 		}
-		var position uint64
-		var previousID, previousDigest string
-		err = tx.QueryRowContext(ctx, `SELECT position,event_id,prefix_digest FROM authority_events WHERE domain_id=? ORDER BY position DESC LIMIT 1`, d.ID).Scan(&position, &previousID, &previousDigest)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return out, err
-		}
-		if previousID != "" && eventID <= previousID {
-			return out, ErrInvalidProof
-		}
-		position++
-		record, e := artifactEncoder.Marshal(map[string]any{"schema": "wipd.event/1", "event_id": eventID, "domain_id": d.ID, "command_id": cmd.ID, "request_hash": owner.hash, "environment": map[string]any{"id": cmd.EnvironmentID, "sequence": cmd.EnvironmentSequence}, "acted_at": cmd.ActedAt, "occurred_at": occurred.UTC().Format(time.RFC3339Nano), "kind": "matter.created", "subject_id": matterID, "repo_id": cmd.Request.Context.Repo, "payload": map[string]any{"id": matterID, "locator": got.Locator, "title": got.Title}})
+		position, e := appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}, occurred, eventID, "matter.created", matterID, map[string]any{"id": matterID, "locator": got.Locator, "title": got.Title})
 		if e != nil {
 			return out, e
-		}
-		prefix := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
-		if previousDigest != "" {
-			decoded, e := digestRaw(previousDigest)
-			if e != nil {
-				return out, e
-			}
-			copy(prefix[:], decoded)
-		}
-		var length [8]byte
-		binary.BigEndian.PutUint64(length[:], uint64(len(record)))
-		h := sha256.New()
-		_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
-		_, _ = h.Write(prefix[:])
-		_, _ = h.Write(length[:])
-		_, _ = h.Write(record)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO authority_events VALUES(?,?,?,?,?,?)`, d.ID, position, eventID, cmd.ID, record, digestRawBytes(h.Sum(nil))); err != nil {
-			return out, err
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO matters VALUES(?,?,?,?,?,?)`, d.ID, matterID, cmd.Request.Context.Repo, got.Locator, got.Title, eventID); err != nil {
 			return out, writeError(err)
@@ -330,14 +332,59 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	} else {
 		problem = string(result.Problem.Code)
 	}
-	receipt, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.terminal-receipt/1", "domain_id": d.ID, "authority_epoch": d.ActiveEpoch, "identity_schema": "wipd.command/1", "command_id": cmd.ID, "request_hash": owner.hash, "operation": map[string]any{"name": cmd.Request.Operation.Name, "version": uint64(cmd.Request.Operation.Version)}, "environment": map[string]any{"id": cmd.EnvironmentID, "sequence": cmd.EnvironmentSequence}, "result": map[string]any{"code": string(result.Code), "output": output, "problem_code": problem}, "accepted_events": rangeValue})
+	return s.finishCommandTx(ctx, tx, commandIdentity{domain: d.ID, epoch: d.ActiveEpoch, environment: cmd.EnvironmentID, sequence: cmd.EnvironmentSequence, id: cmd.ID, name: cmd.Request.Operation.Name, version: uint64(cmd.Request.Operation.Version), hash: owner.hash}, head, string(result.Code), output, problem, rangeValue, first, last, occurred, sign, nil)
+}
+
+type eventIdentity struct {
+	domain, id, hash, environment string
+	sequence                      uint64
+	actedAt, repo                 string
+}
+
+func appendCommandEvent(ctx context.Context, tx *sql.Tx, c eventIdentity, occurred time.Time, id, kind, subject string, payload map[string]any) (uint64, error) {
+	var position uint64
+	var previousID, previousDigest string
+	err := tx.QueryRowContext(ctx, `SELECT position,event_id,prefix_digest FROM authority_events WHERE domain_id=? ORDER BY position DESC LIMIT 1`, c.domain).Scan(&position, &previousID, &previousDigest)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if !ulid.MatchString(id) || (previousID != "" && id <= previousID) {
+		return 0, ErrInvalidProof
+	}
+	position++
+	record, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.event/1", "event_id": id, "domain_id": c.domain, "command_id": c.id, "request_hash": c.hash, "environment": map[string]any{"id": c.environment, "sequence": c.sequence}, "acted_at": c.actedAt, "occurred_at": occurred.UTC().Format(time.RFC3339Nano), "kind": kind, "subject_id": subject, "repo_id": c.repo, "payload": payload})
+	if err != nil {
+		return 0, err
+	}
+	prefix := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
+	if previousDigest != "" {
+		decoded, e := digestRaw(previousDigest)
+		if e != nil {
+			return 0, e
+		}
+		copy(prefix[:], decoded)
+	}
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(record)))
+	h := sha256.New()
+	_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+	_, _ = h.Write(prefix[:])
+	_, _ = h.Write(length[:])
+	_, _ = h.Write(record)
+	_, err = tx.ExecContext(ctx, `INSERT INTO authority_events VALUES(?,?,?,?,?,?)`, c.domain, position, id, c.id, record, digestRawBytes(h.Sum(nil)))
+	return position, err
+}
+
+func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdentity, head uint64, code string, output, problem, rangeValue, first, last any, occurred time.Time, sign Signer, beforeCommit func([]byte, []byte, uint64, uint64) error) (CommandStatus, error) {
+	var out CommandStatus
+	receipt, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.terminal-receipt/1", "domain_id": c.domain, "authority_epoch": c.epoch, "identity_schema": "wipd.command/1", "command_id": c.id, "request_hash": c.hash, "operation": map[string]any{"name": c.name, "version": c.version}, "environment": map[string]any{"id": c.environment, "sequence": c.sequence}, "result": map[string]any{"code": code, "output": output, "problem_code": problem}, "accepted_events": rangeValue})
 	if err != nil {
 		return out, err
 	}
 	var generation, sequence uint64
 	var keyID, before, after string
 	var public, fence []byte
-	err = tx.QueryRowContext(ctx, `SELECT generation,key_id,public_key,not_before,not_after,fence FROM artifact_keys WHERE domain_id=? AND epoch=? ORDER BY generation DESC LIMIT 1`, d.ID, d.ActiveEpoch).Scan(&generation, &keyID, &public, &before, &after, &fence)
+	err = tx.QueryRowContext(ctx, `SELECT generation,key_id,public_key,not_before,not_after,fence FROM artifact_keys WHERE domain_id=? AND epoch=? ORDER BY generation DESC LIMIT 1`, c.domain, c.epoch).Scan(&generation, &keyID, &public, &before, &after, &fence)
 	if err != nil {
 		return out, err
 	}
@@ -345,7 +392,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 		return out, ErrFenced
 	}
 	var predecessor sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT sequence,digest FROM authority_artifacts WHERE domain_id=? AND epoch=? AND generation=? ORDER BY sequence DESC LIMIT 1`, d.ID, d.ActiveEpoch, generation).Scan(&sequence, &predecessor)
+	err = tx.QueryRowContext(ctx, `SELECT sequence,digest FROM authority_artifacts WHERE domain_id=? AND epoch=? AND generation=? ORDER BY sequence DESC LIMIT 1`, c.domain, c.epoch, generation).Scan(&sequence, &predecessor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return out, err
 	}
@@ -356,7 +403,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 		prev = predecessor.String
 		ptr = &predecessor.String
 	}
-	fields := map[string]any{"schema": "wipd.signed-artifact/1", "kind": "portable-receipt", "domain_id": d.ID, "authority_epoch": d.ActiveEpoch, "signer_role": "authority", "signer_key_id": keyID, "key_generation": generation, "artifact_sequence": sequence, "previous_artifact_digest": prev, "issued_at": occurred.UTC().Format(time.RFC3339Nano), "payload_schema": "wipd.terminal-receipt/1", "payload_digest": digestBytes(receipt), "payload": receipt}
+	fields := map[string]any{"schema": "wipd.signed-artifact/1", "kind": "portable-receipt", "domain_id": c.domain, "authority_epoch": c.epoch, "signer_role": "authority", "signer_key_id": keyID, "key_generation": generation, "artifact_sequence": sequence, "previous_artifact_digest": prev, "issued_at": occurred.UTC().Format(time.RFC3339Nano), "payload_schema": "wipd.terminal-receipt/1", "payload_digest": digestBytes(receipt), "payload": receipt}
 	unsigned, err := artifactEncoder.Marshal(fields)
 	if err != nil {
 		return out, err
@@ -373,26 +420,31 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if err != nil {
 		return out, err
 	}
-	digest, err := verifyAuthorityArtifact(wrapper, public, d.ID, keyID, d.ActiveEpoch, generation, sequence, ptr)
+	digest, err := verifyAuthorityArtifact(wrapper, public, c.domain, keyID, c.epoch, generation, sequence, ptr)
 	if err != nil {
 		return out, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO authority_artifacts VALUES(?,?,?,?,?,?,?)`, d.ID, d.ActiveEpoch, generation, sequence, digest, prev, wrapper); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO authority_artifacts VALUES(?,?,?,?,?,?,?)`, c.domain, c.epoch, generation, sequence, digest, prev, wrapper); err != nil {
 		return out, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO terminal_receipts VALUES(?,?,?,?,?,?,?,?,?,?)`, d.ID, cmd.ID, receipt, wrapper, d.ActiveEpoch, generation, sequence, first, last, string(result.Code)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO terminal_receipts VALUES(?,?,?,?,?,?,?,?,?,?)`, c.domain, c.id, receipt, wrapper, c.epoch, generation, sequence, first, last, code); err != nil {
 		return out, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE submissions SET state='terminal' WHERE domain_id=? AND command_id=?`, d.ID, cmd.ID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE submissions SET state='terminal' WHERE domain_id=? AND command_id=?`, c.domain, c.id); err != nil {
 		return out, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE environments SET sequence_head=? WHERE domain_id=? AND environment_id=? AND sequence_head=?`, cmd.EnvironmentSequence, d.ID, cmd.EnvironmentID, head); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE environments SET sequence_head=? WHERE domain_id=? AND environment_id=? AND sequence_head=?`, c.sequence, c.domain, c.environment, head); err != nil {
 		return out, err
+	}
+	if beforeCommit != nil {
+		if err = beforeCommit(receipt, wrapper, generation, sequence); err != nil {
+			return out, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return out, err
 	}
-	delete(s.owners, ownerKey(d.ID, cmd.ID))
+	delete(s.owners, ownerKey(c.domain, c.id))
 	out.Receipt, out.SignedReceipt = receipt, wrapper
 	return out, nil
 }

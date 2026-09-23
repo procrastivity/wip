@@ -40,6 +40,58 @@ only into the durable journal in §5. It reaches authority submission only in a
 Step 6 `ReturnCommand`. A local Run lock, process, heartbeat, route, Clone,
 Worktree, certificate, or cached grant is never a claim or authority evidence.
 
+### Protocol-1 lifecycle result and event closure
+
+The four operations above are protocol controls, **not** M1 catalogue
+operations. On `result.succeeded`, the Step 5 terminal receipt delivered over
+Step 4 has `result.output` set to the deterministic CBOR byte string of exactly
+the corresponding closed map below (not a JSON string). IDs are
+authority-assigned except the requested Dispatch ID; `action` is `abandon` or
+`replace`. The acquire output does not include a grant ID: the pinned grant is
+produced after the receipt.
+
+| Operation | Exact successful output map |
+|---|---|
+| `claim.acquire@v1` | `{claim:{id:claim_id,epoch:claim_epoch},matter_id,batch_id,dispatch_id}` |
+| `claim.journal-repair@v1` | `{claim_id,archived_journal_id,new_journal_id,action}` |
+| `claim.release@v1` | `{claim_id,claim_epoch,dispatch_id,barrier_digest}` |
+| `claim.stand-down@v1` | `{claim_id,claim_epoch,dispatch_id,reason_digest}` |
+
+Each successful command appends exactly the following events in listed order,
+with exactly these closed payload maps; `batch.anonymous-created` occurs only
+when the anonymous Batch did not already exist. No lifecycle version declares
+a successful no-op: success always has this nonempty accepted event range,
+including repair, and replays append nothing. Event IDs are strictly
+increasing across the authority prefix, including adjacent events here.
+
+| Operation | Ordered `kind` → exact `payload` |
+|---|---|
+| acquire | optional `batch.anonymous-created` → `{batch_id,matter_id}`; `claim.acquired` → `{claim_id,claim_epoch,matter_id,batch_id,dispatch_id,owner_environment_id,worktree_id}`; `dispatch.opened` → `{dispatch_id,matter_id,batch_id,claim_id,worktree_id}` |
+| repair | `claim.journal-repaired` → `{claim_id,archived_journal_id,new_journal_id,action}` |
+| release | `dispatch.closed` → `{dispatch_id,claim_id,claim_epoch}`; `claim.released` → `{claim_id,claim_epoch,dispatch_id,barrier_digest}` |
+| stand-down | `dispatch.closed` → `{dispatch_id,claim_id,claim_epoch}`; `claim.stood-down` → `{claim_id,claim_epoch,dispatch_id,owner_environment_id,acting_environment_id,reason_digest,loss_accepted:true}` |
+
+Every record uses the generic `wipd.event/1` envelope: `schema`, `event_id`,
+`domain_id`, `command_id`, `request_hash`, `environment` (`id`, `sequence`),
+`acted_at`, `occurred_at`, `kind`, `subject_id`, `repo_id`, and `payload`.
+Envelope command fields and Environment come from the submitted command
+(the acting Environment for stand-down); `repo_id` is the existing Matter's
+Repo, not an optional caller-selected Repo. `subject_id` is `batch_id` for
+`batch.anonymous-created`, `dispatch_id` for both Dispatch kinds, and
+`claim_id` for every claim kind. No extra payload fields are permitted.
+The authority folds the optional Batch and its one Matter membership, active
+claim and open Dispatch on acquisition; repair records the archive and new
+generation decision, which the Environment installs after the receipt without
+rewriting the old journal; release and stand-down close the Dispatch and fence
+the active claim epoch.
+The event payloads and folded projections MUST agree with the output and
+receipt range atomically. Repair proof and stand-down owner authorization are
+separate retained records, not event payload. Exact reason text is restricted
+audit material only: output, events, projections, routine logs, and diagnostics
+contain its digest, never the text. `barrier_digest` is the verified
+`JournalBarrier.entries_digest`; `reason_digest` is the digest bound by the
+owner attestation. Neither digest replaces its separately verified evidence.
+
 ## 2. One-Matter claim and acquisition
 
 A claim excludes direct claim-delivery writes for exactly one existing Matter.

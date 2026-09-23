@@ -17,6 +17,7 @@ type step7Fixture struct {
 	Notation               string                `json:"notation"`
 	Schemas                step7Schemas          `json:"schemas"`
 	Identity               step7Identity         `json:"identity"`
+	LifecycleSuccess       json.RawMessage       `json:"lifecycle_success_contract"`
 	AcquireGrant           step7AcquireGrant     `json:"acquire_grant"`
 	AcquireRefusals        []step7AcquireRefusal `json:"acquire_refusals"`
 	Hydration              step7Hydration        `json:"hydration"`
@@ -48,6 +49,8 @@ type step7Identity struct {
 	AuthorityEpoch      uint64 `json:"authority_epoch"`
 	OwnerEnvironmentID  string `json:"owner_environment_id"`
 	ActingEnvironmentID string `json:"acting_environment_id"`
+	RepoID              string `json:"repo_id"`
+	WorktreeID          string `json:"worktree_id"`
 	MatterID            string `json:"matter_id"`
 	BatchID             string `json:"batch_id"`
 	DispatchID          string `json:"dispatch_id"`

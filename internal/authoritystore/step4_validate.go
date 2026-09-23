@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -101,8 +102,14 @@ func checkStep4State(db *sql.DB) error {
 	}
 	var terminals int
 	for _, s := range all {
-		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 || s.operation != "matter.create" || s.version != 1 {
+		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 || (s.operation != "matter.create" && !lifecycleOperation(s.operation)) || s.version != 1 {
 			return ErrInvalidStore
+		}
+		if lifecycleOperation(s.operation) {
+			c, e := parseLifecycle(s.command, s.hash)
+			if e != nil || c.domain != s.domain || c.id != s.id || c.epoch != s.epoch || c.environment != s.env || c.sequence != s.seq || c.name != s.operation || c.version != s.version {
+				return ErrInvalidStore
+			}
 		}
 		var commandFields map[string]cbor.RawMessage
 		if err = canonicalDecode(s.command, &commandFields); err != nil || !exactKeys(commandFields, "schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs") || digestBytes(append([]byte("wipd/request-hash/v1\x00"), s.command...)) != s.hash {
@@ -155,12 +162,24 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		if code == "result.succeeded" {
-			if !first.Valid || !last.Valid || first.Int64 != last.Int64 || r.Range == nil || r.Range.Count != 1 || r.Result.Problem != nil || len(r.Result.Output) == 0 {
+			if !first.Valid || !last.Valid || (s.operation == "matter.create" && first.Int64 != last.Int64) || r.Range == nil || (s.operation == "matter.create" && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			var eventID string
-			if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
-				return ErrInvalidStore
+			if lifecycleOperation(s.operation) {
+				var n int64
+				var minID, maxID string
+				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
+					return ErrInvalidStore
+				}
+				var firstID, lastID string
+				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
+					return ErrInvalidStore
+				}
+			} else {
+				var eventID string
+				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
+					return ErrInvalidStore
+				}
 			}
 		} else if (code == "result.rejected" || code == "result.refused" || code == "result.failed") && !first.Valid && !last.Valid && r.Range == nil && r.Result.Output == nil && r.Result.Problem != nil {
 			prefix := string(*r.Result.Problem)
@@ -171,11 +190,21 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		var eventCount int
-		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && eventCount != 1) || (code != "result.succeeded" && eventCount != 0) {
+		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && s.operation == "matter.create" && eventCount != 1) || (code == "result.succeeded" && lifecycleOperation(s.operation) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
-	if terminals != count {
+	var grants int
+	var hasGrants int
+	if err = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='claim_grants'`).Scan(&hasGrants); err != nil {
+		return ErrInvalidStore
+	}
+	if hasGrants != 0 {
+		if err = db.QueryRow(`SELECT count(*) FROM claim_grants`).Scan(&grants); err != nil {
+			return ErrInvalidStore
+		}
+	}
+	if terminals+grants != count {
 		return ErrInvalidStore
 	}
 	return checkStep4Events(db, all)
@@ -193,6 +222,20 @@ func validResultProblem(code, problem string) bool {
 	return false
 }
 
+func lifecycleOperation(name string) bool {
+	switch name {
+	case "claim.acquire", "claim.journal-repair", "claim.release", "claim.stand-down":
+		return true
+	}
+	return false
+}
+
+type lifecycleEvent struct {
+	position uint64
+	id       string
+	raw      []byte
+}
+
 func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 	byID := make(map[string]storedSubmission, len(submissions))
 	for _, s := range submissions {
@@ -204,6 +247,7 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 	}
 	type projected struct{ domain, id, repo, locator, title, birth, command string }
 	var expected []projected
+	lifecycleEvents := make(map[string][]lifecycleEvent)
 	var domain, previousID string
 	var position uint64
 	prefix := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
@@ -225,6 +269,52 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 		if !ok || s.state != "terminal" || pos != position || !ulid.MatchString(id) || (previousID != "" && id <= previousID) {
 			err = ErrInvalidStore
 			break
+		}
+		if lifecycleOperation(s.operation) {
+			var event struct {
+				Schema      string `cbor:"schema"`
+				ID          string `cbor:"event_id"`
+				Domain      string `cbor:"domain_id"`
+				Command     string `cbor:"command_id"`
+				Hash        string `cbor:"request_hash"`
+				Repo        string `cbor:"repo_id"`
+				Acted       string `cbor:"acted_at"`
+				Occurred    string `cbor:"occurred_at"`
+				Environment struct {
+					ID       string `cbor:"id"`
+					Sequence uint64 `cbor:"sequence"`
+				} `cbor:"environment"`
+			}
+			var fields map[string]cbor.RawMessage
+			if closedPayload(raw, &event, "schema", "event_id", "domain_id", "command_id", "request_hash", "kind", "subject_id", "repo_id", "acted_at", "occurred_at", "environment", "payload") != nil || canonicalDecode(raw, &fields) != nil {
+				err = ErrInvalidStore
+				break
+			}
+			var env map[string]cbor.RawMessage
+			c, e := parseLifecycle(s.command, s.hash)
+			if canonicalDecode(fields["environment"], &env) != nil || !exactKeys(env, "id", "sequence") || e != nil || event.Schema != "wipd.event/1" || event.ID != id || event.Domain != d || event.Command != cmd || event.Hash != s.hash || event.Repo != c.repo || event.Acted != c.actedAt || event.Environment.ID != s.env || event.Environment.Sequence != s.seq {
+				err = ErrInvalidStore
+				break
+			}
+			if _, e = utcTime(event.Occurred); e != nil {
+				err = ErrInvalidStore
+				break
+			}
+			lifecycleEvents[ownerKey(d, cmd)] = append(lifecycleEvents[ownerKey(d, cmd)], lifecycleEvent{pos, id, raw})
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
 		}
 		var event struct {
 			Schema      string `cbor:"schema"`
@@ -317,6 +407,22 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 	if err != nil {
 		return err
 	}
+	for _, s := range submissions {
+		if !lifecycleOperation(s.operation) || s.state != "terminal" {
+			continue
+		}
+		var receipt []byte
+		if db.QueryRow(`SELECT receipt FROM terminal_receipts WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&receipt) != nil {
+			return ErrInvalidStore
+		}
+		r, e := readReceipt(receipt)
+		if e != nil {
+			return ErrInvalidStore
+		}
+		if r.Result.Code == "result.succeeded" && checkLifecycleEvents(db, s, r, lifecycleEvents[ownerKey(s.domain, s.id)]) != nil {
+			return fmt.Errorf("%w: lifecycle events %s", ErrInvalidStore, s.operation)
+		}
+	}
 	var n int
 	if err = db.QueryRow(`SELECT count(*) FROM matters`).Scan(&n); err != nil || n != len(expected) {
 		return ErrInvalidStore
@@ -375,6 +481,119 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 	var invalidPending int
 	if err = db.QueryRow(`SELECT count(*) FROM submissions s JOIN environments e USING(domain_id,environment_id) WHERE s.state='submitted' AND s.environment_sequence - 1 != e.sequence_head`).Scan(&invalidPending); err != nil || invalidPending != 0 {
 		return ErrInvalidStore
+	}
+	return nil
+}
+
+// The lifecycle projection supplies authority-assigned IDs; the command and
+// receipt independently bind their exact event sequence and closed maps.
+func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, events []lifecycleEvent) error {
+	c, err := parseLifecycle(s.command, s.hash)
+	if err != nil || r.Range == nil || len(events) != int(r.Range.Count) || len(events) == 0 {
+		return ErrInvalidStore
+	}
+	type expectedEvent struct {
+		kind, subject string
+		payload       map[string]any
+	}
+	var want []expectedEvent
+	var output map[string]any
+	claimID := c.claimID
+	if c.stand != nil {
+		claimID = c.stand.Target.ClaimID
+	}
+	var matter, batch, dispatch, owner, worktree string
+	var epoch uint64
+	var acquire string
+	var closeID sql.NullString
+	if c.name == "claim.acquire" {
+		err = db.QueryRow(`SELECT claim_id,matter_id,batch_id,dispatch_id,owner_environment_id,worktree_id,claim_epoch,acquire_command_id,close_command_id FROM claims WHERE domain_id=? AND acquire_command_id=?`, c.domain, c.id).Scan(&claimID, &matter, &batch, &dispatch, &owner, &worktree, &epoch, &acquire, &closeID)
+	} else {
+		err = db.QueryRow(`SELECT claim_id,matter_id,batch_id,dispatch_id,owner_environment_id,worktree_id,claim_epoch,acquire_command_id,close_command_id FROM claims WHERE domain_id=? AND claim_id=?`, c.domain, claimID).Scan(&claimID, &matter, &batch, &dispatch, &owner, &worktree, &epoch, &acquire, &closeID)
+	}
+	if err != nil || !ulid.MatchString(claimID) || epoch == 0 || (c.name == "claim.acquire" && (acquire != c.id || matter != c.matter || dispatch != c.dispatch || worktree != c.worktree || owner != c.environment)) || (c.name != "claim.acquire" && c.stand == nil && (c.claimEpoch != epoch || owner != c.environment || worktree != c.worktree)) || (c.stand != nil && (c.stand.Target.Epoch != epoch || c.stand.Target.Owner != owner)) {
+		return ErrInvalidStore
+	}
+	var repo string
+	if db.QueryRow(`SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, c.domain, matter).Scan(&repo) != nil || repo != c.repo {
+		return ErrInvalidStore
+	}
+	add := func(kind, subject string, payload map[string]any) {
+		want = append(want, expectedEvent{kind, subject, payload})
+	}
+	switch c.name {
+	case "claim.acquire":
+		var prior int
+		if db.QueryRow(`SELECT count(*) FROM claims p JOIN terminal_receipts t ON t.domain_id=p.domain_id AND t.command_id=p.acquire_command_id WHERE p.domain_id=? AND p.matter_id=? AND t.first_position<?`, c.domain, matter, events[0].position).Scan(&prior) != nil || (prior == 0) != (len(events) == 3) {
+			return ErrInvalidStore
+		}
+		if len(events) == 3 {
+			add("batch.anonymous-created", batch, map[string]any{"batch_id": batch, "matter_id": matter})
+		}
+		if len(events) != 2 && len(events) != 3 {
+			return ErrInvalidStore
+		}
+		add("claim.acquired", claimID, map[string]any{"claim_id": claimID, "claim_epoch": epoch, "matter_id": matter, "batch_id": batch, "dispatch_id": dispatch, "owner_environment_id": owner, "worktree_id": worktree})
+		add("dispatch.opened", dispatch, map[string]any{"dispatch_id": dispatch, "matter_id": matter, "batch_id": batch, "claim_id": claimID, "worktree_id": worktree})
+		output = map[string]any{"claim": map[string]any{"id": claimID, "epoch": epoch}, "matter_id": matter, "batch_id": batch, "dispatch_id": dispatch}
+	case "claim.journal-repair":
+		var archived, next, action string
+		var generation uint64
+		err = db.QueryRow(`SELECT journal_id,generation FROM claim_journals WHERE domain_id=? AND claim_id=? AND repair_command_id=? AND state='quarantined'`, c.domain, claimID, c.id).Scan(&archived, &generation)
+		if err != nil || archived != c.repair.Journal {
+			return ErrInvalidStore
+		}
+		err = db.QueryRow(`SELECT journal_id FROM claim_journals WHERE domain_id=? AND claim_id=? AND generation=?`, c.domain, claimID, generation+1).Scan(&next)
+		if err != nil || len(events) != 1 {
+			return ErrInvalidStore
+		}
+		action = c.repair.Action.Kind
+		output = map[string]any{"claim_id": claimID, "archived_journal_id": archived, "new_journal_id": next, "action": action}
+		add("claim.journal-repaired", claimID, output)
+	case "claim.release", "claim.stand-down":
+		var kind, actor string
+		var barrier []byte
+		var reason sql.NullString
+		err = db.QueryRow(`SELECT kind,acting_environment_id,barrier,reason_digest FROM claim_closes WHERE domain_id=? AND claim_id=? AND command_id=?`, c.domain, claimID, c.id).Scan(&kind, &actor, &barrier, &reason)
+		if err != nil || len(events) != 2 || actor != c.environment || !closeID.Valid || closeID.String != c.id {
+			return ErrInvalidStore
+		}
+		add("dispatch.closed", dispatch, map[string]any{"dispatch_id": dispatch, "claim_id": claimID, "claim_epoch": epoch})
+		if c.name == "claim.release" {
+			if kind != "release" || !bytes.Equal(barrier, mustRaw(mustRaw(c.encoded, "input"), "barrier")) || reason.Valid {
+				return ErrInvalidStore
+			}
+			output = map[string]any{"claim_id": claimID, "claim_epoch": epoch, "dispatch_id": dispatch, "barrier_digest": c.barrier.Digest}
+			add("claim.released", claimID, output)
+		} else {
+			digest := digestBytes([]byte(c.stand.Reason))
+			if kind != "stand-down" || len(barrier) != 0 || !reason.Valid || reason.String != digest || !c.stand.Loss || owner == actor {
+				return ErrInvalidStore
+			}
+			output = map[string]any{"claim_id": claimID, "claim_epoch": epoch, "dispatch_id": dispatch, "reason_digest": digest}
+			add("claim.stood-down", claimID, map[string]any{"claim_id": claimID, "claim_epoch": epoch, "dispatch_id": dispatch, "owner_environment_id": owner, "acting_environment_id": actor, "reason_digest": digest, "loss_accepted": true})
+		}
+	}
+	encoded, err := artifactEncoder.Marshal(output)
+	if err != nil || !bytes.Equal(encoded, r.Result.Output) || len(want) != len(events) {
+		return ErrInvalidStore
+	}
+	for i, item := range events {
+		if (i > 0 && item.position != events[i-1].position+1) || (i == 0 && item.id != r.Range.First) || (i == len(events)-1 && item.id != r.Range.Last) {
+			return ErrInvalidStore
+		}
+		var fields map[string]cbor.RawMessage
+		var value struct {
+			Kind    string `cbor:"kind"`
+			Subject string `cbor:"subject_id"`
+		}
+		if canonicalDecode(item.raw, &fields) != nil || artifactDecoder.Unmarshal(item.raw, &value) != nil || value.Kind != want[i].kind || value.Subject != want[i].subject {
+			return ErrInvalidStore
+		}
+		payload, e := artifactEncoder.Marshal(want[i].payload)
+		if e != nil || !bytes.Equal(payload, fields["payload"]) {
+			return ErrInvalidStore
+		}
 	}
 	return nil
 }

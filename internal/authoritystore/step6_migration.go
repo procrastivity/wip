@@ -178,7 +178,7 @@ func UpgradeV3(root string) error {
 	if err = installStep6(db); err != nil {
 		return err
 	}
-	return checkSchema(db)
+	return checkSchemaVersion(db, 4)
 }
 
 func sameV3StoreContents(db *sql.DB, backup string) error {
