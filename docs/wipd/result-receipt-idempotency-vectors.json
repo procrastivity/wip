@@ -1,0 +1,317 @@
+{
+  "notation": "wipd.result-receipt-vector/1",
+  "identity_schema": "wipd.command/1",
+  "receipt_schema": "wipd.terminal-receipt/1",
+  "result_mappings": [
+    {
+      "result_code": "result.succeeded",
+      "protocol_outcome": "terminal",
+      "output": "required",
+      "problem_prefixes": [],
+      "accepted_events": "required-nonempty",
+      "effects": "events-projections-receipt-atomic"
+    },
+    {
+      "result_code": "result.rejected",
+      "protocol_outcome": "terminal",
+      "output": "null",
+      "problem_prefixes": [
+        "not-found",
+        "operation",
+        "validation"
+      ],
+      "accepted_events": "null",
+      "effects": "receipt-only-no-model-effect"
+    },
+    {
+      "result_code": "result.refused",
+      "protocol_outcome": "terminal",
+      "output": "null",
+      "problem_prefixes": [
+        "refusal"
+      ],
+      "accepted_events": "null",
+      "effects": "receipt-only-no-model-effect"
+    },
+    {
+      "result_code": "result.failed",
+      "protocol_outcome": "terminal",
+      "output": "null",
+      "problem_prefixes": [
+        "internal"
+      ],
+      "accepted_events": "null",
+      "effects": "receipt-only-no-model-effect"
+    }
+  ],
+  "receipts": {
+    "accepted": {
+      "schema": "wipd.terminal-receipt/1",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "authority_epoch": 7,
+      "identity_schema": "wipd.command/1",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "operation": {
+        "name": "matter.create",
+        "version": 1
+      },
+      "environment": {
+        "id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "sequence": 42
+      },
+      "result": {
+        "code": "result.succeeded",
+        "output_cbor_hex": "a3626964781a30314b3643303030303030303030303030303030303030303031657469746c6577436166c3a92070726f746f636f6c206964656e74697479676c6f6361746f727170726f746f636f6c2d6964656e74697479",
+        "problem_code": null
+      },
+      "accepted_events": {
+        "first_event_id": "01K6E000000000000000000001",
+        "last_event_id": "01K6E000000000000000000002",
+        "event_count": 2
+      }
+    },
+    "rejected": {
+      "schema": "wipd.terminal-receipt/1",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "authority_epoch": 7,
+      "identity_schema": "wipd.command/1",
+      "command_id": "01K6C000000000000000000002",
+      "request_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "operation": {
+        "name": "matter.create",
+        "version": 1
+      },
+      "environment": {
+        "id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "sequence": 43
+      },
+      "result": {
+        "code": "result.rejected",
+        "output_cbor_hex": null,
+        "problem_code": "validation.invalid-title"
+      },
+      "accepted_events": null
+    },
+    "refused": {
+      "schema": "wipd.terminal-receipt/1",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "authority_epoch": 7,
+      "identity_schema": "wipd.command/1",
+      "command_id": "01K6C000000000000000000003",
+      "request_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "operation": {
+        "name": "matter.create",
+        "version": 1
+      },
+      "environment": {
+        "id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "sequence": 44
+      },
+      "result": {
+        "code": "result.refused",
+        "output_cbor_hex": null,
+        "problem_code": "refusal.unknown-clone"
+      },
+      "accepted_events": null
+    }
+  },
+  "vectors": [
+    {
+      "name": "accepted-command",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "events": [
+        "submission.committed",
+        "semantic.executed",
+        "terminal.committed",
+        "response.observed"
+      ],
+      "expected": {
+        "outcome": "terminal",
+        "code": "result.succeeded",
+        "submission_known": true,
+        "semantic_executions": 1,
+        "receipt": "accepted",
+        "effects": "two-events-projections-and-receipt-atomic",
+        "dependent_state": "released-for-fresh-revalidation"
+      },
+      "recovery": null
+    },
+    {
+      "name": "malformed-command",
+      "command_id": null,
+      "request_hash": null,
+      "events": [
+        "frame.decoded",
+        "canonical-command.malformed",
+        "submission.not-crossed"
+      ],
+      "expected": {
+        "outcome": "admission-refused",
+        "code": "protocol.malformed-message",
+        "submission_known": false,
+        "semantic_executions": 0,
+        "receipt": null,
+        "effects": "no-submission-no-receipt-no-model-effect",
+        "dependent_state": "not-applicable"
+      },
+      "recovery": null
+    },
+    {
+      "name": "semantic-rejected-command",
+      "command_id": "01K6C000000000000000000002",
+      "request_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "events": [
+        "canonical-command.valid",
+        "submission.committed",
+        "semantic.rejected",
+        "terminal.committed"
+      ],
+      "expected": {
+        "outcome": "terminal",
+        "code": "result.rejected",
+        "submission_known": true,
+        "semantic_executions": 1,
+        "receipt": "rejected",
+        "effects": "receipt-only-no-model-effect",
+        "dependent_state": "blocked-for-explicit-repair"
+      },
+      "recovery": null
+    },
+    {
+      "name": "valid-guard-refusal",
+      "command_id": "01K6C000000000000000000003",
+      "request_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "events": [
+        "canonical-command.valid",
+        "submission.committed",
+        "guard.refused",
+        "terminal.committed"
+      ],
+      "expected": {
+        "outcome": "terminal",
+        "code": "result.refused",
+        "submission_known": true,
+        "semantic_executions": 1,
+        "receipt": "refused",
+        "effects": "receipt-only-no-model-effect",
+        "dependent_state": "blocked-for-explicit-repair"
+      },
+      "recovery": null
+    },
+    {
+      "name": "same-id-same-hash-retry",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "events": [
+        "terminal.lookup",
+        "id-and-hash.match",
+        "stored-receipt.replayed"
+      ],
+      "expected": {
+        "outcome": "terminal",
+        "code": "result.succeeded",
+        "submission_known": true,
+        "semantic_executions": 0,
+        "receipt": "accepted",
+        "effects": "replay-only-no-new-event-no-model-effect",
+        "dependent_state": "released-for-fresh-revalidation"
+      },
+      "recovery": null
+    },
+    {
+      "name": "same-id-different-hash-refusal",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:bd15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "events": [
+        "submission.lookup",
+        "id-match-hash-mismatch",
+        "conflict.returned"
+      ],
+      "expected": {
+        "outcome": "admission-refused",
+        "code": "command.id-conflict",
+        "submission_known": false,
+        "semantic_executions": 0,
+        "receipt": null,
+        "effects": "original-unchanged-no-new-receipt-no-model-effect",
+        "dependent_state": "not-applicable"
+      },
+      "recovery": null
+    },
+    {
+      "name": "definitely-unsent-unavailable",
+      "command_id": "01K6C000000000000000000004",
+      "request_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "events": [
+        "connect.failed",
+        "command-bytes-written=false",
+        "submission.not-crossed"
+      ],
+      "expected": {
+        "outcome": "unavailable",
+        "code": "transport.unavailable",
+        "submission_known": false,
+        "semantic_executions": 0,
+        "receipt": null,
+        "effects": "no-queue-no-submission-no-receipt-no-model-effect",
+        "dependent_state": "not-applicable"
+      },
+      "recovery": null
+    },
+    {
+      "name": "lost-response-receipt-query",
+      "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+      "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503",
+      "events": [
+        "command.bytes-written",
+        "terminal.committed",
+        "response.lost"
+      ],
+      "expected": {
+        "outcome": "outcome-unknown",
+        "code": "outcome-unknown",
+        "submission_known": null,
+        "semantic_executions": 1,
+        "receipt": null,
+        "effects": "dependents-blocked-no-rollback",
+        "dependent_state": "blocked-before-submission"
+      },
+      "recovery": {
+        "action": "receipt.query",
+        "request": {
+          "schema": "wipd.receipt-query/1",
+          "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+          "command_id": "01K5V8JQFM6Q3Q0XZ6F1Z7A2BC",
+          "request_hash": "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503"
+        },
+        "response_kind": "command.terminal",
+        "outcome": "terminal",
+        "receipt": "accepted",
+        "semantic_executions": 0,
+        "dependent_state": "released-for-fresh-revalidation"
+      }
+    },
+    {
+      "name": "dependent-blocked-on-outcome-unknown",
+      "command_id": "01K6C000000000000000000005",
+      "request_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "events": [
+        "predecessor.outcome-unknown",
+        "dependent.causation-bound",
+        "dependent.submission-blocked"
+      ],
+      "expected": {
+        "outcome": "outcome-unknown",
+        "code": "outcome-unknown",
+        "submission_known": false,
+        "semantic_executions": 0,
+        "receipt": null,
+        "effects": "dependent-unsubmitted-no-model-effect",
+        "dependent_state": "blocked-before-submission"
+      },
+      "recovery": null
+    }
+  ]
+}
