@@ -1,0 +1,139 @@
+{
+  "notation": "wipd.design-security-privacy-vector/1",
+  "review": "docs/wipd/design-security-privacy-review.md",
+  "portable_signature": {
+    "name": "authority-signed-portable-receipt",
+    "receipt_source": "docs/wipd/result-receipt-idempotency-vectors.json#/receipts/accepted",
+    "domain_separator": "wipd/signed-artifact/v1",
+    "artifact_digest_separator": "wipd/artifact-digest/v1",
+    "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "signer_key_id": "sha256:a050837d85070582ccf7394b0988847cc312cb88259b894899f6f239cf1791a5",
+    "envelope": {
+      "schema": "wipd.signed-artifact/1",
+      "kind": "portable-receipt",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "authority_epoch": 7,
+      "signer_role": "authority",
+      "key_generation": 2,
+      "artifact_sequence": 41,
+      "previous_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "issued_at": "2026-09-22T17:00:00Z",
+      "payload_schema": "wipd.terminal-receipt/1"
+    },
+    "payload_digest": "sha256:58dda4beba048a09c7df0d8bdb2ced48afcb0360a04c005aa19d1d698757d538",
+    "signature_hex": "abc9fcd4fd87539cad17f0ca62a064861dae5a08b1d57fe210f02001cf2f4340c71a44fe87a2bfcff1fe3b32f5d339bfa72d9a71de69b38f64a1f0bc98afae0e",
+    "artifact_digest": "sha256:47a343b7fd0f886ac9b1e51796f2d41a5fb56e3ae42414275609a523a982ef0e",
+    "negative_cases": [
+      {"name": "payload-byte-changed", "expected": "artifact.invalid-signature"},
+      {"name": "domain-changed", "expected": "artifact.invalid-signature"},
+      {"name": "wrong-signer-role", "expected": "artifact.invalid-signature"},
+      {"name": "parallel-chain-after-fence", "expected": "artifact.untrusted-chain"}
+    ]
+  },
+  "owner_ceremonies": [
+    {
+      "name": "planned-handoff",
+      "required": ["activation-intent", "source-quiescence", "signed-bundle-manifest", "signed-relinquishment", "owner-attestation", "next-epoch-activation"],
+      "loss_accepted": false,
+      "negative": "active-claim-or-unresolved-outcome-refuses"
+    },
+    {
+      "name": "disaster-restore",
+      "required": ["owner-death-attestation", "old-and-next-epoch", "recovered-high-water", "bundle-or-proof-digest", "unresolved-command-digest", "accepted-loss", "next-epoch-activation"],
+      "loss_accepted": true,
+      "negative": "divergent-or-incomplete-candidate-refuses"
+    },
+    {
+      "name": "cross-environment-stand-down",
+      "required": ["command-id-and-hash", "claim-id-and-epoch", "both-environments", "reason-digest", "accepted-loss", "nonce-and-expiry", "owner-signature"],
+      "loss_accepted": true,
+      "negative": "missing-expired-reused-or-wrong-scope-owner-proof-has-no-submission"
+    }
+  ],
+  "certificate_security": {
+    "authority_uri": "wipd://authority/01K5V8K1Q5VX6Y0J8C9W3M4N5P?epoch=7&owner=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "environment_uri": "wipd://environment/01K5V8K8A4J2N7R9T0V3X6Y8ZB?domain=01K5V8K1Q5VX6Y0J8C9W3M4N5P&epoch=7&owner=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "required": ["critical-standard-san", "server-hostname-and-spki-pin", "client-auth-eku", "exact-binding", "revocation-each-exchange"],
+    "refused": ["duplicate-wip-uri", "unknown-query-key", "wrong-domain", "wrong-epoch", "wrong-owner", "wrong-environment", "revoked-generation", "grant-reuse-with-different-csr"]
+  },
+  "d127": {
+    "locator_collision": {
+      "operation": "matter.create@v2",
+      "requested": "alpha",
+      "identity": "01K6M000000000000000000015",
+      "assigned": "alpha-01K6M0",
+      "events": ["matter.created", "matter.locator-repair-required"],
+      "output": {"id": "01K6M000000000000000000015", "title": "Alpha", "requested_locator": "alpha", "assigned_locator": "alpha-01K6M0", "locator_repair_required": true},
+      "repair_required": true,
+      "clear_only": ["authority-rename", "authority-explicit-accept"]
+    },
+    "cursor_provisional_target": {
+      "operation": "cursor.move@v1",
+      "delivery": "environment",
+      "ordering_key": "01K5V8KGD3F6H9J2M4N7Q0R5TW",
+      "environment_sequence": 71,
+      "target": "01K6M000000000000000000016",
+      "target_birth_sequence": 70,
+      "causation": "target-birth-command",
+      "eligibility": "birth-terminal-success",
+      "birth_refusal": "dependent-cursor-quarantined"
+    },
+    "cursor_noop": {
+      "operation": "cursor.move@v1",
+      "canonical_command": {
+        "schema": "wipd.command/1",
+        "command_id": "01K6C000000000000000000004",
+        "authority": {"domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P", "expected_epoch": 7},
+        "environment": {"id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB", "sequence": 71},
+        "acted_at": "2026-09-22T17:00:00Z",
+        "actor": "human",
+        "causation_command_id": null,
+        "correlation_command_id": "01K6C000000000000000000004",
+        "operation": {"name": "cursor.move", "version": 1},
+        "context": {"repo_id": "01K5V8KGD3F6H9J2M4N7Q0R5TW", "clone_id": "01K5V8M0000000000000000001", "worktree_id": "01K5V8M0000000000000000002"},
+        "claim": null,
+        "input": {"target_id": null},
+        "blobs": []
+      },
+      "output": {"previous_target_id": null, "target_id": null, "changed": false},
+      "accepted_events": null,
+      "effects": "none"
+    }
+  },
+  "privacy": {
+    "routine_log_days": 30,
+    "security_audit_days": 90,
+    "restricted_hash_days": 7,
+    "domain_lifetime": ["terminal-receipt-and-hash", "signed-artifact-chain", "owner-attestations", "authority-key-certificates-and-fences", "handoff-and-migration-proofs"],
+    "compactable_after_terminal_audit": ["canonical-command-bytes", "exact-stand-down-reason"],
+    "retain_until_resolution": ["submitted-command-bytes", "outcome-unknown-command-bytes", "pending-journal-command-bytes", "quarantined-command-bytes"],
+    "never_log": ["payload", "reason", "locator", "blob-digest", "grant-or-token", "private-key", "certificate-bytes", "raw-path-or-remote"]
+  },
+  "migration": {
+    "name": "coupling-grouping-binding-and-proof",
+    "coupling_sources": ["batch-run-dispatch", "dependency", "shared-tracker-aggregate", "cursor-target", "causal-correlation-chain", "repo-null-fact"],
+    "unassignable_fact": "migration.refused-unassignable-fact",
+    "component_rule": "users-may-union-never-split",
+    "group": {
+      "correlation_origin": "01K6E000000000000000000001",
+      "command_id": "01K6E000000000000000000001",
+      "environment_id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+      "environment_sequence": 1,
+      "acted_at": "2026-09-22T17:00:00Z",
+      "sort": "first-event-ulid-then-correlation-origin"
+    },
+    "synthetic_binding": {
+      "schema": "wipd.migration-binding/1",
+      "actor": "system:migration",
+      "event": "clone.environment-bound",
+      "position": "after-preserved-legacy-events"
+    },
+    "proof_binds": ["source-store-and-backup", "coupling-audit-and-components", "selected-domain-unions", "group-identities-hashes-and-ranges", "clone-bindings-and-synthetic-range", "destination-prefix-and-blob-closure", "artifact-chain-head", "owner-authorization-and-seal", "rollback-fence"],
+    "rollback_after_destination_submission": "migration.rollback-forbidden"
+  },
+  "implementability": {
+    "m3": ["fresh-domain-owner-epoch", "artifact-and-certificate-registries", "submission-receipt-event-transaction", "claim-and-grant-state", "prefix-blob-snapshot", "handoff-and-migration-proof"],
+    "m4": ["os-peer-singleton", "isolated-path-guard", "per-domain-lane", "environment-sequence-and-journals", "prefix-overlay-receipts", "provenance"],
+    "forbidden_step9_implementation": ["daemon", "listener", "socket", "store", "migration-executor", "cli-cutover", "tracker-wip-outbox-mutation"]
+  }
+}

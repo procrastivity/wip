@@ -7,6 +7,9 @@ digest = tstr .regexp "^sha256:[0-9a-f]{64}$"
 token = tstr
 positive = uint .gt 0
 nullable-ulid = ulid / null
+nonce-128 = bstr .size 16
+ed25519-public-key = bstr .size 32
+ed25519-signature = bstr .size 64
 
 operation = { "name": tstr, "version": positive }
 environment = { "id": ulid, "sequence": positive }
@@ -46,6 +49,19 @@ server-hello = {
 }
 
 matter-create-input = { "title": tstr, "requested_locator": tstr }
+matter-create-v2-output = {
+  "id": ulid,
+  "title": tstr,
+  "requested_locator": tstr,
+  "assigned_locator": tstr,
+  "locator_repair_required": bool
+}
+matter-locator-repair-input = {
+  "matter_id": ulid,
+  "action": "rename" / "accept",
+  "assigned_locator": tstr
+}
+cursor-move-input = { "target_id": nullable-ulid }
 claim-acquire-input = {
   "matter_id": ulid,
   "worktree_id": ulid,
@@ -83,7 +99,8 @@ claim-stand-down-input = {
 }
 command-input = matter-create-input / claim-acquire-input /
                 claim-journal-repair-input / claim-release-input /
-                claim-stand-down-input
+                claim-stand-down-input / matter-locator-repair-input /
+                cursor-move-input
 command = {
   "schema": "wipd.command/1",
   "command_id": ulid,
@@ -137,6 +154,8 @@ terminal-receipt = {
   "result": terminal-result,
   "accepted_events": event-range / null
 }
+; A null accepted_events on result.succeeded is valid only for an operation
+; version that statically declares a deterministic no-op, as closed by Step 9.
 receipt-query = {
   "schema": "wipd.receipt-query/1",
   "domain_id": ulid,
@@ -361,7 +380,216 @@ claim-stand-down = {
   },
   "reason": tstr,
   "acknowledge_unreturned_work_loss": true,
+  "owner_authorization": signed-artifact,
   "deadline": tstr / null
+}
+
+matter-create-v1-output = { "id": ulid, "locator": tstr, "title": tstr }
+matter-locator-repair-required-event = {
+  "requested_locator": tstr,
+  "assigned_locator": tstr
+}
+matter-locator-repaired-event = {
+  "action": "rename" / "accept",
+  "requested_locator": tstr,
+  "previous_locator": tstr,
+  "assigned_locator": tstr
+}
+matter-locator-repair-output = {
+  "id": ulid,
+  "action": "rename" / "accept",
+  "requested_locator": tstr,
+  "previous_locator": tstr,
+  "assigned_locator": tstr
+}
+cursor-move-output = {
+  "previous_target_id": nullable-ulid,
+  "target_id": nullable-ulid,
+  "changed": bool
+}
+cursor-moved-event = cursor-move-output
+
+signed-artifact = {
+  "schema": "wipd.signed-artifact/1",
+  "kind": "portable-receipt" / "claim-grant" / "blob-manifest" /
+          "bundle-manifest" / "authority-relinquishment" /
+          "authority-activation" / "migration-proof" /
+          "authority-artifact-key" / "authority-key-fence" /
+          "owner-attestation" / "enrollment-grant",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "signer_role": "owner" / "authority",
+  "signer_key_id": digest,
+  "key_generation": positive / null,
+  "artifact_sequence": positive / null,
+  "previous_artifact_digest": digest / null,
+  "issued_at": tstr,
+  "payload_schema": tstr,
+  "payload_digest": digest,
+  "payload": bstr,
+  "signature": ed25519-signature
+}
+authority-artifact-key = {
+  "schema": "wipd.authority-artifact-key/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "key_generation": positive,
+  "key_id": digest,
+  "ed25519_public_key": ed25519-public-key,
+  "not_before": tstr,
+  "not_after": tstr
+}
+authority-key-fence = {
+  "schema": "wipd.authority-key-fence/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "key_generation": positive,
+  "key_id": digest,
+  "final_sequence": uint,
+  "final_artifact_digest": digest / null,
+  "effective_at": tstr,
+  "reason_digest": digest
+}
+
+owner-attestation = {
+  "schema": "wipd.owner-attestation/1",
+  "action": "activation-intent" / "planned-handoff" / "disaster-restore" /
+            "claim-stand-down" / "migration-authorize" / "migration-seal",
+  "domain_id": ulid,
+  "current_epoch": positive,
+  "next_epoch": positive / null,
+  "subject_schema": tstr,
+  "subject_digest": digest,
+  "subject": bstr,
+  "nonce": nonce-128,
+  "issued_at": tstr,
+  "expires_at": tstr,
+  "loss_accepted": bool
+}
+activation-intent-subject = {
+  "schema": "wipd.activation-intent-subject/1",
+  "source_authority_spki": digest,
+  "destination_origin": tstr,
+  "destination_authority_spki": digest,
+  "destination_artifact_key_id": digest,
+  "next_epoch": positive
+}
+planned-handoff-subject = {
+  "schema": "wipd.planned-handoff-subject/1",
+  "activation_intent_digest": digest,
+  "source_authority_spki": digest,
+  "destination_origin": tstr,
+  "destination_authority_spki": digest,
+  "destination_artifact_key_id": digest,
+  "bundle_artifact_digest": digest,
+  "relinquishment_artifact_digest": digest,
+  "source_artifact_chain_head": digest
+}
+disaster-restore-subject = {
+  "schema": "wipd.disaster-restore-subject/1",
+  "dead_source_authority_spki": digest,
+  "destination_origin": tstr,
+  "destination_authority_spki": digest,
+  "destination_artifact_key_id": digest,
+  "bundle_or_proof_digest": digest,
+  "recovered_prefix": prefix-anchor,
+  "recovered_artifact_chain_head": digest,
+  "unresolved_old_commands_digest": digest
+}
+claim-stand-down-subject = {
+  "schema": "wipd.claim-stand-down-subject/1",
+  "command_id": ulid,
+  "request_hash": digest,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "owner_environment_id": ulid,
+  "acting_environment_id": ulid,
+  "reason_digest": digest
+}
+migration-authorization-subject = {
+  "schema": "wipd.migration-authorization-subject/1",
+  "migration_id": ulid,
+  "source_store_digest": digest,
+  "coupling_audit_digest": digest,
+  "destination_origin": tstr,
+  "destination_domain_id": ulid,
+  "destination_epoch": positive,
+  "cutover_at": tstr
+}
+migration-seal-subject = {
+  "schema": "wipd.migration-seal-subject/1",
+  "migration_id": ulid,
+  "authorization_artifact_digest": digest,
+  "proof_artifact_digest": digest,
+  "destination_domain_id": ulid,
+  "destination_epoch": positive
+}
+
+enrollment-grant = {
+  "schema": "wipd.enrollment-grant/1",
+  "grant_id": ulid,
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "owner_key_id": digest,
+  "scope": "environment-enroll" / "environment-rotate",
+  "requested_spki_digest": digest,
+  "prior_environment_id": nullable-ulid,
+  "nonce": nonce-128,
+  "issued_at": tstr,
+  "expires_at": tstr
+}
+enrollment-request = {
+  "schema": "wipd.enrollment-request/1",
+  "credential": bstr,
+  "csr_der": bstr,
+  "prior_environment_id": nullable-ulid
+}
+enrollment-issued = {
+  "schema": "wipd.enrollment-issued/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "environment_id": ulid,
+  "owner_key_id": digest,
+  "spki_digest": digest,
+  "certificate_chain_der": [+ bstr]
+}
+
+bundle-entry = {
+  "kind": "canonical-db" / "blob" / "receipt-ledger" /
+          "claim-registry" / "environment-registry" / "artifact-ledger",
+  "logical_name": tstr,
+  "byte_length": uint,
+  "digest": digest,
+  "record_count": uint
+}
+bundle-manifest = {
+  "schema": "wipd.bundle-manifest/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "store_schema": tstr,
+  "prefix": prefix-anchor,
+  "blob_manifest_digest": digest,
+  "artifact_chain_head": digest / null,
+  "entries": [+ bundle-entry]
+}
+authority-relinquishment = {
+  "schema": "wipd.authority-relinquishment/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "bundle_manifest_digest": digest,
+  "artifact_chain_head": digest,
+  "quiesced_at": tstr,
+  "admission_closed": true
+}
+authority-activation = {
+  "schema": "wipd.authority-activation/1",
+  "domain_id": ulid,
+  "previous_epoch": positive,
+  "authority_epoch": positive,
+  "owner_attestation_digest": digest,
+  "installed_bundle_or_proof_digest": digest,
+  "installed_prefix": prefix-anchor,
+  "activated_at": tstr
 }
 
 legacy-event = {
@@ -384,4 +612,52 @@ migration-command = {
   "environment_id": ulid,
   "correlation_origin": ulid,
   "legacy_events": [+ legacy-event]
+}
+migration-binding = {
+  "schema": "wipd.migration-binding/1",
+  "migration_id": ulid,
+  "authority_domain_id": ulid,
+  "environment_id": ulid,
+  "environment_sequence": positive,
+  "acted_at": tstr,
+  "clone_bindings": [+ migration-clone-binding]
+}
+migration-component = {
+  "component_id": ulid,
+  "repo_ids": [+ ulid],
+  "facts_digest": digest
+}
+migration-group-binding = {
+  "correlation_origin": ulid,
+  "environment_id": ulid,
+  "environment_sequence": positive,
+  "acted_at": tstr,
+  "request_hash": digest,
+  "event_range": event-range
+}
+migration-clone-binding = {
+  "clone_id": ulid,
+  "environment_id": ulid
+}
+migration-proof = {
+  "schema": "wipd.migration-proof/1",
+  "migration_id": ulid,
+  "source_store_schema": tstr,
+  "source_store_digest": digest,
+  "source_backup_digest": digest,
+  "source_high_water": prefix-anchor,
+  "coupling_audit_digest": digest,
+  "components": [+ migration-component],
+  "selected_domain_unions": [+ [+ ulid]],
+  "groups": [+ migration-group-binding],
+  "clone_bindings": [* migration-clone-binding],
+  "synthetic_binding_command_id": nullable-ulid,
+  "synthetic_binding_request_hash": digest / null,
+  "synthetic_binding_event_range": event-range / null,
+  "destination_domain_id": ulid,
+  "destination_epoch": positive,
+  "destination_prefix": prefix-anchor,
+  "blob_closure_digest": digest,
+  "artifact_chain_head": digest / null,
+  "rollback_fence": "refuse-after-first-destination-submission"
 }

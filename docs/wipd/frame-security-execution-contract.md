@@ -94,14 +94,15 @@ owner_root_spki: sha256 of the immutable owner-root SubjectPublicKeyInfo
 
 The client validates all of the following: ordinary certificate validity and
 server-auth EKU; hostname SAN against the configured origin; exact SPKI pin;
-and a critical WIP authority binding containing the configured domain ID,
-authority epoch, and owner-root SPKI digest. A DNS match, public CA chain,
+and the Step 9 critical canonical `wipd://authority/...` URI SAN containing the
+configured domain ID, authority epoch, and owner-root SPKI digest. A DNS match,
+public CA chain,
 route name, or profile label cannot replace the pin and binding. Pin or epoch
 change requires an authenticated enrollment/handoff update; it is never
 learned from the failing connection.
 
-The authority requires a client certificate with client-auth EKU and a
-critical Environment binding containing:
+The authority requires a client certificate with client-auth EKU and the Step
+9 critical canonical `wipd://environment/...` URI SAN containing:
 
 ```text
 domain_id, authority_epoch, owner_root_spki, environment_id
@@ -154,9 +155,9 @@ new exchange on a retained connection. Revocation stops new work but never
 rolls back an already submitted command or closes a claim. Promotion to a new
 authority epoch invalidates old-epoch authority and Environment certificates.
 
-Enrollment message schemas, certificate encoding/OIDs, registry persistence,
-and ceremonies are implemented in M3/M5/M6. The bindings and refusal rules
-above are fixed here.
+Step 9 closes enrollment message schemas, standard SAN encoding, one-use
+consumption, and ceremony proofs. Registry persistence and production
+ceremonies are implemented in M3/M5/M6.
 
 ## 3. HTTP and negotiation
 
@@ -428,12 +429,12 @@ following table states every field class explicitly:
 | Actor, acted time, causal/correlation IDs | Vocabulary/shape and later authority rules | Semantic attribution is not authentication | Inside request hash; TLS in transit | Actor omitted by default; IDs/time allowed when needed |
 | Claim ID/epoch, context IDs, blob refs | Authority/domain/claim/schema checks; blob bytes later verified | Exact domain/Environment where required | Inside request hash; TLS in transit | IDs policy-controlled; blob digest/length omitted by default |
 | Protocol/request ID/deadline/frame sequence | Frame validation | Connection and HTTP/2 stream | TLS remotely; OS-authenticated local stream | Request ID, version, byte counts, duration allowed |
-| Results/events/receipts | Later owning schemas validate/assign | Later contracts bind domain/epoch/command | Receipt/event signatures remain Step 5/9 decisions | Stable outcome/problem/range allowed; payload forbidden |
+| Results/events/receipts | Owning schemas validate/assign | Contracts bind domain/epoch/command | Step 9 portable artifacts sign receipts and transfer products, not frames/events | Stable outcome/problem/range allowed; payload forbidden |
 
 No intermediary, log entry, asserted hash, route, or certificate header may
-substitute for these validations. Whether receipts, handoff bundles, manifests,
-or offline journal products receive durable application signatures remains
-with Steps 5–9; this contract does not silently sign or define them.
+substitute for these validations. Step 9's portable artifact signature covers
+receipts, grant descriptors, manifests, and handoff/migration products; it does
+not sign commands, queries, frames, local journals, or authority events.
 
 ## 9. Stable framing/authentication problem boundary
 
@@ -441,7 +442,7 @@ These codes are stable classifications, not terminal command dispositions:
 
 | Code family/examples | Meaning and effect |
 |---|---|
-| `auth.local-peer-mismatch`, `auth.authority-pin-mismatch`, `auth.authority-binding-mismatch`, `auth.environment-certificate-required`, `auth.environment-domain-mismatch`, `auth.environment-revoked`, `auth.grant-invalid`, `auth.grant-consumed` | Authentication/enrollment failed before application admission. No command/query/store effect. Sensitive detail is not returned to an unauthenticated peer. |
+| `auth.local-peer-mismatch`, `auth.authority-pin-mismatch`, `auth.authority-binding-mismatch`, `auth.environment-certificate-required`, `auth.environment-domain-mismatch`, `auth.environment-revoked`, `auth.grant-invalid`, `auth.grant-consumed`, `auth.owner-attestation-invalid` | Authentication/enrollment/owner authorization failed before application admission. No command/query/store effect. Sensitive detail is not returned to an unauthenticated peer. |
 | `protocol.invalid-frame`, `protocol.truncated-frame`, `protocol.frame-too-large`, `protocol.chunk-too-large`, `protocol.stream-too-large`, `protocol.stream-offset`, `protocol.out-of-order`, `protocol.wrong-correlation`, `protocol.unsupported-kind` | Record cannot be safely interpreted under the negotiated protocol. The exchange resets; submission status follows §7 rather than the parser code alone. |
 | `protocol.incompatible-version`, `protocol.invalid-capabilities`, `protocol.malformed-message`, `protocol.unsupported-extension`, `operation.unknown`, `operation.unsupported-version` | Exact Step 3 compatibility outcomes, unchanged by framing. No submission. |
 | `transport.overloaded`, `transport.unavailable`, `transport.cancelled-before-submission`, `transport.deadline-before-submission` | Authenticated handler proves no submission. No terminal receipt is implied. |
@@ -495,7 +496,7 @@ never participate in admission or correctness.
 | Source | Step 4 decision | Trust/recompute/bind/sign/log consequence | Later-owned integration or non-goal |
 |---|---|---|---|
 | **D115 / Q18** | OS credential equality before parsing; owner-only socket; atomic singleton; h2c local profile; no header auth or direct-store path | Peer UID/SID is kernel-bound and not logged as semantic actor; mismatch has no state effect | M4 implements process/socket lifecycle and direct-store isolation |
-| **D117 / Q19** | TLS 1.3 pinned HTTPS, owner/domain/epoch server binding, domain/epoch Environment mTLS, one-use enrollment, renewal/rotation/revocation rules | Cert chains and TLS prove keys; command domain/Environment are independently compared; secrets are never logged | M3 owns registries; M5/M6 implement ceremonies; Step 9 reviews OIDs/rotation and Amp integration |
+| **D117 / Q19** | TLS 1.3 pinned HTTPS, owner/domain/epoch server binding, domain/epoch Environment mTLS, one-use enrollment, renewal/rotation/revocation rules | Cert chains and TLS prove keys; command domain/Environment are independently compared; secrets are never logged | Step 9 fixes canonical URI SANs and ceremonies; M3 owns registries and M5/M6 implement them |
 | **D120 / Q04** | One command per exchange; exact canonical bytes inside a frame; fresh transport request ID per attempt; ordered response on same stream | Authority recomputes hash and resolves metadata; frame fields do not alter identity | Step 5 owns admission/result/receipt; no current CLI change |
 | **D122 / Q04–Q05** | Ordered, bounded record/chunk streams with no implicit replay/reorder | Sequence and contiguous offsets are validated; refusal cannot skip to a suffix | Steps 6–7 define journal return/fold and quarantine; framing alone does not advance a journal |
 | **D123 / Q20–Q21** | Explicit pre-submission no-effect outcomes; post-submission cancellation stops waiting only; ambiguous loss is `outcome-unknown` | Hash remains immutable; no transport event proves rollback; dependent work blocks later | Step 5 fixes durable submission, idempotency, terminal receipts, and same-ID retry |
@@ -503,7 +504,7 @@ never participate in admission or correctness.
 | **D128 / Q04–Q05** | HTTP/2 multiplexing with per-stream order, bounded flow control, and no command ordering inferred from stream order | Per-domain scheduler, not framing, serializes pull/return/write; limits prevent resource admission by assertion | Step 6 defines pull/return/snapshot/reseed content and preservation |
 | **D131 / Q23** | Structured allowlist logs, payload/secret redaction, bounded retention, metrics excluded from correctness | Verified identities/outcomes may be logged; sensitive IDs/hashes require restricted policy | Step 6 adds provenance fields; Step 8 adds redaction checks; Step 9 performs privacy/security review |
 | **Q05** | Fixed prefix, deterministic CBOR body, hard parser ceilings, declared bounded streams, HTTP/2 backpressure | Length checked before allocation; malformed/oversized input has no semantic effect | Step 8 adds independent parsers and fuzz/property suites |
-| **Q24** | Recompute semantic hashes/definitions; bind domain/epoch/Environment to OS/mTLS identity; TLS/cert signatures only; no app request signature | Classification is explicit in §8; logs are a separate projection | Durable receipt/manifest/bundle signing is deliberately unresolved for Steps 5–9 |
+| **Q24** | Recompute semantic hashes/definitions; bind domain/epoch/Environment to OS/mTLS identity; no app request signature | Classification is explicit in §8; logs are a separate projection | Step 9's portable product signatures are separate from requests and frames |
 
 ## 12. Deterministic vectors and later boundaries
 
@@ -525,9 +526,9 @@ This step deliberately leaves these contracts to their owners:
   and stand-down proof.
 - **Step 8:** standalone schemas, all accepted/refusal/retry/read/blob/claim
   vectors, independent client/server doubles, parser fuzzing, and properties.
-- **Step 9:** final security/privacy review, certificate OIDs/algorithms,
-  operational retention policy, durable product signatures, and cross-contract
-  consistency.
+- **Step 9:** `design-security-privacy-review.md` closes certificate binding,
+  operational retention, durable product signatures, owner ceremonies, and
+  cross-contract consistency.
 
 There is no production daemon, socket listener, certificate issuer, store
 change, fresh authority state, migration, M3/M4 code, or current CLI behavior in

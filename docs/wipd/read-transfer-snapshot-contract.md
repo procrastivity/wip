@@ -423,10 +423,15 @@ contract defines no repair control message and never permits skipping the
 head. A receipt replay still goes through the same prefix/receipt installation
 check and does not execute again.
 
-This ordering also fixes D125's integration point: an Environment cursor
-command targeting a provisional object follows that object's birth in the
-same provisional stream by Environment sequence. It cannot be returned,
-folded, or read as folded before the birth receipt and event range install.
+**Step 9 amendment:** D125's provisional-target ordering does not change the
+cursor command's static `environment` delivery or Worktree ordering key. The
+cursor command names the provisional birth as causation, has a greater
+Environment sequence, and remains in its Worktree environment journal. The
+return scheduler treats the birth receipt as an eligibility dependency: the
+cursor cannot be returned, folded, or read as folded before that receipt and
+event range install, and birth refusal quarantines the dependent cursor. This
+is “ordered behind the provisional stream,” not membership in a mixed-delivery
+journal, preserving D120's newborn-subtree-only provisional footprint.
 
 ## 7. Blob upload, cache promotion, and hydration
 

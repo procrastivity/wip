@@ -1,10 +1,11 @@
-# M2 Step 8: published conformance package
+# M2 Steps 8–9: published conformance package and seal
 
-Status: published test-only conformance package for M2 Steps 1–7. It adds no
+Status: published test-only conformance package for M2 Steps 1–9. The Step 9
+independent review is complete and M2 is sealed for M3/M4. This package adds no
 daemon, listener, socket, authority store, migration executor, fresh authority
 state, or current CLI behavior. The key words **MUST**, **MUST NOT**, **SHOULD**,
 and **MAY** retain the meanings fixed by the owning Step 1–7 contracts; this
-package does not revise them.
+package carries only the narrow Step 9 amendments named below.
 
 ## Package products
 
@@ -13,9 +14,12 @@ The package consists of:
 - `conformance-schemas.cddl`, the standalone closed CDDL catalogue for the
   protocol-1 frame and logical command, compatibility, receipt, read,
   transfer, blob, claim, and migration messages;
-- `conformance-vectors.json`, the deterministic index that binds all four
-  prior vector files by SHA-256, publishes eight cross-implementation scripts,
-  enumerates V01–V22, and maps D115–D131 plus Q01–Q25;
+- `conformance-vectors.json`, the deterministic index that binds all five
+  vector files by SHA-256, publishes eight cross-implementation scripts,
+  enumerates V01–V22, maps D115–D131 plus Q01–Q25, and binds the Step 9 seal;
+- `design-security-privacy-review.md` and its vectors, the normative independent
+  security/privacy/M3–M4 implementability review and portable-signature golden
+  product;
 - `internal/protocol/conformance`, an all-`_test.go` package containing
   independent client/server doubles, independent canonical/frame codecs,
   independent incremental/reference parsers, bounded properties, and fuzz
@@ -101,22 +105,22 @@ the previously prose-only deterministic evidence for:
   deterministic sequence, and rollback refusal.
 
 The index has exactly one nonempty entry for each D115–D131 and Q01–Q25 key.
-That mapping means “covered by the cited schema, vector, property, or explicit
-review deferral”; it does not claim that M3/M4 production behavior exists.
+That mapping means “covered by the cited schema, vector, property, or completed
+review”; it does not claim that M3/M4 production behavior exists.
 
-## Deliberate Step 9 review boundary
+## Step 9 review and seal
 
-The index records rather than closes these Step 9 items:
+`design-security-privacy-review.md` closes every former Step 9 deferral. It
+corrects V15's extra locator separator and versions collision success as
+`matter.create@v2` without reinterpreting v1; resolves V16 as an Environment
+journal with an explicit provisional-birth dependency; fixes D127
+event/output/cursor shapes and D130 grouping/binding proof; defines portable
+Ed25519 products and owner ceremonies; closes certificate lifecycle and privacy
+retention; and records M3/M4 atomic-state obligations without implementing them.
 
-- final D115–D131 cross-contract and M3/M4 implementability review;
-- portable receipt, grant, and bundle signatures;
-- owner-attested handoff, restore, and stand-down ceremonies;
-- enrollment, renewal, rotation, and revocation security review;
-- final log/digest/identifier retention, access, and privacy review;
-- D127's final event/output shape and the cursor operation/event schema; and
-- D130 grouping audit, synthetic migration binding, and proof review.
-
-No inconsistency requiring a change to a prior normative contract was found.
-The CDDL transcribes those contracts; if a future implementation differs, the
-owning contract and a newly versioned conformance product must resolve the
-difference rather than weakening a vector.
+The only Step 5 amendment permits a null successful event range for an exact
+operation-version-declared deterministic no-op with no effects. Existing V01's
+effectful success remains nonempty, and the cursor no-op vector proves the
+narrow exception. `deferred_step9` is empty, every exit's `step9_review` is
+empty, and `step9_seal` binds the normative review digest. There are no
+unresolved findings. **M2 is sealed for M3 and M4.**

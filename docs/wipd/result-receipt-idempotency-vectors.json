@@ -8,8 +8,8 @@
       "protocol_outcome": "terminal",
       "output": "required",
       "problem_prefixes": [],
-      "accepted_events": "required-nonempty",
-      "effects": "events-projections-receipt-atomic"
+      "accepted_events": "required-nonempty-or-declared-noop-null",
+      "effects": "events-projections-receipt-atomic-or-declared-noop"
     },
     {
       "result_code": "result.rejected",
@@ -70,6 +70,28 @@
         "last_event_id": "01K6E000000000000000000002",
         "event_count": 2
       }
+    },
+    "successful_noop": {
+      "schema": "wipd.terminal-receipt/1",
+      "domain_id": "01K5V8K1Q5VX6Y0J8C9W3M4N5P",
+      "authority_epoch": 7,
+      "identity_schema": "wipd.command/1",
+      "command_id": "01K6C000000000000000000004",
+      "request_hash": "sha256:3ee068e7820103b28e3526d579135a83882047f2db9b6a2809614bf7e61e8aa8",
+      "operation": {
+        "name": "cursor.move",
+        "version": 1
+      },
+      "environment": {
+        "id": "01K5V8K8A4J2N7R9T0V3X6Y8ZB",
+        "sequence": 71
+      },
+      "result": {
+        "code": "result.succeeded",
+        "output_cbor_hex": "a3676368616e676564f4697461726765745f6964f67270726576696f75735f7461726765745f6964f6",
+        "problem_code": null
+      },
+      "accepted_events": null
     },
     "rejected": {
       "schema": "wipd.terminal-receipt/1",
@@ -134,6 +156,26 @@
         "semantic_executions": 1,
         "receipt": "accepted",
         "effects": "two-events-projections-and-receipt-atomic",
+        "dependent_state": "released-for-fresh-revalidation"
+      },
+      "recovery": null
+    },
+    {
+      "name": "declared-successful-noop",
+      "command_id": "01K6C000000000000000000004",
+      "request_hash": "sha256:3ee068e7820103b28e3526d579135a83882047f2db9b6a2809614bf7e61e8aa8",
+      "events": [
+        "submission.committed",
+        "semantic.noop-proved",
+        "terminal.committed"
+      ],
+      "expected": {
+        "outcome": "terminal",
+        "code": "result.succeeded",
+        "submission_known": true,
+        "semantic_executions": 1,
+        "receipt": "successful_noop",
+        "effects": "declared-noop-receipt-only",
         "dependent_state": "released-for-fresh-revalidation"
       },
       "recovery": null

@@ -289,6 +289,7 @@
       {
         "name": "wrong-epoch",
         "presented_epoch": 2,
+        "owner_authorization_present": true,
         "reason_present": true,
         "loss_acknowledgment_present": true,
         "loss_acknowledgment": true,
@@ -299,6 +300,7 @@
       {
         "name": "missing-reason",
         "presented_epoch": 3,
+        "owner_authorization_present": true,
         "reason_present": false,
         "loss_acknowledgment_present": true,
         "loss_acknowledgment": true,
@@ -309,6 +311,7 @@
       {
         "name": "loss-not-acknowledged",
         "presented_epoch": 3,
+        "owner_authorization_present": true,
         "reason_present": true,
         "loss_acknowledgment_present": true,
         "loss_acknowledgment": false,
@@ -319,6 +322,7 @@
       {
         "name": "accepted-loss-close",
         "presented_epoch": 3,
+        "owner_authorization_present": true,
         "reason_present": true,
         "loss_acknowledgment_present": true,
         "loss_acknowledgment": true,
@@ -331,7 +335,8 @@
       "owner-environment",
       "acting-environment",
       "exact-claim-and-epoch",
-      "restricted-reason",
+      "owner-attestation",
+      "reason-digest",
       "accepted-loss-acknowledgment",
       "dispatch-close"
     ],

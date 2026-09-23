@@ -27,7 +27,7 @@ Within `terminal`, the exact M1 result maps as follows:
 
 | M1 result | Receipt fields | Effects |
 |---|---|---|
-| `result.succeeded` | Typed deterministic output, no problem, nonempty accepted event range | Events, projections, and receipt commit atomically. |
+| `result.succeeded` | Typed deterministic output, no problem, and normally a nonempty accepted event range | Events, projections, and receipt commit atomically. Step 9 permits a null range only for an operation-version-declared deterministic no-op. |
 | `result.rejected` | No output, one `operation.*`, `validation.*`, or `not-found.*` problem code, null event range | Receipt only; no model or external effect. |
 | `result.refused` | No output, one `refusal.*` problem code, null event range | Receipt only; no model or external effect. |
 | `result.failed` | No output, one `internal.*` problem code, null event range | Receipt only; no model or external effect. It is terminal only if the authority can durably commit this no-effect receipt. |
@@ -143,19 +143,27 @@ No other command's event may interleave in that range. `event_count` MUST equal
 the number of events from `first_event_id` through `last_event_id` in authority
 fold order, and every event in that interval MUST name this command ID/hash.
 
+**Step 9 amendment:** an exact operation version MAY statically declare one or
+more deterministic no-op outcomes. Only such an outcome may commit
+`result.succeeded` with its declared typed output and `accepted_events: null`.
+The same terminal transaction MUST prove that it appended no event, changed no
+projection, promoted no blob, and performed no external effect. This exception
+cannot be inferred dynamically from an empty handler result, and it does not
+alter the nonempty range required for every effectful success. It preserves
+idempotent user-visible success without inventing a domain event.
+
 For `result.rejected`, `result.refused`, and `result.failed`, one transaction
 persists the receipt and marks the submission terminal while appending no event,
 changing no projection, promoting no staged blob, and performing no external
 effect. `accepted_events` and `output` are null. A refused or failed transaction
 that cannot prove this no-effect rule cannot commit that disposition.
 
-Protocol major 1 adds no application signature to an individual receipt. A
-receipt is authenticated in transit by the Step 4 OS-peer or TLS/mTLS channel,
-validated against its command/hash and event range, and protected at rest as
-authority data. Step 6 handoff/backup integrity protects the containing bundle;
-Step 9 may introduce a new negotiated receipt schema if durable portable
-signatures are required. A signature cannot replace hash recomputation or event
-range validation.
+The logical receipt above and its command identity remain unchanged. Step 9
+requires the authority to atomically produce a portable
+`wipd.signed-artifact/1` wrapper around it. Live exchanges still require the
+Step 4 OS-peer or TLS/mTLS channel; the wrapper provides independent durable
+verification after transfer or handoff. A signature cannot replace hash
+recomputation or event-range/no-effect validation.
 
 ## 4. Retry and command-ID uniqueness
 
@@ -289,6 +297,10 @@ event-range IDs/count. Full request hashes remain restricted diagnostic/audit
 data under Step 4. Receipt output, problem messages, command bytes, arguments,
 locators, event payloads, credentials, and secrets MUST NOT be logged. Metrics
 never establish submission, terminality, idempotency, or a receipt barrier.
+After terminal resolution, Step 9 permits canonical command-byte compaction
+only when the receipt, hash, typed output, event/reconstruction evidence, and
+all recovery obligations remain durable. Nonterminal and quarantined command
+bytes are retained until resolved or explicitly repaired.
 
 ## 8. Deterministic vectors
 
@@ -319,7 +331,7 @@ client/server doubles, fuzzing, and cross-implementation agreement (Q25).
 | **D130** | Migration evidence uses the same unique command-ID/hash and exact accepted-range invariant without masquerading as an M1 receipt. | Steps 6/9 define the migration-specific envelope, transfer, and proof. |
 | **D131** | Receipt/outcome logging is allowlisted and metrics are nonauthoritative. | Steps 6/9 complete provenance and privacy review. |
 | **Q20–Q21** | Pre-submission cancellation has no receipt/effect; post-submission cancellation stops waiting only and may yield `outcome-unknown`. | Step 7 applies the same rule to journal/claim lifecycle messages. |
-| **Q24** | Authority recomputes hash/range, binds authenticated identity, assigns events/epoch, and does not application-sign protocol-1 receipts. | Step 9 may version a portable signed artifact; it cannot weaken recomputation. |
+| **Q24** | Authority recomputes hash/range or declared no-effect, binds authenticated identity, and assigns events/epoch. | Step 9's separate portable signed-artifact wrapper cannot weaken recomputation. |
 | **Q25** | Step 5 publishes deterministic logical vectors and validators. | Step 8 publishes independent wire/schema conformance. |
 
 The exact Step 6 seed/pull/return/blob/read schemas and Step 7

@@ -30,6 +30,7 @@ type conformanceFixture struct {
 	DecisionCoverage map[string][]string `json:"decision_coverage"`
 	QuestionCoverage map[string][]string `json:"question_coverage"`
 	DeferredStep9    []string            `json:"deferred_step9"`
+	Step9Seal        step9Seal           `json:"step9_seal"`
 }
 
 type sourceVector struct {
@@ -39,11 +40,20 @@ type sourceVector struct {
 }
 
 type canonicalVector struct {
-	Name        string `json:"name"`
-	Source      string `json:"source"`
-	Schema      string `json:"schema"`
-	RequestHash string `json:"request_hash"`
-	BodySHA256  string `json:"body_sha256"`
+	Name           string `json:"name"`
+	Source         string `json:"source"`
+	Schema         string `json:"schema"`
+	RequestHash    string `json:"request_hash"`
+	BodySHA256     string `json:"body_sha256"`
+	ArtifactDigest string `json:"artifact_digest"`
+}
+
+type step9Seal struct {
+	Status             string   `json:"status"`
+	Review             string   `json:"review"`
+	ReviewSHA256       string   `json:"review_sha256"`
+	Vectors            string   `json:"vectors"`
+	UnresolvedFindings []string `json:"unresolved_findings"`
 }
 
 type agreementVector struct {
@@ -117,8 +127,8 @@ func TestPublishedPackageIsCompleteAndSelfConsistent(t *testing.T) {
 		t.Fatalf("package header = %q / %q", fixture.Notation, fixture.ProtocolSchema)
 	}
 
-	if len(fixture.SourceVectors) != 4 {
-		t.Fatalf("source vector count = %d, want 4", len(fixture.SourceVectors))
+	if len(fixture.SourceVectors) != 5 {
+		t.Fatalf("source vector count = %d, want 5", len(fixture.SourceVectors))
 	}
 	for _, source := range fixture.SourceVectors {
 		path := filepath.Join("../../..", source.Path)
@@ -170,17 +180,29 @@ func TestPublishedPackageIsCompleteAndSelfConsistent(t *testing.T) {
 		if exit.Family == "" || exit.Title == "" || len(exit.Sources) == 0 || len(exit.Assertions) == 0 {
 			t.Errorf("exit %s is incomplete: %#v", exit.ID, exit)
 		}
+		if len(exit.Step9Review) != 0 {
+			t.Errorf("exit %s still has Step 9 deferrals: %v", exit.ID, exit.Step9Review)
+		}
 	}
 
 	assertCoverageRange(t, fixture.DecisionCoverage, "D", 115, 131)
 	assertCoverageRange(t, fixture.QuestionCoverage, "Q", 1, 25)
-	if len(fixture.DeferredStep9) == 0 {
-		t.Fatal("Step 9 review set is empty")
+	if len(fixture.DeferredStep9) != 0 {
+		t.Fatalf("Step 9 review still has deferrals: %v", fixture.DeferredStep9)
 	}
-	for _, item := range fixture.DeferredStep9 {
-		if strings.TrimSpace(item) == "" {
-			t.Fatal("Step 9 review set contains an empty item")
-		}
+	if fixture.Step9Seal.Status != "sealed-for-m3-m4" ||
+		fixture.Step9Seal.Review != "docs/wipd/design-security-privacy-review.md" ||
+		fixture.Step9Seal.Vectors != "docs/wipd/design-security-privacy-vectors.json" ||
+		len(fixture.Step9Seal.UnresolvedFindings) != 0 {
+		t.Fatalf("Step 9 seal = %#v", fixture.Step9Seal)
+	}
+	review, err := os.ReadFile(filepath.Join("../../..", fixture.Step9Seal.Review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDigest := sha256.Sum256(review)
+	if got := hex.EncodeToString(reviewDigest[:]); got != fixture.Step9Seal.ReviewSHA256 {
+		t.Fatalf("Step 9 review digest = %s, want %s", got, fixture.Step9Seal.ReviewSHA256)
 	}
 }
 
@@ -200,7 +222,10 @@ func TestPublishedCDDLNamesEveryConformanceSchema(t *testing.T) {
 		"fold-result = {", "reseed-required = {",
 		"claim-acquire = {", "claim-grant-start = {", "claim-grant-end = {",
 		"journal-barrier = {", "claim-release = {", "claim-stand-down = {",
-		"legacy-event = {", "migration-command = {",
+		"matter-create-v1-output = {", "cursor-move-output = {", "signed-artifact = {",
+		"authority-artifact-key = {", "owner-attestation = {", "enrollment-grant = {",
+		"bundle-manifest = {", "authority-activation = {", "legacy-event = {",
+		"migration-command = {", "migration-proof = {",
 	} {
 		if !strings.Contains(string(data), declaration) {
 			t.Errorf("CDDL does not declare %q", declaration)
@@ -258,6 +283,14 @@ func TestPublishedCanonicalProductDigests(t *testing.T) {
 		t.Fatalf("decode page-token canonical product: %v", err)
 	}
 	assertHexDigest(t, "pinned-page-token", readSource.Pagination.Payload, want["pinned-page-token"].BodySHA256)
+
+	signed := loadStep9Fixture(t).PortableSignature
+	if product, ok := want["portable-receipt-signature"]; !ok ||
+		product.Schema != "wipd.signed-artifact/1" ||
+		product.Source != "docs/wipd/design-security-privacy-vectors.json#/portable_signature" ||
+		product.ArtifactDigest != signed.ArtifactDigest {
+		t.Fatalf("portable receipt canonical product not bound to reviewed vector: %#v", product)
+	}
 }
 
 func TestNegativeSecurityAndRecoveryCorpusIsExplicit(t *testing.T) {

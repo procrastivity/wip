@@ -10,7 +10,7 @@
     {
       "path": "docs/wipd/result-receipt-idempotency-vectors.json",
       "notation": "wipd.result-receipt-vector/1",
-      "sha256": "d8b07e79dc75af6013108cc31abfbab623cf48ecb5484db86a283c76fe05f52e"
+      "sha256": "1c904ec1700bc98718ad5d116d59e99f20dcf09cb73704799d66248edb1e005b"
     },
     {
       "path": "docs/wipd/read-transfer-snapshot-vectors.json",
@@ -20,7 +20,12 @@
     {
       "path": "docs/wipd/claim-lifecycle-vectors.json",
       "notation": "wipd.claim-lifecycle-vector/1",
-      "sha256": "5fd638a7a0a1255d851a24ec3fb8f4da97e915f477396c4c09737778fede1419"
+      "sha256": "d67315ca3f20ca8e2a676670527b1da68e4234df16e09e88c87ece85a11ae589"
+    },
+    {
+      "path": "docs/wipd/design-security-privacy-vectors.json",
+      "notation": "wipd.design-security-privacy-vector/1",
+      "sha256": "35418c78a66d9371c3d59fc135ea758831bf36bb8514e9dcd87e3b1e80fa6e1a"
     }
   ],
   "canonical_vectors": [
@@ -47,6 +52,12 @@
       "source": "docs/wipd/conformance-vectors.json#/migration_vector",
       "schema": "wipd.migration-command/1",
       "request_hash": "sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab"
+    },
+    {
+      "name": "portable-receipt-signature",
+      "source": "docs/wipd/design-security-privacy-vectors.json#/portable_signature",
+      "schema": "wipd.signed-artifact/1",
+      "artifact_digest": "sha256:47a343b7fd0f886ac9b1e51796f2d41a5fb56e3ae42414275609a523a982ef0e"
     }
   ],
   "agreement_vectors": [
@@ -159,25 +170,25 @@
     {"id": "V11", "family": "claim cycle", "title": "seed lazy hydration and claim pin", "sources": ["read-transfer-snapshot-vectors.json#/seed", "read-transfer-snapshot-vectors.json#/hydration", "claim-lifecycle-vectors.json#/hydration"], "assertions": ["prefix and manifest complete", "claim blocked until durable verified pin"], "step9_review": []},
     {"id": "V12", "family": "claim cycle", "title": "claim acquire return fold release", "sources": ["claim-lifecycle-vectors.json#/acquire_grant", "claim-lifecycle-vectors.json#/claim_command", "claim-lifecycle-vectors.json#/release"], "assertions": ["one Matter exclusion", "contiguous journal", "terminal receipt release barrier", "old epoch fenced"], "step9_review": []},
     {"id": "V13", "family": "claim cycle", "title": "claim contention and footprint refusal", "sources": ["claim-lifecycle-vectors.json#/acquire_refusals"], "assertions": ["local lock grants no authority", "cross-Matter and aggregate footprints refuse"], "step9_review": []},
-    {"id": "V14", "family": "claim cycle", "title": "cross-Environment stand-down", "sources": ["claim-lifecycle-vectors.json#/stand_down"], "assertions": ["wrong epoch refuses", "reason mandatory", "loss acknowledgment mandatory", "accepted close fences old epoch"], "step9_review": ["owner-attestation ceremony"]},
-    {"id": "V15", "family": "accepted command", "title": "provisional locator collision", "sources": ["conformance-vectors.json#/exits/V15"], "assertions": ["requested=alpha", "assigned=alpha--01K6M0", "identity=01K6M000000000000000000015", "locator-repair-required=true", "only authority rename or explicit accept clears repair"], "step9_review": ["final event and M1 DTO shape"]},
-    {"id": "V16", "family": "accepted command", "title": "Environment cursor move to provisional target", "sources": ["conformance-vectors.json#/exits/V16"], "assertions": ["worktree=01K5V8KGD3F6H9J2M4N7Q0R5TW", "environment-sequence=71", "target=01K6M000000000000000000016", "target-state=provisional", "target birth precedes cursor move in same stream"], "step9_review": ["cursor operation/event schema"]},
+    {"id": "V14", "family": "claim cycle", "title": "cross-Environment stand-down", "sources": ["claim-lifecycle-vectors.json#/stand_down", "design-security-privacy-vectors.json#/owner_ceremonies/2"], "assertions": ["wrong epoch refuses", "reason mandatory", "loss acknowledgment mandatory", "owner attestation binds exact command claim environments reason digest and loss", "accepted close consumes nonce and fences old epoch"], "step9_review": []},
+    {"id": "V15", "family": "accepted command", "title": "provisional locator collision", "sources": ["design-security-privacy-vectors.json#/d127/locator_collision"], "assertions": ["matter.create@v2 collision succeeds while v1 remains unchanged", "requested=alpha", "assigned=alpha-01K6M0", "identity=01K6M000000000000000000015", "matter.created precedes repair-required event in one range", "v2 output binds requested assigned and repair-required", "only authority rename or explicit accept clears repair"], "step9_review": []},
+    {"id": "V16", "family": "accepted command", "title": "Environment cursor move to provisional target", "sources": ["design-security-privacy-vectors.json#/d127/cursor_provisional_target", "design-security-privacy-vectors.json#/d127/cursor_noop"], "assertions": ["worktree=01K5V8KGD3F6H9J2M4N7Q0R5TW", "delivery=environment", "environment-sequence=71", "target=01K6M000000000000000000016", "target birth is explicit eligibility dependency", "birth refusal quarantines cursor", "declared unchanged target succeeds with null range and no effect"], "step9_review": []},
     {"id": "V17", "family": "claim cycle", "title": "return refusal quarantine and repair", "sources": ["read-transfer-snapshot-vectors.json#/pull_with_pending", "read-transfer-snapshot-vectors.json#/return_refusal", "claim-lifecycle-vectors.json#/return_refusal_and_repair"], "assertions": ["eligible return precedes pull", "refused head stops suffix", "replace uses new identity", "abandon needs safe proof"], "step9_review": []},
     {"id": "V18", "family": "incompatible versions/reseed", "title": "incompatible protocol operation and compatible reseed", "sources": ["version-compatibility-contract.md#V18-A", "version-compatibility-contract.md#V18-B", "read-transfer-snapshot-vectors.json#/reseed"], "assertions": ["major 2 versus 1 is protocol.incompatible-version", "matter.create@v2 is operation.unsupported-version", "reseed preserves journal receipts staged blobs and local evidence byte-for-byte"], "step9_review": []},
-    {"id": "V19", "family": "refusal", "title": "local and remote trust refusal", "sources": ["frame-security-execution-vectors.json#/security_vectors"], "assertions": ["OS peer mismatch closes before parse", "wrong pin owner domain revocation and grant reuse refuse without state effect", "application signature cannot replace mTLS"], "step9_review": ["certificate and grant ceremony review"]},
-    {"id": "V20", "family": "incompatible versions/reseed", "title": "handoff and disaster restore", "sources": ["claim-lifecycle-vectors.json#/handoff_promotion", "conformance-vectors.json#/exits/V20"], "assertions": ["active claim blocks planned handoff", "conflicting prefix=transfer.prefix-mismatch", "missing blob=transfer.incomplete-closure", "old unresolved command=never-execute-after-promotion", "ahead client=store.history-regressed", "promotion epoch=8 fences epoch=7"], "step9_review": ["owner attestation", "portable bundle signature", "activation ceremony"]},
-    {"id": "V21", "family": "accepted command", "title": "deterministic legacy migration", "sources": ["conformance-vectors.json#/migration_vector"], "assertions": ["command ID equals correlation origin", "group ordering follows preserved event ULIDs", "request_hash=sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab", "rollback after new write=migration.rollback-forbidden"], "step9_review": ["grouping audit", "migration binding proof"]},
-    {"id": "V22", "family": "read snapshot", "title": "redacted observability and provenance", "sources": ["frame-security-execution-vectors.json#/redaction_vectors", "read-transfer-snapshot-vectors.json#/read_snapshot"], "assertions": ["payload secrets hashes tokens and blob IDs absent from routine log", "reachability and as-of never guessed", "metrics never authorize correctness"], "step9_review": ["final privacy retention and access review"]}
+    {"id": "V19", "family": "refusal", "title": "local and remote trust refusal", "sources": ["frame-security-execution-vectors.json#/security_vectors", "design-security-privacy-vectors.json#/certificate_security", "design-security-privacy-vectors.json#/portable_signature"], "assertions": ["OS peer mismatch closes before parse", "wrong pin owner domain revocation and grant reuse refuse without state effect", "critical canonical URI SAN bindings are exact", "portable product signature cannot replace mTLS", "covered-field signature mutation refuses"], "step9_review": []},
+    {"id": "V20", "family": "incompatible versions/reseed", "title": "handoff and disaster restore", "sources": ["claim-lifecycle-vectors.json#/handoff_promotion", "design-security-privacy-vectors.json#/owner_ceremonies/0", "design-security-privacy-vectors.json#/owner_ceremonies/1"], "assertions": ["active claim blocks planned handoff", "conflicting prefix=transfer.prefix-mismatch", "missing blob=transfer.incomplete-closure", "source signature and owner attestation bind complete planned handoff", "owner death/loss attestation binds restore high-water", "old unresolved command=never-execute-after-promotion", "ahead client=store.history-regressed", "promotion epoch=8 fences epoch=7"], "step9_review": []},
+    {"id": "V21", "family": "accepted command", "title": "deterministic legacy migration", "sources": ["conformance-vectors.json#/migration_vector", "design-security-privacy-vectors.json#/migration"], "assertions": ["all native coupling and Repo-null facts audited", "unassignable facts refuse", "users may union but never split components", "command ID equals correlation origin", "group ordering follows first preserved event ULID", "acted_at equals origin occurred_at", "request_hash=sha256:9e274ba5f36c34285b058d1e6fee55374e8aab6dfd39ec6ccd6ba9e1468d6dab", "synthetic clone binding and signed proof bind destination", "rollback after new write=migration.rollback-forbidden"], "step9_review": []},
+    {"id": "V22", "family": "read snapshot", "title": "redacted observability and provenance", "sources": ["frame-security-execution-vectors.json#/redaction_vectors", "read-transfer-snapshot-vectors.json#/read_snapshot", "design-security-privacy-vectors.json#/privacy"], "assertions": ["payload secrets hashes tokens and blob IDs absent from routine log", "reachability and as-of never guessed", "metrics never authorize correctness", "durable correctness retention is separate from logs", "terminal payloads compact only after recovery obligations end", "unresolved payloads remain until resolution"], "step9_review": []}
   ],
   "decision_coverage": {
-    "D115": ["V18", "V19"], "D116": ["V13", "V20"], "D117": ["V19"],
+    "D115": ["V18", "V19"], "D116": ["V13", "V20"], "D117": ["V19", "portable/receipt-signature"],
     "D118": ["V19"], "D119": ["V08", "V10", "V11", "V20"],
     "D120": ["V01", "V02", "V03", "V05", "V15", "V16"],
     "D121": ["V11", "V12", "V13"], "D122": ["V12", "V17"],
-    "D123": ["V01", "V03", "V04", "V05", "V07", "V10", "V12"],
+    "D123": ["V01", "V03", "V04", "V05", "V07", "V10", "V12", "V16"],
     "D124": ["V01", "V08", "V21"], "D125": ["V16"], "D126": ["V12", "V14"],
     "D127": ["V15"], "D128": ["V08", "V09", "V17", "V18"],
-    "D129": ["V07", "V20"], "D130": ["V21"], "D131": ["V08", "V22"]
+    "D129": ["V07", "V20", "portable/receipt-signature"], "D130": ["V21"], "D131": ["V08", "V22"]
   },
   "question_coverage": {
     "Q01": ["canonical/matter-create-v1-origin"], "Q02": ["property/hash-identity"],
@@ -188,17 +199,16 @@
     "Q17": ["V12", "V14"], "Q18": ["V19"], "Q19": ["V19"],
     "Q20": ["frame-security-execution-vectors.json#/execution_vectors"],
     "Q21": ["V07", "claim-lifecycle-vectors.json#/cancellation"], "Q22": ["V18"],
-    "Q23": ["V22", "deferred/final-privacy-review"],
-    "Q24": ["canonical/matter-create-v1-origin", "V19", "deferred/portable-signatures"],
+    "Q23": ["V22", "review/final-privacy-retention"],
+    "Q24": ["canonical/matter-create-v1-origin", "V19", "portable/receipt-signature"],
     "Q25": ["agreement/all-eight-families", "V01-V22"]
   },
-  "deferred_step9": [
-    "final D115-D131 cross-contract and M3/M4 implementability review",
-    "portable receipt grant and bundle signature decision",
-    "owner attestation handoff restore and stand-down ceremonies",
-    "certificate enrollment renewal rotation and revocation security review",
-    "final payload digest identifier retention access and privacy review",
-    "D127 final event/output shape and cursor operation/event schema",
-    "D130 grouping audit synthetic binding and migration proof"
-  ]
+  "deferred_step9": [],
+  "step9_seal": {
+    "status": "sealed-for-m3-m4",
+    "review": "docs/wipd/design-security-privacy-review.md",
+    "review_sha256": "376929fbad1fa23f7c3c8c3e071f3ce55541e961242fb32495bcf5357a8621fc",
+    "vectors": "docs/wipd/design-security-privacy-vectors.json",
+    "unresolved_findings": []
+  }
 }

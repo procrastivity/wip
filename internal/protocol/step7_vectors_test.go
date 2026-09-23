@@ -210,6 +210,7 @@ type step7StandDown struct {
 type step7StandDownAttempt struct {
 	Name                      string  `json:"name"`
 	PresentedEpoch            uint64  `json:"presented_epoch"`
+	OwnerAuthorizationPresent bool    `json:"owner_authorization_present"`
 	ReasonPresent             bool    `json:"reason_present"`
 	LossAcknowledgmentPresent bool    `json:"loss_acknowledgment_present"`
 	LossAcknowledgment        bool    `json:"loss_acknowledgment"`
@@ -465,6 +466,8 @@ func TestStep7ReleaseStandDownAndPromotionFencing(t *testing.T) {
 	accepted := attempts["accepted-loss-close"]
 	if wrong.PresentedEpoch == standDown.ClaimEpoch || wrong.Result != "result.refused" ||
 		wrong.ProblemCode == nil || *wrong.ProblemCode != "refusal.claim-stand-down-fenced" ||
+		!wrong.OwnerAuthorizationPresent || !missing.OwnerAuthorizationPresent ||
+		!noLoss.OwnerAuthorizationPresent || !accepted.OwnerAuthorizationPresent ||
 		missing.ReasonPresent || missing.Result != "no-submission" || missing.ProblemCode == nil ||
 		*missing.ProblemCode != "protocol.malformed-message" ||
 		!noLoss.LossAcknowledgmentPresent || noLoss.LossAcknowledgment || noLoss.ProblemCode == nil ||
@@ -473,6 +476,8 @@ func TestStep7ReleaseStandDownAndPromotionFencing(t *testing.T) {
 		accepted.ProblemCode != nil || accepted.ClaimStateAfter != "closed-epoch-3-invalid" ||
 		!contains(standDown.SuccessRecords, "owner-environment") ||
 		!contains(standDown.SuccessRecords, "acting-environment") ||
+		!contains(standDown.SuccessRecords, "owner-attestation") ||
+		!contains(standDown.SuccessRecords, "reason-digest") ||
 		!contains(standDown.SuccessRecords, "accepted-loss-acknowledgment") {
 		t.Fatalf("stand-down refusal/success boundary = %#v", attempts)
 	}

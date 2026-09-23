@@ -356,15 +356,23 @@ ClaimStandDown {
   },
   "reason": nonempty NFC text,
   "acknowledge_unreturned_work_loss": true,
+  "owner_authorization": `wipd.signed-artifact/1` carrying an exact
+                         `wipd.owner-attestation/1`,
   "deadline": canonical UTC RFC3339Nano text or null
 }
 ```
 
-The reason is semantic input and is retained as restricted audit evidence, not
-routine log text. A missing reason or loss-acknowledgment field is a closed-map
-`protocol.malformed-message` before submission. A present empty reason is
-`result.rejected` with `validation.stand-down-reason`; a present false loss
-acknowledgment is `result.refused` with
+**Step 9 amendment:** the owner authorization sits outside the canonical
+command, binds its ID/hash plus the exact claim, both Environments, loss, and
+reason digest, and is consumed atomically on success. Missing proof is a
+closed-map `protocol.malformed-message`; invalid, expired, reused, or
+wrong-scope proof is pre-submission `auth.owner-attestation-invalid`. The
+reason remains semantic input but its exact text is restricted audit material,
+not routine log text or permanent domain truth. A missing reason or
+loss-acknowledgment field is `protocol.malformed-message` before submission. A
+present empty reason is `result.rejected` with
+`validation.stand-down-reason`; a present false loss acknowledgment is
+`result.refused` with
 `refusal.claim-loss-not-acknowledged`. Same Environment, wrong owner, wrong
 claim ID, or wrong claim epoch is `result.refused` with
 `refusal.claim-stand-down-fenced`. Terminal cases have receipts; all cases have
@@ -372,11 +380,13 @@ no claim/model effect.
 
 Successful stand-down explicitly permits unknown or unreturned owner journal
 work to be lost from future execution. One terminal transaction records both
-Environments, exact reason, accepted loss acknowledgment, old claim/epoch, and
-Dispatch close; appends close/loss events; invalidates the old epoch; and stores
-the receipt. It never deletes the old Environment's local evidence. A later
-acquisition uses a new claim ID and higher claim epoch. Any old return,
-release, repair, or claim command refuses `claim.fenced` without submission.
+Environments, the reason digest, accepted loss acknowledgment, old claim/epoch,
+owner-attestation nonce consumption, and Dispatch close; appends close/loss
+events; invalidates the old epoch; and stores the receipt. Exact reason text is
+retained only in the encrypted restricted audit sink under Step 9's bounded
+policy. Stand-down never deletes the old Environment's local evidence. A later
+acquisition uses a new claim ID and higher claim epoch. Any old return, release,
+repair, or claim command refuses `claim.fenced` without submission.
 
 ## 9. Authority handoff and promotion fencing
 
@@ -444,7 +454,7 @@ barrier completion, or closure.
 | **D122 / Q12 / Q16** | Immutable contiguous claim journal; one-command `ReturnCommand`/`FoldResult`; stop/quarantine; proof-gated abandon or new-generation replacement; no skip. | Step 6 transfer schemas stay unchanged; Step 8 adds properties/fuzzing. |
 | **D123 / Q16** | Every returned and lifecycle command uses exact Step 5 submission, ID/hash, receipt, event range, and uncertainty rules. | Production persistence remains M3/M4. |
 | **D125** | Claim commands cannot bypass Environment sequence or provisional birth ordering; cursor/environment delivery remains distinct from claim ownership. | Cursor operation/event schemas remain later-owned. |
-| **D126 / Q17** | Normal owner release requires sealed complete terminal receipts and resolved quarantine; cross-Environment stand-down requires exact epoch, reason, and accepted loss; both fence the old epoch. | Owner-attestation ceremony and operational UI remain later work. |
+| **D126 / Q17** | Normal owner release requires sealed complete terminal receipts and resolved quarantine; cross-Environment stand-down requires exact epoch, reason, accepted loss, and Step 9 owner authorization; both fence the old epoch. | Operational UI remains later work. |
 | **D128** | Per-domain lane serializes journal acceptance, return/install, repair, release, and pull; cancellation never advances state. | Scheduler implementation remains M3/M4. |
 | **D129** | Planned handoff requires no active claim; promotion fences every old grant/claim/journal and never executes unresolved old work. | Bundle ceremony and recovery conformance remain Steps 8–9. |
 | **D130** | Migration cannot mint, reopen, or bypass a claim; migrated history remains Step 6 prefix evidence. | Migration executor/proof remains later work. |

@@ -139,7 +139,7 @@ func TestStep5ResultMappingsAndReceiptInvariants(t *testing.T) {
 	}
 
 	wantMappings := []step5ResultMapping{
-		{ResultCode: "result.succeeded", ProtocolOutcome: "terminal", Output: "required", ProblemPrefixes: []string{}, AcceptedEvents: "required-nonempty", Effects: "events-projections-receipt-atomic"},
+		{ResultCode: "result.succeeded", ProtocolOutcome: "terminal", Output: "required", ProblemPrefixes: []string{}, AcceptedEvents: "required-nonempty-or-declared-noop-null", Effects: "events-projections-receipt-atomic-or-declared-noop"},
 		{ResultCode: "result.rejected", ProtocolOutcome: "terminal", Output: "null", ProblemPrefixes: []string{"not-found", "operation", "validation"}, AcceptedEvents: "null", Effects: "receipt-only-no-model-effect"},
 		{ResultCode: "result.refused", ProtocolOutcome: "terminal", Output: "null", ProblemPrefixes: []string{"refusal"}, AcceptedEvents: "null", Effects: "receipt-only-no-model-effect"},
 		{ResultCode: "result.failed", ProtocolOutcome: "terminal", Output: "null", ProblemPrefixes: []string{"internal"}, AcceptedEvents: "null", Effects: "receipt-only-no-model-effect"},
@@ -148,7 +148,7 @@ func TestStep5ResultMappingsAndReceiptInvariants(t *testing.T) {
 		t.Fatalf("result mappings\n got: %#v\nwant: %#v", fixture.ResultMappings, wantMappings)
 	}
 
-	if got := sortedMapKeys(fixture.Receipts); !reflect.DeepEqual(got, []string{"accepted", "refused", "rejected"}) {
+	if got := sortedMapKeys(fixture.Receipts); !reflect.DeepEqual(got, []string{"accepted", "refused", "rejected", "successful_noop"}) {
 		t.Fatalf("receipt names = %v", got)
 	}
 	for name, receipt := range fixture.Receipts {
@@ -174,6 +174,20 @@ func TestStep5ResultMappingsAndReceiptInvariants(t *testing.T) {
 		accepted.AcceptedEvents.FirstEventID == accepted.AcceptedEvents.LastEventID {
 		t.Fatalf("accepted event range = %#v", accepted.AcceptedEvents)
 	}
+
+	noop := fixture.Receipts["successful_noop"]
+	if noop.Operation.Name != "cursor.move" || noop.Operation.Version != 1 || noop.AcceptedEvents != nil {
+		t.Fatalf("declared no-op receipt = %#v", noop)
+	}
+	outputHex = requireString(t, noop.Result.OutputCBORHex, "declared no-op output")
+	outputBytes, err = hex.DecodeString(outputHex)
+	if err != nil {
+		t.Fatalf("declared no-op output hex: %v", err)
+	}
+	wantNoopOutput := map[string]any{"changed": false, "previous_target_id": nil, "target_id": nil}
+	if got := decodeDeterministicCBOR(t, outputBytes); !reflect.DeepEqual(got, wantNoopOutput) {
+		t.Fatalf("declared no-op output\n got: %#v\nwant: %#v", got, wantNoopOutput)
+	}
 }
 
 func TestStep5DeterministicOutcomesRetryAndRecovery(t *testing.T) {
@@ -188,6 +202,7 @@ func TestStep5DeterministicOutcomesRetryAndRecovery(t *testing.T) {
 	}
 	wantNames := []string{
 		"accepted-command",
+		"declared-successful-noop",
 		"definitely-unsent-unavailable",
 		"dependent-blocked-on-outcome-unknown",
 		"lost-response-receipt-query",
@@ -207,6 +222,11 @@ func TestStep5DeterministicOutcomesRetryAndRecovery(t *testing.T) {
 	if accepted.Expected.SubmissionKnown == nil || !*accepted.Expected.SubmissionKnown ||
 		accepted.Expected.SemanticExecutions != 1 {
 		t.Fatalf("accepted execution = %#v", accepted.Expected)
+	}
+	noop := vectors["declared-successful-noop"]
+	assertStep5Events(t, noop, "submission.committed", "semantic.noop-proved", "terminal.committed")
+	if noop.Expected.Effects != "declared-noop-receipt-only" || noop.Expected.SemanticExecutions != 1 {
+		t.Fatalf("declared no-op execution = %#v", noop.Expected)
 	}
 
 	rejected := vectors["semantic-rejected-command"]
@@ -322,15 +342,24 @@ func validateStep5Receipt(t *testing.T, fixture step5Fixture, name string, recei
 		}
 	}
 	if receipt.AuthorityEpoch == 0 || receipt.Environment.Sequence == 0 ||
-		receipt.Operation.Name != "matter.create" || receipt.Operation.Version != 1 ||
+		receipt.Operation.Name == "" || receipt.Operation.Version == 0 ||
 		!step5DigestPattern.MatchString(receipt.RequestHash) {
 		t.Errorf("receipt %s identity fields = %#v", name, receipt)
 	}
 
 	mapping := mappingByCode(t, fixture.ResultMappings, receipt.Result.Code)
 	if receipt.Result.Code == "result.succeeded" {
-		if receipt.Result.OutputCBORHex == nil || receipt.Result.ProblemCode != nil || receipt.AcceptedEvents == nil {
+		if receipt.Result.OutputCBORHex == nil || receipt.Result.ProblemCode != nil {
 			t.Fatalf("succeeded receipt %s = %#v", name, receipt)
+		}
+		if name == "successful_noop" {
+			if receipt.Operation.Name != "cursor.move" || receipt.Operation.Version != 1 || receipt.AcceptedEvents != nil {
+				t.Fatalf("undeclared or effectful no-op receipt %s = %#v", name, receipt)
+			}
+			return
+		}
+		if receipt.AcceptedEvents == nil {
+			t.Fatalf("effectful succeeded receipt %s has no range", name)
 		}
 		if !step5ULIDPattern.MatchString(receipt.AcceptedEvents.FirstEventID) ||
 			!step5ULIDPattern.MatchString(receipt.AcceptedEvents.LastEventID) || receipt.AcceptedEvents.EventCount == 0 {
