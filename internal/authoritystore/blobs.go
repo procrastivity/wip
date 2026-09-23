@@ -353,6 +353,9 @@ func (s *Store) BlobRange(ctx context.Context, domain string, epoch uint64, snap
 // read/transfer resources. Referenced bytes and durable receipt/event truth
 // are never garbage-collected here.
 func (s *Store) CollectExpired(ctx context.Context, now time.Time) error {
+	if now.IsZero() {
+		return ErrInvalidProof
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {

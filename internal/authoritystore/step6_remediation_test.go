@@ -148,6 +148,48 @@ func TestBlobFilesCrashBoundariesAndCollection(t *testing.T) {
 	}
 }
 
+func TestCollectExpiredRejectsZeroClockWithoutCollection(t *testing.T) {
+	s, _ := fresh(t)
+	ctx := context.Background()
+	d, _ := identity(domainA, 7)
+	if err := s.BootstrapDomain(ctx, d, repoA); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	data := []byte("uncommitted staged bytes")
+	digest := digestBytes(data)
+	if _, err := s.StartBlob(ctx, domainA, 7, digest, uint64(len(data)), now); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := durableChunk(s.blobs, domainA, digest, 0, data) // crash before chunk row commits
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.blobs, chunkName(domainA, digest, 0, sum))
+	wantExpiry := now.Add(stagingTTL).UnixNano()
+	if err := s.CollectExpired(ctx, time.Time{}); !errors.Is(err, ErrInvalidProof) {
+		t.Fatalf("zero collection clock: %v", err)
+	}
+	var expiry int64
+	var offset uint64
+	if err := s.db.QueryRow(`SELECT expires_at,verified_offset FROM blob_products WHERE domain_id=? AND digest=?`, domainA, digest).Scan(&expiry, &offset); err != nil || expiry != wantExpiry || offset != 0 {
+		t.Fatalf("zero clock changed staged SQL state: expiry=%d offset=%d err=%v", expiry, offset, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("zero clock changed orphan bytes: %q %v", got, err)
+	}
+	if err := s.CollectExpired(ctx, now.Add(stagingTTL)); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM blob_products WHERE domain_id=? AND digest=?`, domainA, digest).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("valid-clock expiry did not collect staged row: %d %v", count, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("valid-clock expiry did not collect orphan: %v", err)
+	}
+}
+
 func TestBlobReopenRejectsCorruptNamedBytes(t *testing.T) {
 	for _, verified := range []bool{false, true} {
 		t.Run(map[bool]string{false: "staged", true: "verified"}[verified], func(t *testing.T) {
