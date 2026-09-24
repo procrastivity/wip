@@ -79,6 +79,9 @@ func (s *Store) StartBlob(ctx context.Context, domain string, epoch uint64, dige
 		}
 		out = BlobUpload{offset, verified == 1}
 	} else if errors.Is(err, sql.ErrNoRows) {
+		if err = checkWriteAdmission(ctx, tx, domain, epoch); err != nil {
+			return out, err
+		}
 		var count, reserved uint64
 		if err = tx.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(p.byte_length),0) FROM blob_products p WHERE p.domain_id=? AND NOT EXISTS(SELECT 1 FROM blob_references r WHERE r.domain_id=p.domain_id AND r.digest=p.digest)`, domain).Scan(&count, &reserved); err != nil {
 			return out, err
@@ -88,7 +91,7 @@ func (s *Store) StartBlob(ctx context.Context, domain string, epoch uint64, dige
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO blob_products(domain_id,digest,byte_length,expires_at) VALUES(?,?,?,?)`, domain, digest, length, now.Add(stagingTTL).UnixNano())
 		if err != nil {
-			return out, err
+			return out, writeError(err)
 		}
 	} else {
 		return out, err

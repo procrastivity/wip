@@ -106,6 +106,9 @@ func (s *Store) StartTransfer(ctx context.Context, domain string, epoch uint64, 
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = checkWriteAdmission(ctx, tx, domain, epoch); err != nil {
+		return out, err
+	}
 	snapshot, err := pinSnapshotTx(ctx, tx, domain, epoch, start, snapshotID, now, 15*time.Minute, nil)
 	if err != nil {
 		return out, err

@@ -345,6 +345,15 @@ func verifyStandDownAuthorization(ctx context.Context, tx *sql.Tx, c *lifecycleC
 	if used != 0 {
 		return ErrFenced
 	}
+	var priorAction, priorDigest string
+	e = tx.QueryRowContext(ctx, `SELECT action,artifact_digest FROM owner_nonce_uses WHERE domain_id=? AND nonce=?`, c.domain, c.ownerNonce).Scan(&priorAction, &priorDigest)
+	if e == nil {
+		if priorAction != "claim-stand-down" || priorDigest != digestBytes(ownerAuthorization) {
+			return ErrFenced
+		}
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
 	return nil
 }
 
@@ -423,6 +432,13 @@ func (s *Store) recoverLifecycleWithProof(ctx context.Context, c *lifecycleComma
 	}
 	if state != "submitted" {
 		return nil, ErrNotOwner
+	}
+	var activeEpoch uint64
+	if err = s.db.QueryRowContext(ctx, `SELECT active_epoch FROM domains WHERE domain_id=?`, c.domain).Scan(&activeEpoch); err != nil {
+		return nil, err
+	}
+	if activeEpoch != c.epoch {
+		return nil, ErrFenced
 	}
 	if c.stand != nil {
 		tx, e := s.db.BeginTx(ctx, nil)
@@ -780,7 +796,7 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 		return status, grant, e
 	}
 	var active int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM claims WHERE domain_id=? AND (matter_id=? AND close_command_id IS NULL OR dispatch_id=?)`, c.domain, c.matter, c.dispatch).Scan(&active); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM claims WHERE domain_id=? AND authority_epoch=? AND ((matter_id=? AND close_command_id IS NULL) OR dispatch_id=?)`, c.domain, c.epoch, c.matter, c.dispatch).Scan(&active); err != nil {
 		return CommandStatus{}, grant, err
 	}
 	if active != 0 {
@@ -1317,6 +1333,16 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 		}
 		if _, e = tx.ExecContext(ctx, `INSERT INTO claim_closes VALUES(?,?,?,?,?,?,?,?)`, c.domain, id, c.id, kind, storedBarrier, c.environment, reason, nonce); e != nil {
 			return e
+		}
+		if kind == "stand-down" {
+			var authorization []byte
+			var verifiedAt string
+			if e = tx.QueryRowContext(ctx, `SELECT authorization,verified_at FROM claim_stand_down_proofs WHERE domain_id=? AND command_id=?`, c.domain, c.id).Scan(&authorization, &verifiedAt); e != nil {
+				return e
+			}
+			if _, e = tx.ExecContext(ctx, `INSERT INTO owner_nonce_uses(domain_id,nonce,action,artifact_digest,consumed_at) VALUES(?,?,'claim-stand-down',?,?)`, c.domain, c.ownerNonce, digestBytes(authorization), verifiedAt); e != nil {
+				return ErrFenced
+			}
 		}
 		_, e = tx.ExecContext(ctx, `UPDATE claims SET close_command_id=? WHERE domain_id=? AND claim_id=? AND close_command_id IS NULL`, c.id, c.domain, id)
 		return e

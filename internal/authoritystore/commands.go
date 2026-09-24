@@ -3,7 +3,6 @@ package authoritystore
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
@@ -115,6 +114,21 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 	}
 	if priorHash != "" { // replay never re-enters semantic guards
 		return s.status(ctx, tx, operation.Command{ID: c.id, AuthorityDomainID: c.domain})
+	}
+	var admissionClosed int
+	var closedEpoch sql.NullInt64
+	if err = tx.QueryRowContext(ctx, `SELECT admission_closed,closed_epoch FROM authority_continuity WHERE domain_id=?`, d.ID).Scan(&admissionClosed, &closedEpoch); err != nil {
+		return out, err
+	}
+	if admissionClosed != 0 && closedEpoch.Valid && uint64(closedEpoch.Int64) == d.ActiveEpoch {
+		return out, ErrFenced
+	}
+	var migrationAuthorizationPending int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM continuity_products a WHERE a.domain_id=? AND a.authority_epoch=? AND a.kind='migration-authorization' AND NOT EXISTS(SELECT 1 FROM continuity_products z WHERE z.domain_id=a.domain_id AND z.authority_epoch=a.authority_epoch AND z.kind='migration-seal')`, d.ID, d.ActiveEpoch).Scan(&migrationAuthorizationPending); err != nil {
+		return out, err
+	}
+	if migrationAuthorizationPending != 0 {
+		return out, ErrFenced
 	}
 	if before != nil {
 		if err = before(tx); err != nil {
@@ -234,6 +248,13 @@ func (s *Store) RecoverCommand(ctx context.Context, command operation.Command, h
 	}
 	if state != "submitted" {
 		return nil, ErrNotOwner
+	}
+	var active uint64
+	if err = s.db.QueryRowContext(ctx, `SELECT active_epoch FROM domains WHERE domain_id=?`, command.AuthorityDomainID).Scan(&active); err != nil {
+		return nil, err
+	}
+	if active != command.ExpectedAuthorityEpoch {
+		return nil, ErrFenced
 	}
 	s.owners[key] = true
 	return &Execution{store: s, command: command, hash: hash}, nil
@@ -381,53 +402,11 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 	if err != nil {
 		return out, err
 	}
-	var generation, sequence uint64
-	var keyID, before, after string
-	var public, fence []byte
-	err = tx.QueryRowContext(ctx, `SELECT generation,key_id,public_key,not_before,not_after,fence FROM artifact_keys WHERE domain_id=? AND epoch=? ORDER BY generation DESC LIMIT 1`, c.domain, c.epoch).Scan(&generation, &keyID, &public, &before, &after, &fence)
+	appended, err := appendSignedArtifactTx(ctx, tx, c.domain, c.epoch, "portable-receipt", "wipd.terminal-receipt/1", receipt, occurred, sign)
 	if err != nil {
 		return out, err
 	}
-	if fence != nil || interval(before, after, occurred.UTC()) != nil {
-		return out, ErrFenced
-	}
-	var predecessor sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT sequence,digest FROM authority_artifacts WHERE domain_id=? AND epoch=? AND generation=? ORDER BY sequence DESC LIMIT 1`, c.domain, c.epoch, generation).Scan(&sequence, &predecessor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return out, err
-	}
-	sequence++
-	var prev any
-	var ptr *string
-	if predecessor.Valid {
-		prev = predecessor.String
-		ptr = &predecessor.String
-	}
-	fields := map[string]any{"schema": "wipd.signed-artifact/1", "kind": "portable-receipt", "domain_id": c.domain, "authority_epoch": c.epoch, "signer_role": "authority", "signer_key_id": keyID, "key_generation": generation, "artifact_sequence": sequence, "previous_artifact_digest": prev, "issued_at": occurred.UTC().Format(time.RFC3339Nano), "payload_schema": "wipd.terminal-receipt/1", "payload_digest": digestBytes(receipt), "payload": receipt}
-	unsigned, err := artifactEncoder.Marshal(fields)
-	if err != nil {
-		return out, err
-	}
-	sig, err := sign(ctx, append([]byte("wipd/signed-artifact/v1\x00"), unsigned...))
-	if err != nil {
-		return out, err
-	}
-	if !ed25519.Verify(public, append([]byte("wipd/signed-artifact/v1\x00"), unsigned...), sig) {
-		return out, ErrInvalidProof
-	}
-	fields["signature"] = sig
-	wrapper, err := artifactEncoder.Marshal(fields)
-	if err != nil {
-		return out, err
-	}
-	digest, err := verifyAuthorityArtifact(wrapper, public, c.domain, keyID, c.epoch, generation, sequence, ptr)
-	if err != nil {
-		return out, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO authority_artifacts VALUES(?,?,?,?,?,?,?)`, c.domain, c.epoch, generation, sequence, digest, prev, wrapper); err != nil {
-		return out, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO terminal_receipts VALUES(?,?,?,?,?,?,?,?,?,?)`, c.domain, c.id, receipt, wrapper, c.epoch, generation, sequence, first, last, code); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO terminal_receipts VALUES(?,?,?,?,?,?,?,?,?,?)`, c.domain, c.id, receipt, appended.Wrapper, c.epoch, appended.Generation, appended.Sequence, first, last, code); err != nil {
 		return out, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE submissions SET state='terminal' WHERE domain_id=? AND command_id=?`, c.domain, c.id); err != nil {
@@ -437,7 +416,7 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 		return out, err
 	}
 	if beforeCommit != nil {
-		if err = beforeCommit(receipt, wrapper, generation, sequence); err != nil {
+		if err = beforeCommit(receipt, appended.Wrapper, appended.Generation, appended.Sequence); err != nil {
 			return out, err
 		}
 	}
@@ -445,7 +424,7 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 		return out, err
 	}
 	delete(s.owners, ownerKey(c.domain, c.id))
-	out.Receipt, out.SignedReceipt = receipt, wrapper
+	out.Receipt, out.SignedReceipt = receipt, appended.Wrapper
 	return out, nil
 }
 

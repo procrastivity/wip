@@ -330,13 +330,11 @@ func TestTransferEpochAndContinuationClocks(t *testing.T) {
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err = OpenExisting(root)
-	if err != nil {
-		t.Fatalf("promoted epoch reopen: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	if _, err = s.NextTransfer(ctx, transfer.Token, 1<<20, now); !errors.Is(err, ErrFenced) {
-		t.Fatalf("old epoch token after reopen: %v", err)
+	if reopened, openErr := OpenExisting(root); !errors.Is(openErr, ErrInvalidStore) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("accepted SQL-only promotion without activation artifact: %v", openErr)
 	}
 }
 

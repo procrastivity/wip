@@ -705,6 +705,9 @@ func TestClaimStandDownCrossEnvironmentSignedScopeAndLoss(t *testing.T) {
 			"owner_environment_id": envA, "acting_environment_id": envB, "reason_digest": reasonDigest,
 			"loss_accepted": true,
 		}, envB)
+	if err = f.s.AuthorizeMigration(ctx, domainA, migrationAuthorizationFixture(t, owner, d, f.now, 5), f.now); !errors.Is(err, ErrFenced) {
+		t.Fatalf("Step 7 reused consumed Step 5 owner nonce: %v", err)
+	}
 	if _, err = f.s.db.Exec(`DROP TRIGGER claim_stand_down_proofs_immutable`); err != nil {
 		t.Fatal(err)
 	}

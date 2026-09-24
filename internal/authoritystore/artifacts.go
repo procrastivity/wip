@@ -22,6 +22,8 @@ var (
 	ErrInvalidProof = errors.New("authoritystore: invalid signed proof")
 	// ErrFenced rejects an expired, revoked or already consumed credential.
 	ErrFenced = errors.New("authoritystore: revoked or fenced identity")
+	// ErrMigrationRollbackForbidden is the permanent post-submission migration fence.
+	ErrMigrationRollbackForbidden = errors.New("migration.rollback-forbidden")
 )
 
 type signedArtifact struct {
@@ -199,6 +201,9 @@ func (s *Store) RegisterArtifactKey(ctx context.Context, domain string, wrapper 
 	if err != nil {
 		return err
 	}
+	if err = checkWriteAdmission(ctx, tx, domain, d.ActiveEpoch); err != nil {
+		return err
+	}
 	payload, err := ownerArtifact(wrapper, d.OwnerPublicKey, domain, d.OwnerKeyID, "authority-artifact-key", "wipd.authority-artifact-key/1", d.ActiveEpoch)
 	if err != nil {
 		return err
@@ -248,6 +253,9 @@ func (s *Store) FenceArtifactKey(ctx context.Context, domain string, wrapper []b
 	defer func() { _ = tx.Rollback() }()
 	d, err := domainOwner(ctx, tx, domain)
 	if err != nil {
+		return err
+	}
+	if err = checkWriteAdmission(ctx, tx, domain, d.ActiveEpoch); err != nil {
 		return err
 	}
 	payload, err := ownerArtifact(wrapper, d.OwnerPublicKey, domain, d.OwnerKeyID, "authority-key-fence", "wipd.authority-key-fence/1", d.ActiveEpoch)
@@ -430,6 +438,70 @@ func verifyAuthorityArtifact(raw []byte, public ed25519.PublicKey, domain, keyID
 		return "", ErrInvalidProof
 	}
 	return digestBytes(append([]byte("wipd/artifact-digest/v1\x00"), raw...)), nil
+}
+
+type appendedArtifact struct {
+	Wrapper              []byte
+	Digest               string
+	Generation, Sequence uint64
+}
+
+// appendSignedArtifactTx is the one chain-append implementation used by
+// transaction-owned Step 4 and Step 7 products. It never commits its caller's
+// transaction and validates the signer output before adding a chain row.
+func appendSignedArtifactTx(ctx context.Context, tx *sql.Tx, domain string, epoch uint64, kind, payloadSchema string, payload []byte, at time.Time, sign Signer) (appendedArtifact, error) {
+	var out appendedArtifact
+	if sign == nil || at.IsZero() || len(payload) > 1<<20 {
+		return out, ErrInvalidProof
+	}
+	var generation uint64
+	var keyID, before, after string
+	var public, fence []byte
+	err := tx.QueryRowContext(ctx, `SELECT generation,key_id,public_key,not_before,not_after,fence FROM artifact_keys WHERE domain_id=? AND epoch=? ORDER BY generation DESC LIMIT 1`, domain, epoch).Scan(&generation, &keyID, &public, &before, &after, &fence)
+	if err != nil {
+		return out, err
+	}
+	if fence != nil || interval(before, after, at.UTC()) != nil {
+		return out, ErrFenced
+	}
+	var sequence uint64
+	var predecessor sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT sequence,digest FROM authority_artifacts WHERE domain_id=? AND epoch=? AND generation=? ORDER BY sequence DESC LIMIT 1`, domain, epoch, generation).Scan(&sequence, &predecessor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return out, err
+	}
+	sequence++
+	var prev any
+	var ptr *string
+	if predecessor.Valid {
+		prev, ptr = predecessor.String, &predecessor.String
+	}
+	fields := map[string]any{"schema": "wipd.signed-artifact/1", "kind": kind, "domain_id": domain, "authority_epoch": epoch, "signer_role": "authority", "signer_key_id": keyID, "key_generation": generation, "artifact_sequence": sequence, "previous_artifact_digest": prev, "issued_at": at.UTC().Format(time.RFC3339Nano), "payload_schema": payloadSchema, "payload_digest": digestBytes(payload), "payload": payload}
+	unsigned, err := artifactEncoder.Marshal(fields)
+	if err != nil {
+		return out, err
+	}
+	preimage := append([]byte("wipd/signed-artifact/v1\x00"), unsigned...)
+	sig, err := sign(ctx, preimage)
+	if err != nil {
+		return out, err
+	}
+	if !ed25519.Verify(public, preimage, sig) {
+		return out, ErrInvalidProof
+	}
+	fields["signature"] = sig
+	wrapper, err := artifactEncoder.Marshal(fields)
+	if err != nil {
+		return out, err
+	}
+	digest, err := verifyAuthorityArtifact(wrapper, public, domain, keyID, epoch, generation, sequence, ptr)
+	if err != nil {
+		return out, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO authority_artifacts VALUES(?,?,?,?,?,?,?)`, domain, epoch, generation, sequence, digest, prev, wrapper); err != nil {
+		return out, err
+	}
+	return appendedArtifact{Wrapper: wrapper, Digest: digest, Generation: generation, Sequence: sequence}, nil
 }
 
 // Existing chain rows are verified even though Step 4 alone may append a

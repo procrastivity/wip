@@ -288,6 +288,9 @@ func (s *Store) PinSnapshot(ctx context.Context, domain string, epoch uint64, st
 		return PinnedSnapshot{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = checkWriteAdmission(ctx, tx, domain, epoch); err != nil {
+		return PinnedSnapshot{}, err
+	}
 	out, err := pinSnapshotTx(ctx, tx, domain, epoch, start, id, now, lifetime, nil)
 	if err != nil {
 		return PinnedSnapshot{}, err

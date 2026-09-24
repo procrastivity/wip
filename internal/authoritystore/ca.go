@@ -130,6 +130,9 @@ func (s *Store) InstallEnvironmentCA(ctx context.Context, domain string, wrapper
 	if err != nil {
 		return err
 	}
+	if err = checkWriteAdmission(ctx, tx, domain, d.ActiveEpoch); err != nil {
+		return err
+	}
 	payload, err := ownerArtifact(wrapper, d.OwnerPublicKey, domain, d.OwnerKeyID, "environment-ca-delegation", "wipd.environment-ca-delegation/1", d.ActiveEpoch)
 	if err != nil {
 		return err
@@ -182,6 +185,9 @@ func (s *Store) FenceEnvironmentCA(ctx context.Context, domain string, wrapper [
 	defer func() { _ = tx.Rollback() }()
 	d, err := domainOwner(ctx, tx, domain)
 	if err != nil {
+		return err
+	}
+	if err = checkWriteAdmission(ctx, tx, domain, d.ActiveEpoch); err != nil {
 		return err
 	}
 	payload, err := ownerArtifact(wrapper, d.OwnerPublicKey, domain, d.OwnerKeyID, "environment-ca-fence", "wipd.environment-ca-fence/1", d.ActiveEpoch)

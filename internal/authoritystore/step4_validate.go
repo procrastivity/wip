@@ -204,7 +204,17 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 	}
-	if terminals+grants != count {
+	var step7Artifacts int
+	var hasStep7 int
+	if err = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='continuity_products'`).Scan(&hasStep7); err != nil {
+		return ErrInvalidStore
+	}
+	if hasStep7 != 0 {
+		if err = db.QueryRow(`SELECT count(*) FROM continuity_products WHERE kind IN ('bundle-manifest','authority-relinquishment','authority-activation','migration-proof')`).Scan(&step7Artifacts); err != nil {
+			return ErrInvalidStore
+		}
+	}
+	if terminals+grants+step7Artifacts != count {
 		return ErrInvalidStore
 	}
 	return checkStep4Events(db, all)

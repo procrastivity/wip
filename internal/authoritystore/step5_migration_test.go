@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestStep5FreshAndExplicitV4Upgrade(t *testing.T) {
+func TestStep5FreshAndExplicitV4V5Upgrade(t *testing.T) {
 	s, root := fresh(t)
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
 		t.Fatalf("fresh schema version %d: %v", version, err)
 	}
 	if err := s.Close(); err != nil {
@@ -52,6 +52,12 @@ func TestStep5FreshAndExplicitV4Upgrade(t *testing.T) {
 		t.Fatalf("ordinary open of v4: %v", err)
 	}
 	if err = UpgradeV4(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("ordinary open upgraded v5: %v", err)
+	}
+	if err = UpgradeV5(legacy); err != nil {
 		t.Fatal(err)
 	}
 	upgraded, err := OpenExisting(legacy)

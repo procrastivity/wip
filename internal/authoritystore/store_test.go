@@ -208,7 +208,7 @@ func TestOwnerRootSQLGuardAndReopenValidation(t *testing.T) {
 
 func digest(c byte) string { return "sha256:" + string(bytes.Repeat([]byte{c}, 64)) }
 
-func TestPromotionChainReopen(t *testing.T) {
+func TestPromotionChainWithoutVerifiedActivationRefusesReopen(t *testing.T) {
 	s, root := fresh(t)
 	d, _ := identity(domainA, 5)
 	if err := s.BootstrapDomain(context.Background(), d, repoA); err != nil {
@@ -235,16 +235,11 @@ func TestPromotionChainReopen(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenExisting(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := reopened.LookupDomain(context.Background(), domainA)
-	if err != nil || got.ActiveEpoch != 7 {
-		t.Fatalf("promoted epoch: %+v, %v", got, err)
-	}
-	if err := reopened.Close(); err != nil {
-		t.Fatal(err)
+	if reopened, err := OpenExisting(root); !errors.Is(err, ErrInvalidStore) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("accepted promotions without signed activation evidence: %v", err)
 	}
 	db, err = sql.Open("sqlite", filepath.Join(root, "authority.db"))
 	if err != nil {
@@ -385,7 +380,7 @@ func TestOpeningRefusesMissingPartialNewerAndLegacy(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, sql string }{
 		{"legacy", `CREATE TABLE events (id TEXT)`},
-		{"newer", `PRAGMA user_version = 6`},
+		{"newer", `PRAGMA user_version = 7`},
 		{"unversioned-new-schema", `CREATE TABLE future_records (id INTEGER)`},
 		{"missing-table", `DROP TABLE repo_memberships`},
 		{"missing-marker", `DELETE FROM schema_migrations`},

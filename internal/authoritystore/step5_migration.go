@@ -220,7 +220,7 @@ func UpgradeV4(root string) error {
 	if err = installStep5(db); err != nil {
 		return err
 	}
-	return checkSchema(db)
+	return checkSchemaVersion(db, 5)
 }
 
 func sameV4StoreContents(db *sql.DB, backup string) error {

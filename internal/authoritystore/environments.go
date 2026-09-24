@@ -129,6 +129,9 @@ func (s *Store) IssueEnvironmentCertificate(ctx context.Context, domain, environ
 	if !errors.Is(err, sql.ErrNoRows) {
 		return out, err
 	}
+	if err = checkWriteAdmission(ctx, tx, domain, d.ActiveEpoch); err != nil {
+		return out, err
+	}
 	if interval(p.IssuedAt, p.ExpiresAt, at.UTC()) != nil {
 		return out, ErrFenced
 	}

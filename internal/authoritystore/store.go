@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 type schemaObject struct {
 	name string
@@ -131,6 +131,9 @@ func CreateEmpty(root string) (*Store, error) {
 						err = installStep6(db)
 						if err == nil {
 							err = installStep5(db)
+							if err == nil {
+								err = installStep7(db)
+							}
 						}
 					}
 				}
@@ -210,6 +213,10 @@ func OpenExisting(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: blobs: %v", ErrInvalidStore, err)
 	}
+	if err := checkStep7Closure(db, path); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: continuity closure: %v", ErrInvalidStore, err)
+	}
 	store := &Store{db: db, lock: lock, blobs: filepath.Join(path, "blobs"), owners: make(map[string]bool)}
 	lock = nil
 	return store, nil
@@ -278,6 +285,13 @@ func (s *Store) AttachRepo(ctx context.Context, domainID, repoID string) error {
 	}
 	if count == 0 {
 		return ErrNotFound
+	}
+	d, err := domainOwner(ctx, tx, domainID)
+	if err != nil {
+		return err
+	}
+	if err = checkWriteAdmission(ctx, tx, domainID, d.ActiveEpoch); err != nil {
+		return err
 	}
 	var history int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM submissions WHERE domain_id = ?`, domainID).Scan(&history); err != nil {
@@ -350,6 +364,9 @@ func validDomain(d Domain) error {
 
 func writeError(err error) error {
 	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) && strings.Contains(err.Error(), "authority admission closed") {
+		return ErrFenced
+	}
 	// Only PRIMARYKEY (1555) and UNIQUE (2067) denote a duplicate identity.
 	if errors.As(err, &sqliteErr) && (sqliteErr.Code() == 1555 || sqliteErr.Code() == 2067) {
 		return fmt.Errorf("%w: %v", ErrExists, err)
@@ -516,6 +533,15 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 			return fmt.Errorf("step 5 migration marker: %v", err)
 		}
 	}
+	if expectedVersion >= 6 {
+		expected["schema_migrations"] = step7MigrationMarker
+		for _, object := range step7Schema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 6`).Scan(&name); err != nil || name != "continuity-and-migration-proof" {
+			return fmt.Errorf("step 7 migration marker: %v", err)
+		}
+	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		return err
@@ -655,7 +681,13 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 					return err
 				}
 				if expectedVersion >= 5 {
-					return checkStep5State(db)
+					if err := checkStep5State(db); err != nil {
+						return err
+					}
+					if expectedVersion >= 6 {
+						return checkStep7State(db)
+					}
+					return nil
 				}
 			}
 		}
