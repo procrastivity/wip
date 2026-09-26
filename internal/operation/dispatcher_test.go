@@ -86,6 +86,33 @@ func TestDispatchValidatesAndInvokesRegisteredHandler(t *testing.T) {
 	}
 }
 
+func TestDispatchPreservesAsymmetricTypedFixtureSemantics(t *testing.T) {
+	registry := NewRegistry()
+	request := canonicalMatterCreateRequest()
+	request.Input = MatterCreateInput{Title: "M4 Fixture", Locator: "fixture-17"}
+	want := MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
+	if err := registry.Register(MatterCreateV1, func(ctx context.Context, got Request) Result {
+		if ctx.Value(executionContextKey{}) != "fixture-context" {
+			t.Errorf("handler context value = %v, want fixture-context", ctx.Value(executionContextKey{}))
+		}
+		if got.Input != request.Input {
+			t.Errorf("handler input = %#v, want %#v", got.Input, request.Input)
+		}
+		return Result{Code: ResultSucceeded, Output: want}
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	result := registry.Dispatch(context.WithValue(context.Background(), executionContextKey{}, "fixture-context"), request)
+	if result.Code != ResultSucceeded || result.Problem != nil {
+		t.Fatalf("Dispatch() result = %+v, want typed success", result)
+	}
+	got, ok := result.Output.(MatterCreateOutput)
+	if !ok || got != want {
+		t.Fatalf("Dispatch() output = %#v, want typed asymmetric output %#v", result.Output, want)
+	}
+}
+
 func TestDispatchRejectsUnknownVersionAndInvalidRequestBeforeHandler(t *testing.T) {
 	registry := NewRegistry()
 	called := 0

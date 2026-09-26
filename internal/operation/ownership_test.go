@@ -80,3 +80,59 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 		t.Fatalf("writesurface.CreateMatter production callers = %v, want only the existing matter adapter", callers)
 	}
 }
+
+func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate ownership test")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	var registrations []string
+	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if entry.Name() == "spike" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) < 1 {
+				return true
+			}
+			method, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || method.Sel.Name != "Register" {
+				return true
+			}
+			ast.Inspect(call.Args[0], func(arg ast.Node) bool {
+				selector, ok := arg.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "MatterCreateV1" {
+					relative, relErr := filepath.Rel(root, path)
+					if relErr != nil {
+						t.Fatalf("relative registration path: %v", relErr)
+					}
+					registrations = append(registrations, filepath.ToSlash(relative))
+				}
+				return true
+			})
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan production registrations: %v", err)
+	}
+	if len(registrations) != 1 || registrations[0] != "internal/verbs/matter/matter.go" {
+		t.Fatalf("matter.create production registrations = %v, want only legacy CLI adapter", registrations)
+	}
+}
