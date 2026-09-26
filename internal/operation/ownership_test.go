@@ -18,24 +18,7 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
 	var callers []string
-	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if entry.Name() == "spike" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return err
-		}
+	err := walkProductionFiles(root, func(path string, file *ast.File) error {
 		writesurfaceNames := map[string]bool{}
 		for _, spec := range file.Imports {
 			if spec.Path.Value != `"github.com/procrastivity/wip/internal/writesurface"` {
@@ -50,6 +33,25 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 		if len(writesurfaceNames) == 0 {
 			return nil
 		}
+		aliases := map[string]bool{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			assignment, ok := node.(*ast.AssignStmt)
+			if !ok || len(assignment.Lhs) != len(assignment.Rhs) {
+				return true
+			}
+			for index, rhs := range assignment.Rhs {
+				selector, ok := rhs.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "CreateMatter" {
+					continue
+				}
+				packageName, ok := selector.X.(*ast.Ident)
+				lhs, lhsOK := assignment.Lhs[index].(*ast.Ident)
+				if ok && lhsOK && writesurfaceNames[packageName.Name] {
+					aliases[lhs.Name] = true
+				}
+			}
+			return true
+		})
 
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -60,8 +62,9 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 			if !ok || selector.Sel.Name != "CreateMatter" {
 				return true
 			}
-			packageName, ok := selector.X.(*ast.Ident)
-			if ok && writesurfaceNames[packageName.Name] {
+			packageName, packageOK := selector.X.(*ast.Ident)
+			alias, aliasOK := selector.X.(*ast.Ident)
+			if (packageOK && writesurfaceNames[packageName.Name]) || (aliasOK && aliases[alias.Name]) {
 				relative, relErr := filepath.Rel(root, path)
 				if relErr != nil {
 					t.Fatalf("relative caller path: %v", relErr)
@@ -88,23 +91,25 @@ func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
 	var registrations []string
-	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if entry.Name() == "spike" {
-				return filepath.SkipDir
+	err := walkProductionFiles(root, func(path string, file *ast.File) error {
+		aliases := map[string]bool{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			assignment, ok := node.(*ast.AssignStmt)
+			if !ok || len(assignment.Lhs) != len(assignment.Rhs) {
+				return true
 			}
-			return nil
-		}
-		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return err
-		}
+			for index, rhs := range assignment.Rhs {
+				selector, ok := rhs.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "MatterCreateV1" {
+					continue
+				}
+				lhs, lhsOK := assignment.Lhs[index].(*ast.Ident)
+				if lhsOK {
+					aliases[lhs.Name] = true
+				}
+			}
+			return true
+		})
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok || len(call.Args) < 1 {
@@ -123,6 +128,14 @@ func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
 					}
 					registrations = append(registrations, filepath.ToSlash(relative))
 				}
+				identifier, ok := arg.(*ast.Ident)
+				if ok && aliases[identifier.Name] {
+					relative, relErr := filepath.Rel(root, path)
+					if relErr != nil {
+						t.Fatalf("relative aliased registration path: %v", relErr)
+					}
+					registrations = append(registrations, filepath.ToSlash(relative))
+				}
 				return true
 			})
 			return true
@@ -135,4 +148,32 @@ func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
 	if len(registrations) != 1 || registrations[0] != "internal/verbs/matter/matter.go" {
 		t.Fatalf("matter.create production registrations = %v, want only legacy CLI adapter", registrations)
 	}
+}
+
+func walkProductionFiles(root string, visit func(string, *ast.File) error) error {
+	for _, dir := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				if entry.Name() == "spike" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			return visit(path, file)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
