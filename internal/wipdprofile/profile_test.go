@@ -152,6 +152,49 @@ func TestResolveProfilePaths(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsSymlinkCanceledByDotDot(t *testing.T) {
+	base := t.TempDir()
+	linkTarget := t.TempDir()
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(linkTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(base, "profile")
+	input := base + string(filepath.Separator) + "link" + string(filepath.Separator) + ".." + string(filepath.Separator) + "profile"
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "xdg"))
+	t.Setenv("WIP_DB_PATH", "")
+	if _, err := Resolve(input); !errors.Is(err, ErrUnsafeRoot) {
+		t.Fatalf("Resolve(%q) error = %v, want unsafe path refusal", input, err)
+	}
+	if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dotdot-canceled candidate was created or cannot be inspected: %v", err)
+	}
+}
+
+func TestResolveRejectsUntrustedOwnerOfStickyWritableAncestor(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "untrusted-sticky")
+	if err := os.Mkdir(ancestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ancestor, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	currentOwnerLookup := fileOwnerUID
+	fileOwnerUID = func(info os.FileInfo) (uint64, bool) {
+		if info.Name() == "untrusted-sticky" {
+			return 1<<32 - 1, true
+		}
+		return currentOwnerLookup(info)
+	}
+	t.Cleanup(func() { fileOwnerUID = currentOwnerLookup })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "xdg"))
+	t.Setenv("WIP_DB_PATH", "")
+	if _, err := Resolve(filepath.Join(ancestor, "profile")); !errors.Is(err, ErrUnsafeRoot) {
+		t.Fatalf("Resolve() error = %v, want untrusted sticky-ancestor refusal", err)
+	}
+}
+
 func TestResolveRefusesBeforeCreationAndLeavesLegacySentinelUnchanged(t *testing.T) {
 	base := t.TempDir()
 	legacyDir := filepath.Join(base, "legacy")

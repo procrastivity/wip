@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +37,11 @@ func Resolve(explicitRoot string) (Profile, error) {
 	}
 	if !filepath.IsAbs(explicitRoot) {
 		return Profile{}, ErrRelativeRoot
+	}
+	for _, component := range strings.Split(explicitRoot, string(filepath.Separator)) {
+		if component == "." || component == ".." {
+			return Profile{}, fmt.Errorf("%w: root contains ambiguous path component %q", ErrUnsafeRoot, component)
+		}
 	}
 	clean := filepath.Clean(explicitRoot)
 	canonical, err := canonicalWithoutSymlinks(clean)
@@ -113,9 +121,10 @@ func validateDirectoryChain(root string) error {
 			if current == root && info.Mode().Perm()&0o077 != 0 {
 				return fmt.Errorf("%w: profile root is not owner-only", ErrUnsafeRoot)
 			}
-			// A sticky shared temporary ancestor (for example /tmp) is safe to
-			// traverse; other group/world-writable ancestors are not.
-			if info.Mode().Perm()&0022 != 0 && info.Mode()&os.ModeSticky == 0 {
+			// A sticky shared temporary ancestor is safe only when owned by
+			// root or the current user; sticky does not make an attacker-owned
+			// directory immutable.
+			if info.Mode().Perm()&0022 != 0 && !trustedStickyAncestor(info) {
 				return fmt.Errorf("%w: writable ancestor %s", ErrUnsafeRoot, current)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -127,6 +136,47 @@ func validateDirectoryChain(root string) error {
 		}
 	}
 	return nil
+}
+
+var fileOwnerUID = ownerUIDFromInfo
+
+func trustedStickyAncestor(info os.FileInfo) bool {
+	if info.Mode()&os.ModeSticky == 0 {
+		return false
+	}
+	owner, ok := fileOwnerUID(info)
+	if !ok || owner == 0 {
+		return ok
+	}
+	current, err := user.Current()
+	if err != nil {
+		return false
+	}
+	currentUID, err := strconv.ParseUint(current.Uid, 10, 64)
+	return err == nil && owner == currentUID
+}
+
+func ownerUIDFromInfo(info os.FileInfo) (uint64, bool) {
+	value := reflect.ValueOf(info.Sys())
+	if !value.IsValid() {
+		return 0, false
+	}
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return 0, false
+	}
+	uid := value.FieldByName("Uid")
+	if !uid.IsValid() {
+		return 0, false
+	}
+	switch uid.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return uid.Uint(), true
+	default:
+		return 0, false
+	}
 }
 
 func containsAuthorityDB(root string) (bool, error) {
