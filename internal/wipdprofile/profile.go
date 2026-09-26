@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 )
 
@@ -144,16 +142,15 @@ func trustedStickyAncestor(info os.FileInfo) bool {
 	if info.Mode()&os.ModeSticky == 0 {
 		return false
 	}
+	effectiveUID := os.Geteuid()
+	if effectiveUID < 0 {
+		return false
+	}
 	owner, ok := fileOwnerUID(info)
 	if !ok || owner == 0 {
 		return ok
 	}
-	current, err := user.Current()
-	if err != nil {
-		return false
-	}
-	currentUID, err := strconv.ParseUint(current.Uid, 10, 64)
-	return err == nil && owner == currentUID
+	return owner == uint64(effectiveUID)
 }
 
 func ownerUIDFromInfo(info os.FileInfo) (uint64, bool) {

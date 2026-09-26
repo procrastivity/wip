@@ -195,6 +195,30 @@ func TestResolveRejectsUntrustedOwnerOfStickyWritableAncestor(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsStickyAncestorWhenOwnerUIDUnavailable(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "unknown-owner-sticky")
+	if err := os.Mkdir(ancestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ancestor, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	currentOwnerLookup := fileOwnerUID
+	fileOwnerUID = func(info os.FileInfo) (uint64, bool) {
+		if info.Name() == "unknown-owner-sticky" {
+			return 0, false
+		}
+		return currentOwnerLookup(info)
+	}
+	t.Cleanup(func() { fileOwnerUID = currentOwnerLookup })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "xdg"))
+	t.Setenv("WIP_DB_PATH", "")
+	if _, err := Resolve(filepath.Join(ancestor, "profile")); !errors.Is(err, ErrUnsafeRoot) {
+		t.Fatalf("Resolve() error = %v, want unavailable-owner refusal", err)
+	}
+}
+
 func TestResolveRefusesBeforeCreationAndLeavesLegacySentinelUnchanged(t *testing.T) {
 	base := t.TempDir()
 	legacyDir := filepath.Join(base, "legacy")
