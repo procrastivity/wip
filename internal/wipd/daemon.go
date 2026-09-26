@@ -1,5 +1,5 @@
-// Package wipd owns the foreground daemon lifecycle for an explicit private
-// profile. The local socket is not authenticated until a later M4 step.
+// Package wipd owns the foreground daemon lifecycle and authenticated local
+// stream boundary for an explicit private profile. It does not parse requests.
 package wipd
 
 import (
@@ -25,22 +25,32 @@ var (
 	ErrSocketLive       = errors.New("wipd: another listener is active at the socket path")
 	ErrUnsupported      = errors.New("wipd: daemon lifecycle is unsupported on this platform")
 	ErrUnsupportedOwner = errors.New("wipd: cannot verify effective file ownership")
+	ErrPeerCredentials  = errors.New("wipd: local peer credentials are unavailable")
+	ErrPeerUIDMismatch  = errors.New("wipd: local peer UID does not match daemon owner")
 )
 
 // Daemon owns the profile lock, fixture handle, and bound local listener.
 // Closing it removes only the socket inode created by this instance.
 type Daemon struct {
-	listener net.Listener
-	fixture  *wipdfixture.Store
-	lock     *os.File
-	socket   string
-	socketID socketIdentity
+	listener  net.Listener
+	fixture   *wipdfixture.Store
+	lock      *os.File
+	profile   string
+	profileID directoryIdentity
+	socket    string
+	socketID  socketIdentity
 
 	closeOnce sync.Once
 	closeErr  error
 }
 
 type socketIdentity struct {
+	device uint64
+	inode  uint64
+	owner  uint64
+}
+
+type directoryIdentity struct {
 	device uint64
 	inode  uint64
 	owner  uint64
@@ -56,12 +66,16 @@ func Start(explicitProfileRoot string) (*Daemon, error) {
 	if err := ensurePrivateDirectory(profile.Root); err != nil {
 		return nil, err
 	}
+	profileID, err := privateDirectoryIdentity(profile.Root)
+	if err != nil {
+		return nil, err
+	}
 
 	lock, err := acquireProcessLock(filepath.Join(profile.Root, lockFileName))
 	if err != nil {
 		return nil, err
 	}
-	d := &Daemon{lock: lock}
+	d := &Daemon{lock: lock, profile: profile.Root, profileID: profileID}
 	fail := func(err error) (*Daemon, error) {
 		if closeErr := d.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
@@ -104,13 +118,30 @@ func writeLockDiagnostic(file *os.File) error {
 	return nil
 }
 
-// Listener exposes the bound stream only as a lifecycle seam for the later
-// transport step. It performs no peer authentication or request handling.
-func (d *Daemon) Listener() net.Listener {
-	if d == nil {
-		return nil
+// Accept returns a stream only after kernel peer-UID authentication and a
+// fresh check of the private profile/socket path. It consumes no request bytes.
+func (d *Daemon) Accept() (net.Conn, error) {
+	if d == nil || d.listener == nil {
+		return nil, net.ErrClosed
 	}
-	return d.listener
+	connection, err := d.listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	peerUID, err := peerEffectiveUID(connection)
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	if peerUID != d.profileID.owner {
+		_ = connection.Close()
+		return nil, ErrPeerUIDMismatch
+	}
+	if err := verifySocketPath(d.profile, d.socket, d.profileID, d.socketID); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
 }
 
 // Close releases resources in reverse startup order. The lock file is retained

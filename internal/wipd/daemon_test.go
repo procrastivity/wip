@@ -5,11 +5,14 @@ package wipd
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -114,6 +117,233 @@ func TestFixtureDataSurvivesForegroundCrashAndRestart(t *testing.T) {
 	}
 	if err := resumed.Close(); err != nil {
 		t.Fatalf("close recovered fixture daemon: %v", err)
+	}
+}
+
+func TestAcceptAuthenticatesSameUIDSubprocessBeforeExposingBytes(t *testing.T) {
+	root := testProfileRoot(t)
+	daemon, err := Start(root)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = daemon.Close() })
+
+	const request = "GET /wipd/v1/negotiate HTTP/1.1\r\nX-Peer-UID: 4294967295\r\n\r\n"
+	client := exec.Command(os.Args[0], "-test.run=^TestPeerAuthClientHelper$")
+	client.Env = append(os.Environ(), "WIPD_PEER_TEST_CLIENT=1", "WIPD_PEER_SOCKET="+filepath.Join(root, socketFileName), "WIPD_PEER_BYTES="+request)
+	client.Stdout = io.Discard
+	client.Stderr = io.Discard
+	if err := client.Start(); err != nil {
+		t.Fatalf("start same-UID client subprocess: %v", err)
+	}
+	t.Cleanup(func() {
+		if client.ProcessState == nil {
+			_ = client.Process.Kill()
+			_ = client.Wait()
+		}
+	})
+
+	type acceptResult struct {
+		connection net.Conn
+		err        error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		connection, err := daemon.Accept()
+		accepted <- acceptResult{connection: connection, err: err}
+	}()
+	var result acceptResult
+	select {
+	case result = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-UID subprocess did not reach the authenticated accept seam")
+	}
+	if result.err != nil {
+		t.Fatalf("Accept() rejected same-UID subprocess: %v", result.err)
+	}
+	defer result.connection.Close()
+	if err := result.connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline after authenticated Accept(): %v", err)
+	}
+	got := make([]byte, len(request))
+	if _, err := io.ReadFull(result.connection, got); err != nil {
+		t.Fatalf("read bytes after authenticated Accept(): %v", err)
+	}
+	if string(got) != request {
+		t.Fatalf("bytes after authenticated Accept() = %q, want untouched request %q", got, request)
+	}
+	if err := client.Wait(); err != nil {
+		t.Fatalf("same-UID client subprocess: %v", err)
+	}
+}
+
+func TestPeerAuthClientHelper(t *testing.T) {
+	if os.Getenv("WIPD_PEER_TEST_CLIENT") != "1" {
+		return
+	}
+	connection, err := net.Dial("unix", os.Getenv("WIPD_PEER_SOCKET"))
+	if err != nil {
+		t.Fatalf("dial peer-auth test socket: %v", err)
+	}
+	defer connection.Close()
+	if _, err := io.WriteString(connection, os.Getenv("WIPD_PEER_BYTES")); err != nil {
+		t.Fatalf("write peer-auth test bytes: %v", err)
+	}
+}
+
+func TestPeerCredentialUnavailableFailsClosed(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	if _, err := peerEffectiveUID(left); !errors.Is(err, ErrPeerCredentials) {
+		t.Fatalf("peerEffectiveUID(net.Pipe()) error = %v, want ErrPeerCredentials", err)
+	}
+}
+
+func TestAcceptRechecksPrivateRootAndSocketModes(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    func(string) string
+		mode    os.FileMode
+		restore os.FileMode
+	}{
+		{name: "profile root", path: func(root string) string { return root }, mode: 0o755, restore: 0o700},
+		{name: "socket", path: func(root string) string { return filepath.Join(root, socketFileName) }, mode: 0o666, restore: 0o600},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := testProfileRoot(t)
+			daemon, err := Start(root)
+			if err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			t.Cleanup(func() { _ = daemon.Close() })
+			path := test.path(root)
+			if err := os.Chmod(path, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			client, err := net.Dial("unix", filepath.Join(root, socketFileName))
+			if err != nil {
+				t.Fatalf("connect for path recheck: %v", err)
+			}
+			connection, err := daemon.Accept()
+			_ = client.Close()
+			if connection != nil {
+				_ = connection.Close()
+				t.Fatal("Accept() returned a stream after profile/socket permissions changed")
+			}
+			if !errors.Is(err, ErrUnsafeSocket) {
+				t.Fatalf("Accept() error = %v, want ErrUnsafeSocket", err)
+			}
+			if err := os.Chmod(path, test.restore); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDistinctUIDSubprocessRejectedBeforeDownstreamEffects(t *testing.T) {
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		t.Skipf("distinct-UID subprocess capability unavailable: setpriv not found: %v", err)
+	}
+	uid := uint32(65534)
+	if uid == uint32(os.Geteuid()) {
+		uid = 65533
+	}
+	uidText := strconv.FormatUint(uint64(uid), 10)
+	probe := exec.Command(setpriv, "--reuid", uidText, "/usr/bin/id", "-u")
+	probeOutput, err := probe.CombinedOutput()
+	if err != nil {
+		t.Skipf("distinct-UID subprocess capability unavailable: setpriv --reuid %s failed: %v (%s)", uidText, err, strings.TrimSpace(string(probeOutput)))
+	}
+	if strings.TrimSpace(string(probeOutput)) != uidText {
+		t.Fatalf("setpriv reported UID %q, want %s", strings.TrimSpace(string(probeOutput)), uidText)
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skipf("distinct-UID subprocess capability unavailable: python3 not found: %v", err)
+	}
+
+	root := testProfileRoot(t)
+	daemon, err := Start(root)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	wantRecord := wipdfixture.Record{ID: "peer-auth-sentinel", Key: "fixture-key", Value: "unchanged-by-peer"}
+	if err := daemon.fixture.Put(context.Background(), wantRecord); err != nil {
+		t.Fatalf("seed fixture sentinel: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(root, socketFileName), 0o600)
+		_ = os.Chmod(root, 0o700)
+		_ = os.Chmod(filepath.Dir(root), 0o700)
+		_ = daemon.Close()
+	})
+	if err := os.Chmod(filepath.Dir(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, socketFileName), 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	const clientScript = `import socket,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.sendall(("GET / HTTP/1.1\r\nX-Peer-UID: "+sys.argv[2]+"\r\n\r\n").encode())
+s.settimeout(5)
+try:
+    reply=s.recv(1)
+except (ConnectionResetError, BrokenPipeError):
+    reply=b""
+sys.exit(0 if reply == b"" else 3)`
+	client := exec.Command(setpriv, "--reuid", uidText, python, "-c", clientScript, filepath.Join(root, socketFileName), strconv.Itoa(os.Geteuid()))
+	client.Stdout = io.Discard
+	client.Stderr = io.Discard
+	if err := client.Start(); err != nil {
+		t.Fatalf("start distinct-UID peer client: %v", err)
+	}
+	t.Cleanup(func() {
+		if client.ProcessState == nil {
+			_ = client.Process.Kill()
+			_ = client.Wait()
+		}
+	})
+
+	type acceptResult struct {
+		connection net.Conn
+		err        error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		connection, err := daemon.Accept()
+		accepted <- acceptResult{connection: connection, err: err}
+	}()
+	var result acceptResult
+	select {
+	case result = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("distinct-UID client did not reach peer authentication")
+	}
+	if result.connection != nil {
+		_ = result.connection.Close()
+		t.Fatal("distinct-UID peer received an authenticated stream")
+	}
+	if err := client.Wait(); err != nil {
+		t.Fatalf("distinct-UID client: %v", err)
+	}
+	if !errors.Is(result.err, ErrPeerUIDMismatch) {
+		t.Fatalf("Accept() error = %v, want ErrPeerUIDMismatch", result.err)
+	}
+	gotRecord, err := daemon.fixture.Get(context.Background(), wantRecord.Key)
+	if err != nil {
+		t.Fatalf("read fixture sentinel after rejected peer: %v", err)
+	}
+	if gotRecord != wantRecord {
+		t.Fatalf("fixture changed after rejected peer: got %+v, want %+v", gotRecord, wantRecord)
 	}
 }
 

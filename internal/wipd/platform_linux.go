@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/procrastivity/wip/internal/wipdprofile"
 	"golang.org/x/sys/unix"
 )
 
@@ -61,6 +63,86 @@ func ensurePrivateDirectory(root string) error {
 		return errors.New("wipd: profile directory changed during securing")
 	}
 	return nil
+}
+
+func privateDirectoryIdentity(root string) (directoryIdentity, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return directoryIdentity{}, fmt.Errorf("wipd: inspect private profile: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return directoryIdentity{}, fmt.Errorf("%w: profile root is not a mode-0700 directory", ErrUnsafeSocket)
+	}
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return directoryIdentity{}, fmt.Errorf("wipd: open private profile: %w", err)
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return directoryIdentity{}, fmt.Errorf("wipd: inspect open private profile: %w", err)
+	}
+	pathStat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != 0o700 || uint64(stat.Uid) != uint64(os.Geteuid()) || uint64(pathStat.Dev) != uint64(stat.Dev) || pathStat.Ino != stat.Ino {
+		return directoryIdentity{}, fmt.Errorf("%w: profile directory identity or owner changed", ErrUnsafeSocket)
+	}
+	return directoryIdentity{device: uint64(stat.Dev), inode: stat.Ino, owner: uint64(stat.Uid)}, nil
+}
+
+func verifySocketPath(root, socket string, expectedRoot directoryIdentity, expectedSocket socketIdentity) error {
+	profile, err := wipdprofile.Resolve(root)
+	if err != nil || profile.Root != root {
+		return fmt.Errorf("%w: profile parent chain is no longer trusted", ErrUnsafeSocket)
+	}
+	if filepath.Dir(socket) != root || filepath.Base(socket) != socketFileName {
+		return fmt.Errorf("%w: socket is outside the verified profile root", ErrUnsafeSocket)
+	}
+	actualRoot, err := privateDirectoryIdentity(root)
+	if err != nil {
+		return err
+	}
+	if actualRoot != expectedRoot {
+		return fmt.Errorf("%w: profile directory inode changed", ErrUnsafeSocket)
+	}
+	info, err := os.Lstat(socket)
+	if err != nil {
+		return fmt.Errorf("%w: inspect listener path: %v", ErrUnsafeSocket, err)
+	}
+	actualSocket, err := checkedSocketIdentity(info)
+	if err != nil {
+		return err
+	}
+	if actualSocket != expectedSocket {
+		return fmt.Errorf("%w: listener socket inode changed", ErrUnsafeSocket)
+	}
+	return nil
+}
+
+func peerEffectiveUID(connection net.Conn) (uint64, error) {
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return 0, ErrPeerCredentials
+	}
+	rawConnection, err := unixConnection.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
+	}
+	var peerUID uint32
+	var credentialErr error
+	if err := rawConnection.Control(func(fd uintptr) {
+		credentials, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		if err != nil {
+			credentialErr = err
+			return
+		}
+		peerUID = credentials.Uid
+	}); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
+	}
+	if credentialErr != nil {
+		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, credentialErr)
+	}
+	return uint64(peerUID), nil
 }
 
 func acquireProcessLock(path string) (*os.File, error) {
