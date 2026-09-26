@@ -3,14 +3,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/procrastivity/wip/internal/wipd"
 )
@@ -34,31 +31,9 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "wipd: startup refused: %v\n", err)
 		return 1
 	}
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		acceptAuthenticated(daemon)
-	}()
-	<-ctx.Done()
-	closeErr := daemon.Close()
-	<-acceptDone
-	if closeErr != nil {
-		fmt.Fprintf(os.Stderr, "wipd: shutdown: %v\n", closeErr)
+	if err := wipd.NewServer().Serve(ctx, daemon); err != nil {
+		fmt.Fprintf(os.Stderr, "wipd: serve local protocol: %v\n", err)
 		return 1
 	}
 	return 0
-}
-
-func acceptAuthenticated(daemon *wipd.Daemon) {
-	for {
-		connection, err := daemon.Accept()
-		if err == nil {
-			_ = connection.Close()
-			continue
-		}
-		if errors.Is(err, net.ErrClosed) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
 }

@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -47,6 +48,94 @@ func TestCanonicalCommandGoldenVector(t *testing.T) {
 	}
 	if err := VerifyRequestHash(command, gotHash); err != nil {
 		t.Fatalf("VerifyRequestHash() error = %v", err)
+	}
+}
+
+func TestDecodeCanonicalCommandPreservesAsymmetricTypedRequest(t *testing.T) {
+	want := canonicalIdentityCommand()
+	encoded, err := want.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("CanonicalBytes() error = %v", err)
+	}
+	got, err := DecodeCanonicalCommand(encoded)
+	if err != nil {
+		t.Fatalf("DecodeCanonicalCommand() error = %v", err)
+	}
+	if got.ID != want.ID || got.AuthorityDomainID != want.AuthorityDomainID ||
+		got.ExpectedAuthorityEpoch != want.ExpectedAuthorityEpoch ||
+		got.EnvironmentID != want.EnvironmentID || got.EnvironmentSequence != want.EnvironmentSequence {
+		t.Fatalf("decoded command identity = %+v, want %+v", got, want)
+	}
+	if got.Request.Operation != want.Request.Operation || got.Request.Actor != want.Request.Actor ||
+		got.Request.Context != want.Request.Context {
+		t.Fatalf("decoded semantic envelope = %+v, want %+v", got.Request, want.Request)
+	}
+	gotInput, ok := got.Request.Input.(MatterCreateInput)
+	if !ok {
+		t.Fatalf("decoded input type = %T, want MatterCreateInput", got.Request.Input)
+	}
+	wantInput := MatterCreateInput{Title: "Café protocol identity", Locator: "protocol-identity"}
+	if gotInput != wantInput {
+		t.Fatalf("decoded input = %+v, want asymmetric input %+v", gotInput, wantInput)
+	}
+	gotHash, err := got.RequestHash()
+	if err != nil {
+		t.Fatalf("decoded RequestHash() error = %v", err)
+	}
+	if gotHash != "sha256:ad15faaa76992d045529ab28b7bd9ddd63799fa851641c131b881e141e6a9503" {
+		t.Fatalf("decoded request hash = %s, want the published M2 golden", gotHash)
+	}
+}
+
+func TestDecodeCanonicalCommandRejectsOpenOrAlternateEncodings(t *testing.T) {
+	base := canonicalIdentityCommand()
+	value, err := base.canonicalValue()
+	if err != nil {
+		t.Fatalf("canonicalValue() error = %v", err)
+	}
+	unknown := make(canonicalMap, len(value)+1)
+	for key, item := range value {
+		unknown[key] = item
+	}
+	unknown["unknown"] = true
+	missing := make(canonicalMap, len(value)-1)
+	for key, item := range value {
+		if key != "actor" {
+			missing[key] = item
+		}
+	}
+	unknownBytes, err := marshalCanonical(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingBytes, err := marshalCanonical(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canonical, err := base.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The value 7 for expected_epoch is changed from its preferred one-byte
+	// form to the valid but non-shortest two-byte form.
+	nonShortest := bytes.Replace(canonical,
+		[]byte{0x6e, 'e', 'x', 'p', 'e', 'c', 't', 'e', 'd', '_', 'e', 'p', 'o', 'c', 'h', 0x07},
+		[]byte{0x6e, 'e', 'x', 'p', 'e', 'c', 't', 'e', 'd', '_', 'e', 'p', 'o', 'c', 'h', 0x18, 0x07}, 1)
+	if bytes.Equal(nonShortest, canonical) {
+		t.Fatal("test mutation did not find the expected_epoch golden encoding")
+	}
+
+	for name, data := range map[string][]byte{
+		"unknown field":    unknownBytes,
+		"missing field":    missingBytes,
+		"non-shortest int": nonShortest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeCanonicalCommand(data); err == nil {
+				t.Fatal("DecodeCanonicalCommand() accepted a noncanonical command")
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -97,6 +98,30 @@ func (r *Registry) Resolve(id ID) (Registration, error) {
 		}
 	}
 	return Registration{}, unknownOperation(id)
+}
+
+// Definitions returns the registered operation definitions in stable ID
+// order. Protocol adapters use this closed list to negotiate only handlers
+// that can actually be resolved; catalogue entries without handlers are not
+// advertised as executable capabilities.
+func (r *Registry) Definitions() []Definition {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	definitions := make([]Definition, 0, len(r.registrations))
+	for _, registration := range r.registrations {
+		definitions = append(definitions, registration.Definition)
+	}
+	r.mu.RUnlock()
+	sort.Slice(definitions, func(i, j int) bool {
+		left, right := definitions[i].metadata.Operation, definitions[j].metadata.Operation
+		if left.Name != right.Name {
+			return left.Name < right.Name
+		}
+		return left.Version < right.Version
+	})
+	return definitions
 }
 
 // Dispatch resolves request.Operation, validates the semantic request, invokes

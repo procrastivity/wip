@@ -34,6 +34,27 @@ func TestRegistryRegistersAndResolvesVersionedOperation(t *testing.T) {
 	assertResolutionCode(t, err, ProblemUnsupportedVersion)
 }
 
+func TestDefinitionsListsOnlyRegisteredOperationsInStableOrder(t *testing.T) {
+	registry := NewRegistry()
+	if got := registry.Definitions(); len(got) != 0 {
+		t.Fatalf("empty registry Definitions() = %d entries, want 0 despite the catalogue", len(got))
+	}
+	handler := func(context.Context, Request) Result { return Result{} }
+	if err := registry.Register(MatterCreateV1, handler); err != nil {
+		t.Fatal(err)
+	}
+	second := MatterCreateV1
+	second.metadata.Operation = ID{Name: "matter.archive", Version: 1}
+	if err := registry.Register(second, handler); err != nil {
+		t.Fatal(err)
+	}
+	definitions := registry.Definitions()
+	if len(definitions) != 2 || definitions[0].Metadata().Operation != second.Metadata().Operation ||
+		definitions[1].Metadata().Operation != MatterCreateV1.Metadata().Operation {
+		t.Fatalf("registered Definitions() = %+v, want matter.archive@v1 then matter.create@v1", definitions)
+	}
+}
+
 func TestRegistryRejectsInvalidAndDuplicateRegistrations(t *testing.T) {
 	registry := NewRegistry()
 	handler := func(context.Context, Request) Result { return Result{} }
