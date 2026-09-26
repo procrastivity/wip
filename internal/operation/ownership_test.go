@@ -33,38 +33,11 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 		if len(writesurfaceNames) == 0 {
 			return nil
 		}
-		aliases := map[string]bool{}
-		ast.Inspect(file, func(node ast.Node) bool {
-			assignment, ok := node.(*ast.AssignStmt)
-			if !ok || len(assignment.Lhs) != len(assignment.Rhs) {
-				return true
-			}
-			for index, rhs := range assignment.Rhs {
-				selector, ok := rhs.(*ast.SelectorExpr)
-				if !ok || selector.Sel.Name != "CreateMatter" {
-					continue
-				}
-				packageName, ok := selector.X.(*ast.Ident)
-				lhs, lhsOK := assignment.Lhs[index].(*ast.Ident)
-				if ok && lhsOK && writesurfaceNames[packageName.Name] {
-					aliases[lhs.Name] = true
-				}
-			}
-			return true
-		})
+		aliases := collectWritesurfaceAliases(file, writesurfaceNames)
 
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != "CreateMatter" {
-				return true
-			}
-			packageName, packageOK := selector.X.(*ast.Ident)
-			alias, aliasOK := selector.X.(*ast.Ident)
-			if (packageOK && writesurfaceNames[packageName.Name]) || (aliasOK && aliases[alias.Name]) {
+			if ok && isWritesurfaceCreateMatterCall(call, writesurfaceNames, aliases) {
 				relative, relErr := filepath.Rel(root, path)
 				if relErr != nil {
 					t.Fatalf("relative caller path: %v", relErr)
@@ -81,6 +54,36 @@ func TestMatterCreateKeepsOneWritesurfaceOwner(t *testing.T) {
 
 	if len(callers) != 1 || callers[0] != "internal/verbs/matter/matter.go" {
 		t.Fatalf("writesurface.CreateMatter production callers = %v, want only the existing matter adapter", callers)
+	}
+}
+
+func TestWritesurfaceCreateMatterAliasCallIsDetected(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "fixture.go", `
+package fixture
+import "github.com/procrastivity/wip/internal/writesurface"
+func call() {
+	fn := writesurface.CreateMatter
+	fn()
+}
+`, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse synthetic ownership fixture: %v", err)
+	}
+	writesurfaceNames := map[string]bool{"writesurface": true}
+	aliases := collectWritesurfaceAliases(file, writesurfaceNames)
+	if !aliases["fn"] {
+		t.Fatal("synthetic fixture alias fn was not collected")
+	}
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if ok && isWritesurfaceCreateMatterCall(call, writesurfaceNames, aliases) {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("fn() call to aliased writesurface.CreateMatter was not detected")
 	}
 }
 
@@ -176,4 +179,42 @@ func walkProductionFiles(root string, visit func(string, *ast.File) error) error
 		}
 	}
 	return nil
+}
+
+func collectWritesurfaceAliases(file *ast.File, writesurfaceNames map[string]bool) map[string]bool {
+	aliases := map[string]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		assignment, ok := node.(*ast.AssignStmt)
+		if !ok || len(assignment.Lhs) != len(assignment.Rhs) {
+			return true
+		}
+		for index, rhs := range assignment.Rhs {
+			selector, ok := rhs.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "CreateMatter" {
+				continue
+			}
+			packageName, ok := selector.X.(*ast.Ident)
+			lhs, lhsOK := assignment.Lhs[index].(*ast.Ident)
+			if ok && lhsOK && writesurfaceNames[packageName.Name] {
+				aliases[lhs.Name] = true
+			}
+		}
+		return true
+	})
+	return aliases
+}
+
+func isWritesurfaceCreateMatterCall(call *ast.CallExpr, writesurfaceNames, aliases map[string]bool) bool {
+	switch target := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		if target.Sel.Name != "CreateMatter" {
+			return false
+		}
+		packageName, ok := target.X.(*ast.Ident)
+		return ok && writesurfaceNames[packageName.Name]
+	case *ast.Ident:
+		return aliases[target.Name]
+	default:
+		return false
+	}
 }
