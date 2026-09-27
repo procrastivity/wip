@@ -1,6 +1,7 @@
 package authoritystore
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -223,6 +224,51 @@ func TestM5LabGenesisGrantBootstrapPersistsIdentityHighWaterAndReplayFence(t *te
 	}
 	if _, err := reopened.LookupDomain(context.Background(), domain.ID); err != nil {
 		t.Fatalf("consumed replay damaged domain: %v", err)
+	}
+}
+
+func TestM5LabBootstrapPreservesOfflineOwnerRootForEnrollmentGrant(t *testing.T) {
+	store, _ := fresh(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	owner := key("m5-lab-retained-offline-owner-root")
+	ownerPublic := owner.Public().(ed25519.PublicKey)
+	ownerKeyID, err := spkiID(ownerPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := Domain{ID: domainA, OwnerPublicKey: append(ed25519.PublicKey(nil), ownerPublic...), OwnerKeyID: ownerKeyID, ActiveEpoch: 1}
+	setupSigner := key("m5-lab-owner-continuity-setup")
+	genesisGrant := issueM5LabGrantForTest(t, setupSigner, domain, repoA, "create-domain", []byte("owner-link-00001"), now, now.Add(time.Minute))
+	if err := store.BootstrapDomainWithM5LabGrant(ctx, domain, repoA, setupSigner.Public().(ed25519.PublicKey), genesisGrant, now); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.LookupDomain(ctx, domain.ID)
+	if err != nil || !bytes.Equal(persisted.OwnerPublicKey, ownerPublic) || persisted.OwnerKeyID != ownerKeyID {
+		t.Fatalf("bootstrapped owner root = %+v, %v", persisted, err)
+	}
+
+	caPrivate := key("m5-lab-owner-continuity-ca")
+	caDER := caFixture(t, caPrivate, now)
+	caKeyID, err := spkiID(caPrivate.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegation := signedTest(t, owner, "environment-ca-delegation", "wipd.environment-ca-delegation/1", domain.ID, ownerKeyID, 1, map[string]any{
+		"schema": "wipd.environment-ca-delegation/1", "domain_id": domain.ID, "authority_epoch": uint64(1), "owner_key_id": ownerKeyID,
+		"ca_generation": uint64(1), "ca_key_id": caKeyID, "ca_certificate_der": caDER,
+		"not_before": now.Add(-time.Hour).Format(time.RFC3339Nano), "not_after": now.Add(7 * 24 * time.Hour).Format(time.RFC3339Nano),
+	})
+	if err := store.InstallEnvironmentCA(ctx, domain.ID, delegation, now); err != nil {
+		t.Fatalf("owner-signed CA delegation: %v", err)
+	}
+	leafPrivate := key("m5-lab-owner-continuity-environment")
+	csr := csrFixture(t, leafPrivate, "retained owner enrollment")
+	leaf := leafFixture(t, leafPrivate, caPrivate, caDER, domain.ID, envA, ownerKeyID, 1, now, 121)
+	enrollmentGrant := grantFixture(t, owner, domain, "environment-enroll", grantA, envA, leafPrivate, 0x41)
+	issued, err := store.IssueEnvironmentCertificate(ctx, domain.ID, envA, enrollmentGrant, csr, [][]byte{leaf, caDER}, now)
+	if err != nil || issued.DomainID != domain.ID || issued.Epoch != 1 || issued.Generation != 1 || !bytes.Equal(issued.Chain[0], leaf) {
+		t.Fatalf("same offline owner root could not authorize enrollment: %+v, %v", issued, err)
 	}
 }
 

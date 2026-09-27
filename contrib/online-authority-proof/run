@@ -99,6 +99,7 @@ case "${1:-up}" in
     compose up -d
     ;;
   bootstrap)
+    shift
     validate
     check_ownership
     mapfile -t authority_containers < <(compose ps --status running --quiet authority-env)
@@ -107,7 +108,7 @@ case "${1:-up}" in
     (
       cd "$root"
       go run ./cmd/wip-authority-lab bootstrap \
-        --container-id "${authority_containers[0]}" --project "$project"
+        --container-id "${authority_containers[0]}" --project "$project" "$@"
     )
     ;;
   down)

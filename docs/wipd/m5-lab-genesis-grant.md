@@ -7,13 +7,20 @@ endpoint. It adds no CDDL production or `wipd.store/1` content.
 
 ## Issuer and pin
 
-For each bootstrap attempt, the host harness generates a fresh Ed25519 setup
-signer and a separate owner root in memory. Before it sends grant bytes, it
-passes the setup signer's 32-byte public key to the worker as an independent
-pin. The key is not embedded in the grant. The worker rejects a setup signer
-whose SPKI digest equals the owner-root SPKI digest. Neither private key is
-copied to a container or persisted. Grant bytes travel only over the
-harness's `docker exec` stdin.
+The trusted offline owner workflow supplies the retained owner's raw Ed25519
+public key to the harness as canonical base64. The harness never generates a
+replacement owner root and never receives or retains the owner's private key;
+that same root must remain available to sign later owner enrollment grants and
+CA delegations. The genesis grant binds the supplied root's DER-SPKI digest.
+
+For each bootstrap attempt, the host harness independently generates a fresh
+Ed25519 setup signer. Before it sends grant bytes, it passes the setup
+signer's 32-byte public key to the worker as an independent pin. The setup
+key is not embedded in the grant. The worker rejects a setup signer whose
+SPKI digest equals the owner-root SPKI digest. The setup private key remains
+in harness memory and neither it nor the owner private key is copied to a
+container or persisted. Grant bytes travel only over the harness's
+`docker exec` stdin.
 
 ## Grant bytes
 
@@ -67,3 +74,6 @@ The output is a sanitized harness record of the persisted domain ID, active
 epoch, initial Repo ID, and current high-water. A fresh domain has event count
 zero, null high-water event ID, and the normative empty-prefix digest
 `SHA-256(UTF8("wipd/event-prefix/v1") || 0x00)`. Bootstrap creates no event.
+The authoritystore continuity test uses the same supplied owner root to sign
+an M3 enrollment grant and verifies issuance against the bootstrapped domain;
+it does not add enrollment behavior to this lab step.

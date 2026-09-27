@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,8 @@ const (
 	grantInputLimit    = 4096
 	workerTimeout      = 30 * time.Second
 	workerBuildTimeout = 2 * time.Minute
+	refusalExitCode    = 3
+	refusalMarker      = "WIP_AUTHORITY_LAB_SEMANTIC_REFUSAL"
 	ulidAlphabet       = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 )
 
@@ -52,11 +55,36 @@ type bootstrapRecord struct {
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	args := os.Args[1:]
+	if err := run(args); err != nil {
+		var refusal *semanticRefusalError
+		if len(args) > 0 && args[0] == "bootstrap-worker" && errors.As(err, &refusal) {
+			fmt.Fprintf(os.Stderr, "%s\n%s\n", refusalMarker, refusal.err)
+			os.Exit(refusalExitCode)
+		}
 		fmt.Fprintf(os.Stderr, "wip-authority-lab: %v\n", err)
 		os.Exit(1)
 	}
 }
+
+type semanticRefusalError struct{ err error }
+
+func (e *semanticRefusalError) Error() string {
+	return "authority-env bootstrap refused: " + e.err.Error()
+}
+func (e *semanticRefusalError) Unwrap() error { return e.err }
+
+type bootstrapOutcomeUnknownError struct {
+	DomainID string
+	RepoID   string
+	Cause    error
+}
+
+func (e *bootstrapOutcomeUnknownError) Error() string {
+	return fmt.Sprintf("authority-env bootstrap outcome-unknown domain_id=%s repo_id=%s: %v", e.DomainID, e.RepoID, e.Cause)
+}
+
+func (e *bootstrapOutcomeUnknownError) Unwrap() error { return e.Cause }
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -77,8 +105,13 @@ func runHostBootstrap(args []string) error {
 	flags.SetOutput(io.Discard)
 	containerID := flags.String("container-id", "", "running authority-env container ID")
 	project := flags.String("project", "", "validated Compose project name")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *containerID == "" || !labProjectPattern.MatchString(*project) {
-		return errors.New("usage: bootstrap --container-id <id> --project wip-authority-proof-<id>")
+	ownerRootValue := flags.String("owner-root-public-key", "", "base64 Ed25519 public key from the retained offline owner root")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *containerID == "" || !labProjectPattern.MatchString(*project) || *ownerRootValue == "" {
+		return errors.New("usage: bootstrap --container-id <id> --project wip-authority-proof-<id> --owner-root-public-key <base64-ed25519-public-key>")
+	}
+	ownerPublicKey, err := decodePublicKey(*ownerRootValue)
+	if err != nil {
+		return errors.New("invalid offline owner-root public key")
 	}
 	if err := verifyAuthorityContainer(*containerID, *project); err != nil {
 		return err
@@ -120,11 +153,6 @@ func runHostBootstrap(args []string) error {
 			return err
 		}
 	}
-	ownerPublicKey, ownerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
-	}
-	defer clear(ownerPrivateKey)
 	setupPublicKey, setupPrivateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return err
@@ -163,23 +191,34 @@ func runHostBootstrap(args []string) error {
 	command.Stdin = bytes.NewReader(grant)
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err = command.Run(); err != nil {
-		return fmt.Errorf("authority-env bootstrap refused: %w: %s", err, strings.TrimSpace(stderr.String()))
+	if err = command.Start(); err != nil {
+		return fmt.Errorf("could not start docker exec before dispatch: %w", err)
+	}
+	if err = command.Wait(); err != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		return classifyBootstrapExecFailure(exitCode, stderr.String(), domain.ID, repoID, err)
 	}
 	var record bootstrapRecord
 	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
 	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(&record); err != nil {
-		return fmt.Errorf("authority-env returned invalid bootstrap record: %w", err)
+		return unknownBootstrapOutcome(domain.ID, repoID, fmt.Errorf("invalid worker result: %w", err))
 	}
 	if err = decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return errors.New("authority-env returned trailing bootstrap data")
+		return unknownBootstrapOutcome(domain.ID, repoID, errors.New("worker returned trailing bootstrap data"))
 	}
 	if record.DomainID != domain.ID || record.Epoch != 1 || record.RepoID != repoID ||
 		record.HighWater.EventCount != 0 || record.HighWater.EventID != nil || record.HighWater.PrefixDigest != emptyPrefixDigest() {
-		return errors.New("authority-env bootstrap identity or initial high-water differs from the authorized values")
+		return unknownBootstrapOutcome(domain.ID, repoID, errors.New("worker result differs from the authorized identity or initial high-water"))
 	}
-	return json.NewEncoder(os.Stdout).Encode(record)
+	if err := json.NewEncoder(os.Stdout).Encode(record); err != nil {
+		return unknownBootstrapOutcome(domain.ID, repoID, fmt.Errorf("could not deliver bootstrap record: %w", err))
+	}
+	return nil
 }
 
 func verifyAuthorityContainer(containerID, project string) error {
@@ -204,6 +243,23 @@ func runDocker(timeout time.Duration, args ...string) error {
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	return command.Run()
+}
+
+func classifyBootstrapExecFailure(exitCode int, stderr, domainID, repoID string, cause error) error {
+	if exitCode == refusalExitCode {
+		message := strings.TrimSpace(stderr)
+		if before, after, found := strings.Cut(message, "\n"); found && before == refusalMarker && after != "" {
+			return &semanticRefusalError{err: errors.New(strings.TrimSpace(after))}
+		}
+	}
+	if stderr != "" {
+		cause = fmt.Errorf("%w: %s", cause, strings.TrimSpace(stderr))
+	}
+	return unknownBootstrapOutcome(domainID, repoID, cause)
+}
+
+func unknownBootstrapOutcome(domainID, repoID string, cause error) error {
+	return &bootstrapOutcomeUnknownError{DomainID: domainID, RepoID: repoID, Cause: cause}
 }
 
 func authorityContainerGOARCH(containerID string) (string, error) {
@@ -281,34 +337,39 @@ func runBootstrapWorker(args []string) error {
 	ownerRootPublicKey := flags.String("owner-root-public-key", "", "owner-root public key")
 	setupSignerPin := flags.String("setup-signer-pin", "", "out-of-band pinned setup signer public key")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *domainID == "" || *repoID == "" || *ownerRootPublicKey == "" || *setupSignerPin == "" {
-		return errors.New("incomplete authority-env bootstrap input")
+		return refuseBootstrap(errors.New("incomplete authority-env bootstrap input"))
 	}
 	ownerPublicKey, err := decodePublicKey(*ownerRootPublicKey)
 	if err != nil {
-		return errors.New("invalid owner-root public key")
+		return refuseBootstrap(errors.New("invalid owner-root public key"))
 	}
 	pinnedSetupSigner, err := decodePublicKey(*setupSignerPin)
 	if err != nil {
-		return errors.New("invalid setup signer pin")
+		return refuseBootstrap(errors.New("invalid setup signer pin"))
 	}
 	domain, err := makeDomain(*domainID, ownerPublicKey)
 	if err != nil {
-		return errors.New("invalid authorized domain identity")
+		return refuseBootstrap(errors.New("invalid authorized domain identity"))
 	}
 	// Pin parsing and domain binding inputs are established before the
 	// worker accepts or verifies any grant bytes from stdin.
 	grant, err := io.ReadAll(io.LimitReader(os.Stdin, grantInputLimit+1))
 	if err != nil || len(grant) == 0 || len(grant) > grantInputLimit {
-		return errors.New("invalid bounded grant input")
+		return refuseBootstrap(errors.New("invalid bounded grant input"))
 	}
 	defer clear(grant)
 
 	record, err := bootstrapFreshDomain(context.Background(), authorityDataRoot, domain, *repoID, pinnedSetupSigner, grant, time.Now().UTC())
 	if err != nil {
+		if errors.Is(err, authoritystore.ErrM5LabGenesisGrantInvalid) || errors.Is(err, authoritystore.ErrM5LabGenesisGrantConsumed) || errors.Is(err, fs.ErrExist) {
+			return refuseBootstrap(err)
+		}
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(record)
 }
+
+func refuseBootstrap(err error) error { return &semanticRefusalError{err: err} }
 
 func bootstrapFreshDomain(ctx context.Context, root string, domain authoritystore.Domain, repoID string, pinnedSetupSigner ed25519.PublicKey, grant []byte, now time.Time) (bootstrapRecord, error) {
 	if err := authoritystore.VerifyM5LabGenesisGrant(grant, pinnedSetupSigner, domain, repoID, now); err != nil {

@@ -6,10 +6,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +29,11 @@ func TestBootstrapFreshDomainPersistsAuthorizedIdentityAndEmptyHighWater(t *test
 	}
 	domainID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	repoID := "01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	domain, err := makeDomain(domainID, ownerPublic)
+	suppliedOwnerRoot, err := decodePublicKey(base64.StdEncoding.EncodeToString(ownerPublic))
+	if err != nil || !bytes.Equal(suppliedOwnerRoot, ownerPublic) {
+		t.Fatalf("decode trusted offline owner root: %v", err)
+	}
+	domain, err := makeDomain(domainID, suppliedOwnerRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +126,19 @@ func TestBootstrapFreshDomainRejectsBeforeCreatingAuthorityRoot(t *testing.T) {
 	}
 }
 
+func TestHostBootstrapRequiresOfflineOwnerRootInputBeforeDocker(t *testing.T) {
+	err := runHostBootstrap([]string{"--container-id", "container", "--project", "wip-authority-proof-test"})
+	if err == nil || !strings.Contains(err.Error(), "--owner-root-public-key") {
+		t.Fatalf("bootstrap without retained owner public key = %v, want usage refusal", err)
+	}
+	err = runHostBootstrap([]string{
+		"--container-id", "container", "--project", "wip-authority-proof-test", "--owner-root-public-key", "not-base64",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid offline owner-root public key") {
+		t.Fatalf("bootstrap with invalid owner public key = %v, want local refusal", err)
+	}
+}
+
 func TestNewULIDProducesCanonicalAsymmetricIdentities(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	first, err := newULID(now)
@@ -160,5 +179,60 @@ func TestLinuxGOARCHFollowsAuthorityImageAndRejectsUnsupportedPlatforms(t *testi
 		} else if err == nil {
 			t.Errorf("linuxGOARCH(%q, %q) = %q, want rejection", test.os, test.architecture, got)
 		}
+	}
+}
+
+func TestPostCommitLostWorkerResultIsOutcomeUnknownWithReconciliationIdentity(t *testing.T) {
+	ownerPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupPublic, setupPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domainID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	repoID := "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	domain, err := makeDomain(domainID, ownerPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	grant, err := authoritystore.CreateM5LabGenesisGrant(setupPrivate, domain, repoID, []byte("lost-result-0001"), now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "authority")
+	if _, err := bootstrapFreshDomain(context.Background(), root, domain, repoID, setupPublic, grant, now); err != nil {
+		t.Fatalf("simulated worker commit: %v", err)
+	}
+	resultLost := errors.New("docker exec stream lost after worker commit")
+	err = classifyBootstrapExecFailure(-1, "", domainID, repoID, resultLost)
+	var unknown *bootstrapOutcomeUnknownError
+	if !errors.As(err, &unknown) || unknown.DomainID != domainID || unknown.RepoID != repoID || !strings.Contains(err.Error(), "outcome-unknown") {
+		t.Fatalf("post-commit lost result classification = %#v, %v", unknown, err)
+	}
+	store, err := authoritystore.OpenExisting(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if persisted, err := store.LookupDomain(context.Background(), domainID); err != nil || persisted.ID != domainID {
+		t.Fatalf("committed domain unavailable for reconciliation: %+v, %v", persisted, err)
+	}
+	if persistedRepo, err := store.RepoDomain(context.Background(), repoID); err != nil || persistedRepo != domainID {
+		t.Fatalf("committed Repo unavailable for reconciliation: %q, %v", persistedRepo, err)
+	}
+}
+
+func TestWorkerSemanticRefusalIsNotClassifiedAsOutcomeUnknown(t *testing.T) {
+	err := classifyBootstrapExecFailure(refusalExitCode, refusalMarker+"\ninvalid exact-scope grant", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW", errors.New("exit status 3"))
+	var refusal *semanticRefusalError
+	if !errors.As(err, &refusal) || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("semantic refusal classification = %T %v", err, err)
+	}
+	var unknown *bootstrapOutcomeUnknownError
+	if errors.As(err, &unknown) {
+		t.Fatalf("semantic refusal mislabeled outcome-unknown: %+v", unknown)
 	}
 }

@@ -12,22 +12,25 @@ directory:
 ```sh
 ./contrib/online-authority-proof/run config # validate rendered Compose topology
 ./contrib/online-authority-proof/run up     # create/start the lab
-./contrib/online-authority-proof/run bootstrap # initialize authority-env once
+./contrib/online-authority-proof/run bootstrap --owner-root-public-key "$OWNER_ROOT_PUBLIC_KEY_B64"
 ./contrib/online-authority-proof/run down   # stop and remove containers, network, and volumes
 ```
 
 `bootstrap` requires exactly one running, lab-owned `authority-env`. The host
-harness generates a fresh owner root, domain ID, Repo ID, and independent
-per-run setup signer in memory. It pins the setup signer's public key before
-passing the bounded signed grant to a temporary static worker in
-`authority-env` over `docker exec` stdin. The setup private key and grant are
-never mounted or written to disk; the worker is copied temporarily into the
-authority-owned named volume and removed after use. The authority database
-retains only the grant digest, nonce, pinned signer public-key digest, and the
-authorized identity bindings in the same transaction as domain + Repo
-creation. An existing/incomplete authority root is refused; `bootstrap` never
-resets or reuses it. The command prints a sanitized domain/epoch/Repo/initial
-high-water record. `client-env` remains uninitialized in this step.
+The trusted offline owner workflow supplies the retained owner's raw Ed25519
+public key as canonical base64. The owner private key stays outside the
+harness, container, and authority store. The harness creates fresh domain and
+Repo IDs plus an independent per-run setup signer in memory. It pins the
+setup signer's public key before passing the bounded signed grant to a
+temporary static worker in `authority-env` over `docker exec` stdin. The setup
+private key and grant are never mounted or written to disk; the worker is
+copied temporarily into the authority-owned named volume and removed after
+use. The authority database retains only the grant digest, nonce, pinned
+signer public-key digest, and authorized identity bindings in the same
+transaction as domain + Repo creation. An existing/incomplete authority root
+is refused; `bootstrap` never resets or reuses it. The command prints a
+sanitized domain/epoch/Repo/initial high-water record. `client-env` remains
+uninitialized in this step.
 
 The signed create-domain grant is a narrow M5 test-lab setup contract, not an
 M2 frame, enrollment grant, owner attestation, or production authorization
