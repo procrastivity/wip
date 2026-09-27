@@ -39,6 +39,25 @@ reject_mutation service-secret '.services["authority-env"].secrets = [{"source":
 reject_mutation service-config '.services["client-env"].configs = [{"source":"host-config","target":"host-config"}]'
 reject_mutation service-env-file '.services["authority-env"].env_file = ["/home/user/.ssh/id_ed25519"]'
 
+reject_compose_mutation() {
+  local name="$1"
+  local expression="$2"
+  local candidate="$tmp_dir/$name.compose.json"
+  local rendered="$tmp_dir/$name.rendered.json"
+  jq "$expression" "$valid" >"$candidate"
+  docker compose -p "$project" -f "$candidate" config --format json >"$rendered"
+  if jq -e --arg project "$project" -f "$policy" "$rendered" >/dev/null; then
+    printf 'online authority lab policy: accepted Compose-valid mutation: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+reject_compose_mutation volumes-from '.services["client-env"].volumes_from = ["authority-env"]'
+reject_compose_mutation shared-network-name '.networks.lab.name = "shared-lab-network"'
+reject_compose_mutation external-network-definition '.networks.lab = {"name":"shared-lab-network","external":true}'
+reject_compose_mutation shared-pid-namespace '.services["client-env"].pid = "service:authority-env"'
+reject_compose_mutation shared-ipc-namespace '.services["client-env"].ipc = "service:authority-env"'
+
 mock_bin="$tmp_dir/mock-bin"
 mkdir -p "$mock_bin"
 mock_log="$tmp_dir/docker.log"

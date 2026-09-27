@@ -9,6 +9,8 @@
 (.volumes["client-state"].name == ($project + "_client-state")) and
 (.volumes["authority-state"].labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
 (.volumes["client-state"].labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
+((.networks.lab | keys) == ["internal", "ipam", "labels", "name"]) and
+(.networks.lab.name == ($project + "_lab")) and
 (.networks.lab.labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
 (.services["authority-env"].networks | keys) == ["lab"] and
 (.services["client-env"].networks | keys) == ["lab"] and
@@ -27,6 +29,8 @@ all(.services[];
   (.network_mode // "") != "host" and
   (.pid // "") != "host" and
   (.ipc // "") != "host" and
+  (.pid // "") == "" and
+  (.ipc // "") == "" and
   (.read_only // false) == true and
   ((.cap_add // []) | length) == 0 and
   ((.cap_drop // []) | index("ALL")) != null and
@@ -36,6 +40,7 @@ all(.services[];
   ((.secrets // []) | length) == 0 and
   ((.configs // []) | length) == 0 and
   ((.env_file // []) | length) == 0 and
+  ((.volumes_from // []) | length) == 0 and
   (.labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
   all(.volumes[]?; .type == "volume") and
   all((.environment // {}) | to_entries[]?;

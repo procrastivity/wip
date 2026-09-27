@@ -29,9 +29,12 @@ remove Compose orphans.
 `./contrib/online-authority-proof/test-policy` checks the Compose rendering and
 proves the topology guard rejects representative host mounts, bind-backed,
 external, or explicitly shared volumes, secret/config/env-file channels,
-external/host networking, published ports, credentials, and extra services. It
-also tests invalid/colliding project names and proves an invalid config is
-rejected before Docker resource inspection or teardown.
+external or explicitly shared networks, inherited mounts, shared PID/IPC
+namespaces, external/host networking, published ports, credentials, and extra
+services. These adversarial topology mutations are normalized by `docker
+compose config` before the policy rejection is asserted. The tests also cover
+invalid/colliding project names and prove an invalid config is rejected before
+Docker resource inspection or teardown.
 Neither container performs domain initialization or any authority, TLS, grant,
 journal, receipt, or operation behavior. This skeleton makes no claim that the
 M4 synthetic fixture is canonical state and does not implement migration,
