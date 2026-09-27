@@ -68,7 +68,7 @@ func TestClientMapsBareM1ResultAndFixtureStateMatchesDirectDispatch(t *testing.T
 			if err != nil {
 				t.Fatalf("authenticated AF_UNIX HTTP/2 prior-knowledge connect: %v", err)
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			socketResult, err := client.ExecuteCommand(context.Background(), command)
 			if err != nil {
 				t.Fatalf("execute local fixture command over IPC: %v", err)
@@ -295,7 +295,7 @@ func TestClientProcessRestartHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect() from replacement client process: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if encoded := os.Getenv("WIPD_CLIENT_CANONICAL_COMMAND"); encoded != "" {
 		canonical, err := hex.DecodeString(encoded)
 		if err != nil {
@@ -404,7 +404,7 @@ func TestActivateDeadlineIsBoundedWhenSocketIsLiveButUnresponsive(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	started := time.Now()
 	_, err = Activate(context.Background(), root, filepath.Join(t.TempDir(), "must-not-start"))

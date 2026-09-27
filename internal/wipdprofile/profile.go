@@ -12,11 +12,16 @@ import (
 )
 
 var (
+	// ErrMissingProfile means no explicit profile root was supplied.
 	ErrMissingProfile = errors.New("wipd profile: explicit root is required")
-	ErrRelativeRoot   = errors.New("wipd profile: root must be absolute")
-	ErrUnsafeRoot     = errors.New("wipd profile: root or an ancestor is unsafe")
+	// ErrRelativeRoot means the profile root is not absolute.
+	ErrRelativeRoot = errors.New("wipd profile: root must be absolute")
+	// ErrUnsafeRoot means the root or an ancestor fails path validation.
+	ErrUnsafeRoot = errors.New("wipd profile: root or an ancestor is unsafe")
+	// ErrStoreCollision means the profile overlaps normal WIP storage.
 	ErrStoreCollision = errors.New("wipd profile: root overlaps normal WIP storage")
-	ErrAuthorityDB    = errors.New("wipd profile: root overlaps authority.db")
+	// ErrAuthorityDB means the profile overlaps an authority database.
+	ErrAuthorityDB = errors.New("wipd profile: root overlaps authority.db")
 )
 
 // Profile is a verified local path capability, not an opened fixture store.
@@ -122,7 +127,7 @@ func validateDirectoryChain(root string) error {
 			// A sticky shared temporary ancestor is safe only when owned by
 			// root or the current user; sticky does not make an attacker-owned
 			// directory immutable.
-			if info.Mode().Perm()&0022 != 0 && !trustedStickyAncestor(info) {
+			if info.Mode().Perm()&0o022 != 0 && !trustedStickyAncestor(info) {
 				return fmt.Errorf("%w: writable ancestor %s", ErrUnsafeRoot, current)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {

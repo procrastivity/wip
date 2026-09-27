@@ -30,7 +30,8 @@ func ensurePrivateDirectory(root string) error {
 	if err != nil {
 		return fmt.Errorf("wipd: open private profile directory: %w", err)
 	}
-	defer unix.Close(fd)
+	// This read-only verification descriptor has no writes to flush.
+	defer func() { _ = unix.Close(fd) }()
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return fmt.Errorf("wipd: verify private profile directory: %w", err)
@@ -77,7 +78,7 @@ func privateDirectoryIdentity(root string) (directoryIdentity, error) {
 	if err != nil {
 		return directoryIdentity{}, fmt.Errorf("wipd: open private profile: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return directoryIdentity{}, fmt.Errorf("wipd: inspect open private profile: %w", err)

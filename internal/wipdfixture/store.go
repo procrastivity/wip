@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	// Register the SQLite driver for the disposable fixture database.
 	_ "modernc.org/sqlite"
 
 	"github.com/procrastivity/wip/internal/wipdprofile"

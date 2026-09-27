@@ -22,6 +22,7 @@ const (
 
 var requestHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+// Server handles authenticated local frame sessions through its registered operations.
 type Server struct {
 	registry               *operation.Registry
 	maxConcurrentExchanges uint64

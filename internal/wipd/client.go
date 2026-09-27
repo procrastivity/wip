@@ -32,7 +32,9 @@ const (
 )
 
 var (
-	ErrUnavailable    = errors.New("transport.unavailable")
+	// ErrUnavailable reports a local transport that cannot be reached.
+	ErrUnavailable = errors.New("transport.unavailable")
+	// ErrOutcomeUnknown reports a lost response after possible dispatch.
 	ErrOutcomeUnknown = errors.New("transport.outcome-unknown")
 )
 
@@ -281,7 +283,8 @@ func (c *Client) ExecuteCommand(ctx context.Context, command operation.Command) 
 	if err != nil {
 		return operation.Result{}, uncertainExchange(err)
 	}
-	defer response.Body.Close()
+	// Closing a read-only response cannot change the command's outcome.
+	defer func() { _ = response.Body.Close() }()
 	if response.ProtoMajor != 2 || response.StatusCode != http.StatusOK {
 		return operation.Result{}, uncertainExchange(fmt.Errorf("unexpected HTTP/%d.%d status %s", response.ProtoMajor, response.ProtoMinor, response.Status))
 	}
@@ -408,7 +411,7 @@ func (c *Client) negotiate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.ProtoMajor != 2 || response.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected HTTP/%d.%d status %s", response.ProtoMajor, response.ProtoMinor, response.Status)
 	}

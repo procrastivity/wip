@@ -161,7 +161,7 @@ func TestAcceptAuthenticatesSameUIDSubprocessBeforeExposingBytes(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("Accept() rejected same-UID subprocess: %v", result.err)
 	}
-	defer result.connection.Close()
+	defer func() { _ = result.connection.Close() }()
 	if err := result.connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("set read deadline after authenticated Accept(): %v", err)
 	}
@@ -185,7 +185,7 @@ func TestPeerAuthClientHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial peer-auth test socket: %v", err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if _, err := io.WriteString(connection, os.Getenv("WIPD_PEER_BYTES")); err != nil {
 		t.Fatalf("write peer-auth test bytes: %v", err)
 	}
@@ -193,8 +193,8 @@ func TestPeerAuthClientHelper(t *testing.T) {
 
 func TestPeerCredentialUnavailableFailsClosed(t *testing.T) {
 	left, right := net.Pipe()
-	defer left.Close()
-	defer right.Close()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
 	if _, err := peerEffectiveUID(left); !errors.Is(err, ErrPeerCredentials) {
 		t.Fatalf("peerEffectiveUID(net.Pipe()) error = %v, want ErrPeerCredentials", err)
 	}

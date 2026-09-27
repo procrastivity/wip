@@ -116,7 +116,7 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start open-body command.submit: %v", err)
 	}
-	defer requestWriter.Close()
+	defer func() { _ = requestWriter.Close() }()
 	var callResult httpCallResult
 	select {
 	case callResult = <-call:
@@ -184,7 +184,7 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start exchange with invalid trailing record: %v", err)
 		}
-		defer writer.Close()
+		defer func() { _ = writer.Close() }()
 		released := false
 		defer func() {
 			if !released {
@@ -303,7 +303,7 @@ func TestDeclaredLongerOpenBodyDispatchesWithoutWaitingForEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start declared-longer open-body request: %v", err)
 	}
-	defer requestWriter.Close()
+	defer func() { _ = requestWriter.Close() }()
 	if err := <-writeDone; err != nil {
 		t.Fatalf("write command frame while request remains open: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestExchangeConcurrencyLimitReturnsCorrelatedOverloadBeforeDispatch(t *test
 	if err != nil {
 		t.Fatalf("start first active exchange: %v", err)
 	}
-	defer firstWriter.Close()
+	defer func() { _ = firstWriter.Close() }()
 	select {
 	case <-handlerStarted:
 	case <-time.After(5 * time.Second):
@@ -548,7 +548,7 @@ func TestControlCancelBeforeLaneDispatchReturnsNoEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start queued cancellable exchange: %v", err)
 	}
-	defer requestWriter.Close()
+	defer func() { _ = requestWriter.Close() }()
 	if err := <-writeDone; err != nil {
 		t.Fatalf("write queued command: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestDisconnectWhileQueuedCancelsBeforeLaneRelease(t *testing.T) {
 	requestContext, cancelRequest := context.WithCancel(context.Background())
 	defer cancelRequest()
 	reader, writer := io.Pipe()
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, "http://wipd"+exchangePath, reader)
 	if err != nil {
 		t.Fatalf("create cancellable queued request: %v", err)
@@ -759,7 +759,7 @@ func TestDisconnectAfterFixtureCommitReturnsOutcomeUnknownAndKeepsValue(t *testi
 	if err != nil {
 		t.Fatalf("connect local test client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	command := fixtureCommand(t, "01K5V8K1Q5VX6Y0J8C9W3M4N5P", "01K6A000000000000000000061", 61, "disconnect", "disconnect-key")
 	requestContext, cancel := context.WithCancel(context.Background())
 	completed := make(chan struct {
@@ -832,7 +832,7 @@ func TestStalledPartialFrameDoesNotStarveValidExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start stalled partial frame: %v", err)
 	}
-	defer stalledWriter.Close()
+	defer func() { _ = stalledWriter.Close() }()
 	if err := <-stalledWriteDone; err != nil {
 		t.Fatalf("write stalled frame prefix: %v", err)
 	}
@@ -959,7 +959,7 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 	releaseHandler := make(chan struct{})
 	handlerFinished := make(chan error, 1)
 	wantRecord := wipdfixture.Record{ID: "cancelled-wait-handler-record", Key: "cancel-wait-key", Value: "persisted-after-cancel"}
-	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, _ operation.Request) operation.Result {
 		if handlerCalls.Add(1) > 1 {
 			subsequentAdmission <- struct{}{}
 			return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
@@ -994,7 +994,7 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 	if err != nil {
 		t.Fatalf("start cancellable wait: %v", err)
 	}
-	defer requestWriter.Close()
+	defer func() { _ = requestWriter.Close() }()
 	select {
 	case <-handlerStarted:
 	case <-time.After(5 * time.Second):
@@ -1515,7 +1515,7 @@ func waitForChannelLength(t *testing.T, channel chan struct{}, want int) {
 
 func readResponseFrames(t *testing.T, response *http.Response) []frameRecord {
 	t.Helper()
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.ProtoMajor != 2 || response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("protocol response = HTTP/%d.%d %s body=%x, want HTTP/2 200", response.ProtoMajor, response.ProtoMinor, response.Status, body)

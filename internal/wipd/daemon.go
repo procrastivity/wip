@@ -20,13 +20,20 @@ const (
 )
 
 var (
-	ErrAlreadyRunning   = errors.New("wipd: another daemon owns this profile")
-	ErrUnsafeSocket     = errors.New("wipd: existing socket path is unsafe or ambiguous")
-	ErrSocketLive       = errors.New("wipd: another listener is active at the socket path")
-	ErrUnsupported      = errors.New("wipd: daemon lifecycle is unsupported on this platform")
+	// ErrAlreadyRunning means another process holds the profile's singleton lock.
+	ErrAlreadyRunning = errors.New("wipd: another daemon owns this profile")
+	// ErrUnsafeSocket means the socket path cannot be trusted.
+	ErrUnsafeSocket = errors.New("wipd: existing socket path is unsafe or ambiguous")
+	// ErrSocketLive means the existing socket has an active listener.
+	ErrSocketLive = errors.New("wipd: another listener is active at the socket path")
+	// ErrUnsupported means the daemon lifecycle is unavailable on this platform.
+	ErrUnsupported = errors.New("wipd: daemon lifecycle is unsupported on this platform")
+	// ErrUnsupportedOwner means effective file ownership cannot be verified.
 	ErrUnsupportedOwner = errors.New("wipd: cannot verify effective file ownership")
-	ErrPeerCredentials  = errors.New("wipd: local peer credentials are unavailable")
-	ErrPeerUIDMismatch  = errors.New("wipd: local peer UID does not match daemon owner")
+	// ErrPeerCredentials means the local peer's credentials are unavailable.
+	ErrPeerCredentials = errors.New("wipd: local peer credentials are unavailable")
+	// ErrPeerUIDMismatch means the local peer has a different effective UID.
+	ErrPeerUIDMismatch = errors.New("wipd: local peer UID does not match daemon owner")
 )
 
 // Daemon owns the profile lock, fixture handle, and bound local listener.

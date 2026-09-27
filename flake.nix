@@ -25,7 +25,7 @@
           pname = "wip";
           inherit version;
           src = ./.;
-          vendorHash = "sha256-AbnCcnu6O4JKIPWyMwDY9k5nZ91PtGR5Wvf7jD+N/Uw=";
+          vendorHash = "sha256-+SMxW0jLrevSI/ivlLT1XTF6YBFGVH4kpB3bHj2iwAg=";
 
           env.CGO_ENABLED = 0;
 

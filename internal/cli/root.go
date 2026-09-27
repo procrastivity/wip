@@ -66,7 +66,7 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 				return wiperr.New("transport.unavailable", "--experimental-wipd-profile requires a non-empty explicit profile root; no legacy store fallback was attempted")
 			}
 			if profileExplicit && cmd.Parent() != nil &&
-				!(cmd.Parent().Name() == "wip" && cmd.Name() == "status") {
+				(cmd.Parent().Name() != "wip" || cmd.Name() != "status") {
 				return wiperr.New("transport.unavailable", "this WIP verb is not routed through the experimental local profile; no legacy store fallback was attempted")
 			}
 			jsonOut, err := cmd.Flags().GetBool("json")
