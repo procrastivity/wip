@@ -169,4 +169,17 @@ if grep -Eq ' down| ps | network | volume ' "$mock_log"; then
   exit 1
 fi
 
+: >"$mock_log"
+if PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$mock_log" \
+  MOCK_CONFIG="$tmp_dir/invalid-config.json" \
+  WIP_AUTHORITY_LAB_PROJECT="$collision_project" "$root/contrib/online-authority-proof/run" bootstrap \
+  >/dev/null 2>&1; then
+  printf 'online authority lab policy: bootstrap accepted invalid Compose config\n' >&2
+  exit 1
+fi
+if grep -Eq ' ps | inspect | cp | exec ' "$mock_log"; then
+  printf 'invalid Compose config reached bootstrap container inspection or execution\n' >&2
+  exit 1
+fi
+
 printf 'online authority lab policy: PASS\n'

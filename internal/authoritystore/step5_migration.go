@@ -200,7 +200,7 @@ func UpgradeV4(root string) error {
 	if err != nil {
 		return fmt.Errorf("%w: backup validation: %v", ErrInvalidStore, err)
 	}
-	if err = sameV4StoreContents(db, backup); err != nil {
+	if err = sameStoreContents(db, backup); err != nil {
 		return fmt.Errorf("%w: backup differs: %v", ErrInvalidStore, err)
 	}
 	f, err := os.Open(backup)
@@ -220,18 +220,18 @@ func UpgradeV4(root string) error {
 	if err = installStep5(db); err != nil {
 		return err
 	}
-	return checkSchema(db)
+	return checkSchemaVersion(db, 5)
 }
 
-func sameV4StoreContents(db *sql.DB, backup string) error {
+func sameStoreContents(db *sql.DB, backup string) error {
 	u := url.URL{Scheme: "file", Path: backup}
 	q := u.Query()
 	q.Set("mode", "ro")
 	u.RawQuery = q.Encode()
-	if _, err := db.Exec(`ATTACH DATABASE ? AS retained_v4_backup`, u.String()); err != nil {
+	if _, err := db.Exec(`ATTACH DATABASE ? AS retained_backup`, u.String()); err != nil {
 		return err
 	}
-	defer func() { _, _ = db.Exec(`DETACH DATABASE retained_v4_backup`) }()
+	defer func() { _, _ = db.Exec(`DETACH DATABASE retained_backup`) }()
 	rows, err := db.Query(`SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return err
@@ -256,7 +256,7 @@ func sameV4StoreContents(db *sql.DB, backup string) error {
 	for _, table := range tables {
 		name := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
 		var differs int
-		query := fmt.Sprintf(`SELECT EXISTS(SELECT * FROM main.%s EXCEPT SELECT * FROM retained_v4_backup.%s) OR EXISTS(SELECT * FROM retained_v4_backup.%s EXCEPT SELECT * FROM main.%s)`, name, name, name, name)
+		query := fmt.Sprintf(`SELECT EXISTS(SELECT * FROM main.%s EXCEPT SELECT * FROM retained_backup.%s) OR EXISTS(SELECT * FROM retained_backup.%s EXCEPT SELECT * FROM main.%s)`, name, name, name, name)
 		if err = db.QueryRow(query).Scan(&differs); err != nil {
 			return err
 		}

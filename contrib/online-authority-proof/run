@@ -98,13 +98,25 @@ case "${1:-up}" in
     compose down --volumes
     compose up -d
     ;;
+  bootstrap)
+    validate
+    check_ownership
+    mapfile -t authority_containers < <(compose ps --status running --quiet authority-env)
+    [[ "${#authority_containers[@]}" -eq 1 ]] \
+      || fail 'bootstrap requires exactly one running authority-env container'
+    (
+      cd "$root"
+      go run ./cmd/wip-authority-lab bootstrap \
+        --container-id "${authority_containers[0]}" --project "$project"
+    )
+    ;;
   down)
     validate
     check_ownership
     compose down --volumes
     ;;
   *)
-    printf 'usage: %s [config|up|reset|down]\n' "$0" >&2
+    printf 'usage: %s [config|up|bootstrap|reset|down]\n' "$0" >&2
     exit 2
     ;;
 esac

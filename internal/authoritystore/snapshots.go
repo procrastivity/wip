@@ -105,6 +105,39 @@ func currentAnchor(ctx context.Context, tx *sql.Tx, domain string) (PrefixAnchor
 	return a, err
 }
 
+// CurrentPrefixAnchor returns the retained event high-water for an existing
+// domain without pinning a snapshot or changing authority state.
+func (s *Store) CurrentPrefixAnchor(ctx context.Context, domainID string) (PrefixAnchor, error) {
+	if !ulid.MatchString(domainID) {
+		return PrefixAnchor{}, errors.New("authoritystore: invalid domain ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return PrefixAnchor{}, errors.New("authoritystore: closed")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return PrefixAnchor{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var present int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM domains WHERE domain_id=?`, domainID).Scan(&present); err != nil {
+		return PrefixAnchor{}, err
+	}
+	if present == 0 {
+		return PrefixAnchor{}, ErrNotFound
+	}
+	anchor, err := currentAnchor(ctx, tx, domainID)
+	if err != nil {
+		return PrefixAnchor{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return PrefixAnchor{}, err
+	}
+	return anchor, nil
+}
+
 func equalAnchor(a, b PrefixAnchor) bool { return a == b }
 
 func manifestChain(entries []BlobManifestEntry) (string, error) {

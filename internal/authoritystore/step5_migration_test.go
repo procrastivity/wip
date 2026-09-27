@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestStep5FreshAndExplicitV4Upgrade(t *testing.T) {
+func TestM5FreshAndExplicitV4ToV6Upgrade(t *testing.T) {
 	s, root := fresh(t)
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
 		t.Fatalf("fresh schema version %d: %v", version, err)
 	}
 	if err := s.Close(); err != nil {
@@ -54,6 +54,12 @@ func TestStep5FreshAndExplicitV4Upgrade(t *testing.T) {
 	if err = UpgradeV4(legacy); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = OpenExisting(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("ordinary open of v5: %v", err)
+	}
+	if err = UpgradeV5(legacy); err != nil {
+		t.Fatal(err)
+	}
 	upgraded, err := OpenExisting(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +77,14 @@ func TestStep5FreshAndExplicitV4Upgrade(t *testing.T) {
 	defer func() { _ = backup.Close() }()
 	if err = checkSchemaVersion(backup, 4); err != nil {
 		t.Fatalf("retained v4 backup: %v", err)
+	}
+	backup5, err := connect(filepath.Join(legacy, "authority-v5.backup.db"), "ro", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backup5.Close() }()
+	if err = checkSchemaVersion(backup5, 5); err != nil {
+		t.Fatalf("retained v5 backup: %v", err)
 	}
 }
 
