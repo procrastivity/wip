@@ -35,6 +35,8 @@ var (
 	ErrRedirectForbidden = errors.New("wipdauthority: redirects are forbidden")
 	// ErrForbiddenHTTPField means a request contains an M2-forbidden HTTP field.
 	ErrForbiddenHTTPField = errors.New("wipdauthority: forbidden HTTP field")
+	// ErrEnvironmentCertificateInvalid means an incomplete client certificate was supplied.
+	ErrEnvironmentCertificateInvalid = errors.New("wipdauthority: invalid Environment certificate")
 
 	canonicalDomainIDPattern     = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	canonicalSPKIDigestPattern   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -96,6 +98,17 @@ func NewProfile(origin, domainID string, epoch uint64, authoritySPKIPin, ownerRo
 // Origin returns the exact configured HTTPS origin.
 func (profile Profile) Origin() string { return profile.origin }
 
+// DomainID returns the explicitly configured authority domain.
+func (profile Profile) DomainID() string { return profile.domainID }
+
+// Epoch returns the explicitly configured authority epoch.
+func (profile Profile) Epoch() uint64 { return profile.epoch }
+
+// OwnerRootSPKI returns the canonical SHA-256 digest of the configured owner-root SPKI.
+func (profile Profile) OwnerRootSPKI() string {
+	return "sha256:" + hex.EncodeToString(profile.ownerRootSPKI[:])
+}
+
 // HealthURL returns the stateless process-readiness endpoint for this origin.
 func (profile Profile) HealthURL() string { return profile.origin + "/healthz" }
 
@@ -105,15 +118,31 @@ func (profile Profile) HealthURL() string { return profile.origin + "/healthz" }
 // SPKI pin, and the canonical authority binding URI SAN. It does not follow
 // redirects or permit alternate origins, credentials, queries, or compression.
 func (profile Profile) HTTPClient(roots *x509.CertPool) (*http.Client, error) {
+	return profile.HTTPClientWithCertificate(roots, nil)
+}
+
+// HTTPClientWithCertificate creates the same pinned HTTP/2 client as
+// HTTPClient and optionally presents the Environment certificate for mTLS.
+// The server certificate is still validated with the ordinary trust-root and
+// hostname checks before the explicit M2 pin and authority binding checks.
+func (profile Profile) HTTPClientWithCertificate(roots *x509.CertPool, clientCertificate *tls.Certificate) (*http.Client, error) {
 	if err := profile.validate(); err != nil {
 		return nil, err
 	}
+	var certificates []tls.Certificate
+	if clientCertificate != nil {
+		if len(clientCertificate.Certificate) == 0 || clientCertificate.PrivateKey == nil {
+			return nil, ErrEnvironmentCertificateInvalid
+		}
+		certificates = []tls.Certificate{*clientCertificate}
+	}
 	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		MaxVersion: tls.VersionTLS13,
-		ServerName: profile.host,
-		RootCAs:    roots,
-		NextProtos: []string{"h2"},
+		MinVersion:   tls.VersionTLS13,
+		MaxVersion:   tls.VersionTLS13,
+		ServerName:   profile.host,
+		RootCAs:      roots,
+		Certificates: certificates,
+		NextProtos:   []string{"h2"},
 		VerifyConnection: func(state tls.ConnectionState) error {
 			if state.NegotiatedProtocol != "h2" {
 				return ErrHTTP2Required

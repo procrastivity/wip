@@ -88,7 +88,7 @@ func (e *bootstrapOutcomeUnknownError) Unwrap() error { return e.Cause }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected bootstrap or bootstrap-worker")
+		return errors.New("expected a lab command")
 	}
 	switch args[0] {
 	case "bootstrap":
@@ -96,7 +96,7 @@ func run(args []string) error {
 	case "bootstrap-worker":
 		return runBootstrapWorker(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q", args[0])
+		return runStep4Command(args)
 	}
 }
 

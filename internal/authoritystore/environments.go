@@ -74,6 +74,135 @@ func csrProof(der []byte) (*x509.CertificateRequest, string, error) {
 	return csr, digestBytes(csr.RawSubjectPublicKeyInfo), nil
 }
 
+type environmentEnrollmentAuthorization struct {
+	domain        Domain
+	grant         enrollmentGrant
+	spki          string
+	csrDigest     string
+	oldGeneration uint64
+	caEpoch       uint64
+	caGeneration  uint64
+	caCertificate []byte
+	alreadyIssued *EnvironmentCertificate
+}
+
+func validateEnvironmentEnrollment(ctx context.Context, tx *sql.Tx, domain, environment string, grant, csrDER []byte, at time.Time) (environmentEnrollmentAuthorization, error) {
+	var authorization environmentEnrollmentAuthorization
+	d, err := domainOwner(ctx, tx, domain)
+	if err != nil {
+		return authorization, err
+	}
+	payload, err := ownerArtifact(grant, d.OwnerPublicKey, domain, d.OwnerKeyID, "enrollment-grant", "wipd.enrollment-grant/1", d.ActiveEpoch)
+	if err != nil {
+		return authorization, err
+	}
+	var p enrollmentGrant
+	if err = closedPayload(payload, &p, "schema", "grant_id", "domain_id", "authority_epoch", "owner_key_id", "scope", "requested_spki_digest", "prior_environment_id", "nonce", "issued_at", "expires_at"); err != nil {
+		return authorization, err
+	}
+	if p.Schema != "wipd.enrollment-grant/1" || !ulid.MatchString(p.ID) || p.DomainID != domain || p.Epoch != d.ActiveEpoch || p.OwnerKeyID != d.OwnerKeyID || len(p.Nonce) != 16 || !validDigest(p.SPKIDigest) {
+		return authorization, ErrInvalidProof
+	}
+	_, spki, err := csrProof(csrDER)
+	if err != nil || spki != p.SPKIDigest {
+		return authorization, ErrInvalidProof
+	}
+	csrDigest := digestBytes(csrDER)
+	var usedDigest, usedCSR, usedID string
+	var usedGeneration uint64
+	err = tx.QueryRowContext(ctx, `SELECT grant_digest,csr_digest,environment_id,generation FROM enrollment_consumptions WHERE domain_id = ? AND grant_id = ?`, domain, p.ID).Scan(&usedDigest, &usedCSR, &usedID, &usedGeneration)
+	if err == nil {
+		if usedDigest != digestBytes(grant) || usedCSR != csrDigest || usedID != environment {
+			return authorization, ErrFenced
+		}
+		issued, readErr := readCertificate(ctx, tx, domain, environment, usedGeneration)
+		if readErr != nil {
+			return authorization, readErr
+		}
+		authorization.alreadyIssued = &issued
+		authorization.domain = d
+		authorization.grant = p
+		authorization.spki = spki
+		authorization.csrDigest = csrDigest
+		return authorization, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return authorization, err
+	}
+	if restrictedKey(ctx, tx, domain, spki, d.OwnerKeyID) {
+		return authorization, ErrInvalidProof
+	}
+	if interval(p.IssuedAt, p.ExpiresAt, at.UTC()) != nil {
+		return authorization, ErrFenced
+	}
+	start, _ := utcTime(p.IssuedAt)
+	end, _ := utcTime(p.ExpiresAt)
+	if end.Sub(start) > 10*time.Minute {
+		return authorization, ErrInvalidProof
+	}
+	if (p.Scope == "environment-enroll" && p.PriorID != nil) || (p.Scope == "environment-rotate" && (p.PriorID == nil || *p.PriorID != environment)) || (p.Scope != "environment-enroll" && p.Scope != "environment-rotate") {
+		return authorization, ErrInvalidProof
+	}
+	var oldGeneration uint64
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM environments WHERE domain_id = ? AND environment_id = ?`, domain, environment).Scan(&oldGeneration)
+	if p.Scope == "environment-enroll" && err == nil {
+		return authorization, ErrExists
+	}
+	if p.Scope == "environment-rotate" && errors.Is(err, sql.ErrNoRows) {
+		return authorization, ErrNotFound
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return authorization, err
+	}
+	if p.Scope == "environment-rotate" {
+		previous, err := readCertificate(ctx, tx, domain, environment, oldGeneration)
+		if err != nil {
+			return authorization, err
+		}
+		if previous.Revoked || previous.Epoch != d.ActiveEpoch || previous.SPKIDigest == spki {
+			return authorization, ErrFenced
+		}
+	}
+	caEpoch, caGeneration, caCertificate, err := currentCA(ctx, tx, domain, d.ActiveEpoch, at)
+	if err != nil {
+		return authorization, err
+	}
+	return environmentEnrollmentAuthorization{
+		domain: d, grant: p, spki: spki, csrDigest: csrDigest, oldGeneration: oldGeneration,
+		caEpoch: caEpoch, caGeneration: caGeneration, caCertificate: caCertificate,
+	}, nil
+}
+
+// ValidateEnvironmentEnrollment checks the owner grant, exact CSR, expiry,
+// replay state, and active CA before a restricted external signer is invoked.
+// An identical already-issued grant/CSR returns the persisted certificate for
+// safe response-loss recovery without requiring another signature.
+func (s *Store) ValidateEnvironmentEnrollment(ctx context.Context, domain, environment string, grant, csrDER []byte, at time.Time) (EnvironmentCertificate, bool, error) {
+	var out EnvironmentCertificate
+	if !ulid.MatchString(environment) {
+		return out, false, ErrInvalidProof
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return out, false, errors.New("authoritystore: closed")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	authorization, err := validateEnvironmentEnrollment(ctx, tx, domain, environment, grant, csrDER, at)
+	if err != nil {
+		return out, false, err
+	}
+	if authorization.alreadyIssued != nil {
+		out = *authorization.alreadyIssued
+		return out, true, tx.Commit()
+	}
+	return out, false, tx.Commit()
+}
+
 // IssueEnvironmentCertificate binds a verified owner grant to one exact CSR
 // and one leaf-then-delegated-CA chain. The restricted issuer signs externally;
 // the store verifies the produced certificate before consuming the grant.
@@ -93,109 +222,46 @@ func (s *Store) IssueEnvironmentCertificate(ctx context.Context, domain, environ
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	d, err := domainOwner(ctx, tx, domain)
+	authorization, err := validateEnvironmentEnrollment(ctx, tx, domain, environment, grant, csrDER, at)
 	if err != nil {
 		return out, err
 	}
-	payload, err := ownerArtifact(grant, d.OwnerPublicKey, domain, d.OwnerKeyID, "enrollment-grant", "wipd.enrollment-grant/1", d.ActiveEpoch)
-	if err != nil {
-		return out, err
+	if authorization.alreadyIssued != nil {
+		return *authorization.alreadyIssued, tx.Commit()
 	}
-	var p enrollmentGrant
-	if err = closedPayload(payload, &p, "schema", "grant_id", "domain_id", "authority_epoch", "owner_key_id", "scope", "requested_spki_digest", "prior_environment_id", "nonce", "issued_at", "expires_at"); err != nil {
-		return out, err
-	}
-	if p.Schema != "wipd.enrollment-grant/1" || !ulid.MatchString(p.ID) || p.DomainID != domain || p.Epoch != d.ActiveEpoch || p.OwnerKeyID != d.OwnerKeyID || len(p.Nonce) != 16 || !validDigest(p.SPKIDigest) {
+	if len(chain) != 2 || !bytes.Equal(chain[1], authorization.caCertificate) {
 		return out, ErrInvalidProof
 	}
-	_, spki, err := csrProof(csrDER)
-	if err != nil || spki != p.SPKIDigest {
+	leaf, leafSPKI, err := verifyLeaf(chain[0], authorization.caCertificate, domain, environment, authorization.domain.OwnerKeyID, authorization.domain.ActiveEpoch, at)
+	if err != nil || leafSPKI != authorization.spki {
 		return out, ErrInvalidProof
 	}
-	csrDigest := digestBytes(csrDER)
-	var usedDigest, usedCSR, usedID string
-	var usedGen uint64
-	err = tx.QueryRowContext(ctx, `SELECT grant_digest,csr_digest,environment_id,generation FROM enrollment_consumptions WHERE domain_id = ? AND grant_id = ?`, domain, p.ID).Scan(&usedDigest, &usedCSR, &usedID, &usedGen)
-	if err == nil {
-		if usedDigest != digestBytes(grant) || usedCSR != csrDigest || usedID != environment {
-			return out, ErrFenced
-		}
-		out, err = readCertificate(ctx, tx, domain, environment, usedGen)
-		if err != nil {
-			return out, err
-		}
-		return out, tx.Commit()
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return out, err
-	}
-	if interval(p.IssuedAt, p.ExpiresAt, at.UTC()) != nil {
-		return out, ErrFenced
-	}
-	start, _ := utcTime(p.IssuedAt)
-	end, _ := utcTime(p.ExpiresAt)
-	if end.Sub(start) > 10*time.Minute {
-		return out, ErrInvalidProof
-	}
-	if (p.Scope == "environment-enroll" && p.PriorID != nil) || (p.Scope == "environment-rotate" && (p.PriorID == nil || *p.PriorID != environment)) || (p.Scope != "environment-enroll" && p.Scope != "environment-rotate") {
-		return out, ErrInvalidProof
-	}
-	var oldGen uint64
-	err = tx.QueryRowContext(ctx, `SELECT generation FROM environments WHERE domain_id = ? AND environment_id = ?`, domain, environment).Scan(&oldGen)
-	if p.Scope == "environment-enroll" && err == nil {
-		return out, ErrExists
-	}
-	if p.Scope == "environment-rotate" && errors.Is(err, sql.ErrNoRows) {
-		return out, ErrNotFound
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return out, err
-	}
-	if p.Scope == "environment-rotate" {
-		previous, err := readCertificate(ctx, tx, domain, environment, oldGen)
-		if err != nil {
-			return out, err
-		}
-		if previous.Revoked || previous.Epoch != d.ActiveEpoch || previous.SPKIDigest == spki {
-			return out, ErrFenced
-		}
-	}
-	caEpoch, caGeneration, caDER, err := currentCA(ctx, tx, domain, d.ActiveEpoch, at)
-	if err != nil {
-		return out, err
-	}
-	if len(chain) != 2 || !bytes.Equal(chain[1], caDER) {
-		return out, ErrInvalidProof
-	}
-	leaf, leafSPKI, err := verifyLeaf(chain[0], caDER, domain, environment, d.OwnerKeyID, d.ActiveEpoch, at)
-	if err != nil || leafSPKI != spki || restrictedKey(ctx, tx, domain, leafSPKI, d.OwnerKeyID) {
-		return out, ErrInvalidProof
-	}
-	if oldGen == 0 {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO environments(domain_id,environment_id,epoch,generation) VALUES(?,?,?,1)`, domain, environment, d.ActiveEpoch); err != nil {
+	if authorization.oldGeneration == 0 {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO environments(domain_id,environment_id,epoch,generation) VALUES(?,?,?,1)`, domain, environment, authorization.domain.ActiveEpoch); err != nil {
 			return out, writeError(err)
 		}
 	} else {
-		if _, err = tx.ExecContext(ctx, `UPDATE environments SET generation = ? WHERE domain_id = ? AND environment_id = ?`, oldGen+1, domain, environment); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE environments SET generation = ? WHERE domain_id = ? AND environment_id = ?`, authorization.oldGeneration+1, domain, environment); err != nil {
 			return out, err
 		}
 	}
-	gen := oldGen + 1
-	if err = insertLeaf(ctx, tx, domain, environment, gen, caEpoch, caGeneration, leaf, chain, leafSPKI); err != nil {
+	gen := authorization.oldGeneration + 1
+	if err = insertLeaf(ctx, tx, domain, environment, gen, authorization.caEpoch, authorization.caGeneration, leaf, chain, leafSPKI); err != nil {
 		return out, err
 	}
-	if oldGen != 0 {
-		if _, err = tx.ExecContext(ctx, `UPDATE environment_certificates SET revoked_at = ? WHERE domain_id = ? AND environment_id = ? AND generation = ? AND revoked_at IS NULL`, at.UTC().Format(time.RFC3339Nano), domain, environment, oldGen); err != nil {
+	if authorization.oldGeneration != 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE environment_certificates SET revoked_at = ? WHERE domain_id = ? AND environment_id = ? AND generation = ? AND revoked_at IS NULL`, at.UTC().Format(time.RFC3339Nano), domain, environment, authorization.oldGeneration); err != nil {
 			return out, err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO enrollment_consumptions(domain_id,grant_id,nonce,grant_digest,scope,csr_digest,environment_id,generation) VALUES(?,?,?,?,?,?,?,?)`, domain, p.ID, p.Nonce, digestBytes(grant), p.Scope, csrDigest, environment, gen); err != nil {
+	p := authorization.grant
+	if _, err = tx.ExecContext(ctx, `INSERT INTO enrollment_consumptions(domain_id,grant_id,nonce,grant_digest,scope,csr_digest,environment_id,generation) VALUES(?,?,?,?,?,?,?,?)`, domain, p.ID, p.Nonce, digestBytes(grant), p.Scope, authorization.csrDigest, environment, gen); err != nil {
 		return out, writeError(err)
 	}
 	if err = tx.Commit(); err != nil {
 		return out, err
 	}
-	return EnvironmentCertificate{domain, environment, d.ActiveEpoch, gen, caGeneration, spki, [][]byte{bytes.Clone(chain[0]), bytes.Clone(chain[1])}, false}, nil
+	return EnvironmentCertificate{domain, environment, authorization.domain.ActiveEpoch, gen, authorization.caGeneration, authorization.spki, [][]byte{bytes.Clone(chain[0]), bytes.Clone(chain[1])}, false}, nil
 }
 
 func currentCA(ctx context.Context, tx *sql.Tx, domain string, epoch uint64, at time.Time) (uint64, uint64, []byte, error) {

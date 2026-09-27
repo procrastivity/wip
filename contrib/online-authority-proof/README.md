@@ -1,10 +1,13 @@
-# Online authority proof Compose lab skeleton
+# Online authority proof Compose lab
 
 This is only the disposable M5 lab topology. `authority-env` and `client-env`
 are separate Environments with separate named volumes. The host runs `run` as
 the harness; it is not a Compose service. Both containers are attached only
-to an internal Docker network. No host paths are mounted, and the containers
-do not receive host WIP databases, default state, keys, or credentials.
+to an internal Docker network. No host paths are mounted and no host WIP
+database or default state is imported. During the explicit enrollment step,
+the authority worker receives the operator-provided delegated Environment CA
+key and an ephemeral lab TLS key over `docker exec` stdin; both remain in
+worker memory and are never written to SQLite or a host-mounted path.
 
 With Docker Engine, Docker Compose v2, and `jq` available, run from any
 directory:
@@ -12,12 +15,40 @@ directory:
 ```sh
 ./contrib/online-authority-proof/run config # validate rendered Compose topology
 ./contrib/online-authority-proof/run up     # create/start the lab
+./contrib/online-authority-proof/run prepare-client # create pending key and export CSR
 ./contrib/online-authority-proof/run bootstrap --owner-root-public-key "$OWNER_ROOT_PUBLIC_KEY_B64"
+./contrib/online-authority-proof/run enroll \
+  --domain-id "$DOMAIN_ID" --repo-id "$REPO_ID" --epoch 1 \
+  --owner-root-public-key "$OWNER_ROOT_PUBLIC_KEY_B64" \
+  --environment-ca-certificate ./environment-ca.der \
+  --environment-ca-private-key ./environment-ca-key.pk8 \
+  --environment-ca-delegation ./environment-ca-delegation.cbor \
+  --enrollment-grant ./enrollment-grant.cbor
 ./contrib/online-authority-proof/run down   # stop and remove containers, network, and volumes
 ```
 
-`bootstrap` requires exactly one running, lab-owned `authority-env`. The host
-The trusted offline owner workflow supplies the retained owner's raw Ed25519
+`prepare-client` creates one pending Ed25519 identity in the client volume and
+prints only its public CSR in base64. After `bootstrap` prints the new domain
+and initial Repo IDs, the existing offline owner workflow must sign an
+Environment-CA delegation for that domain/epoch and a one-use enrollment grant
+bound to the CSR's SPKI. The operator supplies those signed artifacts plus the
+delegated CA certificate and its restricted signing key to `enroll`; this lab
+does not implement or replace the offline owner signer. The retained owner
+root private key is never supplied to the harness or either container.
+
+`enroll` starts a temporary pinned TLS 1.3/HTTP/2 authority worker, installs
+the owner-signed CA delegation, and serves enrollment for only the supplied
+grant and exact prepared CSR. The client authenticates the authority before
+requesting enrollment, validates the returned leaf against the supplied
+delegated CA, proves key possession over mTLS, then verifies the empty initial
+prefix and manifest. It atomically creates the client shadow only after the
+complete `SeedEnd` agrees; failed or truncated exchanges leave no installed
+identity. The authority verifies the configured Repo's persisted domain
+membership before enrollment and seed exchange. The result prints only the
+domain/epoch/Repo/Environment bindings and empty prefix/manifest digests.
+
+`bootstrap` requires exactly one running, lab-owned `authority-env`. The
+trusted offline owner workflow supplies the retained owner's raw Ed25519
 public key as canonical base64. The owner private key stays outside the
 harness, container, and authority store. The harness creates fresh domain and
 Repo IDs plus an independent per-run setup signer in memory. It pins the
@@ -29,8 +60,7 @@ use. The authority database retains only the grant digest, nonce, pinned
 signer public-key digest, and authorized identity bindings in the same
 transaction as domain + Repo creation. An existing/incomplete authority root
 is refused; `bootstrap` never resets or reuses it. The command prints a
-sanitized domain/epoch/Repo/initial high-water record. `client-env` remains
-uninitialized in this step.
+sanitized domain/epoch/Repo/initial high-water record.
 
 The signed create-domain grant is a narrow M5 test-lab setup contract, not an
 M2 frame, enrollment grant, owner attestation, or production authorization
@@ -64,7 +94,8 @@ Compose JSON directly. The tests also cover invalid/colliding project names
 and prove an invalid config is rejected before Docker resource inspection or
 teardown.
 Only the explicit `bootstrap` step initializes authority-env domain identity.
-This lab does not yet implement client enrollment, command exchange, journal,
-receipt, or operation behavior. It makes no claim that the M4 synthetic
+This lab implements only initial enrollment and the empty seed; it does not
+implement command exchange, journal, receipt, or operation behavior. It makes
+no claim that the M4 synthetic
 fixture is canonical state and does not implement migration, disconnected
 claim commands, production cutover, or later acceptance work.

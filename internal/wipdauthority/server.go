@@ -31,6 +31,10 @@ type Server struct {
 // authority certificate. Application endpoints remain unavailable at this
 // step; health reports only that this process is serving requests.
 func NewServer(profile Profile, certificate tls.Certificate) (*Server, error) {
+	return newServer(profile, certificate, http.HandlerFunc(serveHealth), false)
+}
+
+func newServer(profile Profile, certificate tls.Certificate, handler http.Handler, requestClientCertificate bool) (*Server, error) {
 	if err := profile.validate(); err != nil {
 		return nil, err
 	}
@@ -59,6 +63,7 @@ func NewServer(profile Profile, certificate tls.Certificate) (*Server, error) {
 		MinVersion:   tls.VersionTLS13,
 		MaxVersion:   tls.VersionTLS13,
 		NextProtos:   []string{"h2"},
+		ClientAuth:   tls.NoClientCert,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			for _, protocol := range hello.SupportedProtos {
 				if protocol == "h2" {
@@ -74,8 +79,11 @@ func NewServer(profile Profile, certificate tls.Certificate) (*Server, error) {
 			return nil
 		},
 	}
+	if requestClientCertificate {
+		tlsConfig.ClientAuth = tls.RequestClientCert
+	}
 	httpServer := &http.Server{
-		Handler:           http.HandlerFunc(serveHealth),
+		Handler:           handler,
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,

@@ -111,13 +111,41 @@ case "${1:-up}" in
         --container-id "${authority_containers[0]}" --project "$project" "$@"
     )
     ;;
+  prepare-client)
+    validate
+    check_ownership
+    mapfile -t client_containers < <(compose ps --status running --quiet client-env)
+    [[ "${#client_containers[@]}" -eq 1 ]] \
+      || fail 'client preparation requires exactly one running client-env container'
+    (
+      cd "$root"
+      go run ./cmd/wip-authority-lab prepare-client \
+        --container-id "${client_containers[0]}" --project "$project"
+    )
+    ;;
+  enroll)
+    shift
+    validate
+    check_ownership
+    mapfile -t authority_containers < <(compose ps --status running --quiet authority-env)
+    mapfile -t client_containers < <(compose ps --status running --quiet client-env)
+    [[ "${#authority_containers[@]}" -eq 1 && "${#client_containers[@]}" -eq 1 ]] \
+      || fail 'enrollment requires exactly one running authority-env and client-env container'
+    (
+      cd "$root"
+      go run ./cmd/wip-authority-lab enroll \
+        --project "$project" \
+        --authority-container-id "${authority_containers[0]}" \
+        --client-container-id "${client_containers[0]}" "$@"
+    )
+    ;;
   down)
     validate
     check_ownership
     compose down --volumes
     ;;
   *)
-    printf 'usage: %s [config|up|bootstrap|reset|down]\n' "$0" >&2
+    printf 'usage: %s [config|up|bootstrap|prepare-client|enroll|reset|down]\n' "$0" >&2
     exit 2
     ;;
 esac
