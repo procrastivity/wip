@@ -58,6 +58,9 @@ reject_compose_mutation external-network-definition '.networks.lab = {"name":"sh
 reject_compose_mutation shared-pid-namespace '.services["client-env"].pid = "service:authority-env"'
 reject_compose_mutation shared-ipc-namespace '.services["client-env"].ipc = "service:authority-env"'
 reject_compose_mutation host-build-context '.services["client-env"].image = "wip-authority-proof-local:latest" | .services["client-env"].build = {"context":"/home/user/.wip","dockerfile_inline":"FROM alpine:3.22.1\nCOPY . /state"} | .services["client-env"].pull_policy = "build"'
+reject_compose_mutation scaled-client '.services["client-env"].scale = 2'
+reject_compose_mutation replicated-client '.services["client-env"].deploy = {"replicas":2}'
+reject_compose_mutation external-provider '.services["client-env"].provider = {"type":"awesomecloud"}'
 
 printf 'LAB_ENVIRONMENT=client\n' >"$tmp_dir/client.env"
 reject_compose_mutation harmless-env-file ".services[\"client-env\"].env_file = [\"$tmp_dir/client.env\"]"

@@ -30,10 +30,12 @@ remove Compose orphans.
 proves the topology guard rejects representative host mounts, bind-backed,
 external, or explicitly shared volumes, secret/config/env-file channels,
 external or explicitly shared networks, inherited mounts, shared PID/IPC
-namespaces, external/host networking, published ports, credentials, and extra
-services. These adversarial topology mutations are normalized by `docker
+namespaces, multi-replica services, external providers, external/host
+networking, published ports, credentials, and extra services. These adversarial
+topology mutations are normalized by `docker
 compose config` before policy rejection for the build-context, env-file,
-volumes-from, network-name, PID, and IPC cases. `--no-env-resolution` is used
+volumes-from, network-name, PID/IPC, scale/replica, and provider cases.
+`--no-env-resolution` is used
 so env-file declarations remain visible even when they only repeat an allowed
 environment variable. Other focused policy mutations operate on rendered
 Compose JSON directly. The tests also cover invalid/colliding project names
