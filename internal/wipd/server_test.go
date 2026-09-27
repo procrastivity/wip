@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdfixture"
 	"golang.org/x/net/http2"
 )
 
@@ -97,23 +98,32 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err = postFrameRequest(client, exchangePath, commandFrame)
+	call, requestWriter, writeDone, err := postOpenFrameRequest(client, exchangePath, commandFrame)
 	if err != nil {
-		t.Fatalf("POST command.submit: %v", err)
+		t.Fatalf("start open-body command.submit: %v", err)
 	}
-	frames = readResponseFrames(t, response)
-	if len(frames) != 1 || frames[0].requestID != requestID || frames[0].sequence != 0 || frames[0].kind != "problem" {
-		t.Fatalf("command response records = %+v, want one correlated transport problem", frames)
+	defer requestWriter.Close()
+	var callResult httpCallResult
+	select {
+	case callResult = <-call:
+	case <-time.After(5 * time.Second):
+		t.Fatal("open-body exchange did not respond before the request writer was closed")
 	}
-	problem, err := decodePayload(frames[0].payload)
-	if err != nil {
-		t.Fatalf("decode command response: %v", err)
+	if callResult.err != nil {
+		t.Fatalf("POST command.submit with open request body: %v", callResult.err)
 	}
-	if problem != "transport.unavailable" {
-		t.Fatalf("command response = %#v, want transport.unavailable because durable Step 5 submission is absent", problem)
+	frames = readResponseFrames(t, callResult.response)
+	assertFixtureHandlerResult(t, frames, requestID, operation.ResultSucceeded, map[string]any{
+		"id": "01M4FIXTURE0000000000000001", "locator": "fixture-17", "title": "M4 Fixture",
+	})
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write open-body command frame: %v", err)
 	}
-	if got := handlerCalls.Load(); got != 0 {
-		t.Fatalf("semantic Handler ran %d times without a durable submission owner, want zero", got)
+	if err := requestWriter.Close(); err != nil {
+		t.Fatalf("close request writer after response: %v", err)
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("semantic Handler ran %d times for one accepted request, want 1", got)
 	}
 
 	for name, frame := range map[string]frameRecord{
@@ -126,8 +136,8 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertHTTP2StreamReset(t, client, wire)
-			if got := handlerCalls.Load(); got != 0 {
-				t.Fatalf("semantic Handler ran %d times after rejected %s frame, want zero", got, name)
+			if got := handlerCalls.Load(); got != 1 {
+				t.Fatalf("semantic Handler ran %d times after rejected %s frame, want only the prior accepted request", got, name)
 			}
 		})
 	}
@@ -145,11 +155,32 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	}
 	assertHTTP2StreamReset(t, client, append(firstIDFrame, otherIDFrame...))
 
-	misorderedFrame, err := encodeFrame(frameRecord{requestID: requestID, sequence: 1, kind: "control.cancel", payload: []byte{0xa0}}, maxFrameBodyLimit)
+	misorderedFrame, err := encodeFrame(frameRecord{requestID: requestID, sequence: 2, kind: "control.cancel", payload: []byte{0xa0}}, maxFrameBodyLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	assertHTTP2StreamReset(t, client, append(firstIDFrame, misorderedFrame...))
+
+	validCancel, err := encodeFrame(frameRecord{requestID: requestID, sequence: 1, kind: "control.cancel", payload: []byte{0xa0}}, maxFrameBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = postFrameRequest(client, exchangePath, append(firstIDFrame, validCancel...))
+	if err != nil {
+		t.Fatalf("pre-dispatch control.cancel: %v", err)
+	}
+	frames = readResponseFrames(t, response)
+	if len(frames) != 1 || frames[0].requestID != requestID || frames[0].kind != "problem" {
+		t.Fatalf("pre-dispatch cancellation response = %+v, want correlated no-submission problem", frames)
+	}
+	problem, err := decodePayload(frames[0].payload)
+	if err != nil || problem != "transport.cancelled-before-submission" {
+		t.Fatalf("pre-dispatch cancellation problem = %#v, err %v; want transport.cancelled-before-submission", problem, err)
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("semantic Handler ran %d times after pre-dispatch cancellation, want only the prior accepted request", got)
+	}
 
 	probeFrame, err := encodeFrame(frameRecord{
 		requestID: "01K6A000000000000000000004",
@@ -165,23 +196,67 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 		t.Fatalf("valid exchange after stream-local errors: %v", err)
 	}
 	frames = readResponseFrames(t, response)
-	if len(frames) != 1 {
-		t.Fatalf("post-reset probe response records = %+v, want transport.unavailable", frames)
-	}
-	problem, err = decodePayload(frames[0].payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if problem != "transport.unavailable" {
-		t.Fatalf("post-reset probe response = %#v, want same negotiated session to remain usable", problem)
-	}
-	if got := handlerCalls.Load(); got != 0 {
-		t.Fatalf("semantic Handler ran %d times for malformed/correlated/order-rejected frames, want zero", got)
+	assertFixtureHandlerResult(t, frames, "01K6A000000000000000000004", operation.ResultSucceeded, map[string]any{
+		"id": "01M4FIXTURE0000000000000001", "locator": "fixture-17", "title": "M4 Fixture",
+	})
+	if got := handlerCalls.Load(); got != 2 {
+		t.Fatalf("semantic Handler ran %d times after malformed/rejected exchanges, want exactly the two accepted requests", got)
 	}
 }
 
-func TestExchangeConcurrencyLimitAppliesBackpressureBeforeBodyParsing(t *testing.T) {
-	server := newServer(operation.NewRegistry(), 1)
+func TestRegistryDispatchPersistsOnlyLocalFixtureAndReturnsTypedOutput(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	wantRecord := wipdfixture.Record{ID: "m4-fixture-handler-record", Key: "fixture-17", Value: "M4 Fixture"}
+	wantOutput := operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		input, ok := request.Input.(operation.MatterCreateInput)
+		if !ok {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed, Message: "unexpected fixture input type"}}
+		}
+		record := wipdfixture.Record{ID: wantRecord.ID, Key: input.Locator, Value: input.Title}
+		if err := daemon.fixture.Put(ctx, record); err != nil {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed, Message: err.Error()}}
+		}
+		return operation.Result{Code: operation.ResultSucceeded, Output: wantOutput}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, _ := startHTTP2UnixServerWithSetup(t, newServer(registry, 1), func(started *Daemon) { daemon = started })
+	negotiateHTTP2TestSession(t, client)
+	command, hash := canonicalFixtureCommand(t)
+	commandFrame := mustCommandFrame(t, "01K6A000000000000000000010", command, hash)
+	response, err := postFrameRequest(client, exchangePath, commandFrame)
+	if err != nil {
+		t.Fatalf("POST fixture-backed command: %v", err)
+	}
+	frames := readResponseFrames(t, response)
+	assertFixtureHandlerResult(t, frames, "01K6A000000000000000000010", operation.ResultSucceeded, map[string]any{
+		"id": wantOutput.ID, "locator": wantOutput.Locator, "title": wantOutput.Title,
+	})
+	gotRecord, err := daemon.fixture.Get(context.Background(), wantRecord.Key)
+	if err != nil {
+		t.Fatalf("read test-only persisted fixture record: %v", err)
+	}
+	if gotRecord != wantRecord {
+		t.Fatalf("persisted fixture record = %+v, want asymmetric fixture value %+v", gotRecord, wantRecord)
+	}
+}
+
+func TestExchangeConcurrencyLimitReturnsCorrelatedOverloadBeforeDispatch(t *testing.T) {
+	registry := operation.NewRegistry()
+	var handlerCalls atomic.Int32
+	handlerStarted := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
+		handlerCalls.Add(1)
+		handlerStarted <- struct{}{}
+		<-releaseHandler
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 1)
 	client, _ := startHTTP2UnixServer(t, server)
 	vector := loadStep4FrameVector(t)
 	response, err := postFrameRequest(client, negotiatePath, mustHex(t, vector.WireHex))
@@ -190,63 +265,146 @@ func TestExchangeConcurrencyLimitAppliesBackpressureBeforeBodyParsing(t *testing
 	}
 	_ = readResponseFrames(t, response)
 
-	reader, writer := io.Pipe()
-	request, err := http.NewRequest(http.MethodPost, "http://wipd"+exchangePath, reader)
+	command, hash := canonicalFixtureCommand(t)
+	firstRequestID := "01K6A000000000000000000011"
+	firstCall, firstWriter, firstWriteDone, err := postOpenFrameRequest(client, exchangePath, mustCommandFrame(t, firstRequestID, command, hash))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("start first active exchange: %v", err)
 	}
-	firstResponse := make(chan struct {
-		response *http.Response
-		err      error
-	}, 1)
-	go func() {
-		response, err := client.Do(request)
-		firstResponse <- struct {
-			response *http.Response
-			err      error
-		}{response: response, err: err}
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for len(server.exchangeSlots) != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	defer firstWriter.Close()
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first valid exchange did not reach the registered Handler")
 	}
 	if active := len(server.exchangeSlots); active != 1 {
-		_ = writer.Close()
-		t.Fatalf("active exchanges = %d, want first incomplete body to hold the sole slot", active)
+		t.Fatalf("active exchanges = %d, want first pending Handler to hold the sole slot", active)
 	}
 
-	secondFrame, err := encodeFrame(frameRecord{
-		requestID: "01K6A000000000000000000003",
-		sequence:  0,
-		kind:      "server.hello",
-		payload:   []byte{0xa0},
-	}, maxFrameBodyLimit)
-	if err != nil {
-		t.Fatal(err)
-	}
+	secondRequestID := "01K6A000000000000000000012"
+	secondFrame := mustCommandFrame(t, secondRequestID, command, hash)
 	secondResponse, err := postFrameRequest(client, exchangePath, secondFrame)
 	if err != nil {
 		t.Fatalf("second exchange request: %v", err)
 	}
-	if secondResponse.StatusCode != http.StatusServiceUnavailable || secondResponse.ProtoMajor != 2 {
-		_ = secondResponse.Body.Close()
-		t.Fatalf("overloaded response = HTTP/%d.%d %s, want HTTP/2 503", secondResponse.ProtoMajor, secondResponse.ProtoMinor, secondResponse.Status)
+	frames := readResponseFrames(t, secondResponse)
+	if len(frames) != 1 || frames[0].requestID != secondRequestID || frames[0].sequence != 0 || frames[0].kind != "problem" {
+		t.Fatalf("overloaded response frames = %+v, want one correlated problem", frames)
 	}
-	_ = secondResponse.Body.Close()
+	problem, err := decodePayload(frames[0].payload)
+	if err != nil || problem != "transport.overloaded" {
+		t.Fatalf("overloaded response payload = %#v, err %v; want transport.overloaded", problem, err)
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("Handlers called = %d after overload, want only the admitted request", got)
+	}
 
-	_ = writer.Close()
+	close(releaseHandler)
 	select {
-	case result := <-firstResponse:
+	case result := <-firstCall:
+		if result.err != nil {
+			t.Fatalf("first exchange after Handler completion: %v", result.err)
+		}
+		frames := readResponseFrames(t, result.response)
+		assertFixtureHandlerResult(t, frames, firstRequestID, operation.ResultSucceeded, map[string]any{
+			"id": "01M4FIXTURE0000000000000001", "locator": "fixture-17", "title": "M4 Fixture",
+		})
+	case <-time.After(5 * time.Second):
+		t.Fatal("first exchange did not complete after releasing its Handler")
+	}
+	if err := <-firstWriteDone; err != nil {
+		t.Fatalf("write first exchange frame: %v", err)
+	}
+}
+
+func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	handlerStarted := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	handlerFinished := make(chan error, 1)
+	wantRecord := wipdfixture.Record{ID: "cancelled-wait-handler-record", Key: "cancel-wait-key", Value: "persisted-after-cancel"}
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		handlerStarted <- struct{}{}
+		select {
+		case <-releaseHandler:
+		case <-ctx.Done():
+			handlerFinished <- ctx.Err()
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed, Message: ctx.Err().Error()}}
+		}
+		err := daemon.fixture.Put(ctx, wantRecord)
+		handlerFinished <- err
+		if err != nil {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed, Message: err.Error()}}
+		}
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 1)
+	client, _ := startHTTP2UnixServerWithSetup(t, server, func(started *Daemon) { daemon = started })
+	negotiateHTTP2TestSession(t, client)
+	command, hash := canonicalFixtureCommand(t)
+	requestID := "01K6A000000000000000000013"
+	call, requestWriter, writeDone, err := postOpenFrameRequest(client, exchangePath, mustCommandFrame(t, requestID, command, hash))
+	if err != nil {
+		t.Fatalf("start cancellable wait: %v", err)
+	}
+	defer requestWriter.Close()
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("valid request did not enter the pending Handler")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write command frame: %v", err)
+	}
+
+	cancelFrame, err := encodeFrame(frameRecord{requestID: requestID, sequence: 1, kind: "control.cancel", payload: []byte{0xa0}}, maxFrameBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := requestWriter.Write(cancelFrame); err != nil {
+		t.Fatalf("write control.cancel while Handler is pending: %v", err)
+	}
+	select {
+	case result := <-call:
 		if result.response != nil {
-			body, bodyErr := io.ReadAll(result.response.Body)
 			_ = result.response.Body.Close()
-			if result.err == nil && bodyErr == nil {
-				t.Fatalf("incomplete first exchange unexpectedly completed with body %x", body)
-			}
+		}
+		if result.err == nil {
+			t.Fatal("cancelled exchange returned a semantic response; want only a stopped HTTP/2 wait stream")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("first incomplete exchange did not stop after client closed its request body")
+		t.Fatal("valid control.cancel did not stop the waiting HTTP/2 stream")
+	}
+	if active := len(server.exchangeSlots); active != 1 {
+		t.Fatalf("active Handler slots after cancel = %d, want 1 until Handler completion", active)
+	}
+	select {
+	case err := <-handlerFinished:
+		t.Fatalf("Handler completed before explicit release after wait cancellation: %v", err)
+	default:
+	}
+
+	close(releaseHandler)
+	select {
+	case err := <-handlerFinished:
+		if err != nil {
+			t.Fatalf("complete test-only Handler after wait cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handler did not finish after explicit release")
+	}
+	got, err := daemon.fixture.Get(context.Background(), wantRecord.Key)
+	if err != nil {
+		t.Fatalf("read fixture after cancelled wait: %v", err)
+	}
+	if got != wantRecord {
+		t.Fatalf("fixture after cancelled wait = %+v, want completed Handler value %+v; cancellation must not imply rollback", got, wantRecord)
+	}
+	if active := len(server.exchangeSlots); active != 0 {
+		t.Fatalf("active Handler slots after completion = %d, want 0", active)
 	}
 }
 
@@ -324,11 +482,18 @@ func TestCapabilityRejectionIsReportedOverAuthenticatedHTTP2(t *testing.T) {
 }
 
 func startHTTP2UnixServer(t *testing.T, server *Server) (*http.Client, *http2.Transport) {
+	return startHTTP2UnixServerWithSetup(t, server, nil)
+}
+
+func startHTTP2UnixServerWithSetup(t *testing.T, server *Server, setup func(*Daemon)) (*http.Client, *http2.Transport) {
 	t.Helper()
 	root := testProfileRoot(t)
 	daemon, err := Start(root)
 	if err != nil {
 		t.Fatalf("start isolated test daemon: %v", err)
+	}
+	if setup != nil {
+		setup(daemon)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
@@ -361,6 +526,113 @@ func postFrameRequest(client *http.Client, path string, body []byte) (*http.Resp
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
 	return client.Do(request)
+}
+
+type httpCallResult struct {
+	response *http.Response
+	err      error
+}
+
+func postOpenFrameRequest(client *http.Client, path string, body []byte) (<-chan httpCallResult, *io.PipeWriter, <-chan error, error) {
+	reader, writer := io.Pipe()
+	request, err := http.NewRequest(http.MethodPost, "http://wipd"+path, reader)
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return nil, nil, nil, err
+	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	call := make(chan httpCallResult, 1)
+	go func() {
+		response, err := client.Do(request)
+		call <- httpCallResult{response: response, err: err}
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := writer.Write(body)
+		writeDone <- err
+	}()
+	return call, writer, writeDone, nil
+}
+
+func negotiateHTTP2TestSession(t *testing.T, client *http.Client) {
+	t.Helper()
+	vector := loadStep4FrameVector(t)
+	response, err := postFrameRequest(client, negotiatePath, mustHex(t, vector.WireHex))
+	if err != nil {
+		t.Fatalf("negotiate test session: %v", err)
+	}
+	frames := readResponseFrames(t, response)
+	if len(frames) != 2 || frames[0].kind != "server.hello" || frames[1].kind != "session.parameters" {
+		t.Fatalf("test session negotiation records = %+v, want ServerHello and SessionParameters", frames)
+	}
+}
+
+func mustCommandFrame(t *testing.T, requestID string, canonicalCommand []byte, hash string) []byte {
+	t.Helper()
+	payload, err := encodePayload(map[string]any{
+		"schema":            "wipd.command-submit/1",
+		"canonical_command": canonicalCommand,
+		"request_hash":      hash,
+		"deadline":          nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := encodeFrame(frameRecord{requestID: requestID, sequence: 0, kind: "command.submit", payload: payload}, maxFrameBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func canonicalFixtureCommand(t *testing.T) ([]byte, string) {
+	t.Helper()
+	canonical, _ := canonicalGoldenCommand(t)
+	command, err := operation.DecodeCanonicalCommand(canonical)
+	if err != nil {
+		t.Fatalf("decode M2 golden command for fixture input: %v", err)
+	}
+	command.Request.Input = operation.MatterCreateInput{Title: "M4 Fixture", Locator: "fixture-17"}
+	canonical, err = command.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("encode asymmetric fixture command: %v", err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatalf("hash asymmetric fixture command: %v", err)
+	}
+	return canonical, hash
+}
+
+func assertFixtureHandlerResult(t *testing.T, frames []frameRecord, requestID string, code operation.ResultCode, wantOutput map[string]any) {
+	t.Helper()
+	if len(frames) != 1 || frames[0].requestID != requestID || frames[0].sequence != 0 || frames[0].kind != "response.end" {
+		t.Fatalf("fixture Handler response frames = %+v, want one correlated response.end", frames)
+	}
+	value, err := decodePayload(frames[0].payload)
+	if err != nil {
+		t.Fatalf("decode fixture Handler result: %v", err)
+	}
+	fields, ok := value.(map[string]any)
+	if !ok || len(fields) != 5 || fields["schema"] != fixtureHandlerResultSchema || fields["result_code"] != string(code) || fields["problem_code"] != nil {
+		t.Fatalf("fixture Handler result envelope = %#v, want closed local fixture schema and %s", value, code)
+	}
+	operationID, ok := fields["operation"].(map[string]any)
+	if !ok || !reflect.DeepEqual(operationID, map[string]any{"name": "matter.create", "version": uint64(1)}) {
+		t.Fatalf("fixture Handler operation identity = %#v, want matter.create@v1", fields["operation"])
+	}
+	outputBytes, ok := fields["output"].([]byte)
+	if !ok {
+		t.Fatalf("fixture Handler output = %#v, want canonical typed-output CBOR bytes", fields["output"])
+	}
+	output, err := decodePayload(outputBytes)
+	if err != nil {
+		t.Fatalf("decode canonical typed Handler output: %v", err)
+	}
+	if !reflect.DeepEqual(output, wantOutput) {
+		t.Fatalf("typed Handler output = %#v, want asymmetric output %#v", output, wantOutput)
+	}
 }
 
 func readResponseFrames(t *testing.T, response *http.Response) []frameRecord {

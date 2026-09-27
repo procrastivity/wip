@@ -3,6 +3,7 @@ package wipd
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	negotiatePath = "/wipd/v1/negotiate"
-	exchangePath  = "/wipd/v1/exchange"
+	negotiatePath              = "/wipd/v1/negotiate"
+	exchangePath               = "/wipd/v1/exchange"
+	fixtureHandlerResultSchema = "wipd.m4-fixture-handler-result/1"
 )
 
 var requestHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -25,10 +27,12 @@ type Server struct {
 	registry               *operation.Registry
 	maxConcurrentExchanges uint64
 	exchangeSlots          chan struct{}
+	preflightSlots         chan struct{}
 }
 
 type connectionSession struct {
 	mu          sync.Mutex
+	ctx         context.Context
 	negotiating bool
 	negotiated  bool
 	failed      bool
@@ -39,8 +43,9 @@ type connectionSession struct {
 type sessionContextKey struct{}
 
 // NewServer creates the production local frame server with no registered
-// semantic operations. Step 6 supplies transport and typed routing only;
-// durable submission and execution remain owned by a later execution layer.
+// semantic operations. The Handler dispatch path is exercised only by an
+// explicitly composed local test fixture; durable submission and authority
+// execution remain owned by a later execution layer.
 func NewServer() *Server {
 	return newServer(operation.NewRegistry(), defaultExchanges)
 }
@@ -56,6 +61,7 @@ func newServer(registry *operation.Registry, maxExchanges uint64) *Server {
 		registry:               registry,
 		maxConcurrentExchanges: maxExchanges,
 		exchangeSlots:          make(chan struct{}, int(maxExchanges)),
+		preflightSlots:         make(chan struct{}, 1),
 	}
 }
 
@@ -109,7 +115,7 @@ func (s *Server) Serve(ctx context.Context, daemon *Daemon) error {
 			break
 		}
 
-		state := &connectionSession{}
+		state := &connectionSession{ctx: serveCtx}
 		connectionCtx := context.WithValue(serveCtx, sessionContextKey{}, state)
 		connectionsMu.Lock()
 		if serveCtx.Err() != nil {
@@ -265,14 +271,19 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	}
 
 	select {
-	case s.exchangeSlots <- struct{}{}:
-		defer func() { <-s.exchangeSlots }()
-	default:
-		writer.WriteHeader(http.StatusServiceUnavailable)
+	case s.preflightSlots <- struct{}{}:
+	case <-request.Context().Done():
 		return
 	}
+	preflightOwned := true
+	defer func() {
+		if preflightOwned {
+			<-s.preflightSlots
+		}
+	}()
 
-	frame, err := readOneFrame(request.Body, uint32(parameters.maxFrameBody))
+	countedBody := &countingReader{reader: request.Body}
+	frame, err := readFrame(countedBody, uint32(parameters.maxFrameBody))
 	if err != nil {
 		abortHTTP2Stream()
 	}
@@ -282,6 +293,20 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	if frame.kind != "command.submit" {
 		abortHTTP2Stream()
 	}
+
+	select {
+	case s.exchangeSlots <- struct{}{}:
+	default:
+		s.writeProblem(writer, frame.requestID, 0, "transport.overloaded", uint32(parameters.maxFrameBody))
+		return
+	}
+	slotOwnedByHandler := false
+	defer func() {
+		if !slotOwnedByHandler {
+			<-s.exchangeSlots
+		}
+	}()
+
 	command, deadline, err := decodeCommandSubmit(frame.payload)
 	if err != nil {
 		s.writeProblem(writer, frame.requestID, 0, errMalformedMessage.Error(), uint32(parameters.maxFrameBody))
@@ -296,15 +321,138 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.writeProblemPayload(writer, frame.requestID, 0, problem, uint32(parameters.maxFrameBody))
 		return
 	}
-	if _, err := s.registry.Resolve(command.Request.Operation); err != nil {
-		problem := compatibilityProblem(command.Request.Operation, hello.operations)
-		s.writeProblemPayload(writer, frame.requestID, 0, problem, uint32(parameters.maxFrameBody))
+
+	if request.ContentLength >= 0 && countedBody.bytesRead < request.ContentLength {
+		cancelFrame, err := readFrame(countedBody, uint32(parameters.maxFrameBody))
+		if err != nil || validateCancelFrame(frame, cancelFrame) != nil || countedBody.bytesRead != request.ContentLength {
+			abortHTTP2Stream()
+		}
+		s.writeProblem(writer, frame.requestID, 0, "transport.cancelled-before-submission", uint32(parameters.maxFrameBody))
 		return
 	}
-	// Step 5 requires a durable submission owner and authenticated domain,
-	// epoch, and Environment binding before a semantic Handler can run. Step 6
-	// deliberately owns neither, so this path proves no submission and stops.
-	s.writeProblem(writer, frame.requestID, 0, "transport.unavailable", uint32(parameters.maxFrameBody))
+
+	<-s.preflightSlots
+	preflightOwned = false
+
+	handlerResult := make(chan operation.Result, 1)
+	go func() { handlerResult <- s.registry.Dispatch(state.ctx, command.Request) }()
+	transferSlotToHandler := func() {
+		slotOwnedByHandler = true
+		go func() {
+			<-handlerResult
+			<-s.exchangeSlots
+		}()
+	}
+
+	nextFrame := make(chan frameReadResult, 1)
+	go func() {
+		next, err := readFrame(request.Body, uint32(parameters.maxFrameBody))
+		nextFrame <- frameReadResult{frame: next, err: err}
+	}()
+
+	for {
+		select {
+		case incoming := <-nextFrame:
+			if errors.Is(incoming.err, io.EOF) {
+				nextFrame = nil
+				continue
+			}
+			transferSlotToHandler()
+			if incoming.err != nil {
+				abortHTTP2Stream()
+			}
+			if err := validateCancelFrame(frame, incoming.frame); err != nil {
+				abortHTTP2Stream()
+			}
+			// Once a Handler may have effects, CANCEL stops this exchange's
+			// wait only. Resetting this HTTP/2 stream makes no rollback claim;
+			// the Handler retains its bounded exchange slot until it completes.
+			abortHTTP2Stream()
+		case result := <-handlerResult:
+			// Prefer a cancellation record already parsed by the independent
+			// request reader over completing the response concurrently.
+			select {
+			case incoming := <-nextFrame:
+				if errors.Is(incoming.err, io.EOF) {
+					nextFrame = nil
+				} else {
+					if incoming.err != nil {
+						abortHTTP2Stream()
+					}
+					if err := validateCancelFrame(frame, incoming.frame); err != nil {
+						abortHTTP2Stream()
+					}
+					abortHTTP2Stream()
+				}
+			default:
+			}
+			payload, err := encodeFixtureHandlerResult(command.Request.Operation, result)
+			if err != nil {
+				abortHTTP2Stream()
+			}
+			wire, err := encodeFrame(frameRecord{requestID: frame.requestID, sequence: 0, kind: "response.end", payload: payload}, uint32(parameters.maxFrameBody))
+			if err != nil {
+				abortHTTP2Stream()
+			}
+			_, _ = writer.Write(wire)
+			return
+		}
+	}
+}
+
+type frameReadResult struct {
+	frame frameRecord
+	err   error
+}
+
+func validateCancelFrame(submit, cancel frameRecord) error {
+	if cancel.requestID != submit.requestID {
+		return errWrongCorrelation
+	}
+	if cancel.sequence != 1 {
+		return errOutOfOrder
+	}
+	if cancel.kind != "control.cancel" {
+		return errUnsupportedKind
+	}
+	payload, err := decodePayload(cancel.payload)
+	if err != nil {
+		return err
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok || len(fields) != 0 {
+		return errMalformedMessage
+	}
+	return nil
+}
+
+func encodeFixtureHandlerResult(id operation.ID, result operation.Result) ([]byte, error) {
+	var output any
+	if result.Output != nil {
+		var outputValue map[string]any
+		switch typed := result.Output.(type) {
+		case operation.MatterCreateOutput:
+			outputValue = map[string]any{"id": typed.ID, "locator": typed.Locator, "title": typed.Title}
+		default:
+			return nil, errors.New("wipd: unsupported local fixture output type")
+		}
+		encoded, err := encodePayload(outputValue)
+		if err != nil {
+			return nil, err
+		}
+		output = encoded
+	}
+	var problemCode any
+	if result.Problem != nil {
+		problemCode = string(result.Problem.Code)
+	}
+	return encodePayload(map[string]any{
+		"schema":       fixtureHandlerResultSchema,
+		"operation":    map[string]any{"name": id.Name, "version": uint64(id.Version)},
+		"result_code":  string(result.Code),
+		"output":       output,
+		"problem_code": problemCode,
+	})
 }
 
 func (s *Server) writeProblem(writer http.ResponseWriter, requestID string, sequence uint64, code string, limit uint32) {

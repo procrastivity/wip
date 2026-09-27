@@ -142,6 +142,15 @@ terminal-result = {
   "output": bstr / null,
   "problem_code": tstr / null
 }
+; M4 Step 6 local test fixture only. This Handler-return envelope is not an
+; authority terminal result, submission acknowledgement, or receipt.
+fixture-handler-result = {
+  "schema": "wipd.m4-fixture-handler-result/1",
+  "operation": operation,
+  "result_code": "result.succeeded" / "result.rejected" / "result.refused" / "result.failed",
+  "output": bstr / null,
+  "problem_code": tstr / null
+}
 terminal-receipt = {
   "schema": "wipd.terminal-receipt/1",
   "domain_id": ulid,

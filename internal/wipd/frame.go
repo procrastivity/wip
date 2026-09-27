@@ -98,6 +98,17 @@ func readFrame(reader io.Reader, limit uint32) (frameRecord, error) {
 	return readFrameUsing(reader, limit, func(length uint32) []byte { return make([]byte, length) })
 }
 
+type countingReader struct {
+	reader    io.Reader
+	bytesRead int64
+}
+
+func (reader *countingReader) Read(data []byte) (int, error) {
+	n, err := reader.reader.Read(data)
+	reader.bytesRead += int64(n)
+	return n, err
+}
+
 func readFrameUsing(reader io.Reader, limit uint32, allocate func(uint32) []byte) (frameRecord, error) {
 	var prefix [4]byte
 	n, err := io.ReadFull(reader, prefix[:])
