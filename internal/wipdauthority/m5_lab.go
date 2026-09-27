@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"io"
 	"math/big"
@@ -85,6 +84,7 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", serveHealth)
 	mux.HandleFunc(labEnrollPath, app.serveEnroll)
+	mux.HandleFunc(labNegotiatePath, app.serveNegotiate)
 	mux.HandleFunc(labExchangePath, app.serveExchange)
 	return newServer(profile, certificate, mux, true)
 }
@@ -198,119 +198,172 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
-	if request.TLS == nil || !request.TLS.HandshakeComplete || len(request.TLS.PeerCertificates) != 2 {
-		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-certificate-required")
-		return
-	}
-	peer := request.TLS.PeerCertificates[0]
-	if len(peer.URIs) != 1 || peer.URIs[0] == nil {
+	if _, err := app.authenticateEnvironment(request); err != nil {
 		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
-		return
-	}
-	// VerifyEnvironmentPeer validates the exact SAN, chain, key possession,
-	// revocation state, domain, and epoch from the completed TLS connection.
-	certificate, err := app.store.VerifyEnvironmentPeer(request.Context(), app.profile.domainID, environmentIDFromURI(peer.URIs[0].String()), app.profile.epoch, *request.TLS, time.Now().UTC())
-	if err != nil || certificate.DomainID != app.profile.domainID {
-		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
-		return
-	}
-	if err = app.verifyRoute(request.Context()); err != nil {
-		writeLabProblem(writer, "00000000000000000000000000", "auth.authority-binding-mismatch")
 		return
 	}
 	frame, err := readSingleFrame(request.Body)
-	if err != nil || frame.Sequence != 0 || frame.Kind != "seed.request" {
+	if err != nil {
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
-	var seedRequest wipdwire.SeedRequest
-	if err = wipdwire.DecodeCanonical(frame.Payload, &seedRequest, "schema", "domain_id", "expected_epoch", "store_schema", "resume_token"); err != nil ||
-		seedRequest.Schema != "wipd.seed-request/1" || seedRequest.DomainID != app.profile.domainID ||
-		seedRequest.Epoch != app.profile.epoch || seedRequest.StoreSchema != "wipd.store/1" || seedRequest.ResumeToken != nil {
-		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+	session := connectionSession(request)
+	if session == nil {
+		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
-	current, err := app.store.CurrentPrefixAnchor(request.Context(), app.profile.domainID)
-	if err != nil || current.EventCount != 0 || current.EventID != "" || current.Digest != emptyPrefixDigest() {
-		writeLabProblem(writer, frame.RequestID, "transfer.prefix-mismatch")
+	session.mu.Lock()
+	negotiated := session.negotiated && !session.failed && !session.negotiating
+	if !negotiated {
+		session.failed = true
+	}
+	session.mu.Unlock()
+	if !negotiated {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
 		return
 	}
-	product, err := app.initialSeed(request.Context(), time.Now().UTC())
+	if frame.Sequence != 0 {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	kind := ""
+	var start authoritystore.PrefixAnchor
+	switch frame.Kind {
+	case "seed.request":
+		var seed wipdwire.SeedRequest
+		if err = wipdwire.DecodeCanonical(frame.Payload, &seed, "schema", "domain_id", "expected_epoch", "store_schema", "resume_token"); err != nil ||
+			seed.Schema != "wipd.seed-request/1" || seed.DomainID != app.profile.domainID || seed.Epoch != app.profile.epoch ||
+			seed.StoreSchema != "wipd.store/1" || seed.ResumeToken != nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+			return
+		}
+		kind = "seed"
+		start = authoritystore.EmptyPrefixAnchor()
+	case "pull.request":
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(frame.Payload, "schema", "domain_id", "expected_epoch", "installed", "resume_token")
+		installed, installedOK := fields["installed"].(map[string]any)
+		var pull wipdwire.PullRequest
+		if decodeErr != nil || !installedOK || !wipdwire.ExactMapKeys(installed, "event_count", "high_water_event_id", "prefix_digest") ||
+			wipdwire.DecodeCanonical(frame.Payload, &pull, "schema", "domain_id", "expected_epoch", "installed", "resume_token") != nil ||
+			pull.Schema != "wipd.pull-request/1" || pull.DomainID != app.profile.domainID || pull.Epoch != app.profile.epoch || pull.ResumeToken != nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+			return
+		}
+		kind = "pull"
+		start = authorityAnchor(pull.Installed)
+	default:
+		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+		return
+	}
+	product, err := app.transferProduct(request.Context(), kind, start, time.Now().UTC())
 	if err != nil {
-		writeLabProblem(writer, frame.RequestID, "transfer.incomplete")
+		code := "transfer.incomplete"
+		if errors.Is(err, authoritystore.ErrPrefixMismatch) {
+			code = "transfer.prefix-mismatch"
+		}
+		writeLabProblem(writer, frame.RequestID, code)
+		return
+	}
+	if err = writeLabFrames(writer, frame.RequestID, product); err != nil {
+		return
+	}
+}
+
+func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != labNegotiatePath || request.Method != http.MethodPost || request.URL.RawQuery != "" || request.URL.ForceQuery || !allowedLabHTTP(request) {
+		http.NotFound(writer, request)
+		return
+	}
+	if !hasContentType(request, "application/cbor") {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	if _, err := app.authenticateEnvironment(request); err != nil {
+		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
+		return
+	}
+	session := connectionSession(request)
+	if session == nil {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	session.mu.Lock()
+	if session.negotiating || session.negotiated || session.failed {
+		session.failed = true
+		session.mu.Unlock()
+		writeLabProblem(writer, "00000000000000000000000000", "protocol.out-of-order")
+		return
+	}
+	session.negotiating = true
+	session.mu.Unlock()
+	succeeded := false
+	defer func() {
+		session.mu.Lock()
+		session.negotiating = false
+		if !succeeded {
+			session.failed = true
+		}
+		session.mu.Unlock()
+	}()
+	frame, err := readSingleFrame(request.Body)
+	if err != nil {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
+	if frame.Sequence != 0 || frame.Kind != "client.hello" {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	hello, parameters, problem := negotiateLab(frame.Payload)
+	if problem != "" {
+		writeLabProblem(writer, frame.RequestID, problem)
+		return
+	}
+	first, err := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: frame.RequestID, Kind: "server.hello", Payload: hello})
+	if err != nil {
+		http.Error(writer, "internal error", http.StatusInternalServerError)
+		return
+	}
+	second, err := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: frame.RequestID, Sequence: 1, Kind: "session.parameters", Payload: parameters})
+	if err != nil || len(first)+len(second) > maxLabResponseBytes {
+		http.Error(writer, "internal error", http.StatusInternalServerError)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/cbor")
 	writer.Header().Set("Cache-Control", "no-store")
-	for sequence, record := range product {
-		wire, encodeErr := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: frame.RequestID, Sequence: uint64(sequence), Kind: record.kind, Payload: record.payload})
-		if encodeErr != nil || len(wire) > maxLabResponseBytes {
-			http.Error(writer, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if _, err = writer.Write(wire); err != nil {
-			return
-		}
+	if _, err = writer.Write(first); err != nil {
+		return
 	}
+	if _, err = writer.Write(second); err != nil {
+		return
+	}
+	session.mu.Lock()
+	session.negotiated = true
+	succeeded = true
+	session.mu.Unlock()
+}
+
+func (app *m5LabHandler) authenticateEnvironment(request *http.Request) (authoritystore.EnvironmentCertificate, error) {
+	if request.TLS == nil || !request.TLS.HandshakeComplete || len(request.TLS.PeerCertificates) != 2 {
+		return authoritystore.EnvironmentCertificate{}, errors.New("missing Environment certificate")
+	}
+	peer := request.TLS.PeerCertificates[0]
+	if len(peer.URIs) != 1 || peer.URIs[0] == nil {
+		return authoritystore.EnvironmentCertificate{}, errors.New("invalid Environment identity")
+	}
+	certificate, err := app.store.VerifyEnvironmentPeer(request.Context(), app.profile.domainID, environmentIDFromURI(peer.URIs[0].String()), app.profile.epoch, *request.TLS, time.Now().UTC())
+	if err != nil || certificate.DomainID != app.profile.domainID {
+		return authoritystore.EnvironmentCertificate{}, errors.New("untrusted Environment certificate")
+	}
+	if err = app.verifyRoute(request.Context()); err != nil {
+		return authoritystore.EnvironmentCertificate{}, err
+	}
+	return certificate, nil
 }
 
 type labFrameRecord struct {
 	kind    string
 	payload []byte
-}
-
-func (app *m5LabHandler) initialSeed(ctx context.Context, now time.Time) ([]labFrameRecord, error) {
-	empty := authoritystore.PrefixAnchor{Digest: emptyPrefixDigest()}
-	transferID, err := randomULID(now)
-	if err != nil {
-		return nil, err
-	}
-	snapshotID, err := randomULID(now)
-	if err != nil {
-		return nil, err
-	}
-	transfer, err := app.store.StartTransfer(ctx, app.profile.domainID, app.profile.epoch, "seed", "wipd.store/1", empty, snapshotID, transferID, now)
-	if err != nil || transfer.EventCount != 0 || transfer.EventByteLength != 0 || len(transfer.Snapshot.Manifest.Entries) != 0 || len(transfer.Snapshot.Items) != 0 {
-		return nil, errors.New("fresh Step 4 seed must be empty")
-	}
-	boundary, err := app.store.NextTransfer(ctx, transfer.Token, wipdwire.FrameLimit, now)
-	if err != nil || !boundary.Complete || boundary.ManifestDigest != transfer.Snapshot.Manifest.Digest {
-		return nil, errors.New("empty seed transfer did not reach complete manifest boundary")
-	}
-	start := wipdwire.SeedStart{
-		Schema: "wipd.seed-start/1", TransferID: transfer.ID, DomainID: app.profile.domainID,
-		Epoch: app.profile.epoch, StoreSchema: "wipd.store/1", SnapshotID: transfer.SnapshotID,
-		EventCount: 0, EventByteLength: 0, ManifestDigest: transfer.Snapshot.Manifest.Digest,
-	}
-	start.Prefix.Start = wireAnchor(transfer.Snapshot.Delta.Start)
-	start.Prefix.End = wireAnchor(transfer.Snapshot.Delta.End)
-	manifest := wipdwire.BlobManifest{
-		Schema: "wipd.blob-manifest/1", DomainID: transfer.Snapshot.Manifest.DomainID,
-		Epoch: transfer.Snapshot.Manifest.Epoch, AsOf: wireAnchor(transfer.Snapshot.Manifest.AsOf),
-		Entries: []wipdwire.BlobManifestEntry{}, Digest: transfer.Snapshot.Manifest.Digest,
-	}
-	end := wipdwire.SeedEnd{
-		Schema: "wipd.seed-end/1", TransferID: transfer.ID,
-		VerifiedPrefix: wireAnchor(transfer.Snapshot.Delta.End),
-		ManifestDigest: transfer.Snapshot.Manifest.Digest, Complete: true,
-	}
-	values := []struct {
-		kind  string
-		value any
-	}{
-		{"seed.start", start},
-		{"blob.manifest", manifest},
-		{"seed.end", end},
-	}
-	product := make([]labFrameRecord, 0, len(values))
-	for _, item := range values {
-		payload, encodeErr := wipdwire.EncodeCanonical(item.value)
-		if encodeErr != nil {
-			return nil, encodeErr
-		}
-		product = append(product, labFrameRecord{kind: item.kind, payload: payload})
-	}
-	return product, nil
 }
 
 func (app *m5LabHandler) verifyRoute(ctx context.Context) error {
@@ -381,11 +434,6 @@ func wireAnchor(anchor authoritystore.PrefixAnchor) wipdwire.PrefixAnchor {
 		eventID = &anchor.EventID
 	}
 	return wipdwire.PrefixAnchor{EventCount: anchor.EventCount, EventID: eventID, Digest: anchor.Digest}
-}
-
-func emptyPrefixDigest() string {
-	sum := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func randomULID(now time.Time) (string, error) {

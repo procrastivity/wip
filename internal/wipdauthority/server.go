@@ -89,6 +89,9 @@ func newServer(profile Profile, certificate tls.Certificate, handler http.Handle
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	if requestClientCertificate {
+		httpServer.ConnContext = labConnectionContext
+	}
 	if err := http2.ConfigureServer(httpServer, &http2.Server{IdleTimeout: 60 * time.Second}); err != nil {
 		return nil, err
 	}

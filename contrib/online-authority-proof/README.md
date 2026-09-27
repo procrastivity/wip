@@ -38,14 +38,34 @@ root private key is never supplied to the harness or either container.
 
 `enroll` starts a temporary pinned TLS 1.3/HTTP/2 authority worker, installs
 the owner-signed CA delegation, and serves enrollment for only the supplied
-grant and exact prepared CSR. The client authenticates the authority before
-requesting enrollment, validates the returned leaf against the supplied
-delegated CA, proves key possession over mTLS, then verifies the empty initial
-prefix and manifest. It atomically creates the client shadow only after the
-complete `SeedEnd` agrees; failed or truncated exchanges leave no installed
-identity. The authority verifies the configured Repo's persisted domain
-membership before enrollment and seed exchange. The result prints only the
-domain/epoch/Repo/Environment bindings and empty prefix/manifest digests.
+grant and exact prepared CSR. The client authenticates and negotiates M2 on the
+same mTLS HTTP/2 connection before seed exchange, validates the returned leaf
+against the supplied delegated CA, proves key possession over mTLS, then
+verifies the complete seed prefix and manifest (which may be empty or
+non-empty). It atomically creates the client shadow only after the complete
+`SeedEnd` agrees; failed or truncated exchanges leave no installed identity.
+The authority verifies the configured Repo's persisted domain membership
+before enrollment and seed exchange. The result prints only the
+domain/epoch/Repo/Environment bindings and verified prefix/manifest digests.
+
+The bounded `wipdseed.PullAndInstall` client API negotiates on each new
+connection and installs a complete M2 pull delta only after `PullEnd`. The
+client validates event-record order and bytes, the cumulative prefix digest,
+and the complete manifest, then rebuilds the supported M1 `matter.created`
+projection from event bytes before atomically replacing its local base.
+Unsupported event kinds fail closed. The deterministic non-empty seed/pull
+acceptance uses an ephemeral authority store and synthetic M1 commands only in
+tests; run it with:
+
+```sh
+go test ./internal/wipdseed -run 'TestNegotiationIsRequiredBeforeSeedExchange|TestPullRejectsAnAnchorAheadOfAuthorityAsPrefixMismatch|TestPullInstallsAsymmetricAuthorityEventOrderAndProjection' -count=1
+```
+
+That test compares installed event bytes and authority order plus derived
+projection values/order against a pinned authority snapshot. The ordinary
+Compose `enroll` flow remains reproducible with the external signed
+CA-delegation/enrollment-grant artifacts described above; it does not seed
+authority mutations itself.
 
 `bootstrap` requires exactly one running, lab-owned `authority-env`. The
 trusted offline owner workflow supplies the retained owner's raw Ed25519
@@ -94,8 +114,8 @@ Compose JSON directly. The tests also cover invalid/colliding project names
 and prove an invalid config is rejected before Docker resource inspection or
 teardown.
 Only the explicit `bootstrap` step initializes authority-env domain identity.
-This lab implements only initial enrollment and the empty seed; it does not
-implement command exchange, journal, receipt, or operation behavior. It makes
-no claim that the M4 synthetic
-fixture is canonical state and does not implement migration, disconnected
-claim commands, production cutover, or later acceptance work.
+This lab implements initial enrollment plus bounded seed/pull installation for
+the supported M1 event projection; it does not implement command exchange,
+journal, receipt, or production operation behavior. It makes no claim that
+the M4 synthetic fixture is canonical state and does not implement migration,
+disconnected claim commands, production cutover, or later acceptance work.

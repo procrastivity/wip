@@ -16,9 +16,11 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/procrastivity/wip/internal/authoritystore"
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdauthority"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
@@ -105,6 +108,225 @@ func TestEnrollAndSeedInstallsOnlyVerifiedEmptyShadow(t *testing.T) {
 	if _, err = wipdauthority.NewM5LabServer(fixture.profile, tlsCertificate(t, fixture.serverCertDER, fixture.serverPrivate), wrongRepoConfig); !errors.Is(err, wipdauthority.ErrRepoMembershipMismatch) {
 		t.Fatalf("wrong Repo server binding = %v, want membership refusal", err)
 	}
+}
+
+func TestNegotiationIsRequiredBeforeSeedExchange(t *testing.T) {
+	fixture := newClientFixture(t)
+	state := enrollFixtureClient(t, fixture, t.TempDir())
+	client := installedClient(t, fixture, state)
+	requestFrame, requestID, err := encodeRequestFrame("seed.request", wipdwire.SeedRequest{
+		Schema: "wipd.seed-request/1", DomainID: state.DomainID, Epoch: state.Epoch, StoreSchema: "wipd.store/1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := postFrames(context.Background(), client, fixture.profile.Origin()+"/wipd/v1/exchange", requestFrame, requestID, 1)
+	if err != nil || len(frames) != 1 || frames[0].Kind != "problem" {
+		t.Fatalf("seed before negotiation = %+v, %v; want one correlated protocol problem", frames, err)
+	}
+	if err = decodeProblem(frames[0].Payload); err == nil || !strings.Contains(err.Error(), "protocol.out-of-order") {
+		t.Fatalf("seed-before-negotiate problem = %v, want protocol.out-of-order", err)
+	}
+}
+
+func TestPullRejectsAnAnchorAheadOfAuthorityAsPrefixMismatch(t *testing.T) {
+	fixture := newClientFixture(t)
+	state := enrollFixtureClient(t, fixture, t.TempDir())
+	client := installedClient(t, fixture, state)
+	limits, err := negotiateRemote(context.Background(), client, fixture.profile.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureEventID := "01KZ7XHAQT1S46NYPN1PW1DX60"
+	requestFrame, requestID, err := encodeRequestFrame("pull.request", wipdwire.PullRequest{
+		Schema: "wipd.pull-request/1", DomainID: state.DomainID, Epoch: state.Epoch,
+		Installed: wipdwire.PrefixAnchor{EventCount: 1, EventID: &futureEventID, Digest: testDigest([]byte("future authority prefix"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := postFramesWithinSession(context.Background(), client, fixture.profile.Origin()+"/wipd/v1/exchange",
+		requestFrame, requestID, maxClientTransferEvents+3, limits)
+	if err != nil || len(frames) != 1 || frames[0].Kind != "problem" {
+		t.Fatalf("pull from a future anchor = %+v, %v; want correlated prefix-mismatch", frames, err)
+	}
+	if err = decodeProblem(frames[0].Payload); err == nil || !strings.Contains(err.Error(), "transfer.prefix-mismatch") {
+		t.Fatalf("future-anchor pull problem = %v, want transfer.prefix-mismatch", err)
+	}
+}
+
+func installedClient(t *testing.T, fixture *clientFixture, state ClientState) *http.Client {
+	t.Helper()
+	key, err := x509.ParsePKCS8PrivateKey(state.PrivateKeyPKCS8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(state.CertificateDER[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &tls.Certificate{Certificate: clone2D(state.CertificateDER), PrivateKey: key, Leaf: leaf}
+	client, err := fixture.profile.HTTPClientWithCertificate(fixture.roots, certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	return client
+}
+
+func TestPullInstallsAsymmetricAuthorityEventOrderAndProjection(t *testing.T) {
+	fixture := newClientFixture(t)
+	state := enrollFixtureClient(t, fixture, t.TempDir())
+	artifactSigner := registerClientFixtureArtifactKey(t, fixture)
+	peer := peerStateFromClient(t, state)
+	ctx := context.Background()
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, "01KZ7XHAQT1S46NYPN1PW1DX40", "01KZ7XHAQT1S46NYPN1PW1DX50", "01KZ7XHAQT1S46NYPN1PW1DX60", "Zulu title", "zulu-item", 1)
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, "01KZ7XHAQT1S46NYPN1PW1DX41", "01KZ7XHAQT1S46NYPN1PW1DX51", "01KZ7XHAQT1S46NYPN1PW1DX61", "Alpha title", "alpha-item", 2)
+
+	directory := t.TempDir()
+	installed := enrollFixtureClient(t, fixture, directory)
+	if installed.Prefix.EventCount != 2 || len(installed.EventRecords) != 2 || len(installed.Projections) != 2 {
+		t.Fatalf("non-empty seed installed wrong authority prefix: %+v", installed)
+	}
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, "01KZ7XHAQT1S46NYPN1PW1DX42", "01KZ7XHAQT1S46NYPN1PW1DX52", "01KZ7XHAQT1S46NYPN1PW1DX62", "Middle title", "middle-item", 3)
+	installed, err := PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Prefix.EventCount != 3 || installed.Prefix.EventID == nil || *installed.Prefix.EventID != "01KZ7XHAQT1S46NYPN1PW1DX62" ||
+		len(installed.EventRecords) != 3 || len(installed.Projections) != 3 {
+		t.Fatalf("pull installed wrong asymmetric prefix: %+v", installed)
+	}
+	if installed.EventRecords[0].EventID != "01KZ7XHAQT1S46NYPN1PW1DX60" || installed.EventRecords[1].EventID != "01KZ7XHAQT1S46NYPN1PW1DX61" || installed.EventRecords[2].EventID != "01KZ7XHAQT1S46NYPN1PW1DX62" {
+		t.Fatalf("event order = %v, want original authority order [..DX60, ..DX61, ..DX62]", []string{installed.EventRecords[0].EventID, installed.EventRecords[1].EventID, installed.EventRecords[2].EventID})
+	}
+
+	now := time.Now().UTC()
+	snapshot, err := fixture.store.PinSnapshot(ctx, state.DomainID, state.Epoch, authoritystore.EmptyPrefixAnchor(), "01KZ7XHAQT1S46NYPN1PW1DX70", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = fixture.store.ReleaseSnapshot(context.Background(), state.DomainID, state.Epoch, snapshot.ID)
+	})
+	if len(snapshot.Delta.Events) != len(installed.EventRecords) || snapshot.Delta.End.EventCount != installed.Prefix.EventCount || snapshot.Delta.End.Digest != installed.Prefix.Digest {
+		t.Fatalf("installed anchor differs from authority snapshot: client=%+v authority=%+v", installed.Prefix, snapshot.Delta.End)
+	}
+	for index, event := range snapshot.Delta.Events {
+		if installed.EventRecords[index].EventID != event.EventID || !bytes.Equal(installed.EventRecords[index].Record, event.Record) {
+			t.Fatalf("installed event %d differs byte-for-byte/order from authority: client=%+v authority=%+v", index, installed.EventRecords[index], event)
+		}
+	}
+	if len(snapshot.Items) != 3 || len(snapshot.Items) != len(installed.Projections) {
+		t.Fatalf("projection counts differ: client=%d authority=%d", len(installed.Projections), len(snapshot.Items))
+	}
+	for index, item := range snapshot.Items {
+		var authority eventProjection
+		if err = wipdwire.DecodeCanonical(item.Value, &authority, "id", "repo_id", "locator", "title", "birth_event_id"); err != nil {
+			t.Fatal(err)
+		}
+		var clientProjection eventProjection
+		if err = json.Unmarshal(installed.Projections[index], &clientProjection); err != nil {
+			t.Fatal(err)
+		}
+		if clientProjection != authority {
+			t.Fatalf("projection %d differs: client=%+v authority=%+v", index, clientProjection, authority)
+		}
+	}
+	if got := []string{projectionLocator(t, installed.Projections[0]), projectionLocator(t, installed.Projections[1]), projectionLocator(t, installed.Projections[2])}; !reflect.DeepEqual(got, []string{"alpha-item", "middle-item", "zulu-item"}) {
+		t.Fatalf("projection order = %v, want stable locator order independent of event order", got)
+	}
+
+	corrupt := installed
+	corrupt.Projections = append([]json.RawMessage(nil), installed.Projections...)
+	corrupt.Projections[0] = json.RawMessage(`{"id":"01KZ7XHAQT1S46NYPN1PW1DX51","repo_id":"01KZ7XHAQT1S46NYPN1PW1DX3C","locator":"wrong-item","title":"Alpha title","birth_event_id":"01KZ7XHAQT1S46NYPN1PW1DX61"}`)
+	if err = validateInstalledState(corrupt, fixture.profile); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("asymmetric persisted projection = %v, want integrity refusal", err)
+	}
+}
+
+func enrollFixtureClient(t *testing.T, fixture *clientFixture, directory string) ClientState {
+	t.Helper()
+	if err := SavePending(directory, fixture.identity); err != nil {
+		t.Fatal(err)
+	}
+	state, err := EnrollAndSeed(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot, fixture.delegation,
+		testRepoID, fixture.identity, fixture.grant, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func registerClientFixtureArtifactKey(t *testing.T, fixture *clientFixture) ed25519.PrivateKey {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := testSPKIID(t, public)
+	now := time.Now().UTC().Truncate(time.Second)
+	certificate := signOwnerArtifact(t, fixture.owner, "authority-artifact-key", "wipd.authority-artifact-key/1", testDomainID, fixture.ownerKeyID, 1, map[string]any{
+		"schema": "wipd.authority-artifact-key/1", "domain_id": testDomainID, "authority_epoch": uint64(1),
+		"key_generation": uint64(1), "key_id": keyID, "ed25519_public_key": []byte(public),
+		"not_before": now.Add(-time.Hour).Format(time.RFC3339Nano), "not_after": now.Add(time.Hour).Format(time.RFC3339Nano),
+	})
+	if err = fixture.store.RegisterArtifactKey(context.Background(), testDomainID, certificate, now); err != nil {
+		clear(private)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clear(private) })
+	return private
+}
+
+func peerStateFromClient(t *testing.T, state ClientState) tls.ConnectionState {
+	t.Helper()
+	certificates := make([]*x509.Certificate, 0, len(state.CertificateDER))
+	for _, der := range state.CertificateDER {
+		certificate, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certificates = append(certificates, certificate)
+	}
+	return tls.ConnectionState{HandshakeComplete: true, PeerCertificates: certificates}
+}
+
+func createFixtureMatter(t *testing.T, store *authoritystore.Store, peer tls.ConnectionState, signer ed25519.PrivateKey, state ClientState, commandID, matterID, eventID, title, locator string, sequence uint64) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	command := operation.Command{
+		ID: commandID, AuthorityDomainID: state.DomainID, ExpectedAuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, EnvironmentSequence: sequence, ActedAt: now.Format(time.RFC3339Nano),
+		CorrelationCommandID: commandID,
+		Request: operation.Request{
+			Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: state.RepoID}, Input: operation.MatterCreateInput{Title: title, Locator: locator}, Blobs: []operation.BlobInput{},
+		},
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.SubmitCommand(context.Background(), command, hash, peer, now)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("submit fixture mutation: status=%+v err=%v", status, err)
+	}
+	result := operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: matterID, Locator: locator, Title: title}}
+	if _, err = store.CompleteCommand(context.Background(), status.Owner, result, matterID, eventID, now, func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(signer, message), nil
+	}); err != nil {
+		t.Fatalf("complete fixture mutation: %v", err)
+	}
+}
+
+func projectionLocator(t *testing.T, projection json.RawMessage) string {
+	t.Helper()
+	var value eventProjection
+	if err := json.Unmarshal(projection, &value); err != nil {
+		t.Fatal(err)
+	}
+	return value.Locator
 }
 
 func TestEnrollAndSeedWrongDomainOrGrantLeavesNoClientState(t *testing.T) {
@@ -267,7 +489,8 @@ func TestVerifyEmptySeedRejectsTruncatedReorderedOrMismatchedProduct(t *testing.
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := cloneFrames(frames)
-			if _, err := verifyEmptySeed(test.mutate(candidate), fixture.profile, testRepoID, "01KZ7XHAQT1S46NYPN1PW1DX3E", "sha256:"+strings.Repeat("a", 64)); !errors.Is(err, ErrInvalidClientState) {
+			if _, err := verifyTransferFrames(test.mutate(candidate), "seed", fixture.profile, testRepoID,
+				"01KZ7XHAQT1S46NYPN1PW1DX3E", "sha256:"+strings.Repeat("a", 64), emptyWireAnchor(), nil); !errors.Is(err, ErrInvalidClientState) {
 				t.Fatalf("mutated seed = %v, want invalid-state refusal", err)
 			}
 		})

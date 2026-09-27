@@ -1,6 +1,5 @@
-// Package wipdseed implements the Step 4 client enrollment and first verified
-// seed install. The initial M5 domain is intentionally required to be empty;
-// general pull, resume, hydration, and reseed remain later-step behavior.
+// Package wipdseed implements the Step 4 client enrollment, verified seed,
+// and bounded prefix-pull install for the M5 authority lab.
 package wipdseed
 
 import (
@@ -53,18 +52,20 @@ type PreparedIdentity struct {
 
 // ClientState is the locally installed identity and verified shadow anchor.
 type ClientState struct {
-	Schema          string                `json:"schema"`
-	RepoID          string                `json:"repo_id"`
-	DomainID        string                `json:"domain_id"`
-	Epoch           uint64                `json:"authority_epoch"`
-	EnvironmentID   string                `json:"environment_id"`
-	OwnerKeyID      string                `json:"owner_key_id"`
-	SPKIDigest      string                `json:"spki_digest"`
-	PrivateKeyPKCS8 []byte                `json:"private_key_pkcs8"`
-	CertificateDER  [][]byte              `json:"certificate_chain_der"`
-	Prefix          wipdwire.PrefixAnchor `json:"prefix"`
-	ManifestDigest  string                `json:"manifest_digest"`
-	Projections     []json.RawMessage     `json:"projections"`
+	Schema          string                       `json:"schema"`
+	RepoID          string                       `json:"repo_id"`
+	DomainID        string                       `json:"domain_id"`
+	Epoch           uint64                       `json:"authority_epoch"`
+	EnvironmentID   string                       `json:"environment_id"`
+	OwnerKeyID      string                       `json:"owner_key_id"`
+	SPKIDigest      string                       `json:"spki_digest"`
+	PrivateKeyPKCS8 []byte                       `json:"private_key_pkcs8"`
+	CertificateDER  [][]byte                     `json:"certificate_chain_der"`
+	Prefix          wipdwire.PrefixAnchor        `json:"prefix"`
+	EventRecords    []wipdwire.EventRecord       `json:"event_records"`
+	ManifestDigest  string                       `json:"manifest_digest"`
+	ManifestEntries []wipdwire.BlobManifestEntry `json:"manifest_entries"`
+	Projections     []json.RawMessage            `json:"projections"`
 }
 
 // PrepareIdentity creates a private Environment key and CSR. The caller keeps
@@ -208,6 +209,10 @@ func EnrollAndSeed(ctx context.Context, profile wipdauthority.Profile, roots *x5
 		return empty, err
 	}
 	defer seedClient.CloseIdleConnections()
+	limits, err := negotiateRemote(ctx, seedClient, profile.Origin())
+	if err != nil {
+		return empty, err
+	}
 	seedRequest := wipdwire.SeedRequest{
 		Schema: "wipd.seed-request/1", DomainID: profile.DomainID(), Epoch: profile.Epoch(),
 		StoreSchema: "wipd.store/1",
@@ -216,11 +221,14 @@ func EnrollAndSeed(ctx context.Context, profile wipdauthority.Profile, roots *x5
 	if err != nil {
 		return empty, err
 	}
-	seedFrames, err := postFrames(ctx, seedClient, profile.Origin()+"/wipd/v1/exchange", seedFrame, seedRequestID, 3)
+	if !withinSessionFrame(seedFrame, limits) {
+		return empty, ErrInvalidClientState
+	}
+	seedFrames, err := postFramesWithinSession(ctx, seedClient, profile.Origin()+"/wipd/v1/exchange", seedFrame, seedRequestID, maxClientTransferEvents+3, limits)
 	if err != nil {
 		return empty, err
 	}
-	seed, err := verifyEmptySeed(seedFrames, profile, repoID, issued.EnvironmentID, issued.SPKIDigest)
+	seed, err := verifyTransferFrames(seedFrames, "seed", profile, repoID, issued.EnvironmentID, issued.SPKIDigest, emptyWireAnchor(), nil)
 	if err != nil {
 		return empty, err
 	}
@@ -328,49 +336,6 @@ func mustSPKI(public any) []byte {
 	return der
 }
 
-func verifyEmptySeed(frames []wipdwire.Frame, profile wipdauthority.Profile, repoID, environmentID, spkiDigest string) (ClientState, error) {
-	var state ClientState
-	if len(frames) != 3 {
-		return state, ErrInvalidClientState
-	}
-	for sequence, frame := range frames {
-		if frame.Sequence != uint64(sequence) || frame.RequestID != frames[0].RequestID {
-			return state, ErrInvalidClientState
-		}
-	}
-	var start wipdwire.SeedStart
-	if frames[0].Kind != "seed.start" || decodeClosedRecord(frames[0].Payload, &start,
-		"schema", "transfer_id", "domain_id", "authority_epoch", "store_schema", "snapshot_id", "prefix", "event_count", "event_byte_length", "blob_manifest_digest") != nil {
-		return state, ErrInvalidClientState
-	}
-	var manifest wipdwire.BlobManifest
-	if frames[1].Kind != "blob.manifest" || decodeClosedRecord(frames[1].Payload, &manifest,
-		"schema", "domain_id", "authority_epoch", "as_of", "entries", "manifest_digest") != nil {
-		return state, ErrInvalidClientState
-	}
-	var end wipdwire.SeedEnd
-	if frames[2].Kind != "seed.end" || decodeClosedRecord(frames[2].Payload, &end,
-		"schema", "transfer_id", "verified_prefix", "verified_blob_manifest_digest", "complete") != nil {
-		return state, ErrInvalidClientState
-	}
-	empty := wipdwire.PrefixAnchor{Digest: emptyPrefixDigest()}
-	manifestDigest := emptyManifestDigest()
-	if !clientULIDPattern.MatchString(repoID) || !clientULIDPattern.MatchString(environmentID) || !validDigest(spkiDigest) ||
-		start.Schema != "wipd.seed-start/1" || !clientULIDPattern.MatchString(start.TransferID) || start.DomainID != profile.DomainID() || start.Epoch != profile.Epoch() ||
-		start.StoreSchema != "wipd.store/1" || !clientULIDPattern.MatchString(start.SnapshotID) || start.EventCount != 0 || start.EventByteLength != 0 ||
-		start.Prefix.Start != empty || start.Prefix.End != empty || start.ManifestDigest != manifestDigest ||
-		manifest.Schema != "wipd.blob-manifest/1" || manifest.DomainID != start.DomainID || manifest.Epoch != start.Epoch ||
-		manifest.AsOf != empty || len(manifest.Entries) != 0 || manifest.Digest != manifestDigest ||
-		end.Schema != "wipd.seed-end/1" || end.TransferID != start.TransferID || end.VerifiedPrefix != empty || end.ManifestDigest != manifestDigest || !end.Complete {
-		return state, ErrInvalidClientState
-	}
-	return ClientState{
-		Schema: "wipd.m5-client-state/1", RepoID: repoID, DomainID: profile.DomainID(), Epoch: profile.Epoch(),
-		EnvironmentID: environmentID, OwnerKeyID: profile.OwnerRootSPKI(), SPKIDigest: spkiDigest, Prefix: empty,
-		ManifestDigest: manifestDigest, Projections: []json.RawMessage{},
-	}, nil
-}
-
 type nestedMapSchema struct {
 	path []string
 	keys []string
@@ -389,9 +354,17 @@ func decodeClosedRecord(payload []byte, destination any, keys ...string) error {
 			{path: []string{"prefix", "start"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}},
 			{path: []string{"prefix", "end"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}},
 		}
+	case *wipdwire.PullStart:
+		schemas = []nestedMapSchema{
+			{path: []string{"prefix"}, keys: []string{"start", "end"}},
+			{path: []string{"prefix", "start"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}},
+			{path: []string{"prefix", "end"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}},
+		}
 	case *wipdwire.BlobManifest:
 		schemas = []nestedMapSchema{{path: []string{"as_of"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}}}
 	case *wipdwire.SeedEnd:
+		schemas = []nestedMapSchema{{path: []string{"verified_prefix"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}}}
+	case *wipdwire.PullEnd:
 		schemas = []nestedMapSchema{{path: []string{"verified_prefix"}, keys: []string{"event_count", "high_water_event_id", "prefix_digest"}}}
 	default:
 		return ErrInvalidClientState
@@ -433,6 +406,21 @@ func postSingleFrame(ctx context.Context, client *http.Client, endpoint string, 
 }
 
 func postFrames(ctx context.Context, client *http.Client, endpoint string, requestFrame []byte, requestID string, maxFrames int) ([]wipdwire.Frame, error) {
+	return postFramesBounded(ctx, client, endpoint, requestFrame, requestID, maxFrames,
+		maxFrames*(wipdwire.FrameLimit+4), wipdwire.FrameLimit)
+}
+
+func postFramesWithinSession(ctx context.Context, client *http.Client, endpoint string, requestFrame []byte, requestID string, maxFrames int, limits sessionLimits) ([]wipdwire.Frame, error) {
+	if !withinSessionFrame(requestFrame, limits) {
+		return nil, ErrInvalidClientState
+	}
+	return postFramesBounded(ctx, client, endpoint, requestFrame, requestID, maxFrames, limits.streamBytes, limits.frameBody)
+}
+
+func postFramesBounded(ctx context.Context, client *http.Client, endpoint string, requestFrame []byte, requestID string, maxFrames, maxBytes, maxFrameBody int) ([]wipdwire.Frame, error) {
+	if maxFrames <= 0 || maxBytes <= 0 || maxFrameBody <= 0 {
+		return nil, ErrInvalidClientState
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestFrame))
 	if err != nil {
 		return nil, err
@@ -443,8 +431,8 @@ func postFrames(ctx context.Context, client *http.Client, endpoint string, reque
 		return nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(response.Body, int64(maxFrames*(wipdwire.FrameLimit+4))+1))
-	if err != nil || len(data) > maxFrames*(wipdwire.FrameLimit+4) || response.StatusCode != http.StatusOK ||
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(maxBytes)+1))
+	if err != nil || len(data) > maxBytes || response.StatusCode != http.StatusOK ||
 		response.Header.Get("Content-Type") != "application/cbor" || response.Header.Get("Content-Encoding") != "" {
 		return nil, ErrInvalidClientState
 	}
@@ -454,6 +442,10 @@ func postFrames(ctx context.Context, client *http.Client, endpoint string, reque
 	}
 	for _, frame := range frames {
 		if frame.RequestID != requestID {
+			return nil, ErrInvalidClientState
+		}
+		wire, encodeErr := wipdwire.EncodeFrame(frame)
+		if encodeErr != nil || len(wire)-4 > maxFrameBody {
 			return nil, ErrInvalidClientState
 		}
 	}

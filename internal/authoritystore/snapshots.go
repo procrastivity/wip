@@ -84,6 +84,10 @@ func emptyAnchor() PrefixAnchor {
 	return PrefixAnchor{Digest: digestBytes([]byte("wipd/event-prefix/v1\x00"))}
 }
 
+// EmptyPrefixAnchor returns the canonical genesis anchor used by M2 seed
+// requests and clients with no installed authority events.
+func EmptyPrefixAnchor() PrefixAnchor { return emptyAnchor() }
+
 func anchorAt(ctx context.Context, tx *sql.Tx, domain string, count uint64) (PrefixAnchor, error) {
 	if count == 0 {
 		return emptyAnchor(), nil

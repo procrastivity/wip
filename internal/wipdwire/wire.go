@@ -211,6 +211,16 @@ type SeedRequest struct {
 	ResumeToken *string `cbor:"resume_token"`
 }
 
+// PullRequest asks for the complete authority delta after an exact installed
+// prefix. The current M5 lab slice requires a nil ResumeToken.
+type PullRequest struct {
+	Schema      string       `cbor:"schema"`
+	DomainID    string       `cbor:"domain_id"`
+	Epoch       uint64       `cbor:"expected_epoch"`
+	Installed   PrefixAnchor `cbor:"installed"`
+	ResumeToken *string      `cbor:"resume_token"`
+}
+
 // SeedStart describes the stable prefix and snapshot beginning a seed transfer.
 type SeedStart struct {
 	Schema      string `cbor:"schema"`
@@ -226,6 +236,28 @@ type SeedStart struct {
 	EventCount      uint64 `cbor:"event_count"`
 	EventByteLength uint64 `cbor:"event_byte_length"`
 	ManifestDigest  string `cbor:"blob_manifest_digest"`
+}
+
+// PullStart describes a bounded pull from the client's installed anchor to a
+// pinned current authority prefix, using the existing M2 logical message.
+type PullStart struct {
+	Schema     string `cbor:"schema"`
+	TransferID string `cbor:"transfer_id"`
+	DomainID   string `cbor:"domain_id"`
+	Epoch      uint64 `cbor:"authority_epoch"`
+	Prefix     struct {
+		Start PrefixAnchor `cbor:"start"`
+		End   PrefixAnchor `cbor:"end"`
+	} `cbor:"prefix"`
+	EventCount      uint64 `cbor:"event_count"`
+	EventByteLength uint64 `cbor:"event_byte_length"`
+	ManifestDigest  string `cbor:"blob_manifest_digest"`
+}
+
+// EventRecord carries the exact immutable event bytes and their authority ID.
+type EventRecord struct {
+	EventID string `cbor:"event_id"`
+	Record  []byte `cbor:"record"`
 }
 
 // BlobManifestEntry describes one blob in a seed's complete blob manifest.
@@ -248,6 +280,14 @@ type BlobManifest struct {
 // SeedEnd closes a seed transfer with the verified prefix and manifest digest.
 type SeedEnd struct {
 	Schema         string       `cbor:"schema"`
+	TransferID     string       `cbor:"transfer_id"`
+	VerifiedPrefix PrefixAnchor `cbor:"verified_prefix"`
+	ManifestDigest string       `cbor:"verified_blob_manifest_digest"`
+	Complete       bool         `cbor:"complete"`
+}
+
+// PullEnd closes an M2 pull with its verified prefix and manifest digest.
+type PullEnd struct {
 	TransferID     string       `cbor:"transfer_id"`
 	VerifiedPrefix PrefixAnchor `cbor:"verified_prefix"`
 	ManifestDigest string       `cbor:"verified_blob_manifest_digest"`
