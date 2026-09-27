@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -475,10 +476,16 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 	registry := operation.NewRegistry()
 	var daemon *Daemon
 	handlerStarted := make(chan struct{}, 1)
+	subsequentAdmission := make(chan struct{}, 1)
+	var handlerCalls atomic.Int32
 	releaseHandler := make(chan struct{})
 	handlerFinished := make(chan error, 1)
 	wantRecord := wipdfixture.Record{ID: "cancelled-wait-handler-record", Key: "cancel-wait-key", Value: "persisted-after-cancel"}
 	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		if handlerCalls.Add(1) > 1 {
+			subsequentAdmission <- struct{}{}
+			return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		}
 		handlerStarted <- struct{}{}
 		select {
 		case <-releaseHandler:
@@ -554,8 +561,60 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 	if got != wantRecord {
 		t.Fatalf("fixture after cancelled wait = %+v, want completed Handler value %+v; cancellation must not imply rollback", got, wantRecord)
 	}
-	if active := len(server.exchangeSlots); active != 0 {
-		t.Fatalf("active Handler slots after completion = %d, want 0", active)
+
+	const retryInterval = time.Millisecond
+	releaseBy := time.Now().Add(5 * time.Second)
+	releaseDeadline := time.NewTimer(time.Until(releaseBy))
+	defer releaseDeadline.Stop()
+	retryDelay := time.NewTimer(0)
+	defer retryDelay.Stop()
+	admitted := false
+	for attempt := 0; attempt < 77; attempt++ {
+		select {
+		case <-releaseDeadline.C:
+			t.Fatal("exchange slot was not released in time for a subsequent request")
+		case <-retryDelay.C:
+		}
+
+		nextRequestID := fmt.Sprintf("%s%02d", requestID[:len(requestID)-2], 23+attempt)
+		attemptAdmitted := false
+		func() {
+			requestContext, cancel := context.WithDeadline(context.Background(), releaseBy)
+			defer cancel()
+			request, err := http.NewRequestWithContext(requestContext, http.MethodPost, "http://wipd"+exchangePath,
+				bytes.NewReader(mustCommandFrame(t, nextRequestID, command, hash)))
+			if err != nil {
+				t.Fatalf("create subsequent exchange request: %v", err)
+			}
+			request.Header.Set("Content-Type", "application/octet-stream")
+			response, err := client.Do(request)
+			select {
+			case <-subsequentAdmission:
+				assertStreamReset(t, httpCallResult{response: response, err: err})
+				attemptAdmitted = true
+				return
+			default:
+			}
+			if err != nil || response == nil {
+				t.Fatalf("subsequent request failed before admission: response=%v err=%v", response, err)
+			}
+			frames := readResponseFrames(t, response)
+			if len(frames) != 1 || frames[0].requestID != nextRequestID || frames[0].sequence != 0 || frames[0].kind != "problem" {
+				t.Fatalf("response while waiting for slot release = %+v, want correlated overload problem", frames)
+			}
+			problem, err := decodePayload(frames[0].payload)
+			if err != nil || problem != "transport.overloaded" {
+				t.Fatalf("response while waiting for slot release = %#v, err %v; want transport.overloaded", problem, err)
+			}
+		}()
+		if attemptAdmitted {
+			admitted = true
+			break
+		}
+		retryDelay.Reset(retryInterval)
+	}
+	if !admitted {
+		t.Fatal("subsequent request was not admitted after the Handler released its slot")
 	}
 }
 
