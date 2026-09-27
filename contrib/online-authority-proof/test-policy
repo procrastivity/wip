@@ -9,7 +9,7 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
 valid="$tmp_dir/valid.json"
 project=wip-authority-proof-policytest
-docker compose -p "$project" -f "$compose_file" config --format json >"$valid"
+docker compose -p "$project" -f "$compose_file" config --no-env-resolution --format json >"$valid"
 jq -e --arg project "$project" -f "$policy" "$valid" >/dev/null
 
 reject_mutation() {
@@ -45,7 +45,7 @@ reject_compose_mutation() {
   local candidate="$tmp_dir/$name.compose.json"
   local rendered="$tmp_dir/$name.rendered.json"
   jq "$expression" "$valid" >"$candidate"
-  docker compose -p "$project" -f "$candidate" config --format json >"$rendered"
+  docker compose -p "$project" -f "$candidate" config --no-env-resolution --format json >"$rendered"
   if jq -e --arg project "$project" -f "$policy" "$rendered" >/dev/null; then
     printf 'online authority lab policy: accepted Compose-valid mutation: %s\n' "$name" >&2
     exit 1
@@ -57,6 +57,10 @@ reject_compose_mutation shared-network-name '.networks.lab.name = "shared-lab-ne
 reject_compose_mutation external-network-definition '.networks.lab = {"name":"shared-lab-network","external":true}'
 reject_compose_mutation shared-pid-namespace '.services["client-env"].pid = "service:authority-env"'
 reject_compose_mutation shared-ipc-namespace '.services["client-env"].ipc = "service:authority-env"'
+reject_compose_mutation host-build-context '.services["client-env"].image = "wip-authority-proof-local:latest" | .services["client-env"].build = {"context":"/home/user/.wip","dockerfile_inline":"FROM alpine:3.22.1\nCOPY . /state"} | .services["client-env"].pull_policy = "build"'
+
+printf 'LAB_ENVIRONMENT=client\n' >"$tmp_dir/client.env"
+reject_compose_mutation harmless-env-file ".services[\"client-env\"].env_file = [\"$tmp_dir/client.env\"]"
 
 mock_bin="$tmp_dir/mock-bin"
 mkdir -p "$mock_bin"
@@ -67,7 +71,7 @@ set -eu
 printf '%s\n' "$*" >>"$MOCK_DOCKER_LOG"
 case "$1" in
   compose)
-    if [[ "$*" == *"config --format json"* ]]; then
+    if [[ "$*" == *"config --no-env-resolution --format json"* ]]; then
       cat "$MOCK_CONFIG"
     fi
     ;;

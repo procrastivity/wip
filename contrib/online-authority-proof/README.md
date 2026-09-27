@@ -32,9 +32,13 @@ external, or explicitly shared volumes, secret/config/env-file channels,
 external or explicitly shared networks, inherited mounts, shared PID/IPC
 namespaces, external/host networking, published ports, credentials, and extra
 services. These adversarial topology mutations are normalized by `docker
-compose config` before the policy rejection is asserted. The tests also cover
-invalid/colliding project names and prove an invalid config is rejected before
-Docker resource inspection or teardown.
+compose config` before policy rejection for the build-context, env-file,
+volumes-from, network-name, PID, and IPC cases. `--no-env-resolution` is used
+so env-file declarations remain visible even when they only repeat an allowed
+environment variable. Other focused policy mutations operate on rendered
+Compose JSON directly. The tests also cover invalid/colliding project names
+and prove an invalid config is rejected before Docker resource inspection or
+teardown.
 Neither container performs domain initialization or any authority, TLS, grant,
 journal, receipt, or operation behavior. This skeleton makes no claim that the
 M4 synthetic fixture is canonical state and does not implement migration,

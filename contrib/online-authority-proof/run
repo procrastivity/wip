@@ -25,7 +25,7 @@ validate() {
   local config
   config="$(mktemp)"
   trap 'rm -f "$config"' RETURN
-  compose config --format json >"$config"
+  compose config --no-env-resolution --format json >"$config"
   jq -e --arg project "$project" -f "$policy" "$config" >/dev/null \
     || fail 'Compose config violates the isolated lab topology policy'
   printf 'online authority lab: config and isolation policy PASS\n'

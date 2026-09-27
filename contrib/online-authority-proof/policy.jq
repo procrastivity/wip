@@ -16,6 +16,10 @@
 (.services["client-env"].networks | keys) == ["lab"] and
 (.services["authority-env"].environment.LAB_ENVIRONMENT == "authority") and
 (.services["client-env"].environment.LAB_ENVIRONMENT == "client") and
+all(.services[];
+  .image == "alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1" and
+  (.build // null) == null and
+  (.pull_policy // "") == "") and
 (.services["authority-env"].volumes | length) == 1 and
 (.services["client-env"].volumes | length) == 1 and
 (.services["authority-env"].volumes[0].type == "volume") and
