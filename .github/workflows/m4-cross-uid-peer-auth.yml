@@ -1,0 +1,42 @@
+name: M4 distinct-UID peer authentication
+
+on:
+  push:
+    branches:
+      - amp/m4-step9-cross-uid-ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m4-cross-uid-peer-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  distinct-uid-peer-auth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 1b5a6099d3104c7a9cd622101382b23381f18273
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+
+      - name: Build the Step 9 peer-auth test binary
+        run: nix develop --command go test -c -o /tmp/wipd-peer-auth.test ./internal/wipd
+
+      - name: Require a real distinct-UID PASS (a capability skip fails)
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(sudo /tmp/wipd-peer-auth.test -test.v -test.run '^TestDistinctUIDSubprocessRejectedBeforeDownstreamEffects$' 2>&1)" || {
+            printf '%s\n' "$output"
+            exit 1
+          }
+          printf '%s\n' "$output"
+          if grep -Fq -- '--- SKIP: TestDistinctUIDSubprocessRejectedBeforeDownstreamEffects' <<<"$output"; then
+            echo 'The distinct-UID helper skipped; this is not M4 acceptance evidence.' >&2
+            exit 1
+          fi
+          grep -Fq -- '--- PASS: TestDistinctUIDSubprocessRejectedBeforeDownstreamEffects' <<<"$output"
