@@ -19,11 +19,19 @@ directory:
 For an explicitly fresh disposable run, `./contrib/online-authority-proof/run
 reset` removes the project's old containers, network, and named volumes before
 starting fresh. The default Compose project is `wip-authority-proof-$UID`; set
-`WIP_AUTHORITY_LAB_PROJECT` to use a different isolated project name.
+`WIP_AUTHORITY_LAB_PROJECT` to use a different project name with a lowercase
+alphanumeric/underscore/hyphen suffix (1–32 characters). The harness validates
+the rendered config before any resource inspection or teardown and refuses
+resources bearing the project label without its lab ownership label, as well
+as pre-existing named lab volumes/networks that are not lab-owned. It does not
+remove Compose orphans.
 
 `./contrib/online-authority-proof/test-policy` checks the Compose rendering and
-proves the topology guard rejects representative host mounts, shared volumes,
-external/host networking, published ports, credentials, and extra services.
+proves the topology guard rejects representative host mounts, bind-backed,
+external, or explicitly shared volumes, secret/config/env-file channels,
+external/host networking, published ports, credentials, and extra services. It
+also tests invalid/colliding project names and proves an invalid config is
+rejected before Docker resource inspection or teardown.
 Neither container performs domain initialization or any authority, TLS, grant,
 journal, receipt, or operation behavior. This skeleton makes no claim that the
 M4 synthetic fixture is canonical state and does not implement migration,

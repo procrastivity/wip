@@ -8,15 +8,16 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
 valid="$tmp_dir/valid.json"
-docker compose -f "$compose_file" config --format json >"$valid"
-jq -e -f "$policy" "$valid" >/dev/null
+project=wip-authority-proof-policytest
+docker compose -p "$project" -f "$compose_file" config --format json >"$valid"
+jq -e --arg project "$project" -f "$policy" "$valid" >/dev/null
 
 reject_mutation() {
   local name="$1"
   local expression="$2"
   local candidate="$tmp_dir/$name.json"
   jq "$expression" "$valid" >"$candidate"
-  if jq -e -f "$policy" "$candidate" >/dev/null; then
+  if jq -e --arg project "$project" -f "$policy" "$candidate" >/dev/null; then
     printf 'online authority lab policy: accepted forbidden mutation: %s\n' "$name" >&2
     exit 1
   fi
@@ -29,5 +30,100 @@ reject_mutation host-network '.services["authority-env"].network_mode = "host"'
 reject_mutation published-port '.services["authority-env"].ports = [{"target":8080,"published":"8080"}]'
 reject_mutation credential-env '.services["client-env"].environment.GH_TOKEN = "forbidden"'
 reject_mutation extra-service '.services.harness = .services["client-env"]'
+reject_mutation bind-backed-volume '.volumes["authority-state"].driver_opts = {"type":"none","o":"bind","device":"/home/user/.wip"}'
+reject_mutation external-volume '.volumes["authority-state"].external = true'
+reject_mutation shared-volume-name '.volumes["authority-state"].name = "shared-authority-data"'
+reject_mutation top-level-secret '.secrets["host-key"] = {"file":"/home/user/.ssh/id_ed25519"}'
+reject_mutation top-level-config '.configs["host-config"] = {"file":"/home/user/.ssh/id_ed25519"}'
+reject_mutation service-secret '.services["authority-env"].secrets = [{"source":"host-key","target":"id_ed25519"}]'
+reject_mutation service-config '.services["client-env"].configs = [{"source":"host-config","target":"host-config"}]'
+reject_mutation service-env-file '.services["authority-env"].env_file = ["/home/user/.ssh/id_ed25519"]'
+
+mock_bin="$tmp_dir/mock-bin"
+mkdir -p "$mock_bin"
+mock_log="$tmp_dir/docker.log"
+cat >"$mock_bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >>"$MOCK_DOCKER_LOG"
+case "$1" in
+  compose)
+    if [[ "$*" == *"config --format json"* ]]; then
+      cat "$MOCK_CONFIG"
+    fi
+    ;;
+  ps)
+    if [[ "${MOCK_COLLISION:-}" == container ]]; then
+      printf 'foreign-container\n'
+    fi
+    ;;
+  inspect)
+    printf 'foreign-project foreign-owner\n'
+    ;;
+  network|volume)
+    if [[ "$2" == inspect ]]; then
+      printf 'foreign-project foreign-owner\n'
+    elif [[ "$1" == volume && "${MOCK_COLLISION:-}" == volume ]]; then
+      printf '%s\n' "$MOCK_EXPECTED_RESOURCE"
+    fi
+    ;;
+esac
+MOCK
+chmod +x "$mock_bin/docker"
+
+if PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$mock_log" MOCK_CONFIG="$valid" \
+  WIP_AUTHORITY_LAB_PROJECT=unrelated-project "$root/contrib/online-authority-proof/run" down \
+  >/dev/null 2>&1; then
+  printf 'online authority lab policy: accepted invalid project override\n' >&2
+  exit 1
+fi
+[ ! -s "$mock_log" ] || { printf 'invalid project reached Docker\n' >&2; exit 1; }
+
+collision_project=wip-authority-proof-collision
+docker compose -p "$collision_project" -f "$compose_file" config --format json \
+  >"$tmp_dir/collision.json"
+if PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$mock_log" \
+  MOCK_CONFIG="$tmp_dir/collision.json" MOCK_COLLISION=container \
+  WIP_AUTHORITY_LAB_PROJECT="$collision_project" "$root/contrib/online-authority-proof/run" down \
+  >/dev/null 2>&1; then
+  printf 'online authority lab policy: did not reject a colliding project override\n' >&2
+  exit 1
+fi
+if grep -q ' down' "$mock_log"; then
+  printf 'colliding project reached destructive down\n' >&2
+  exit 1
+fi
+
+volume_project=wip-authority-proof-volumeclash
+docker compose -p "$volume_project" -f "$compose_file" config --format json \
+  >"$tmp_dir/volume-collision.json"
+: >"$mock_log"
+if PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$mock_log" \
+  MOCK_CONFIG="$tmp_dir/volume-collision.json" MOCK_COLLISION=volume \
+  MOCK_EXPECTED_RESOURCE="${volume_project}_authority-state" \
+  WIP_AUTHORITY_LAB_PROJECT="$volume_project" "$root/contrib/online-authority-proof/run" down \
+  >/dev/null 2>&1; then
+  printf 'online authority lab policy: did not reject a colliding named volume\n' >&2
+  exit 1
+fi
+if grep -q ' down' "$mock_log"; then
+  printf 'colliding named volume reached destructive down\n' >&2
+  exit 1
+fi
+
+docker compose -p "$collision_project" -f "$compose_file" config --format json \
+  | jq '.networks.lab.internal = false' >"$tmp_dir/invalid-config.json"
+: >"$mock_log"
+if PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$mock_log" \
+  MOCK_CONFIG="$tmp_dir/invalid-config.json" \
+  WIP_AUTHORITY_LAB_PROJECT="$collision_project" "$root/contrib/online-authority-proof/run" down \
+  >/dev/null 2>&1; then
+  printf 'online authority lab policy: teardown accepted invalid Compose config\n' >&2
+  exit 1
+fi
+if grep -Eq ' down| ps | network | volume ' "$mock_log"; then
+  printf 'invalid Compose config reached Docker resource inspection or teardown\n' >&2
+  exit 1
+fi
 
 printf 'online authority lab policy: PASS\n'

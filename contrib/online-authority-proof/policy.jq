@@ -1,6 +1,15 @@
 (.services | keys) == ["authority-env", "client-env"] and
 (.volumes | keys) == ["authority-state", "client-state"] and
+(.secrets // {} | keys) == [] and
+(.configs // {} | keys) == [] and
 (.networks | keys) == ["lab"] and
+(.volumes["authority-state"] | keys) == ["labels", "name"] and
+(.volumes["client-state"] | keys) == ["labels", "name"] and
+(.volumes["authority-state"].name == ($project + "_authority-state")) and
+(.volumes["client-state"].name == ($project + "_client-state")) and
+(.volumes["authority-state"].labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
+(.volumes["client-state"].labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
+(.networks.lab.labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
 (.services["authority-env"].networks | keys) == ["lab"] and
 (.services["client-env"].networks | keys) == ["lab"] and
 (.services["authority-env"].environment.LAB_ENVIRONMENT == "authority") and
@@ -24,6 +33,10 @@ all(.services[];
   ((.security_opt // []) | index("no-new-privileges:true")) != null and
   ((.devices // []) | length) == 0 and
   ((.ports // []) | length) == 0 and
+  ((.secrets // []) | length) == 0 and
+  ((.configs // []) | length) == 0 and
+  ((.env_file // []) | length) == 0 and
+  (.labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
   all(.volumes[]?; .type == "volume") and
   all((.environment // {}) | to_entries[]?;
     .key == "LAB_ENVIRONMENT")) and

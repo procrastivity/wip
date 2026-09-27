@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="$root/contrib/online-authority-proof/compose.yaml"
 policy="$root/contrib/online-authority-proof/policy.jq"
 project="${WIP_AUTHORITY_LAB_PROJECT:-wip-authority-proof-${UID}}"
+owner_label=com.procrastivity.wip.authority-proof
 
 fail() {
   printf 'online authority lab: %s\n' "$*" >&2
@@ -13,6 +14,8 @@ fail() {
 
 command -v docker >/dev/null || fail 'docker CLI is unavailable'
 command -v jq >/dev/null || fail 'jq is unavailable'
+[[ "$project" =~ ^wip-authority-proof-[a-z0-9][a-z0-9_-]{0,31}$ ]] \
+  || fail 'project must match wip-authority-proof-<lowercase-id> (1-32 characters)'
 
 compose() {
   docker compose -p "$project" -f "$compose_file" "$@"
@@ -23,9 +26,61 @@ validate() {
   config="$(mktemp)"
   trap 'rm -f "$config"' RETURN
   compose config --format json >"$config"
-  jq -e -f "$policy" "$config" >/dev/null \
+  jq -e --arg project "$project" -f "$policy" "$config" >/dev/null \
     || fail 'Compose config violates the isolated lab topology policy'
   printf 'online authority lab: config and isolation policy PASS\n'
+}
+
+check_ownership() {
+  local id labels resources expected
+
+  resources="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" \
+    || fail 'cannot inspect Docker containers for project ownership'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    labels="$(docker inspect --format "{{ index .Config.Labels \"com.docker.compose.project\" }} {{ index .Config.Labels \"$owner_label\" }}" "$id")"
+    [ "$labels" = "$project lab-v1" ] \
+      || fail "refusing project collision: container $id is not owned by this lab"
+  done <<<"$resources"
+
+  resources="$(docker network ls -q --filter "label=com.docker.compose.project=$project")" \
+    || fail 'cannot inspect Docker networks for project ownership'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    labels="$(docker network inspect --format "{{ index .Labels \"com.docker.compose.project\" }} {{ index .Labels \"$owner_label\" }}" "$id")"
+    [ "$labels" = "$project lab-v1" ] \
+      || fail "refusing project collision: network $id is not owned by this lab"
+  done <<<"$resources"
+
+  resources="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" \
+    || fail 'cannot inspect Docker volumes for project ownership'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    labels="$(docker volume inspect --format "{{ index .Labels \"com.docker.compose.project\" }} {{ index .Labels \"$owner_label\" }}" "$id")"
+    [ "$labels" = "$project lab-v1" ] \
+      || fail "refusing project collision: volume $id is not owned by this lab"
+  done <<<"$resources"
+
+  for expected in "${project}_authority-state" "${project}_client-state"; do
+    resources="$(docker volume ls -q --filter "name=$expected")" \
+      || fail 'cannot inspect expected lab volumes for ownership'
+    while IFS= read -r id; do
+      [ "$id" = "$expected" ] || continue
+      labels="$(docker volume inspect --format "{{ index .Labels \"com.docker.compose.project\" }} {{ index .Labels \"$owner_label\" }}" "$id")"
+      [ "$labels" = "$project lab-v1" ] \
+        || fail "refusing project collision: volume $id is not owned by this lab"
+    done <<<"$resources"
+  done
+
+  expected="${project}_lab"
+  resources="$(docker network ls -q --filter "name=$expected")" \
+    || fail 'cannot inspect expected lab network for ownership'
+  while IFS= read -r id; do
+    [ "$id" = "$expected" ] || continue
+    labels="$(docker network inspect --format "{{ index .Labels \"com.docker.compose.project\" }} {{ index .Labels \"$owner_label\" }}" "$id")"
+    [ "$labels" = "$project lab-v1" ] \
+      || fail "refusing project collision: network $id is not owned by this lab"
+  done <<<"$resources"
 }
 
 case "${1:-up}" in
@@ -34,15 +89,19 @@ case "${1:-up}" in
     ;;
   up)
     validate
+    check_ownership
     compose up -d
     ;;
   reset)
-    compose down --volumes --remove-orphans
     validate
+    check_ownership
+    compose down --volumes
     compose up -d
     ;;
   down)
-    compose down --volumes --remove-orphans
+    validate
+    check_ownership
+    compose down --volumes
     ;;
   *)
     printf 'usage: %s [config|up|reset|down]\n' "$0" >&2
