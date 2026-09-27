@@ -60,7 +60,12 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 			if err != nil {
 				return err
 			}
-			if experimentalProfile != "" && cmd.Parent() != nil &&
+			profileFlag := cmd.Root().PersistentFlags().Lookup("experimental-wipd-profile")
+			profileExplicit := profileFlag != nil && profileFlag.Changed
+			if profileExplicit && experimentalProfile == "" {
+				return wiperr.New("transport.unavailable", "--experimental-wipd-profile requires a non-empty explicit profile root; no legacy store fallback was attempted")
+			}
+			if profileExplicit && cmd.Parent() != nil &&
 				!(cmd.Parent().Name() == "wip" && cmd.Name() == "status") {
 				return wiperr.New("transport.unavailable", "this WIP verb is not routed through the experimental local profile; no legacy store fallback was attempted")
 			}
@@ -153,7 +158,8 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 		if err != nil {
 			return err
 		}
-		if profileRoot != "" {
+		profileFlag := cmd.Root().PersistentFlags().Lookup("experimental-wipd-profile")
+		if profileRoot != "" || (profileFlag != nil && profileFlag.Changed) {
 			return activateExperimentalWipd(cmd, streams, profileRoot)
 		}
 		return cmd.Help()

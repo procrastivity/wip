@@ -84,6 +84,39 @@ func TestExplicitExperimentalProfileNeverFallsBackToLegacyMatterCreate(t *testin
 	}
 }
 
+func TestEmptyExplicitExperimentalProfileRefusesWithoutLegacyStoreAccess(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root", args: []string{"--json"}},
+		{name: "status", args: []string{"--json", "status"}},
+		{name: "matter create", args: []string{"--json", "plumbing", "matter", "create", "--title", "Must Not Fall Back", "--locator", "must-not-fall-back"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacyDir := filepath.Join(t.TempDir(), "legacy-store")
+			t.Setenv("WIP_DB_PATH", filepath.Join(legacyDir, "wip.db"))
+
+			var stdout, stderr bytes.Buffer
+			streams := &iostreams.Streams{Out: &stdout, Err: &stderr}
+			root := cli.NewRootCommand(streams, buildinfo.Info{Version: "test", Commit: "test", Date: "test"})
+			root.SetArgs(append([]string{"--experimental-wipd-profile="}, test.args...))
+			if code := cli.Execute(root, streams); code == 0 {
+				t.Fatalf("empty explicit profile unexpectedly succeeded: stdout %q, stderr %q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `"code":"transport.unavailable"`) ||
+				!strings.Contains(stderr.String(), "requires a non-empty explicit profile root") ||
+				!strings.Contains(stderr.String(), "no legacy store fallback was attempted") {
+				t.Fatalf("empty explicit profile error = %q, want structured no-fallback refusal", stderr.String())
+			}
+			if _, err := os.Lstat(legacyDir); !os.IsNotExist(err) {
+				t.Fatalf("empty explicit profile reached or created legacy store directory: %v", err)
+			}
+		})
+	}
+}
+
 func TestExperimentalRootActivationStartsForegroundDaemonAndReportsLocalStatus(t *testing.T) {
 	base, err := os.MkdirTemp("/tmp", "w7-")
 	if err != nil {
