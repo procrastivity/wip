@@ -4,6 +4,7 @@ package wipd
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -249,6 +250,67 @@ func TestWipdImportGraphExcludesLegacyAndAuthorityStores(t *testing.T) {
 		if strings.HasPrefix(importPath, "github.com/procrastivity/wip/internal/store") ||
 			strings.HasPrefix(importPath, "github.com/procrastivity/wip/internal/authoritystore") {
 			t.Fatalf("wipd client/server dependency reaches forbidden persistence package %q", importPath)
+		}
+	}
+}
+
+func TestClientProcessRestartRetainsFixtureState(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	if err := registerFixtureHandler(registry, operation.ResultSucceeded, func(ctx context.Context, record wipdfixture.Record) error {
+		return daemon.fixture.Put(ctx, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := startLocalIPCServerWithSetup(t, newServer(registry, 2), func(started *Daemon) { daemon = started })
+	canonical, _ := canonicalFixtureCommand(t)
+	runClientProcess := func(command []byte) {
+		t.Helper()
+		child := exec.Command(os.Args[0], "-test.run=^TestClientProcessRestartHelper$")
+		child.Env = append(os.Environ(),
+			"WIPD_CLIENT_RESTART_HELPER=1",
+			"WIPD_CLIENT_PROFILE_ROOT="+root,
+			"WIPD_CLIENT_CANONICAL_COMMAND="+hex.EncodeToString(command),
+		)
+		output, err := child.CombinedOutput()
+		if err != nil {
+			t.Fatalf("client subprocess failed: %v\n%s", err, output)
+		}
+	}
+	runClientProcess(canonical)
+	runClientProcess(nil)
+
+	want := wipdfixture.Record{ID: "m4-fixture-handler-record", Key: "fixture-17", Value: "M4 Fixture"}
+	got, err := daemon.fixture.Get(context.Background(), want.Key)
+	if err != nil || got != want {
+		t.Fatalf("daemon-owned fixture after client process restart = %+v, err %v; want %+v", got, err, want)
+	}
+}
+
+func TestClientProcessRestartHelper(t *testing.T) {
+	if os.Getenv("WIPD_CLIENT_RESTART_HELPER") != "1" {
+		return
+	}
+	client, err := Connect(context.Background(), os.Getenv("WIPD_CLIENT_PROFILE_ROOT"))
+	if err != nil {
+		t.Fatalf("Connect() from replacement client process: %v", err)
+	}
+	defer client.Close()
+	if encoded := os.Getenv("WIPD_CLIENT_CANONICAL_COMMAND"); encoded != "" {
+		canonical, err := hex.DecodeString(encoded)
+		if err != nil {
+			t.Fatalf("decode helper command: %v", err)
+		}
+		command, err := operation.DecodeCanonicalCommand(canonical)
+		if err != nil {
+			t.Fatalf("decode helper command identity: %v", err)
+		}
+		result, err := client.ExecuteCommand(context.Background(), command)
+		if err != nil {
+			t.Fatalf("ExecuteCommand() from client subprocess: %v", err)
+		}
+		if result.Code != operation.ResultSucceeded {
+			t.Fatalf("client subprocess result = %+v, want typed success", result)
 		}
 	}
 }
