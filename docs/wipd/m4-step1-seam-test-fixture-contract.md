@@ -43,26 +43,8 @@ title: "M4 Fixture"}`. The handler returns `result.succeeded` and the typed
 `MatterCreateOutput`; validation must preserve the distinct title, locator,
 and ID rather than relying on a symmetric echo. Negative dispatch continues to
 use typed `result.rejected` plus stable `operation.*` problems. This is a
-contract test only: it does not invoke `writesurface` or production state.
-Step 6's explicitly local test server may persist the separate asymmetric
-`wipdfixture.Record` through a test-only Handler to exercise the registry seam.
-
-## Step 6 test-only Handler response
-
-The Step 6 regression harness may encode one bounded `response.end` frame
-whose closed payload follows `fixture-handler-result` in
-`conformance-schemas.cddl` (`wipd.m4-fixture-handler-result/1`). Its fields are
-the registered operation ID, the M1 Handler disposition, canonical CBOR bytes
-for the typed output (or null), and the stable problem code (or null). The
-canonical output bytes contain the closed `MatterCreateOutput` map for this
-fixture.
-
-This schema is test-harness-only: production `NewServer` has an empty registry
-and must not emit it. It reports only what the explicitly injected local test
-Handler returned. It is not an M2 authority response or evidence of command
-submission, a terminal receipt, accepted events, Environment binding, or
-canonical state. The test fixture database is disposable local test data; it
-does not represent the production Matter projection or authority state.
+contract test only: it does not invoke `writesurface`, a database, or a
+transport.
 
 The fixture's local-only status vocabulary is deliberately limited to
 `process_ready`, `profile_verified`, and `fixture_ready` booleans plus stable
@@ -81,9 +63,8 @@ operation/schema/store/feature capability lists); exact operation identity
 `wipd.store/1`; and the existing required `wipd.frame/1` feature from
 `frame-security-execution-contract.md`. Negotiation remains owned by the
 version-compatibility contract. JSON examples/vectors remain diagnostic
-notation, never wire JSON. M4 adds no M2 fields, feature IDs, or protocol
-version. The separate Step 6 fixture-only response schema above is not an M2
-feature and is not advertised or used by production `NewServer`.
+notation, never wire JSON. M4 adds no wire fields, feature IDs, schemas, or
+protocol version.
 
 The test handler and its future disposable fixture store are not canonical
 authority state, authority events, receipts, claims, or journals. They must

@@ -16,9 +16,8 @@ import (
 )
 
 const (
-	negotiatePath              = "/wipd/v1/negotiate"
-	exchangePath               = "/wipd/v1/exchange"
-	fixtureHandlerResultSchema = "wipd.m4-fixture-handler-result/1"
+	negotiatePath = "/wipd/v1/negotiate"
+	exchangePath  = "/wipd/v1/exchange"
 )
 
 var requestHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -61,7 +60,7 @@ func newServer(registry *operation.Registry, maxExchanges uint64) *Server {
 		registry:               registry,
 		maxConcurrentExchanges: maxExchanges,
 		exchangeSlots:          make(chan struct{}, int(maxExchanges)),
-		preflightSlots:         make(chan struct{}, 1),
+		preflightSlots:         make(chan struct{}, int(maxExchanges)+1), // bounded parser slots plus one overload frame
 	}
 }
 
@@ -272,8 +271,11 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 
 	select {
 	case s.preflightSlots <- struct{}{}:
-	case <-request.Context().Done():
-		return
+	default:
+		// No request ID is available until one complete frame has been
+		// parsed, so fail this bounded admission attempt with a stream reset
+		// rather than queueing an unbounded number of waiting handlers.
+		abortHTTP2Stream()
 	}
 	preflightOwned := true
 	defer func() {
@@ -282,8 +284,7 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		}
 	}()
 
-	countedBody := &countingReader{reader: request.Body}
-	frame, err := readFrame(countedBody, uint32(parameters.maxFrameBody))
+	frame, err := readFrame(request.Body, uint32(parameters.maxFrameBody))
 	if err != nil {
 		abortHTTP2Stream()
 	}
@@ -322,24 +323,18 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		return
 	}
 
-	if request.ContentLength >= 0 && countedBody.bytesRead < request.ContentLength {
-		cancelFrame, err := readFrame(countedBody, uint32(parameters.maxFrameBody))
-		if err != nil || validateCancelFrame(frame, cancelFrame) != nil || countedBody.bytesRead != request.ContentLength {
-			abortHTTP2Stream()
-		}
-		s.writeProblem(writer, frame.requestID, 0, "transport.cancelled-before-submission", uint32(parameters.maxFrameBody))
-		return
-	}
-
 	<-s.preflightSlots
 	preflightOwned = false
 
-	handlerResult := make(chan operation.Result, 1)
-	go func() { handlerResult <- s.registry.Dispatch(state.ctx, command.Request) }()
+	handlerDone := make(chan struct{}, 1)
+	go func() {
+		_ = s.registry.Dispatch(state.ctx, command.Request)
+		handlerDone <- struct{}{}
+	}()
 	transferSlotToHandler := func() {
 		slotOwnedByHandler = true
 		go func() {
-			<-handlerResult
+			<-handlerDone
 			<-s.exchangeSlots
 		}()
 	}
@@ -368,34 +363,11 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 			// wait only. Resetting this HTTP/2 stream makes no rollback claim;
 			// the Handler retains its bounded exchange slot until it completes.
 			abortHTTP2Stream()
-		case result := <-handlerResult:
-			// Prefer a cancellation record already parsed by the independent
-			// request reader over completing the response concurrently.
-			select {
-			case incoming := <-nextFrame:
-				if errors.Is(incoming.err, io.EOF) {
-					nextFrame = nil
-				} else {
-					if incoming.err != nil {
-						abortHTTP2Stream()
-					}
-					if err := validateCancelFrame(frame, incoming.frame); err != nil {
-						abortHTTP2Stream()
-					}
-					abortHTTP2Stream()
-				}
-			default:
-			}
-			payload, err := encodeFixtureHandlerResult(command.Request.Operation, result)
-			if err != nil {
-				abortHTTP2Stream()
-			}
-			wire, err := encodeFrame(frameRecord{requestID: frame.requestID, sequence: 0, kind: "response.end", payload: payload}, uint32(parameters.maxFrameBody))
-			if err != nil {
-				abortHTTP2Stream()
-			}
-			_, _ = writer.Write(wire)
-			return
+		case <-handlerDone:
+			// Step 6 has no M2 response payload for a local Handler result.
+			// The production registry is empty; test fixtures observe typed
+			// output through their local Handler sink, not a new wire schema.
+			abortHTTP2Stream()
 		}
 	}
 }
@@ -424,35 +396,6 @@ func validateCancelFrame(submit, cancel frameRecord) error {
 		return errMalformedMessage
 	}
 	return nil
-}
-
-func encodeFixtureHandlerResult(id operation.ID, result operation.Result) ([]byte, error) {
-	var output any
-	if result.Output != nil {
-		var outputValue map[string]any
-		switch typed := result.Output.(type) {
-		case operation.MatterCreateOutput:
-			outputValue = map[string]any{"id": typed.ID, "locator": typed.Locator, "title": typed.Title}
-		default:
-			return nil, errors.New("wipd: unsupported local fixture output type")
-		}
-		encoded, err := encodePayload(outputValue)
-		if err != nil {
-			return nil, err
-		}
-		output = encoded
-	}
-	var problemCode any
-	if result.Problem != nil {
-		problemCode = string(result.Problem.Code)
-	}
-	return encodePayload(map[string]any{
-		"schema":       fixtureHandlerResultSchema,
-		"operation":    map[string]any{"name": id.Name, "version": uint64(id.Version)},
-		"result_code":  string(result.Code),
-		"output":       output,
-		"problem_code": problemCode,
-	})
 }
 
 func (s *Server) writeProblem(writer http.ResponseWriter, requestID string, sequence uint64, code string, limit uint32) {
