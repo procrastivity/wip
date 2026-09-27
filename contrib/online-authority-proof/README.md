@@ -28,7 +28,7 @@ remove Compose orphans.
 
 `./contrib/online-authority-proof/test-policy` checks the Compose rendering and
 proves the topology guard rejects representative host mounts, bind-backed,
-external, or explicitly shared volumes, secret/config/env-file channels,
+external, or explicitly shared volumes, secret/config/env/label-file channels,
 external or explicitly shared networks, inherited mounts, shared PID/IPC
 namespaces, multi-replica services, external providers, external/host
 networking, published ports, credentials, and extra services. These adversarial

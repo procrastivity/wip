@@ -47,7 +47,9 @@ all(.services[];
   ((.secrets // []) | length) == 0 and
   ((.configs // []) | length) == 0 and
   ((.env_file // []) | length) == 0 and
+  ((.label_file // []) | length) == 0 and
   ((.volumes_from // []) | length) == 0 and
+  ((.labels | keys) == ["com.procrastivity.wip.authority-proof"]) and
   (.labels["com.procrastivity.wip.authority-proof"] == "lab-v1") and
   all(.volumes[]?; .type == "volume") and
   all((.environment // {}) | to_entries[]?;

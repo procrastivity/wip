@@ -65,6 +65,23 @@ reject_compose_mutation external-provider '.services["client-env"].provider = {"
 printf 'LAB_ENVIRONMENT=client\n' >"$tmp_dir/client.env"
 reject_compose_mutation harmless-env-file ".services[\"client-env\"].env_file = [\"$tmp_dir/client.env\"]"
 
+printf 'TOKEN=synthetic-not-a-secret\n' >"$tmp_dir/client.labels"
+label_file_candidate="$tmp_dir/label-file.compose.json"
+label_file_rendered="$tmp_dir/label-file.rendered.json"
+jq ".services[\"client-env\"].label_file = [\"$tmp_dir/client.labels\"]" "$valid" \
+  >"$label_file_candidate"
+docker compose -p "$project" -f "$label_file_candidate" config --no-env-resolution --format json \
+  >"$label_file_rendered"
+jq -e '
+  .services["client-env"].labels.TOKEN == "synthetic-not-a-secret" and
+  (.services["client-env"].label_file | length) > 0
+' "$label_file_rendered" >/dev/null \
+  || { printf 'Compose did not normalize the synthetic label_file as expected\n' >&2; exit 1; }
+if jq -e --arg project "$project" -f "$policy" "$label_file_rendered" >/dev/null; then
+  printf 'online authority lab policy: accepted Compose-normalized label_file credential\n' >&2
+  exit 1
+fi
+
 mock_bin="$tmp_dir/mock-bin"
 mkdir -p "$mock_bin"
 mock_log="$tmp_dir/docker.log"
