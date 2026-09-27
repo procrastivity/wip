@@ -328,7 +328,10 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	<-s.preflightSlots
 	preflightOwned = false
 
-	dispatchContext, cancelDispatch := context.WithCancel(state.ctx)
+	// Queued work follows the exchange lifetime. Registry.Dispatch still gets
+	// the server context after the dispatch gate opens, so a later disconnect
+	// cannot cancel a Handler that may already have durable effects.
+	dispatchContext, cancelDispatch := context.WithCancel(request.Context())
 	defer cancelDispatch()
 	gate := &dispatchGate{cancel: cancelDispatch}
 	dispatchDone := make(chan struct{})
@@ -347,7 +350,7 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 			if deadline != nil && !deadline.After(time.Now()) {
 				return dispatchOutcome{problemCode: "transport.deadline-before-submission"}
 			}
-			if !gate.begin() {
+			if !gate.begin(request.Context()) {
 				return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
 			}
 			return dispatchOutcome{result: s.registry.Dispatch(state.ctx, command.Request)}

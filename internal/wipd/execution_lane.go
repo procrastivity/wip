@@ -87,10 +87,11 @@ type dispatchGate struct {
 	cancel     context.CancelFunc
 }
 
-func (gate *dispatchGate) begin() bool {
+func (gate *dispatchGate) begin(requestContext context.Context) bool {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	if gate.cancelled {
+	if gate.cancelled || requestContext.Err() != nil {
+		gate.cancelled = true
 		return false
 	}
 	gate.dispatched = true

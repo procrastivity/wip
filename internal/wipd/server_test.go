@@ -605,6 +605,128 @@ func TestControlCancelBeforeLaneDispatchReturnsNoEffect(t *testing.T) {
 	waitForExecutionLanesEmpty(t, server.executionLanes)
 }
 
+func TestDisconnectWhileQueuedCancelsBeforeLaneRelease(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	var handlerCalls atomic.Int32
+	firstStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		handlerCalls.Add(1)
+		input := request.Input.(operation.MatterCreateInput)
+		if input.Locator == "held-counter" {
+			firstStarted <- struct{}{}
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return executionFailed(ctx.Err())
+			}
+		}
+		return incrementFixtureCounter(ctx, daemon.fixture, request)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 2)
+	client, _ := startHTTP2UnixServerWithSetup(t, server, func(started *Daemon) { daemon = started })
+	negotiateHTTP2TestSession(t, client)
+	seedFixtureCounter(t, daemon.fixture, "held-counter")
+	seedFixtureCounter(t, daemon.fixture, "cancelled-counter")
+
+	domain := "01K5V8K1Q5VX6Y0J8C9W3M4N5P"
+	first := fixtureCommand(t, domain, "01K6A000000000000000000071", 71, "hold-first", "held-counter")
+	queued := fixtureCommand(t, domain, "01K6A000000000000000000072", 72, "must-not-run", "cancelled-counter")
+	firstRequestID := "01K6A000000000000000000073"
+	firstFrame := mustCommandFrameFor(t, firstRequestID, first)
+	firstCall := make(chan httpCallResult, 1)
+	go func() {
+		response, err := postFrameRequest(client, exchangePath, firstFrame)
+		firstCall <- httpCallResult{response: response, err: err}
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first mutation did not acquire its domain lane")
+	}
+
+	queuedRequestID := "01K6A000000000000000000074"
+	queuedFrame := mustCommandFrameFor(t, queuedRequestID, queued)
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, "http://wipd"+exchangePath, reader)
+	if err != nil {
+		t.Fatalf("create cancellable queued request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	queuedCall := make(chan httpCallResult, 1)
+	go func() {
+		response, err := client.Do(request)
+		queuedCall <- httpCallResult{response: response, err: err}
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := writer.Write(queuedFrame)
+		writeDone <- err
+	}()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write queued command frame: %v", err)
+	}
+	waitForLaneOccupancy(t, server.executionLanes, domain, 1, 1)
+
+	// Cancel B while A still holds the lane. The queued acquisition must leave
+	// immediately from request-context cancellation, before A is released.
+	cancelRequest()
+	_ = writer.Close()
+	select {
+	case result := <-queuedCall:
+		if result.response != nil {
+			_ = result.response.Body.Close()
+		}
+		if result.err == nil {
+			t.Fatal("canceled queued exchange unexpectedly received a response")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled queued exchange did not reset")
+	}
+	waitForLaneOccupancy(t, server.executionLanes, domain, 1, 0)
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("Handler calls before releasing domain lane = %d, want only active A", got)
+	}
+
+	close(releaseFirst)
+	select {
+	case result := <-firstCall:
+		assertHTTPM1Response(t, result.response, result.err, firstRequestID, operation.Result{
+			Code: operation.ResultSucceeded,
+			Output: operation.MatterCreateOutput{
+				ID: "01M4F1XT4R3E00000000000001", Locator: "held-counter", Title: "1",
+			},
+		})
+	case <-time.After(5 * time.Second):
+		t.Fatal("active mutation did not complete after lane release")
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("queued Handler ran after its request was reset: total calls %d, want 1", got)
+	}
+	assertFixtureCounter(t, daemon.fixture, "held-counter", "1")
+	assertFixtureCounter(t, daemon.fixture, "cancelled-counter", "0")
+	waitForExecutionLanesEmpty(t, server.executionLanes)
+	waitForExchangeSlots(t, server, 0)
+}
+
+func TestDispatchGateRejectsCanceledRequestAtBegin(t *testing.T) {
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	gate := &dispatchGate{cancel: func() {}}
+	if gate.begin(requestContext) {
+		t.Fatal("dispatch gate began after request cancellation")
+	}
+	if gate.dispatched {
+		t.Fatal("dispatch gate marked canceled request as dispatched")
+	}
+}
+
 func TestDisconnectAfterFixtureCommitReturnsOutcomeUnknownAndKeepsValue(t *testing.T) {
 	registry := operation.NewRegistry()
 	var daemon *Daemon
