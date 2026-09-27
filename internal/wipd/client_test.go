@@ -254,11 +254,18 @@ func TestWipdImportGraphExcludesLegacyAndAuthorityStores(t *testing.T) {
 }
 
 func startLocalIPCServer(t *testing.T, server *Server) (string, *Daemon) {
+	return startLocalIPCServerWithSetup(t, server, nil)
+}
+
+func startLocalIPCServerWithSetup(t *testing.T, server *Server, setup func(*Daemon)) (string, *Daemon) {
 	t.Helper()
 	root := testProfileRoot(t)
 	daemon, err := Start(root)
 	if err != nil {
 		t.Fatalf("start fixture IPC daemon: %v", err)
+	}
+	if setup != nil {
+		setup(daemon)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)

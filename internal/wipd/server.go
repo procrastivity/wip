@@ -27,6 +27,7 @@ type Server struct {
 	maxConcurrentExchanges uint64
 	exchangeSlots          chan struct{}
 	preflightSlots         chan struct{}
+	executionLanes         *executionLanes
 }
 
 type connectionSession struct {
@@ -61,6 +62,7 @@ func newServer(registry *operation.Registry, maxExchanges uint64) *Server {
 		maxConcurrentExchanges: maxExchanges,
 		exchangeSlots:          make(chan struct{}, int(maxExchanges)),
 		preflightSlots:         make(chan struct{}, int(maxExchanges)+1), // bounded parser slots plus one overload frame
+		executionLanes:         &executionLanes{},
 	}
 }
 
@@ -301,9 +303,9 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.writeProblem(writer, frame.requestID, 0, "transport.overloaded", uint32(parameters.maxFrameBody))
 		return
 	}
-	slotOwnedByHandler := false
+	slotOwnedByDispatch := false
 	defer func() {
-		if !slotOwnedByHandler {
+		if !slotOwnedByDispatch {
 			<-s.exchangeSlots
 		}
 	}()
@@ -326,14 +328,36 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	<-s.preflightSlots
 	preflightOwned = false
 
-	handlerDone := make(chan operation.Result, 1)
+	dispatchContext, cancelDispatch := context.WithCancel(state.ctx)
+	defer cancelDispatch()
+	gate := &dispatchGate{cancel: cancelDispatch}
+	dispatchDone := make(chan struct{})
+	dispatchOutcomes := make(chan dispatchOutcome, 1)
 	go func() {
-		handlerDone <- s.registry.Dispatch(state.ctx, command.Request)
+		defer close(dispatchDone)
+		outcome := func() dispatchOutcome {
+			// M2 D128's domain lane encloses semantic dispatch only. Later
+			// return/pull barriers belong immediately before this point; frame
+			// reads, cancellation waits, and response writes remain outside it.
+			releaseLane, acquired := s.executionLanes.acquire(dispatchContext, command.AuthorityDomainID)
+			if !acquired {
+				return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
+			}
+			defer releaseLane()
+			if deadline != nil && !deadline.After(time.Now()) {
+				return dispatchOutcome{problemCode: "transport.deadline-before-submission"}
+			}
+			if !gate.begin() {
+				return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
+			}
+			return dispatchOutcome{result: s.registry.Dispatch(state.ctx, command.Request)}
+		}()
+		dispatchOutcomes <- outcome
 	}()
-	transferSlotToHandler := func() {
-		slotOwnedByHandler = true
+	transferSlotToDispatch := func() {
+		slotOwnedByDispatch = true
 		go func() {
-			<-handlerDone
+			<-dispatchDone
 			<-s.exchangeSlots
 		}()
 	}
@@ -351,18 +375,38 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 				nextFrame = nil
 				continue
 			}
-			transferSlotToHandler()
 			if incoming.err != nil {
+				_ = gate.cancelBeforeDispatch()
+				transferSlotToDispatch()
 				abortHTTP2Stream()
 			}
 			if err := validateCancelFrame(frame, incoming.frame); err != nil {
+				_ = gate.cancelBeforeDispatch()
+				transferSlotToDispatch()
 				abortHTTP2Stream()
 			}
+			if gate.cancelBeforeDispatch() {
+				transferSlotToDispatch()
+				s.writeProblem(writer, frame.requestID, 0, "transport.cancelled-before-submission", uint32(parameters.maxFrameBody))
+				return
+			}
+			transferSlotToDispatch()
 			// Once a Handler may have effects, CANCEL stops this exchange's
 			// wait only. Resetting this HTTP/2 stream makes no rollback claim;
-			// the Handler retains its bounded exchange slot until it completes.
+			// dispatch retains its bounded exchange slot until it completes.
 			abortHTTP2Stream()
-		case result := <-handlerDone:
+		case <-request.Context().Done():
+			// A disconnected stream cancels queued work before dispatch. After
+			// the dispatch boundary it only ends this wait; the Handler uses the
+			// server context and is allowed to finish its durable fixture effect.
+			_ = gate.cancelBeforeDispatch()
+			transferSlotToDispatch()
+			return
+		case outcome := <-dispatchOutcomes:
+			if outcome.problemCode != "" {
+				s.writeProblem(writer, frame.requestID, 0, outcome.problemCode, uint32(parameters.maxFrameBody))
+				return
+			}
 			// A completed Handler is the only source of the existing bare M1
 			// result payload on response.end. A transport reset before the
 			// client receives it remains uncertain; it is never rewritten as a
@@ -370,12 +414,13 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 			select {
 			case incoming := <-nextFrame:
 				if !errors.Is(incoming.err, io.EOF) {
+					transferSlotToDispatch()
 					abortHTTP2Stream()
 				}
 				nextFrame = nil
 			default:
 			}
-			payload, err := encodeM1ResultPayload(result)
+			payload, err := encodeM1ResultPayload(outcome.result)
 			if err != nil {
 				abortHTTP2Stream()
 			}
@@ -392,6 +437,11 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 type frameReadResult struct {
 	frame frameRecord
 	err   error
+}
+
+type dispatchOutcome struct {
+	result      operation.Result
+	problemCode string
 }
 
 func validateCancelFrame(submit, cancel frameRecord) error {

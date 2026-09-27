@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -176,9 +177,10 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	}
 	assertTrailingRecordsReset := func(t *testing.T, wire []byte) {
 		t.Helper()
+		firstFrameLength := int(binary.BigEndian.Uint32(wire[:4])) + 4
 		release := make(chan struct{})
 		handlerHolds <- release
-		call, writer, writeDone, err := postOpenFrameRequest(client, exchangePath, wire)
+		call, writer, writeDone, err := postOpenFrameRequest(client, exchangePath, wire[:firstFrameLength])
 		if err != nil {
 			t.Fatalf("start exchange with invalid trailing record: %v", err)
 		}
@@ -195,7 +197,10 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 			t.Fatal("first valid command did not reach its held Handler")
 		}
 		if err := <-writeDone; err != nil {
-			t.Fatalf("write command and trailing records: %v", err)
+			t.Fatalf("write first command record: %v", err)
+		}
+		if _, err := writer.Write(wire[firstFrameLength:]); err != nil {
+			t.Fatalf("write invalid trailing record after dispatch: %v", err)
 		}
 		select {
 		case result := <-call:
@@ -386,6 +391,303 @@ func TestExchangeConcurrencyLimitReturnsCorrelatedOverloadBeforeDispatch(t *test
 	if err := <-firstWriteDone; err != nil {
 		t.Fatalf("write first exchange frame: %v", err)
 	}
+}
+
+func TestDomainExecutionLaneSerializesMutationsAndIsolatesOtherDomains(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	var callsA, callsB atomic.Int32
+	firstAStarted := make(chan struct{}, 1)
+	releaseFirstA := make(chan struct{})
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		input := request.Input.(operation.MatterCreateInput)
+		if input.Locator == "counter-a" {
+			if callsA.Add(1) == 1 {
+				firstAStarted <- struct{}{}
+				select {
+				case <-releaseFirstA:
+				case <-ctx.Done():
+					return executionFailed(ctx.Err())
+				}
+			}
+		} else {
+			callsB.Add(1)
+		}
+		return incrementFixtureCounter(ctx, daemon.fixture, request)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 3)
+	root, _ := startLocalIPCServerWithSetup(t, server, func(started *Daemon) { daemon = started })
+	seedFixtureCounter(t, daemon.fixture, "counter-a")
+	seedFixtureCounter(t, daemon.fixture, "counter-b")
+	client, err := Connect(context.Background(), root)
+	if err != nil {
+		t.Fatalf("connect local test client: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	domainA := "01K5V8K1Q5VX6Y0J8C9W3M4N5P"
+	domainB := "01K6B000000000000000000001"
+	commandA1 := fixtureCommand(t, domainA, "01K6A000000000000000000031", 43, "increment-a-1", "counter-a")
+	commandA2 := fixtureCommand(t, domainA, "01K6A000000000000000000032", 44, "increment-a-2", "counter-a")
+	commandB := fixtureCommand(t, domainB, "01K6A000000000000000000033", 45, "increment-b", "counter-b")
+	type callResult struct {
+		result operation.Result
+		err    error
+	}
+	run := func(command operation.Command) <-chan callResult {
+		completed := make(chan callResult, 1)
+		go func() {
+			result, err := client.ExecuteCommand(context.Background(), command)
+			completed <- callResult{result: result, err: err}
+		}()
+		return completed
+	}
+	waitResult := func(name string, completed <-chan callResult, want operation.Result) {
+		t.Helper()
+		select {
+		case got := <-completed:
+			if got.err != nil {
+				t.Fatalf("%s execution error: %v", name, got.err)
+			}
+			assertSemanticResultsEqual(t, got.result, want)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not complete", name)
+		}
+	}
+
+	callA1 := run(commandA1)
+	select {
+	case <-firstAStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first domain-A mutation did not enter its Handler")
+	}
+	callA2 := run(commandA2)
+	waitForLaneOccupancy(t, server.executionLanes, domainA, 1, 1)
+	if got := callsA.Load(); got != 1 {
+		t.Fatalf("same-domain Handler calls while first is held = %d, want only the first dispatch", got)
+	}
+
+	callB := run(commandB)
+	waitResult("independent domain-B mutation", callB, operation.Result{
+		Code: operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{
+			ID: "01M4F1XT4R3E00000000000001", Locator: "counter-b", Title: "1",
+		},
+	})
+	if got := callsB.Load(); got != 1 {
+		t.Fatalf("domain-B Handler calls = %d, want one independent dispatch while domain A is blocked", got)
+	}
+
+	close(releaseFirstA)
+	waitResult("first domain-A mutation", callA1, operation.Result{
+		Code: operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{
+			ID: "01M4F1XT4R3E00000000000001", Locator: "counter-a", Title: "1",
+		},
+	})
+	waitResult("queued domain-A mutation", callA2, operation.Result{
+		Code: operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{
+			ID: "01M4F1XT4R3E00000000000001", Locator: "counter-a", Title: "2",
+		},
+	})
+	assertFixtureCounter(t, daemon.fixture, "counter-a", "2")
+	assertFixtureCounter(t, daemon.fixture, "counter-b", "1")
+	waitForExecutionLanesEmpty(t, server.executionLanes)
+}
+
+func TestControlCancelBeforeLaneDispatchReturnsNoEffect(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	var handlerCalls atomic.Int32
+	firstStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
+		handlerCalls.Add(1)
+		input := request.Input.(operation.MatterCreateInput)
+		if input.Title == "hold-first" {
+			firstStarted <- struct{}{}
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return executionFailed(ctx.Err())
+			}
+		}
+		return incrementFixtureCounter(ctx, daemon.fixture, request)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 2)
+	var client *http.Client
+	client, _ = startHTTP2UnixServerWithSetup(t, server, func(started *Daemon) { daemon = started })
+	negotiateHTTP2TestSession(t, client)
+	seedFixtureCounter(t, daemon.fixture, "held-counter")
+	seedFixtureCounter(t, daemon.fixture, "cancelled-counter")
+
+	domain := "01K5V8K1Q5VX6Y0J8C9W3M4N5P"
+	first := fixtureCommand(t, domain, "01K6A000000000000000000041", 51, "hold-first", "held-counter")
+	cancelled := fixtureCommand(t, domain, "01K6A000000000000000000042", 52, "must-not-run", "cancelled-counter")
+	firstRequestID := "01K6A000000000000000000051"
+	firstFrame := mustCommandFrameFor(t, firstRequestID, first)
+	firstCall := make(chan httpCallResult, 1)
+	go func() {
+		response, err := postFrameRequest(client, exchangePath, firstFrame)
+		firstCall <- httpCallResult{response: response, err: err}
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first same-domain mutation did not enter its Handler")
+	}
+
+	cancelRequestID := "01K6A000000000000000000052"
+	cancelFrame := mustCommandFrameFor(t, cancelRequestID, cancelled)
+	call, requestWriter, writeDone, err := postOpenFrameRequest(client, exchangePath, cancelFrame)
+	if err != nil {
+		t.Fatalf("start queued cancellable exchange: %v", err)
+	}
+	defer requestWriter.Close()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write queued command: %v", err)
+	}
+	waitForLaneOccupancy(t, server.executionLanes, domain, 1, 1)
+	cancelRecord, err := encodeFrame(frameRecord{
+		requestID: cancelRequestID,
+		sequence:  1,
+		kind:      "control.cancel",
+		payload:   []byte{0xa0},
+	}, maxFrameBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := requestWriter.Write(cancelRecord); err != nil {
+		t.Fatalf("send control.cancel before lane dispatch: %v", err)
+	}
+	select {
+	case response := <-call:
+		if response.err != nil || response.response == nil {
+			t.Fatalf("pre-dispatch cancellation response = %v, err %v", response.response, response.err)
+		}
+		frames := readResponseFrames(t, response.response)
+		if len(frames) != 1 || frames[0].requestID != cancelRequestID || frames[0].sequence != 0 || frames[0].kind != "problem" {
+			t.Fatalf("pre-dispatch cancel frames = %+v, want one correlated problem", frames)
+		}
+		code, err := problemCodeFromPayload(frames[0].payload)
+		if err != nil || code != "transport.cancelled-before-submission" {
+			t.Fatalf("pre-dispatch cancel code = %q, err %v; want transport.cancelled-before-submission", code, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued control.cancel did not receive a no-effect response")
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("Handlers called after queued cancellation = %d, want only the active mutation", got)
+	}
+	assertFixtureCounter(t, daemon.fixture, "cancelled-counter", "0")
+
+	close(releaseFirst)
+	select {
+	case response := <-firstCall:
+		assertHTTPM1Response(t, response.response, response.err, firstRequestID, operation.Result{
+			Code: operation.ResultSucceeded,
+			Output: operation.MatterCreateOutput{
+				ID: "01M4F1XT4R3E00000000000001", Locator: "held-counter", Title: "1",
+			},
+		})
+	case <-time.After(5 * time.Second):
+		t.Fatal("active mutation did not complete after release")
+	}
+	if got := handlerCalls.Load(); got != 1 {
+		t.Fatalf("Handlers called after active mutation completed = %d, want cancelled request never dispatched", got)
+	}
+	assertFixtureCounter(t, daemon.fixture, "held-counter", "1")
+	waitForExecutionLanesEmpty(t, server.executionLanes)
+}
+
+func TestDisconnectAfterFixtureCommitReturnsOutcomeUnknownAndKeepsValue(t *testing.T) {
+	registry := operation.NewRegistry()
+	var daemon *Daemon
+	committed := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	handlerDone := make(chan error, 1)
+	wantRecord := wipdfixture.Record{ID: "fixture-disconnect-record", Key: "disconnect-key", Value: "committed-before-disconnect"}
+	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, _ operation.Request) operation.Result {
+		if err := daemon.fixture.Put(ctx, wantRecord); err != nil {
+			handlerDone <- err
+			return executionFailed(err)
+		}
+		committed <- struct{}{}
+		select {
+		case <-releaseHandler:
+		case <-ctx.Done():
+			handlerDone <- ctx.Err()
+			return executionFailed(ctx.Err())
+		}
+		handlerDone <- nil
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{
+			ID: "01M4F1XT4R3E00000000000001", Locator: "disconnect-key", Title: "Committed",
+		}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(registry, 1)
+	root, _ := startLocalIPCServerWithSetup(t, server, func(started *Daemon) { daemon = started })
+	client, err := Connect(context.Background(), root)
+	if err != nil {
+		t.Fatalf("connect local test client: %v", err)
+	}
+	defer client.Close()
+	command := fixtureCommand(t, "01K5V8K1Q5VX6Y0J8C9W3M4N5P", "01K6A000000000000000000061", 61, "disconnect", "disconnect-key")
+	requestContext, cancel := context.WithCancel(context.Background())
+	completed := make(chan struct {
+		result operation.Result
+		err    error
+	}, 1)
+	go func() {
+		result, err := client.ExecuteCommand(requestContext, command)
+		completed <- struct {
+			result operation.Result
+			err    error
+		}{result: result, err: err}
+	}()
+	select {
+	case <-committed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("fixture Handler did not durably commit before disconnect")
+	}
+	cancel()
+	select {
+	case outcome := <-completed:
+		var exchangeError *ExchangeError
+		if !errors.As(outcome.err, &exchangeError) || exchangeError.Code != "transport.outcome-unknown" ||
+			!exchangeError.Uncertain || !errors.Is(outcome.err, ErrOutcomeUnknown) {
+			t.Fatalf("post-commit disconnect result=%+v error=%v; want uncertain transport.outcome-unknown", outcome.result, outcome.err)
+		}
+		if outcome.result.Code != "" {
+			t.Fatalf("post-commit disconnect invented semantic result %q; want transport uncertainty only", outcome.result.Code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not report outcome-unknown after disconnect")
+	}
+	got, err := daemon.fixture.Get(context.Background(), wantRecord.Key)
+	if err != nil || got != wantRecord {
+		t.Fatalf("fixture value after response loss = %+v, err %v; want durable committed value %+v", got, err, wantRecord)
+	}
+	waitForLaneOccupancy(t, server.executionLanes, command.AuthorityDomainID, 1, 0)
+	waitForExchangeSlots(t, server, 1)
+
+	close(releaseHandler)
+	select {
+	case err := <-handlerDone:
+		if err != nil {
+			t.Fatalf("Handler completion after client disconnect: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handler did not complete after response loss")
+	}
+	waitForExchangeSlots(t, server, 0)
 }
 
 func TestStalledPartialFrameDoesNotStarveValidExchange(t *testing.T) {
@@ -879,6 +1181,135 @@ func canonicalFixtureCommand(t *testing.T) ([]byte, string) {
 		t.Fatalf("hash asymmetric fixture command: %v", err)
 	}
 	return canonical, hash
+}
+
+func fixtureCommand(t *testing.T, domainID, commandID string, sequence uint64, title, locator string) operation.Command {
+	t.Helper()
+	canonical, _ := canonicalGoldenCommand(t)
+	command, err := operation.DecodeCanonicalCommand(canonical)
+	if err != nil {
+		t.Fatalf("decode canonical command for synthetic fixture key: %v", err)
+	}
+	command.AuthorityDomainID = domainID
+	command.ID = commandID
+	command.CorrelationCommandID = commandID
+	command.EnvironmentSequence = sequence
+	command.Request.Input = operation.MatterCreateInput{Title: title, Locator: locator}
+	if _, err := command.CanonicalBytes(); err != nil {
+		t.Fatalf("validate synthetic fixture command: %v", err)
+	}
+	return command
+}
+
+func mustCommandFrameFor(t *testing.T, requestID string, command operation.Command) []byte {
+	t.Helper()
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("encode command frame identity: %v", err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatalf("hash command frame identity: %v", err)
+	}
+	return mustCommandFrame(t, requestID, canonical, hash)
+}
+
+func seedFixtureCounter(t *testing.T, fixture *wipdfixture.Store, key string) {
+	t.Helper()
+	if err := fixture.Put(context.Background(), wipdfixture.Record{ID: "fixture-counter-" + key, Key: key, Value: "0"}); err != nil {
+		t.Fatalf("seed synthetic fixture counter %q: %v", key, err)
+	}
+}
+
+func incrementFixtureCounter(ctx context.Context, fixture *wipdfixture.Store, request operation.Request) operation.Result {
+	input := request.Input.(operation.MatterCreateInput)
+	record, err := fixture.Get(ctx, input.Locator)
+	if err != nil {
+		return executionFailed(err)
+	}
+	value, err := strconv.Atoi(record.Value)
+	if err != nil {
+		return executionFailed(err)
+	}
+	record.Value = strconv.Itoa(value + 1)
+	if err := fixture.Put(ctx, record); err != nil {
+		return executionFailed(err)
+	}
+	return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{
+		ID: "01M4F1XT4R3E00000000000001", Locator: input.Locator, Title: record.Value,
+	}}
+}
+
+func executionFailed(err error) operation.Result {
+	return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+		Code: operation.ProblemExecutionFailed, Message: err.Error(),
+	}}
+}
+
+func assertFixtureCounter(t *testing.T, fixture *wipdfixture.Store, key, want string) {
+	t.Helper()
+	record, err := fixture.Get(context.Background(), key)
+	if err != nil || record.Value != want {
+		t.Fatalf("synthetic fixture counter %q = %+v, err %v; want value %q", key, record, err, want)
+	}
+}
+
+func waitForLaneOccupancy(t *testing.T, lanes *executionLanes, key string, wantActive, wantWaiting int) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		active, waiting := lanes.occupancy(key)
+		if active == wantActive && waiting == wantWaiting {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("execution lane %q occupancy = active %d, waiting %d; want active %d, waiting %d", key, active, waiting, wantActive, wantWaiting)
+		}
+	}
+}
+
+func waitForExecutionLanesEmpty(t *testing.T, lanes *executionLanes) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		lanes.mu.Lock()
+		count := len(lanes.byKey)
+		lanes.mu.Unlock()
+		if count == 0 {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("execution lane table retained %d entries after all exchanges completed", count)
+		}
+	}
+}
+
+func waitForExchangeSlots(t *testing.T, server *Server, want int) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		if active := len(server.exchangeSlots); active == want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("active exchange slots = %d, want %d", len(server.exchangeSlots), want)
+		}
+	}
 }
 
 func assertStreamReset(t *testing.T, result httpCallResult) {
