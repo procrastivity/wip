@@ -27,9 +27,17 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	registry := operation.NewRegistry()
 	var handlerCalls atomic.Int32
 	handlerResults := make(chan operation.Result, 8)
+	handlerHolds := make(chan chan struct{}, 2)
+	handlerHeld := make(chan struct{}, 2)
 	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
 		handlerCalls.Add(1)
-		result := operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		select {
+		case release := <-handlerHolds:
+			handlerHeld <- struct{}{}
+			<-release
+		default:
+		}
+		result := operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 		handlerResults <- result
 		return result
 	}); err != nil {
@@ -114,9 +122,12 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("open-body exchange did not return before the request writer was closed")
 	}
-	assertStreamReset(t, callResult)
+	assertCallM1Response(t, callResult, requestID, operation.Result{
+		Code:   operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"},
+	})
 	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
-		ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture",
+		ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture",
 	})
 	if err := <-writeDone; err != nil {
 		t.Fatalf("write open-body command frame: %v", err)
@@ -158,20 +169,48 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHTTP2StreamReset(t, client, append(firstIDFrame, otherIDFrame...))
-	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
-		ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture",
-	})
 
 	misorderedFrame, err := encodeFrame(frameRecord{requestID: requestID, sequence: 2, kind: "control.cancel", payload: []byte{0xa0}}, maxFrameBodyLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	assertHTTP2StreamReset(t, client, append(firstIDFrame, misorderedFrame...))
-	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
-		ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture",
-	})
+	assertTrailingRecordsReset := func(t *testing.T, wire []byte) {
+		t.Helper()
+		release := make(chan struct{})
+		handlerHolds <- release
+		call, writer, writeDone, err := postOpenFrameRequest(client, exchangePath, wire)
+		if err != nil {
+			t.Fatalf("start exchange with invalid trailing record: %v", err)
+		}
+		defer writer.Close()
+		released := false
+		defer func() {
+			if !released {
+				close(release)
+			}
+		}()
+		select {
+		case <-handlerHeld:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first valid command did not reach its held Handler")
+		}
+		if err := <-writeDone; err != nil {
+			t.Fatalf("write command and trailing records: %v", err)
+		}
+		select {
+		case result := <-call:
+			assertStreamReset(t, result)
+		case <-time.After(5 * time.Second):
+			t.Fatal("server did not reset the invalid trailing-record stream")
+		}
+		close(release)
+		released = true
+		assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
+			ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture",
+		})
+	}
+	assertTrailingRecordsReset(t, append(firstIDFrame, otherIDFrame...))
+	assertTrailingRecordsReset(t, append(firstIDFrame, misorderedFrame...))
 
 	probeFrame, err := encodeFrame(frameRecord{
 		requestID: "01K6A000000000000000000004",
@@ -183,9 +222,12 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	response, err = postFrameRequest(client, exchangePath, probeFrame)
-	assertStreamReset(t, httpCallResult{response: response, err: err})
+	assertHTTPM1Response(t, response, err, "01K6A000000000000000000004", operation.Result{
+		Code:   operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"},
+	})
 	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
-		ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture",
+		ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture",
 	})
 	if got := handlerCalls.Load(); got != 4 {
 		t.Fatalf("semantic Handler ran %d times, want accepted first records to dispatch and invalid first records to be rejected", got)
@@ -197,7 +239,7 @@ func TestRegistryDispatchPersistsOnlyLocalFixtureAndReturnsTypedOutput(t *testin
 	var daemon *Daemon
 	handlerResults := make(chan operation.Result, 1)
 	wantRecord := wipdfixture.Record{ID: "m4-fixture-handler-record", Key: "fixture-17", Value: "M4 Fixture"}
-	wantOutput := operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
+	wantOutput := operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
 	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
 		input, ok := request.Input.(operation.MatterCreateInput)
 		if !ok {
@@ -218,7 +260,10 @@ func TestRegistryDispatchPersistsOnlyLocalFixtureAndReturnsTypedOutput(t *testin
 	command, hash := canonicalFixtureCommand(t)
 	commandFrame := mustCommandFrame(t, "01K6A000000000000000000010", command, hash)
 	response, err := postFrameRequest(client, exchangePath, commandFrame)
-	assertStreamReset(t, httpCallResult{response: response, err: err})
+	assertHTTPM1Response(t, response, err, "01K6A000000000000000000010", operation.Result{
+		Code:   operation.ResultSucceeded,
+		Output: wantOutput,
+	})
 	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, wantOutput)
 	gotRecord, err := daemon.fixture.Get(context.Background(), wantRecord.Key)
 	if err != nil {
@@ -232,7 +277,7 @@ func TestRegistryDispatchPersistsOnlyLocalFixtureAndReturnsTypedOutput(t *testin
 func TestDeclaredLongerOpenBodyDispatchesWithoutWaitingForEOF(t *testing.T) {
 	registry := operation.NewRegistry()
 	handlerResults := make(chan operation.Result, 1)
-	wantOutput := operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
+	wantOutput := operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
 	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
 		result := operation.Result{Code: operation.ResultSucceeded, Output: wantOutput}
 		handlerResults <- result
@@ -259,7 +304,10 @@ func TestDeclaredLongerOpenBodyDispatchesWithoutWaitingForEOF(t *testing.T) {
 	}
 	select {
 	case result := <-call:
-		assertStreamReset(t, result)
+		assertCallM1Response(t, result, requestID, operation.Result{
+			Code:   operation.ResultSucceeded,
+			Output: wantOutput,
+		})
 	case <-time.After(5 * time.Second):
 		t.Fatal("server waited for the declared request body remainder instead of dispatching the first frame")
 	}
@@ -278,7 +326,7 @@ func TestExchangeConcurrencyLimitReturnsCorrelatedOverloadBeforeDispatch(t *test
 		handlerCalls.Add(1)
 		handlerStarted <- struct{}{}
 		<-releaseHandler
-		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +376,10 @@ func TestExchangeConcurrencyLimitReturnsCorrelatedOverloadBeforeDispatch(t *test
 	close(releaseHandler)
 	select {
 	case result := <-firstCall:
-		assertStreamReset(t, result)
+		assertCallM1Response(t, result, firstRequestID, operation.Result{
+			Code:   operation.ResultSucceeded,
+			Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"},
+		})
 	case <-time.After(5 * time.Second):
 		t.Fatal("first exchange did not complete after releasing its Handler")
 	}
@@ -343,7 +394,7 @@ func TestStalledPartialFrameDoesNotStarveValidExchange(t *testing.T) {
 	handlerResults := make(chan operation.Result, 1)
 	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
 		handlerCalls.Add(1)
-		result := operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		result := operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 		handlerResults <- result
 		return result
 	}); err != nil {
@@ -387,9 +438,12 @@ func TestStalledPartialFrameDoesNotStarveValidExchange(t *testing.T) {
 
 	successID := "01K6A000000000000000000022"
 	response, err = postFrameRequest(client, exchangePath, mustCommandFrame(t, successID, command, hash))
-	assertStreamReset(t, httpCallResult{response: response, err: err})
+	assertHTTPM1Response(t, response, err, successID, operation.Result{
+		Code:   operation.ResultSucceeded,
+		Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"},
+	})
 	assertTypedHandlerResult(t, <-handlerResults, operation.ResultSucceeded, operation.MatterCreateOutput{
-		ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture",
+		ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture",
 	})
 	if active := len(server.preflightSlots); active != 1 {
 		t.Fatalf("preflight slots after successful dispatch = %d, want stalled parser to retain only its own slot", active)
@@ -484,7 +538,7 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 	if err := registry.Register(operation.MatterCreateV1, func(ctx context.Context, request operation.Request) operation.Result {
 		if handlerCalls.Add(1) > 1 {
 			subsequentAdmission <- struct{}{}
-			return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+			return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 		}
 		handlerStarted <- struct{}{}
 		select {
@@ -498,7 +552,7 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 		if err != nil {
 			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed, Message: err.Error()}}
 		}
-		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +644,10 @@ func TestControlCancelStopsWaitingWithoutCancellingOrRollingBackHandler(t *testi
 			response, err := client.Do(request)
 			select {
 			case <-subsequentAdmission:
-				assertStreamReset(t, httpCallResult{response: response, err: err})
+				assertHTTPM1Response(t, response, err, nextRequestID, operation.Result{
+					Code:   operation.ResultSucceeded,
+					Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"},
+				})
 				attemptAdmitted = true
 				return
 			default:
@@ -836,6 +893,43 @@ func assertStreamReset(t *testing.T, result httpCallResult) {
 	}
 	if result.err == nil {
 		t.Fatal("exchange returned neither an HTTP/2 stream reset nor an error")
+	}
+}
+
+func assertCallM1Response(t *testing.T, call httpCallResult, requestID string, want operation.Result) {
+	t.Helper()
+	if call.err != nil || call.response == nil {
+		t.Fatalf("exchange response = %v, err %v; want a framed M1 response", call.response, call.err)
+	}
+	assertHTTPM1Response(t, call.response, nil, requestID, want)
+}
+
+func assertHTTPM1Response(t *testing.T, response *http.Response, responseErr error, requestID string, want operation.Result) {
+	t.Helper()
+	if responseErr != nil || response == nil {
+		t.Fatalf("exchange response = %v, err %v; want a framed M1 response", response, responseErr)
+	}
+	frames := readResponseFrames(t, response)
+	if len(frames) != 1 || frames[0].requestID != requestID || frames[0].sequence != 0 || frames[0].kind != "response.end" {
+		t.Fatalf("M1 response frames = %+v, want one correlated response.end", frames)
+	}
+	got, err := decodeM1ResultPayload(frames[0].payload)
+	if err != nil {
+		t.Fatalf("decode bare M1 response result: %v", err)
+	}
+	assertSemanticResultsEqual(t, got, want)
+}
+
+func assertSemanticResultsEqual(t *testing.T, got, want operation.Result) {
+	t.Helper()
+	if got.Code != want.Code || !reflect.DeepEqual(got.Output, want.Output) {
+		t.Fatalf("M1 result = %+v, want disposition/output %+v", got, want)
+	}
+	if (got.Problem == nil) != (want.Problem == nil) {
+		t.Fatalf("M1 result problem presence = %+v, want %+v", got.Problem, want.Problem)
+	}
+	if got.Problem != nil && got.Problem.Code != want.Problem.Code {
+		t.Fatalf("M1 result problem code = %q, want %q", got.Problem.Code, want.Problem.Code)
 	}
 }
 

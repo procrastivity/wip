@@ -56,6 +56,14 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			experimentalProfile, err := cmd.Flags().GetString("experimental-wipd-profile")
+			if err != nil {
+				return err
+			}
+			if experimentalProfile != "" && cmd.Parent() != nil &&
+				!(cmd.Parent().Name() == "wip" && cmd.Name() == "status") {
+				return wiperr.New("transport.unavailable", "this WIP verb is not routed through the experimental local profile; no legacy store fallback was attempted")
+			}
 			jsonOut, err := cmd.Flags().GetBool("json")
 			if err != nil {
 				return err
@@ -71,7 +79,12 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 			if asRole == "" {
 				asRole = os.Getenv("WIP_AS_ROLE")
 			}
-			cmd.SetContext(cliflags.WithFlags(cmd.Context(), cliflags.Flags{JSON: jsonOut, Verbose: verbose, AsRole: asRole}))
+			cmd.SetContext(cliflags.WithFlags(cmd.Context(), cliflags.Flags{
+				JSON:                    jsonOut,
+				Verbose:                 verbose,
+				AsRole:                  asRole,
+				ExperimentalWipdProfile: experimentalProfile,
+			}))
 			return nil
 		},
 	}
@@ -81,6 +94,7 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	root.PersistentFlags().Bool("json", false, "emit the success payload as one JSON value")
 	root.PersistentFlags().BoolP("verbose", "v", false, "extra diagnostic lines on stderr")
 	root.PersistentFlags().String("as-role", "", "act as this spawned role (or set WIP_AS_ROLE); the claim must have an open `wip plumbing role spawn` behind it")
+	root.PersistentFlags().String("experimental-wipd-profile", "", "opt in to authenticated local wipd IPC using this explicit private profile root")
 
 	// Help lists the porcelain in registration order (D112), not
 	// alphabetically — ten entries, manifest last. Every verb that isn't
@@ -135,6 +149,13 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 		return fmt.Errorf("unknown command %q for %q%s", args[0], cmd.CommandPath(), suggestionsBlock(cmd, args[0]))
 	}
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		profileRoot, err := cmd.Flags().GetString("experimental-wipd-profile")
+		if err != nil {
+			return err
+		}
+		if profileRoot != "" {
+			return activateExperimentalWipd(cmd, streams, profileRoot)
+		}
 		return cmd.Help()
 	}
 

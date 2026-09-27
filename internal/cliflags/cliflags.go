@@ -1,7 +1,6 @@
-// Package cliflags carries the two global flags (--json, -v/--verbose) from
-// root's PersistentPreRunE down to every verb via context, per the chassis
-// Brief: "Both bind once at root, read via context by every verb. A verb
-// never redeclares either flag."
+// Package cliflags carries root-level CLI flags from PersistentPreRunE down to
+// verbs via context. This includes the presentation flags and the explicit
+// experimental wipd profile opt-in.
 package cliflags
 
 import "context"
@@ -10,8 +9,9 @@ type contextKey struct{}
 
 // Flags is the set of global flag values threaded through context.
 type Flags struct {
-	JSON    bool
-	Verbose bool
+	JSON                    bool
+	Verbose                 bool
+	ExperimentalWipdProfile string
 
 	// AsRole is the role name this invocation acts as (`--as-role`, or the
 	// WIP_AS_ROLE environment the agent harness sets once per role session);

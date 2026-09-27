@@ -24,6 +24,7 @@ import (
 	"github.com/procrastivity/wip/internal/surface"
 	"github.com/procrastivity/wip/internal/tiers"
 	waitingrender "github.com/procrastivity/wip/internal/verbs/waiting"
+	"github.com/procrastivity/wip/internal/wipd"
 )
 
 // Command constructs `wip plumbing status` — the pair's canonical member,
@@ -74,6 +75,10 @@ func PorcelainCommand(streams *iostreams.Streams) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags := cliflags.FromContext(cmd.Context())
+			if flags.ExperimentalWipdProfile != "" {
+				status := wipd.ProbeStatus(cmd.Context(), flags.ExperimentalWipdProfile)
+				return renderExperimentalWipdStatus(streams, flags.JSON, status)
+			}
 
 			dir, err := os.Getwd()
 			if err != nil {
@@ -101,6 +106,20 @@ func PorcelainCommand(streams *iostreams.Streams) *cobra.Command {
 	cmd.Flags().BoolVar(&full, "full", false, "every section — finished and blocked too (human output; --json always emits the complete payload)")
 	surface.Annotate(cmd, surface.Plumbing)
 	return cmd
+}
+
+func renderExperimentalWipdStatus(streams *iostreams.Streams, jsonMode bool, status wipd.LocalStatus) error {
+	if jsonMode {
+		encoded, err := json.Marshal(status)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(streams.Out, string(encoded))
+		return err
+	}
+	_, err := fmt.Fprintf(streams.Out, "wipd status: %s\nprofile_verified: %t\nprocess_ready: %t\nfixture_ready: %t\n",
+		status.StatusCode, status.ProfileVerified, status.ProcessReady, status.FixtureReady)
+	return err
 }
 
 // statusData is the gather step both members share: the tier-scoped view,

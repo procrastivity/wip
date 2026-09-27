@@ -111,7 +111,7 @@ func TestDispatchPreservesAsymmetricTypedFixtureSemantics(t *testing.T) {
 	registry := NewRegistry()
 	request := canonicalMatterCreateRequest()
 	request.Input = MatterCreateInput{Title: "M4 Fixture", Locator: "fixture-17"}
-	want := MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
+	want := MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}
 	if err := registry.Register(MatterCreateV1, func(ctx context.Context, got Request) Result {
 		if ctx.Value(executionContextKey{}) != "fixture-context" {
 			t.Errorf("handler context value = %v, want fixture-context", ctx.Value(executionContextKey{}))

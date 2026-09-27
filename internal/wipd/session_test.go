@@ -11,7 +11,7 @@ import (
 func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *testing.T) {
 	registry := operation.NewRegistry()
 	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
-		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4FIXTURE0000000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: "01M4F1XT4R3E00000000000001", Locator: "fixture-17", Title: "M4 Fixture"}}
 	}); err != nil {
 		t.Fatal(err)
 	}

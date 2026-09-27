@@ -326,10 +326,9 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	<-s.preflightSlots
 	preflightOwned = false
 
-	handlerDone := make(chan struct{}, 1)
+	handlerDone := make(chan operation.Result, 1)
 	go func() {
-		_ = s.registry.Dispatch(state.ctx, command.Request)
-		handlerDone <- struct{}{}
+		handlerDone <- s.registry.Dispatch(state.ctx, command.Request)
 	}()
 	transferSlotToHandler := func() {
 		slotOwnedByHandler = true
@@ -363,11 +362,29 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 			// wait only. Resetting this HTTP/2 stream makes no rollback claim;
 			// the Handler retains its bounded exchange slot until it completes.
 			abortHTTP2Stream()
-		case <-handlerDone:
-			// Step 6 has no M2 response payload for a local Handler result.
-			// The production registry is empty; test fixtures observe typed
-			// output through their local Handler sink, not a new wire schema.
-			abortHTTP2Stream()
+		case result := <-handlerDone:
+			// A completed Handler is the only source of the existing bare M1
+			// result payload on response.end. A transport reset before the
+			// client receives it remains uncertain; it is never rewritten as a
+			// semantic failure or refusal.
+			select {
+			case incoming := <-nextFrame:
+				if !errors.Is(incoming.err, io.EOF) {
+					abortHTTP2Stream()
+				}
+				nextFrame = nil
+			default:
+			}
+			payload, err := encodeM1ResultPayload(result)
+			if err != nil {
+				abortHTTP2Stream()
+			}
+			wire, err := encodeFrame(frameRecord{requestID: frame.requestID, sequence: 0, kind: "response.end", payload: payload}, uint32(parameters.maxFrameBody))
+			if err != nil {
+				abortHTTP2Stream()
+			}
+			_, _ = writer.Write(wire)
+			return
 		}
 	}
 }

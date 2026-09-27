@@ -40,7 +40,7 @@ func TestTestOnlyRegistryHandlerPersistsTypedAsymmetricFixture(t *testing.T) {
 	}
 
 	input := operation.MatterCreateInput{Title: "M4 fixture result", Locator: "unequal-fixture-key"}
-	const fixtureID = "01M4FIXTURE0000000000000001"
+	const fixtureID = "01M4F1XT4R3E00000000000001"
 	wantOutput := operation.MatterCreateOutput{
 		ID:      fixtureID,
 		Locator: "unequal-fixture-key",
