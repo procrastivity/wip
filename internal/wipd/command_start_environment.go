@@ -60,6 +60,19 @@ func (environment *JournalCommandStartEnvironment) InstallPull(ctx context.Conte
 	return commandStartSnapshot(installed), nil
 }
 
+// InstallBirthRelease atomically installs the lifecycle receipt, verified
+// authority tail, and rebuilt overlay through the Environment journal.
+func (environment *JournalCommandStartEnvironment) InstallBirthRelease(ctx context.Context, expected CommandStartSnapshot, attempt wipdjournal.BirthReleaseCommand, receipt []byte, tail CommandPull) (CommandStartSnapshot, error) {
+	if err := environment.checkExpected(expected); err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	installed, err := environment.journal.InstallBirthRelease(ctx, installExpectation(expected), attempt, receipt, tail.VerifiedTransfer)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	return commandStartSnapshot(installed), nil
+}
+
 // AdmitPending commits the recoverable provisional overlay with return eligibility.
 func (environment *JournalCommandStartEnvironment) AdmitPending(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry) (CommandStartSnapshot, error) {
 	if err := environment.checkExpected(expected); err != nil {

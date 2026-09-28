@@ -186,7 +186,8 @@ func parseLifecycle(raw []byte, hash string) (*lifecycleCommand, error) {
 		}
 		c.matter, c.dispatch, c.mode = in.Matter, in.Dispatch, in.Mode
 	case "claim.journal-repair", "claim.release":
-		if w.Claim == nil || c.worktree == "" || c.clone == "" {
+		if w.Claim == nil || c.name == "claim.journal-repair" && (c.worktree == "" || c.clone == "") ||
+			c.name == "claim.release" && ((c.worktree == "") != (c.clone == "")) {
 			return nil, ErrInvalidProof
 		}
 		if c.name == "claim.release" {
@@ -267,6 +268,10 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 			return CommandStatus{}, ErrInvalidProof
 		}
 		return s.submitIdentity(ctx, c.commandIdentity, peer, at, func(tx *sql.Tx) error {
+			if c.name == "claim.release" && c.worktree == "" {
+				_, err := validateBirthReleaseOwner(ctx, tx, c)
+				return err
+			}
 			x, err := loadClaim(ctx, tx, c, c.claimID)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrFenced
@@ -278,7 +283,7 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 				return ErrFenced
 			}
 			return nil
-		}, nil)
+		}, nil, nil)
 	}
 	if len(ownerAuthorization) == 0 {
 		return CommandStatus{}, ErrInvalidProof
@@ -289,7 +294,7 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO claim_stand_down_proofs VALUES(?,?,?,?,?)`, c.domain, c.id, c.ownerNonce, ownerAuthorization, at.UTC().Format(time.RFC3339Nano))
 		return writeError(err)
-	}, nil)
+	}, nil, nil)
 }
 
 func verifyStandDownAuthorization(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, ownerAuthorization []byte, at time.Time) error {
@@ -371,6 +376,25 @@ func (s *Store) RecoverClaimLifecycle(ctx context.Context, raw []byte, hash stri
 	return s.recoverLifecycleWithProof(ctx, c, raw, hash, proof)
 }
 
+// AbandonClaimLifecycleExecution releases only the in-process continuation
+// lease after a completion attempt has returned an error. The durable command
+// remains submitted and exact-retryable; no semantic or projection state is
+// changed. A concurrent completion still owns the lease until it returns.
+func (s *Store) AbandonClaimLifecycleExecution(owner *Execution) error {
+	if owner == nil || owner.store != s || owner.lifecycle == nil {
+		return ErrInvalidProof
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := ownerKey(owner.lifecycle.domain, owner.lifecycle.id)
+	if !s.owners[key] || s.executions[key] != owner {
+		return ErrNotOwner
+	}
+	delete(s.owners, key)
+	delete(s.executions, key)
+	return nil
+}
+
 // SubmitClaimAcquire validates the exact installed anchor before crossing the
 // shared authenticated submission point. A replay bypasses the prefix guard.
 func (s *Store) SubmitClaimAcquire(ctx context.Context, canonical []byte, hash string, installed PrefixAnchor, peer tls.ConnectionState, at time.Time) (CommandStatus, error) {
@@ -389,7 +413,7 @@ func (s *Store) SubmitClaimAcquire(ctx context.Context, canonical []byte, hash s
 		}
 		_, e = tx.ExecContext(ctx, `INSERT INTO claim_acquire_intents VALUES(?,?,?,?,?)`, c.domain, c.id, installed.EventCount, eventID, installed.Digest)
 		return e
-	}, nil)
+	}, nil, nil)
 }
 
 // RecoverClaimAcquire claims an abandoned pending execution without altering
@@ -1028,6 +1052,7 @@ type claimState struct {
 	matter, repo, owner, worktree, dispatch, journal, state string
 	epoch, authority, generation                            uint64
 	closed                                                  sql.NullString
+	implicit                                                bool
 }
 
 func loadClaim(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, id string) (claimState, error) {
@@ -1111,7 +1136,13 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 		return CommandStatus{}, ErrInvalidProof
 	}
 	c := owner.lifecycle
-	if (c.name == "claim.journal-repair" && (len(eventIDs) != 1 || !ulid.MatchString(newJournal))) || (c.name != "claim.journal-repair" && (len(eventIDs) != 2 || newJournal != "")) {
+	implicitRelease := c.name == "claim.release" && c.worktree == ""
+	wantEvents := 2
+	if c.name == "claim.journal-repair" || implicitRelease {
+		wantEvents = 1
+	}
+	if (c.name == "claim.journal-repair" && (len(eventIDs) != wantEvents || !ulid.MatchString(newJournal))) ||
+		(c.name != "claim.journal-repair" && (len(eventIDs) != wantEvents || newJournal != "")) {
 		return CommandStatus{}, ErrInvalidProof
 	}
 	s.mu.Lock()
@@ -1132,12 +1163,23 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 	if c.stand != nil {
 		id = c.stand.Target.ClaimID
 	}
-	x, e := loadClaim(ctx, tx, c, id)
+	var x claimState
+	var e error
+	if implicitRelease {
+		x, e = loadImplicitBirthClaim(ctx, tx, c)
+	} else {
+		x, e = loadClaim(ctx, tx, c, id)
+	}
 	problem := ""
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return CommandStatus{}, e
 	}
-	if e != nil || x.closed.Valid || x.authority != c.epoch || x.repo != c.repo || (c.stand != nil && (x.epoch != c.stand.Target.Epoch || x.owner != c.stand.Target.Owner || x.owner == c.environment)) || (c.stand == nil && (x.epoch != c.claimEpoch || x.owner != c.environment || x.worktree != c.worktree)) {
+	ownerMismatch := c.stand != nil && (x.epoch != c.stand.Target.Epoch || x.owner != c.stand.Target.Owner || x.owner == c.environment)
+	if c.stand == nil && !implicitRelease {
+		ownerMismatch = x.epoch != c.claimEpoch || x.owner != c.environment || x.worktree != c.worktree
+	}
+	if e != nil || x.closed.Valid || x.authority != c.epoch || x.repo != c.repo || ownerMismatch ||
+		implicitRelease && (x.matter != c.claimID || x.epoch != c.claimEpoch || x.owner != c.environment || x.state != "open") {
 		problem = "refusal.claim-stand-down-fenced"
 		if c.stand == nil {
 			problem = "refusal.claim-release-barrier"
@@ -1167,7 +1209,18 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 			}
 		case "claim.release":
 			b := c.barrier
-			if x.journal != b.Journal || x.state != "sealed" || !b.Sealed || b.Unresolved != 0 || b.Quarantined != 0 || b.Count != b.Last || b.Count != b.Receipts {
+			if x.implicit {
+				var count, receipts, unresolved, quarantined uint64
+				barrier, count, receipts, unresolved, quarantined, e = birthBarrierStatus(ctx, tx, c.domain, x.matter)
+				if e != nil {
+					return CommandStatus{}, e
+				}
+				if b.Journal != x.journal || !b.Sealed || b.Count == 0 || b.Count != count || b.Last != count ||
+					b.Receipts != receipts || receipts != count || b.Unresolved != 0 || unresolved != 0 ||
+					b.Quarantined != 0 || quarantined != 0 || b.Digest != barrier {
+					problem = "refusal.claim-release-barrier"
+				}
+			} else if x.journal != b.Journal || x.state != "sealed" || !b.Sealed || b.Unresolved != 0 || b.Quarantined != 0 || b.Count != b.Last || b.Count != b.Receipts {
 				problem = "refusal.claim-release-barrier"
 			} else {
 				var n uint64
@@ -1252,11 +1305,18 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 		}{"claim.journal-repaired", id, output})
 	}
 	if c.barrier != nil {
-		output = map[string]any{"claim_id": id, "claim_epoch": x.epoch, "dispatch_id": x.dispatch, "barrier_digest": barrier}
+		var dispatch any = x.dispatch
+		if x.implicit {
+			dispatch = nil
+		}
+		output = map[string]any{"claim_id": id, "claim_epoch": x.epoch, "dispatch_id": dispatch, "barrier_digest": barrier}
+		if !x.implicit {
+			events = append(events, struct {
+				kind, subject string
+				payload       map[string]any
+			}{"dispatch.closed", x.dispatch, map[string]any{"dispatch_id": x.dispatch, "claim_id": id, "claim_epoch": x.epoch}})
+		}
 		events = append(events, struct {
-			kind, subject string
-			payload       map[string]any
-		}{"dispatch.closed", x.dispatch, map[string]any{"dispatch_id": x.dispatch, "claim_id": id, "claim_epoch": x.epoch}}, struct {
 			kind, subject string
 			payload       map[string]any
 		}{"claim.released", id, output})
@@ -1304,6 +1364,17 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 				}
 				_, e = tx.ExecContext(ctx, `INSERT INTO claim_journal_entries(domain_id,journal_id,position,command_id,request_hash,command,environment_sequence,state) VALUES(?,?,1,?,?,?,?,'pending-return')`, c.domain, newJournal, replacement.ID, r.Hash, r.Replacement, replacement.Sequence)
 				return e
+			}
+			return nil
+		}
+		if x.implicit {
+			result, updateErr := tx.ExecContext(ctx, `UPDATE birth_journals SET state='released',release_command_id=?,barrier_digest=? WHERE domain_id=? AND matter_id=? AND state='open' AND release_command_id IS NULL`, c.id, barrier, c.domain, x.matter)
+			if updateErr != nil {
+				return updateErr
+			}
+			changed, updateErr := result.RowsAffected()
+			if updateErr != nil || changed != 1 {
+				return ErrFenced
 			}
 			return nil
 		}

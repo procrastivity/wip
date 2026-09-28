@@ -157,6 +157,29 @@ both causation and correlation, and have a greater sequence in the same
 Environment and Repo. A terminal-success birth receipt is required; fixture
 Matter state and legacy local state do not establish authority claim truth.
 
+**M5 Step 9 birth-release amendment:** the existing `claim.release@v1`
+operation can close this dispatch-less implicit claim without introducing an
+operation or receipt schema. The authority retains a birth journal whose first
+member is the successful Matter birth and whose following members are the
+owner Environment's exact causally bound Step commands. The Environment must
+return the eligible prefix through the shared coordinator and atomically
+install each receipt, verified event tail, manifest, and rebuilt overlay
+before acknowledging that receipt to the authority. The authenticated
+acknowledgment binds the exact terminal receipt and installed prefix; it is
+not a substitute receipt and cannot be inferred from local state. The
+authority requires ordered acknowledgments and independently recomputes the
+complete successful receipt barrier before release.
+
+Any pending/unknown outcome or quarantine prevents release. A successful
+authority transaction emits one `claim.released` event with
+`dispatch_id:null`, updates durable birth-journal release state, and fences
+later Step use of the implicit claim; there is no `dispatch.closed` event
+because birth created no Dispatch. The Environment persists the exact
+release command identity before submission and only reports release after its
+terminal receipt and complete tail are atomically installed. On unknown
+outcome or local install failure, only exact-identity recovery is allowed;
+local evidence never clears the authority fence or manufactures release.
+
 For `result.succeeded`, one authority transaction MUST:
 
 1. append one or more contiguous authority events, each carrying the same

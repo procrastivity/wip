@@ -88,8 +88,8 @@ func cloneRawMessages(values []json.RawMessage) []json.RawMessage {
 	return result
 }
 
-// Exchange sends exactly one M2 command.submit, receipt.query, or pull.request
-// frame over the negotiated authenticated HTTP/2 session.
+// Exchange sends one negotiated command, lifecycle, receipt, birth-journal
+// control, or pull frame over the authenticated HTTP/2 session.
 func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, payload any) ([]wipdwire.Frame, error) {
 	if client == nil || client.client == nil || ctx == nil {
 		return nil, ErrInvalidClientState
@@ -102,6 +102,10 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 1
 	case "pull.request":
 		maxFrames = maxClientTransferEvents + 3
+	case "birth-journal.ack":
+		maxFrames = 1
+	case "claim.release":
+		maxFrames = 2
 	default:
 		return nil, ErrInvalidClientState
 	}

@@ -103,6 +103,23 @@ func (environment *commandStartTracedEnvironment) InstallPull(ctx context.Contex
 	return installed, nil
 }
 
+func (environment *commandStartTracedEnvironment) InstallBirthRelease(ctx context.Context, expected CommandStartSnapshot, attempt wipdjournal.BirthReleaseCommand, receipt []byte, tail CommandPull) (CommandStartSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	environment.mu.Lock()
+	defer environment.mu.Unlock()
+	if environment.failInstall != nil {
+		return CommandStartSnapshot{}, environment.failInstall
+	}
+	installed, err := environment.durable.InstallBirthRelease(ctx, expected, attempt, receipt, tail)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	environment.trace.add("install-release-receipt+tail+overlay:" + attempt.ID)
+	return installed, nil
+}
+
 func (environment *commandStartTracedEnvironment) AdmitPending(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry) (CommandStartSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
@@ -131,12 +148,16 @@ func (environment *commandStartTracedEnvironment) setCurrentID(commandID string)
 }
 
 type commandStartFakeAuthority struct {
-	trace          *commandStartTrace
-	returnResults  []operation.ResultCode
-	returnContinue []bool
-	returnIndex    int
-	pullEventID    string
-	pullFailure    error
+	trace           *commandStartTrace
+	returnResults   []operation.ResultCode
+	returnContinue  []bool
+	returnIndex     int
+	pullEventID     string
+	pullFailure     error
+	acks            []wipdwire.BirthJournalAck
+	releaseCalls    int
+	releaseFailure  error
+	releaseAttempts []wipdjournal.BirthReleaseCommand
 }
 
 func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipdjournal.Entry, start wipdwire.PrefixAnchor) (CommandFold, error) {
@@ -198,9 +219,72 @@ func (authority *commandStartFakeAuthority) Pull(_ context.Context, start wipdwi
 	}, nil
 }
 
+func (authority *commandStartFakeAuthority) AcknowledgeBirthJournalEntry(_ context.Context, ack wipdwire.BirthJournalAck) error {
+	authority.acks = append(authority.acks, ack)
+	authority.trace.add("ack:" + ack.CommandID)
+	return nil
+}
+
+func (authority *commandStartFakeAuthority) SubmitBirthClaimRelease(_ context.Context, attempt wipdjournal.BirthReleaseCommand, start wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error) {
+	authority.releaseCalls++
+	copyAttempt := attempt
+	copyAttempt.CanonicalBytes = bytes.Clone(attempt.CanonicalBytes)
+	copyAttempt.Receipt = bytes.Clone(attempt.Receipt)
+	authority.releaseAttempts = append(authority.releaseAttempts, copyAttempt)
+	if authority.releaseFailure != nil {
+		authority.trace.add("submit-release-unknown:" + attempt.ID)
+		return nil, "", CommandPull{}, authority.releaseFailure
+	}
+	outputMap := map[string]any{
+		"claim_id": attempt.Barrier.Claim.ID, "claim_epoch": attempt.Barrier.Claim.Epoch,
+		"dispatch_id": nil, "barrier_digest": attempt.Barrier.Digest,
+	}
+	output, err := wipdwire.EncodeCanonical(outputMap)
+	if err != nil {
+		return nil, "", CommandPull{}, err
+	}
+	eventID := nextCommandStartEventID(start)
+	eventRecord, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": commandStartDomainID,
+		"command_id": attempt.ID, "request_hash": attempt.RequestHash,
+		"environment": map[string]any{"id": commandStartEnvironmentID, "sequence": attempt.EnvironmentSeq},
+		"acted_at":    "2026-09-28T00:00:00Z", "occurred_at": "2026-09-28T00:00:00Z",
+		"kind": "claim.released", "subject_id": attempt.Barrier.Claim.ID,
+		"repo_id": commandStartRepoID, "payload": outputMap,
+	})
+	if err != nil {
+		return nil, "", CommandPull{}, err
+	}
+	transfer, err := commandStartVerifiedTransfer(start, []wipdwire.EventRecord{{EventID: eventID, Record: eventRecord}})
+	if err != nil {
+		return nil, "", CommandPull{}, err
+	}
+	receipt, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.terminal-receipt/1", "domain_id": commandStartDomainID, "authority_epoch": uint64(7),
+		"identity_schema": "wipd.command/1", "command_id": attempt.ID, "request_hash": attempt.RequestHash,
+		"operation":       map[string]any{"name": "claim.release", "version": uint64(1)},
+		"environment":     map[string]any{"id": commandStartEnvironmentID, "sequence": attempt.EnvironmentSeq},
+		"result":          map[string]any{"code": string(operation.ResultSucceeded), "output": output, "problem_code": nil},
+		"accepted_events": map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)},
+	})
+	if err != nil {
+		return nil, "", CommandPull{}, err
+	}
+	authority.trace.add("submit-release:" + attempt.ID)
+	return receipt, operation.ResultSucceeded, CommandPull{
+		DomainID: commandStartDomainID, Epoch: 7, Start: start, End: transfer.End(),
+		Manifest: transfer.Manifest(), VerifiedTransfer: transfer,
+	}, nil
+}
+
 func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartTracedEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
 	t.Helper()
-	journal, err := wipdjournal.Open(t.TempDir()+"/journal", wipdjournal.Identity{
+	return newCommandStartFixtureAt(t, t.TempDir()+"/journal")
+}
+
+func newCommandStartFixtureAt(t *testing.T, root string) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartTracedEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
+	t.Helper()
+	journal, err := wipdjournal.Open(root, wipdjournal.Identity{
 		RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID,
 	})
 	if err != nil {
@@ -398,6 +482,240 @@ func TestConnectedCanonicalMatterAndStepBirthReplayThroughTerminalCoordinator(t 
 		return nil
 	}); !errors.Is(err, wipdjournal.ErrCommandIDConflict) || authority.returnIndex != 2 {
 		t.Fatalf("conflicting Step replay err=%v returnIndex=%d", err, authority.returnIndex)
+	}
+}
+
+func TestBirthClaimReleaseReturnsPrefixAndInstallsBeforeRelease(t *testing.T) {
+	root := t.TempDir() + "/journal"
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixtureAt(t, root)
+	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"73", 1, "", commandStartCommandPrefix+"73",
+		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Birth", Locator: "birth"}, nil)
+	environment.currentID = matter.ID
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
+	authority.returnContinue = []bool{false, false}
+	matterResult, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), matter, func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+	if err != nil || !matterResult.Returned {
+		t.Fatalf("Matter birth: returned=%v err=%v", matterResult.Returned, err)
+	}
+	matterOutput := matterResult.SemanticResult.Output.(operation.MatterCreateOutput)
+	step := commandStartCanonicalCommand(commandStartCommandPrefix+"74", 2, matter.ID, matter.ID,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateInput{ParentID: matterOutput.ID, Title: "First step"},
+		&operation.ClaimContext{ID: matterOutput.ID, Epoch: "1"})
+	environment.currentID = step.ID
+	if result, runErr := coordinator.RunConnected(context.Background(), wipdjournal.CommandInput{
+		ID: step.ID, CausationCommandID: step.CausationCommandID, CorrelationCommandID: step.CorrelationCommandID,
+		Request: step.Request,
+	}, func(context.Context, CommandStartSnapshot, operation.Command) error { return nil }); runErr != nil || result.Returned {
+		t.Fatalf("provisional Step admission: result=%+v err=%v", result, runErr)
+	}
+	stepEntry, err := journal.Get(step.ID)
+	if err != nil || stepEntry.State != wipdjournal.StatePendingReturn {
+		t.Fatalf("Step disposition = %+v, err=%v; want eligible pending-return", stepEntry, err)
+	}
+
+	before := trace.all()
+	releaseID := commandStartCommandPrefix + "75"
+	released, err := coordinator.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human"))
+	if err != nil || released.Code != operation.ResultSucceeded || released.Attempt.EnvironmentSeq != 3 {
+		t.Fatalf("birth release = %+v, trace=%v, err=%v", released, trace.all(), err)
+	}
+	if len(authority.acks) != 2 || authority.acks[0].MatterID != matterOutput.ID || authority.acks[0].CommandID != matter.ID ||
+		authority.acks[1].CommandID != step.ID || authority.acks[0].Installed.EventCount != authority.acks[1].Installed.EventCount {
+		t.Fatalf("birth receipt acknowledgments = %+v", authority.acks)
+	}
+	after := trace.all()[len(before):]
+	want := []string{
+		"snapshot:" + step.ID,
+		"return:" + step.ID,
+		"install-fold+receipt+tail+overlay:" + step.ID,
+		"pull:4", "install-pull+overlay",
+		"snapshot:" + step.ID,
+		"ack:" + matter.ID, "ack:" + step.ID,
+		"submit-release:" + releaseID,
+		"install-release-receipt+tail+overlay:" + releaseID,
+	}
+	if !equalCommandStartTrace(after, want) {
+		t.Fatalf("birth release trace = %v, want %v", after, want)
+	}
+	stored, err := journal.BirthReleaseAttempt(releaseID)
+	if err != nil || !stored.Returned || !bytes.Equal(stored.Receipt, released.Receipt) {
+		t.Fatalf("durable birth release attempt=%+v err=%v", stored, err)
+	}
+	if _, err = coordinator.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human")); err != nil || authority.releaseCalls != 1 {
+		t.Fatalf("exact local release replay made another authority call: calls=%d err=%v", authority.releaseCalls, err)
+	}
+	if _, err = journal.PrepareCommand(commandStartInput(releaseID, "release-id-conflict")); err == nil {
+		t.Fatal("M1 command reused a durable birth-release command ID")
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identity := wipdjournal.Identity{RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID}
+	reopened, err := wipdjournal.Open(root, identity)
+	if err != nil {
+		t.Fatalf("reopen installed birth release: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	recovered, err := reopened.BirthReleaseAttempt(releaseID)
+	if err != nil || !recovered.Returned || recovered.ResultCode != operation.ResultSucceeded || !bytes.Equal(recovered.Receipt, released.Receipt) {
+		t.Fatalf("recovered release outcome=%+v err=%v", recovered, err)
+	}
+	installed, err := reopened.InstallSnapshot(context.Background())
+	if err != nil || installed.Anchor.EventCount != 6 {
+		t.Fatalf("recovered installed tail=%+v err=%v", installed.Anchor, err)
+	}
+	overlay, err := reopened.Overlay(context.Background())
+	if err != nil || len(overlay) != 6 {
+		t.Fatalf("recovered overlay rows=%d err=%v", len(overlay), err)
+	}
+	for _, item := range overlay {
+		if item.Kind != "folded" {
+			t.Fatalf("release left a provisional overlay item: %+v", item)
+		}
+	}
+}
+
+func TestBirthReleaseUnknownOutcomeBlocksCommandsAndRetriesExactIdentity(t *testing.T) {
+	root := t.TempDir() + "/journal"
+	coordinator, journal, environment, authority, _, _ := newCommandStartFixtureAt(t, root)
+	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"83", 1, "", commandStartCommandPrefix+"83",
+		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Birth", Locator: "birth"}, nil)
+	environment.currentID = matter.ID
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded}
+	authority.returnContinue = []bool{false}
+	matterResult, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), matter, func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+	if err != nil || !matterResult.Returned {
+		t.Fatalf("Matter birth: returned=%v err=%v", matterResult.Returned, err)
+	}
+	matterID := matterResult.SemanticResult.Output.(operation.MatterCreateOutput).ID
+	releaseID := commandStartCommandPrefix + "85"
+	authority.releaseFailure = errors.New("lost release response")
+	if _, err = coordinator.ReleaseBirthClaim(context.Background(), matterID, releaseID, operation.Actor("human")); err == nil {
+		t.Fatal("lost release response was reported as a terminal result")
+	}
+	pending, err := journal.BirthReleaseAttempt(releaseID)
+	if err != nil || pending.Returned {
+		t.Fatalf("release attempt after unknown outcome=%+v err=%v", pending, err)
+	}
+	firstIdentity := bytes.Clone(pending.CanonicalBytes)
+	firstHash := pending.RequestHash
+	firstSequence := pending.EnvironmentSeq
+	firstBarrier := append([]byte(nil), mustEncodeBirthBarrier(t, pending.Barrier)...)
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identity := wipdjournal.Identity{RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID}
+	journal, err = wipdjournal.Open(root, identity)
+	if err != nil {
+		t.Fatalf("reopen outcome-unknown release: %v", err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	trace := &commandStartTrace{}
+	environment = newCommandStartTestEnvironment(t, journal, trace, matter.ID)
+	server := newServer(operation.NewRegistry(), 4)
+	coordinator, err = server.NewCommandStartCoordinator(commandStartDomainID, journal, authority, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = journal.BirthReleaseAttempt(releaseID)
+	if err != nil || pending.Returned || pending.EnvironmentSeq != firstSequence || pending.RequestHash != firstHash ||
+		!bytes.Equal(pending.CanonicalBytes, firstIdentity) || !bytes.Equal(mustEncodeBirthBarrier(t, pending.Barrier), firstBarrier) {
+		t.Fatalf("recovered release attempt=%+v err=%v", pending, err)
+	}
+	blockedID := commandStartCommandPrefix + "86"
+	if _, err = coordinator.RunConnected(context.Background(), commandStartInput(blockedID, "blocked"), func(context.Context, CommandStartSnapshot, operation.Command) error {
+		t.Fatal("connected command crossed unresolved release")
+		return nil
+	}); !errors.Is(err, ErrCommandStartBlocked) {
+		t.Fatalf("command with unresolved release err=%v; want blocked", err)
+	}
+	if _, err = journal.Get(blockedID); !errors.Is(err, wipdjournal.ErrNotFound) {
+		t.Fatalf("blocked command acquired an Environment sequence: %v", err)
+	}
+	authority.releaseFailure = nil
+	if result, retryErr := coordinator.ReleaseBirthClaim(context.Background(), matterID, releaseID, operation.Actor("human")); retryErr != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("exact release retry result=%+v err=%v", result, retryErr)
+	}
+	if len(authority.releaseAttempts) != 2 || authority.releaseAttempts[0].RequestHash != firstHash ||
+		!bytes.Equal(authority.releaseAttempts[0].CanonicalBytes, firstIdentity) || authority.releaseAttempts[1].RequestHash != firstHash ||
+		!bytes.Equal(authority.releaseAttempts[1].CanonicalBytes, firstIdentity) {
+		t.Fatalf("unknown-outcome retry changed release command identity: %+v", authority.releaseAttempts)
+	}
+	if authority.releaseCalls != 2 {
+		t.Fatalf("release remote calls=%d; want exact retry once", authority.releaseCalls)
+	}
+}
+
+func TestBirthClaimReleaseStopsAtQuarantineWithoutAcknowledgingOrReturningSuffix(t *testing.T) {
+	coordinator, journal, environment, authority, _, _ := newCommandStartFixture(t)
+	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"93", 1, "", commandStartCommandPrefix+"93",
+		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Birth", Locator: "birth"}, nil)
+	environment.currentID = matter.ID
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultRejected}
+	authority.returnContinue = []bool{false, false}
+	matterResult, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), matter, func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+	if err != nil || !matterResult.Returned {
+		t.Fatalf("Matter birth: returned=%v err=%v", matterResult.Returned, err)
+	}
+	matterID := matterResult.SemanticResult.Output.(operation.MatterCreateOutput).ID
+	firstStep := commandStartCanonicalCommand(commandStartCommandPrefix+"94", 2, matter.ID, matter.ID,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateInput{ParentID: matterID, Title: "quarantined"},
+		&operation.ClaimContext{ID: matterID, Epoch: "1"})
+	if _, err = journal.PrepareCanonicalCommand(firstStep); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEntry, err := journal.Get(firstStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.AdmitPending(context.Background(), installed.Expectation(), firstEntry.Command.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondStep := commandStartCanonicalCommand(commandStartCommandPrefix+"95", 3, matter.ID, matter.ID,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateInput{ParentID: matterID, Title: "must not pass quarantine"},
+		&operation.ClaimContext{ID: matterID, Epoch: "1"})
+	if _, err = journal.PrepareCanonicalCommand(secondStep); err != nil {
+		t.Fatal(err)
+	}
+	installed, err = journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEntry, err := journal.Get(secondStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.AdmitPending(context.Background(), installed.Expectation(), secondEntry.Command.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = coordinator.ReleaseBirthClaim(context.Background(), matterID, commandStartCommandPrefix+"96", operation.Actor("human")); !errors.Is(err, ErrCommandStartBlocked) {
+		t.Fatalf("release crossed quarantined prefix: %v", err)
+	}
+	firstAfter, err := journal.Get(firstStep.ID)
+	if err != nil || firstAfter.State != wipdjournal.StateReturned {
+		t.Fatalf("quarantined head terminal disposition=%+v err=%v", firstAfter, err)
+	}
+	secondAfter, err := journal.Get(secondStep.ID)
+	if err != nil || secondAfter.State != wipdjournal.StatePendingReturn {
+		t.Fatalf("suffix passed refusal: %+v err=%v", secondAfter, err)
+	}
+	if authority.returnIndex != 2 || authority.releaseCalls != 0 || len(authority.acks) != 0 {
+		t.Fatalf("release crossed refusal: returns=%d releases=%d acknowledgments=%d", authority.returnIndex, authority.releaseCalls, len(authority.acks))
+	}
+	installed, err = journal.InstallSnapshot(context.Background())
+	if err != nil || installed.Receipts[firstStep.ID].ResultCode != operation.ResultRejected {
+		t.Fatalf("quarantine terminal receipt was not installed: %+v err=%v", installed.Receipts[firstStep.ID], err)
+	}
+	overlay, err := journal.Overlay(context.Background())
+	if err != nil || len(overlay) != 3 || overlay[len(overlay)-1].ID != secondStep.ID || overlay[len(overlay)-1].Kind != "provisional" {
+		t.Fatalf("suffix overlay after quarantine=%+v err=%v", overlay, err)
+	}
+	if _, err = journal.BirthReleaseAttempt(commandStartCommandPrefix + "96"); !errors.Is(err, wipdjournal.ErrNotFound) {
+		t.Fatalf("quarantined journal allocated a release identity: %v", err)
 	}
 }
 
@@ -856,4 +1174,13 @@ func equalCommandStartTrace(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func mustEncodeBirthBarrier(t *testing.T, barrier wipdwire.JournalBarrier) []byte {
+	t.Helper()
+	encoded, err := wipdwire.EncodeCanonical(barrier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

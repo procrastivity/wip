@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -456,6 +458,202 @@ func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *
 	}
 	writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID,
 		wipdwire.Frame{RequestID: frame.RequestID, Kind: "command.terminal", Payload: status.Receipt}, "")
+}
+
+func (app *m5LabHandler) serveBirthJournalAck(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
+	var ack wipdwire.BirthJournalAck
+	if err := wipdwire.DecodeCanonical(frame.Payload, &ack,
+		"schema", "domain_id", "authority_epoch", "matter_id", "command_id", "request_hash", "terminal_receipt", "installed_prefix"); err != nil ||
+		ack.Schema != "wipd.birth-journal-ack/1" {
+		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	ctx, cancel, arbiter, ok := app.beginReadOnlyExchange(writer, request, body, frame.RequestID)
+	if !ok {
+		return
+	}
+	defer cancel(context.Canceled)
+	err := app.store.AcknowledgeBirthJournalEntry(ctx, ack, *request.TLS, environment.EnvironmentID, time.Now().UTC())
+	if err != nil {
+		code := "authority.unavailable"
+		if errors.Is(err, authoritystore.ErrFenced) || errors.Is(err, authoritystore.ErrInvalidProof) {
+			code = "auth.environment-domain-mismatch"
+		} else if errors.Is(err, authoritystore.ErrPending) || errors.Is(err, authoritystore.ErrPrefixMismatch) {
+			code = "command.sequence-blocked"
+		}
+		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, code)
+		return
+	}
+	payload, err := wipdwire.EncodeCanonical(wipdwire.BirthJournalAcked{
+		Schema: "wipd.birth-journal-acked/1", DomainID: ack.DomainID,
+		MatterID: ack.MatterID, CommandID: ack.CommandID, RequestHash: ack.RequestHash,
+	})
+	if err != nil {
+		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, "authority.unavailable")
+		return
+	}
+	writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID,
+		wipdwire.Frame{RequestID: frame.RequestID, Kind: "birth-journal.acknowledged", Payload: payload}, "")
+}
+
+func (app *m5LabHandler) serveBirthClaimRelease(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
+	var release wipdwire.ClaimRelease
+	if err := wipdwire.DecodeCanonical(frame.Payload, &release,
+		"schema", "canonical_command", "request_hash", "barrier", "deadline"); err != nil ||
+		release.Schema != "wipd.claim-release/1" || len(release.CanonicalCommand) == 0 {
+		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	commandID, environmentID, err := app.validateBirthReleaseCommand(release)
+	if err != nil || environmentID != environment.EnvironmentID {
+		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	var deadline time.Time
+	if release.Deadline != nil {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, *release.Deadline)
+		if parseErr != nil || parsed.UTC().Format(time.RFC3339Nano) != *release.Deadline || !bytes.HasSuffix([]byte(*release.Deadline), []byte("Z")) {
+			writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+			return
+		}
+		deadline = parsed
+		if !deadline.After(time.Now()) {
+			writeLabProblem(writer, frame.RequestID, "transport.deadline-before-submission")
+			return
+		}
+	}
+	admissionParent := request.Context()
+	var cancelDeadline context.CancelFunc
+	if !deadline.IsZero() {
+		admissionParent, cancelDeadline = context.WithDeadline(admissionParent, deadline)
+		defer cancelDeadline()
+	}
+	admissionCtx, cancelAdmission := context.WithCancelCause(admissionParent)
+	defer cancelAdmission(context.Canceled)
+	watchLabCommandControl(request.Context(), body, frame.RequestID, cancelAdmission)
+	status, err := app.store.SubmitClaimLifecycle(admissionCtx, release.CanonicalCommand, release.RequestHash, *request.TLS, time.Now().UTC(), nil)
+	if err != nil {
+		writeLabProblem(writer, frame.RequestID, submissionProblem(err))
+		return
+	}
+	if !status.Pending {
+		if len(status.Receipt) == 0 {
+			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+			return
+		}
+		writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Kind: "command.terminal", Payload: status.Receipt})
+		return
+	}
+	owner := status.Owner
+	if owner == nil {
+		var recoverErr error
+		owner, recoverErr = app.store.RecoverClaimLifecycle(context.Background(), release.CanonicalCommand, release.RequestHash)
+		if recoverErr != nil && !errors.Is(recoverErr, authoritystore.ErrNotOwner) {
+			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+			return
+		}
+	}
+	accepted, err := wipdwire.EncodeCanonical(wipdwire.SubmissionAccepted{
+		Schema: "wipd.submission-accepted/1", DomainID: app.profile.domainID, Epoch: app.profile.epoch,
+		CommandID: commandID, RequestHash: release.RequestHash,
+	})
+	if err != nil {
+		writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+		return
+	}
+	writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Sequence: 0, Kind: "submission.accepted", Payload: accepted})
+	_ = http.NewResponseController(writer).Flush()
+	if owner == nil {
+		return
+	}
+	eventID, err := randomULID(time.Now().UTC())
+	if err != nil {
+		_ = app.store.AbandonClaimLifecycleExecution(owner)
+		return
+	}
+	completed := make(chan struct {
+		status authoritystore.CommandStatus
+		err    error
+	}, 1)
+	go func() {
+		status, completeErr := app.store.CompleteClaimLifecycle(context.Background(), owner, "", []string{eventID}, time.Now().UTC(), app.sign)
+		if completeErr != nil {
+			_ = app.store.AbandonClaimLifecycleExecution(owner)
+		}
+		completed <- struct {
+			status authoritystore.CommandStatus
+			err    error
+		}{status: status, err: completeErr}
+	}()
+	select {
+	case result := <-completed:
+		if result.err == nil && !result.status.Pending && len(result.status.Receipt) > 0 {
+			writeLabFrameContinuation(writer, wipdwire.Frame{RequestID: frame.RequestID, Sequence: 1, Kind: "command.terminal", Payload: result.status.Receipt})
+		}
+	case <-admissionCtx.Done():
+		// Submission is durable; cancellation ends this wait, not lifecycle completion.
+	}
+}
+
+func (app *m5LabHandler) validateBirthReleaseCommand(release wipdwire.ClaimRelease) (string, string, error) {
+	var emptyID, emptyEnvironment string
+	fields, err := wipdwire.DecodeCanonicalMap(release.CanonicalCommand,
+		"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs")
+	if err != nil || fields["schema"] != "wipd.command/1" || fields["causation_command_id"] != nil {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	hash := sha256.Sum256(append([]byte("wipd/request-hash/v1\x00"), release.CanonicalCommand...))
+	if release.RequestHash != "sha256:"+hex.EncodeToString(hash[:]) {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	commandID, commandOK := fields["command_id"].(string)
+	correlation, correlationOK := fields["correlation_command_id"].(string)
+	if !commandOK || commandID == "" || !correlationOK || correlation != commandID {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	authority, ok := fields["authority"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(authority, "domain_id", "expected_epoch") || authority["domain_id"] != app.profile.domainID || authority["expected_epoch"] != app.profile.epoch {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	environment, ok := fields["environment"].(map[string]any)
+	environmentID, environmentOK := environment["id"].(string)
+	sequence, sequenceOK := environment["sequence"].(uint64)
+	if !ok || !wipdwire.ExactMapKeys(environment, "id", "sequence") || !environmentOK || !ulidPattern.MatchString(environmentID) || !sequenceOK || sequence == 0 {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	operationFields, ok := fields["operation"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(operationFields, "name", "version") || operationFields["name"] != "claim.release" || operationFields["version"] != uint64(1) {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	contextFields, ok := fields["context"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(contextFields, "repo_id", "clone_id", "worktree_id") || contextFields["repo_id"] != app.repoID ||
+		contextFields["clone_id"] != nil || contextFields["worktree_id"] != nil {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	claim, ok := fields["claim"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(claim, "id", "epoch") || claim["id"] != release.Barrier.Claim.ID || claim["epoch"] != release.Barrier.Claim.Epoch {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	input, ok := fields["input"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(input, "barrier") {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	commandBarrier, err := wipdwire.EncodeCanonical(input["barrier"])
+	requestBarrier, requestErr := wipdwire.EncodeCanonical(release.Barrier)
+	if err != nil || requestErr != nil || !bytes.Equal(commandBarrier, requestBarrier) {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	blobs, ok := fields["blobs"].([]any)
+	if !ok || len(blobs) != 0 {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	actor, actorOK := fields["actor"].(string)
+	actedAt, timeOK := fields["acted_at"].(string)
+	parsed, timeErr := time.Parse(time.RFC3339Nano, actedAt)
+	if !actorOK || actor == "" || !timeOK || timeErr != nil || parsed.UTC().Format(time.RFC3339Nano) != actedAt || !bytes.HasSuffix([]byte(actedAt), []byte("Z")) {
+		return emptyID, emptyEnvironment, wipdwire.ErrInvalidRecord
+	}
+	return commandID, environmentID, nil
 }
 
 func submissionProblem(err error) string {

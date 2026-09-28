@@ -397,6 +397,10 @@ func installTestReceipt(t *testing.T, entry Entry, result operation.ResultCode, 
 
 func downgradeInstallTestDBToV1(db *sql.DB) error {
 	for _, statement := range []string{
+		`DROP TRIGGER command_birth_release_id_conflict`, `DROP TRIGGER command_after_pending_birth_release`,
+		`DROP TRIGGER birth_release_command_id_conflict`, `DROP TRIGGER birth_release_before_insert`,
+		`DROP TRIGGER birth_release_state_transition`, `DROP TRIGGER birth_release_no_delete`,
+		`DROP TRIGGER birth_release_identity_immutable`, `DROP TABLE birth_release_attempts`,
 		`DROP TRIGGER command_state_transition`, `DROP INDEX commands_pending_order`,
 		`DROP TRIGGER command_identity_immutable`, `DROP TRIGGER command_no_delete`,
 		`DROP INDEX environment_overlay_order`, `DROP TABLE environment_overlay`,

@@ -89,6 +89,14 @@ type CommandStartAuthority interface {
 	Pull(context.Context, wipdwire.PrefixAnchor) (CommandPull, error)
 }
 
+// BirthReleaseAuthority acknowledges receipts only after their exact fold is
+// installed locally, then submits the existing claim.release@v1 command and
+// returns its terminal receipt with the complete verified authority tail.
+type BirthReleaseAuthority interface {
+	AcknowledgeBirthJournalEntry(context.Context, wipdwire.BirthJournalAck) error
+	SubmitBirthClaimRelease(context.Context, wipdjournal.BirthReleaseCommand, wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error)
+}
+
 // CommandStartEnvironment owns the local atomic commit boundaries. InstallFold
 // commits the exact receipt, returned prefix delta, complete manifest, return
 // status, and rebuilt overlay in one transaction. InstallPull commits the
@@ -98,6 +106,7 @@ type CommandStartEnvironment interface {
 	Snapshot(context.Context) (CommandStartSnapshot, error)
 	InstallFold(context.Context, CommandStartSnapshot, wipdjournal.Entry, CommandFold) (CommandStartSnapshot, error)
 	InstallPull(context.Context, CommandStartSnapshot, CommandPull) (CommandStartSnapshot, error)
+	InstallBirthRelease(context.Context, CommandStartSnapshot, wipdjournal.BirthReleaseCommand, []byte, CommandPull) (CommandStartSnapshot, error)
 	AdmitPending(context.Context, CommandStartSnapshot, wipdjournal.Entry) (CommandStartSnapshot, error)
 	commandStartJournal() *wipdjournal.Journal
 }
@@ -209,6 +218,13 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 		return empty, ctx.Err()
 	}
 	defer release()
+	pendingRelease, err := coordinator.journal.HasPendingBirthRelease()
+	if err != nil {
+		return empty, err
+	}
+	if pendingRelease {
+		return empty, fmt.Errorf("%w: a birth-claim release outcome is unresolved", ErrCommandStartBlocked)
+	}
 	entry, err := prepare()
 	if err != nil {
 		return empty, err

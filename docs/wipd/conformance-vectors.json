@@ -20,7 +20,7 @@
     {
       "path": "docs/wipd/claim-lifecycle-vectors.json",
       "notation": "wipd.claim-lifecycle-vector/1",
-      "sha256": "d7a9db99835f48767dc66459070a614a31abcd28a179518f735a174a2ab1983b"
+      "sha256": "de3f8ebed2225c4ae6b577677312e77a3a7a99eef780b6c11cf73512bb6c0006"
     },
     {
       "path": "docs/wipd/design-security-privacy-vectors.json",
@@ -168,7 +168,7 @@
     {"id": "V09", "family": "read snapshot", "title": "pinned pagination", "sources": ["read-transfer-snapshot-vectors.json#/pagination"], "assertions": ["underlying mutation cannot alter pages", "scope and MAC failures are distinct"], "step9_review": []},
     {"id": "V10", "family": "blob upload", "title": "blob idempotency and integrity", "sources": ["read-transfer-snapshot-vectors.json#/blob"], "assertions": ["digest and length independently verified", "duplicate upload idempotent", "promotion waits for success"], "step9_review": []},
     {"id": "V11", "family": "claim cycle", "title": "seed lazy hydration and claim pin", "sources": ["read-transfer-snapshot-vectors.json#/seed", "read-transfer-snapshot-vectors.json#/hydration", "claim-lifecycle-vectors.json#/hydration"], "assertions": ["prefix and manifest complete", "claim blocked until durable verified pin"], "step9_review": []},
-    {"id": "V12", "family": "claim cycle", "title": "claim acquire return fold release", "sources": ["claim-lifecycle-vectors.json#/acquire_grant", "claim-lifecycle-vectors.json#/claim_command", "claim-lifecycle-vectors.json#/release"], "assertions": ["one Matter exclusion", "contiguous journal", "terminal receipt release barrier", "old epoch fenced"], "step9_review": []},
+    {"id": "V12", "family": "claim cycle", "title": "claim acquire return fold release", "sources": ["claim-lifecycle-vectors.json#/acquire_grant", "claim-lifecycle-vectors.json#/claim_command", "claim-lifecycle-vectors.json#/release", "claim-lifecycle-vectors.json#/birth_release"], "assertions": ["one Matter exclusion", "contiguous journal", "terminal receipt release barrier", "old epoch fenced", "birth prefix returned and installed before ordered receipt acknowledgments", "dispatch-less release is fenced by authority and replay-stable"], "step9_review": []},
     {"id": "V13", "family": "claim cycle", "title": "claim contention and footprint refusal", "sources": ["claim-lifecycle-vectors.json#/acquire_refusals"], "assertions": ["local lock grants no authority", "cross-Matter and aggregate footprints refuse"], "step9_review": []},
     {"id": "V14", "family": "claim cycle", "title": "cross-Environment stand-down", "sources": ["claim-lifecycle-vectors.json#/stand_down", "design-security-privacy-vectors.json#/owner_ceremonies/2"], "assertions": ["wrong epoch refuses", "reason mandatory", "loss acknowledgment mandatory", "owner attestation binds exact command claim environments reason digest and loss", "accepted close consumes nonce and fences old epoch"], "step9_review": []},
     {"id": "V15", "family": "accepted command", "title": "provisional locator collision", "sources": ["design-security-privacy-vectors.json#/d127/locator_collision"], "assertions": ["matter.create@v2 collision succeeds while v1 remains unchanged", "requested=alpha", "assigned=alpha-01K6M0", "identity=01K6M000000000000000000015", "matter.created precedes repair-required event in one range", "v2 output binds requested assigned and repair-required", "only authority rename or explicit accept clears repair"], "step9_review": []},

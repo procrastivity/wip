@@ -266,6 +266,61 @@ func (runtime *Runtime) Pull(ctx context.Context, installed wipdwire.PrefixAncho
 	return runtime.pull(ctx, installed)
 }
 
+// AcknowledgeBirthJournalEntry publishes only the exact terminal receipt
+// already committed to the Environment's installed prefix.
+func (runtime *Runtime) AcknowledgeBirthJournalEntry(ctx context.Context, ack wipdwire.BirthJournalAck) error {
+	if runtime == nil || runtime.client == nil || ack.DomainID != runtime.state.DomainID || ack.Epoch != runtime.state.Epoch ||
+		ack.Schema != "wipd.birth-journal-ack/1" {
+		return wipdseed.ErrInvalidClientState
+	}
+	frames, err := runtime.client.Exchange(ctx, "birth-journal.ack", ack)
+	if err != nil {
+		return err
+	}
+	if len(frames) != 1 || frames[0].Kind != "birth-journal.acknowledged" {
+		return wipdseed.ErrInvalidClientState
+	}
+	var acknowledged wipdwire.BirthJournalAcked
+	if wipdwire.DecodeCanonical(frames[0].Payload, &acknowledged,
+		"schema", "domain_id", "matter_id", "command_id", "request_hash") != nil ||
+		acknowledged.Schema != "wipd.birth-journal-acked/1" || acknowledged.DomainID != ack.DomainID ||
+		acknowledged.MatterID != ack.MatterID || acknowledged.CommandID != ack.CommandID || acknowledged.RequestHash != ack.RequestHash {
+		return wipdseed.ErrInvalidClientState
+	}
+	return nil
+}
+
+// SubmitBirthClaimRelease sends the Environment's exact durable lifecycle
+// identity and returns its terminal receipt with a complete verified tail.
+func (runtime *Runtime) SubmitBirthClaimRelease(ctx context.Context, attempt wipdjournal.BirthReleaseCommand, installed wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, wipd.CommandPull, error) {
+	var empty wipd.CommandPull
+	if runtime == nil || runtime.client == nil || ctx == nil || attempt.ID == "" || attempt.Barrier.Journal != attempt.Barrier.Claim.ID {
+		return nil, "", empty, wipdseed.ErrInvalidClientState
+	}
+	payload := wipdwire.ClaimRelease{
+		Schema: "wipd.claim-release/1", CanonicalCommand: bytes.Clone(attempt.CanonicalBytes),
+		RequestHash: attempt.RequestHash, Barrier: attempt.Barrier,
+	}
+	frames, err := runtime.client.Exchange(ctx, "claim.release", payload)
+	if err != nil {
+		return nil, "", empty, err
+	}
+	receipt, err := terminalFromBirthRelease(ctx, runtime.client, runtime.state.DomainID, runtime.state.Epoch,
+		runtime.state.EnvironmentID, attempt, payload, frames)
+	if err != nil {
+		return nil, "", empty, err
+	}
+	code, err := validateBirthReleaseTerminal(receipt, runtime.state.DomainID, runtime.state.Epoch, runtime.state.EnvironmentID, attempt)
+	if err != nil {
+		return nil, "", empty, err
+	}
+	tail, err := runtime.pull(ctx, installed)
+	if err != nil {
+		return nil, "", empty, err
+	}
+	return receipt, code, tail, nil
+}
+
 func (runtime *Runtime) pull(ctx context.Context, installed wipdwire.PrefixAnchor) (wipd.CommandPull, error) {
 	var empty wipd.CommandPull
 	payload := wipdwire.PullRequest{

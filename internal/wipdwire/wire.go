@@ -6,7 +6,9 @@ package wipdwire
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -236,6 +238,138 @@ type PrefixAnchor struct {
 	EventCount uint64  `cbor:"event_count"`
 	EventID    *string `cbor:"high_water_event_id"`
 	Digest     string  `cbor:"prefix_digest"`
+}
+
+// JournalBarrier is the existing claim.release receipt barrier. For a
+// dispatch-less provisional birth claim, Journal is the Matter ULID and Claim
+// is {id: Matter ULID, epoch: 1}.
+type JournalBarrier struct {
+	Schema      string   `cbor:"schema"`
+	Journal     string   `cbor:"journal_id"`
+	Claim       ClaimRef `cbor:"claim"`
+	Count       uint64   `cbor:"entry_count"`
+	Last        uint64   `cbor:"last_position"`
+	Receipts    uint64   `cbor:"terminal_receipt_count"`
+	Digest      string   `cbor:"entries_digest"`
+	Sealed      bool     `cbor:"sealed"`
+	Unresolved  uint64   `cbor:"unresolved_count"`
+	Quarantined uint64   `cbor:"quarantined_count"`
+}
+
+// ClaimRef is the claim identity nested in a release barrier.
+type ClaimRef struct {
+	ID    string `cbor:"id"`
+	Epoch uint64 `cbor:"epoch"`
+}
+
+// JournalBarrierRange is the receipt's exact accepted event range, or nil for
+// an effect-free terminal receipt.
+type JournalBarrierRange struct {
+	First string
+	Last  string
+	Count uint64
+}
+
+// JournalBarrierEntry is authority-retained receipt evidence in one journal
+// position. It is also used by the Environment to construct a candidate
+// barrier from its atomically installed receipts.
+type JournalBarrierEntry struct {
+	Position    uint64
+	CommandID   string
+	RequestHash string
+	ResultCode  string
+	Range       *JournalBarrierRange
+}
+
+// JournalBarrierDigest computes the normative chained digest over ordered
+// terminal receipt identities and accepted ranges.
+func JournalBarrierDigest(entries []JournalBarrierEntry) (string, error) {
+	root := sha256.Sum256([]byte("wipd/journal-barrier/v1\x00"))
+	for index, entry := range entries {
+		position := uint64(index + 1)
+		if entry.Position != position || !requestIDPattern.MatchString(entry.CommandID) || !validWireDigest(entry.RequestHash) {
+			return "", ErrInvalidRecord
+		}
+		component := make([]byte, 8, 8+26+32+1+1+26+26+8)
+		binary.BigEndian.PutUint64(component, position)
+		component = append(component, entry.CommandID...)
+		hash, _ := hex.DecodeString(entry.RequestHash[7:])
+		component = append(component, hash...)
+		switch entry.ResultCode {
+		case "result.succeeded":
+			component = append(component, 0)
+		case "result.rejected":
+			component = append(component, 1)
+		case "result.refused":
+			component = append(component, 2)
+		case "result.failed":
+			component = append(component, 3)
+		default:
+			return "", ErrInvalidRecord
+		}
+		if entry.Range == nil {
+			component = append(component, 0)
+		} else {
+			if !requestIDPattern.MatchString(entry.Range.First) || !requestIDPattern.MatchString(entry.Range.Last) ||
+				entry.Range.First > entry.Range.Last || entry.Range.Count == 0 {
+				return "", ErrInvalidRecord
+			}
+			component = append(component, 1)
+			component = append(component, entry.Range.First...)
+			component = append(component, entry.Range.Last...)
+			var count [8]byte
+			binary.BigEndian.PutUint64(count[:], entry.Range.Count)
+			component = append(component, count[:]...)
+		}
+		h := sha256.New()
+		_, _ = h.Write([]byte("wipd/journal-barrier-step/v1\x00"))
+		_, _ = h.Write(root[:])
+		_, _ = h.Write(component)
+		copy(root[:], h.Sum(nil))
+	}
+	return "sha256:" + hex.EncodeToString(root[:]), nil
+}
+
+func validWireDigest(value string) bool {
+	if len(value) != 71 || value[:7] != "sha256:" {
+		return false
+	}
+	decoded, err := hex.DecodeString(value[7:])
+	return err == nil && len(decoded) == sha256.Size && value == "sha256:"+hex.EncodeToString(decoded)
+}
+
+// BirthJournalAck is an authenticated assertion that the exact terminal
+// receipt and its accepted event range have been atomically installed through
+// Installed by the owning Environment.
+type BirthJournalAck struct {
+	Schema      string       `cbor:"schema"`
+	DomainID    string       `cbor:"domain_id"`
+	Epoch       uint64       `cbor:"authority_epoch"`
+	MatterID    string       `cbor:"matter_id"`
+	CommandID   string       `cbor:"command_id"`
+	RequestHash string       `cbor:"request_hash"`
+	Receipt     []byte       `cbor:"terminal_receipt"`
+	Installed   PrefixAnchor `cbor:"installed_prefix"`
+}
+
+// BirthJournalAcked confirms that the authority retained one exact installed
+// receipt acknowledgment for the authenticated Environment.
+type BirthJournalAcked struct {
+	Schema      string `cbor:"schema"`
+	DomainID    string `cbor:"domain_id"`
+	MatterID    string `cbor:"matter_id"`
+	CommandID   string `cbor:"command_id"`
+	RequestHash string `cbor:"request_hash"`
+}
+
+// ClaimRelease carries the existing claim.release@v1 lifecycle command. It
+// introduces no M1 operation schema.
+type ClaimRelease struct {
+	Schema           string         `cbor:"schema"`
+	CanonicalCommand []byte         `cbor:"canonical_command"`
+	RequestHash      string         `cbor:"request_hash"`
+	Barrier          JournalBarrier `cbor:"barrier"`
+	Deadline         *string        `cbor:"deadline"`
 }
 
 // SeedRequest asks for the initial authority seed for a bound domain epoch.

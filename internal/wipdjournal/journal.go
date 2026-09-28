@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,13 +28,14 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdprofile"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 2
+	schemaVersion  = 3
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -118,6 +120,21 @@ type Entry struct {
 	Created bool
 }
 
+// BirthReleaseCommand is the exact durable identity of the existing
+// claim.release@v1 control for a dispatch-less provisional birth claim. It is
+// stored separately from M1 operation entries because lifecycle controls are
+// not M1 catalogue operations.
+type BirthReleaseCommand struct {
+	ID             string
+	RequestHash    string
+	EnvironmentSeq uint64
+	CanonicalBytes []byte
+	Barrier        wipdwire.JournalBarrier
+	Returned       bool
+	Receipt        []byte
+	ResultCode     operation.ResultCode
+}
+
 // StagedBlob identifies durable content without exposing a local path.
 type StagedBlob struct {
 	Digest string
@@ -185,6 +202,11 @@ func Open(root string, identity Identity) (*Journal, error) {
 		var version int
 		if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err == nil && version == 1 {
 			err = upgradeSchemaV1(db, identity)
+			if err == nil {
+				err = upgradeSchemaV2(db, identity)
+			}
+		} else if err == nil && version == 2 {
+			err = upgradeSchemaV2(db, identity)
 		} else if err == nil {
 			err = checkIdentity(db, identity)
 		}
@@ -823,7 +845,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=2), name TEXT NOT NULL CHECK(name='environment-command-start-installation')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=3), name TEXT NOT NULL CHECK(name='environment-birth-release-receipt-barrier')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -865,14 +887,17 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(2, 'environment-command-start-installation')`,
-		`PRAGMA user_version=2`,
+		`INSERT INTO schema_migrations(version, name) VALUES(3, 'environment-birth-release-receipt-barrier')`,
+		`PRAGMA user_version=3`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
 		}
 	}
 	if err = createEnvironmentInstallSchema(tx); err != nil {
+		return err
+	}
+	if err = createBirthReleaseSchema(tx); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
@@ -899,7 +924,7 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=2`).Scan(&migration); err != nil || migration != "environment-command-start-installation" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=3`).Scan(&migration); err != nil || migration != "environment-birth-release-receipt-barrier" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
@@ -915,6 +940,10 @@ func checkSchemaObjects(db *sql.DB) error {
 		"installed_event_no_update": "trigger", "installed_event_no_delete": "trigger", "installed_receipts": "table",
 		"installed_receipt_no_update": "trigger", "installed_receipt_no_delete": "trigger", "environment_overlay": "table",
 		"environment_overlay_order": "index",
+		"birth_release_attempts":    "table", "birth_release_identity_immutable": "trigger", "birth_release_no_delete": "trigger",
+		"birth_release_state_transition": "trigger", "birth_release_before_insert": "trigger",
+		"birth_release_command_id_conflict": "trigger", "command_after_pending_birth_release": "trigger",
+		"command_birth_release_id_conflict": "trigger",
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
@@ -953,11 +982,15 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 		return err
 	}
 	nextPosition := uint64(1)
-	for index, entry := range entries {
-		if entry.EnvironmentSeq != uint64(index+1) || entry.Command.AuthorityDomainID != identity.DomainID ||
+	commandSequences := make([]uint64, 0, len(entries))
+	commandIDs := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.Command.AuthorityDomainID != identity.DomainID ||
 			entry.Command.ExpectedAuthorityEpoch != identity.AuthorityEpoch || entry.Command.EnvironmentID != identity.EnvironmentID {
 			return ErrInvalidJournal
 		}
+		commandSequences = append(commandSequences, entry.EnvironmentSeq)
+		commandIDs[entry.Command.ID] = struct{}{}
 		input := CommandInput{
 			ID: entry.Command.ID, CausationCommandID: entry.Command.CausationCommandID,
 			CorrelationCommandID: entry.Command.CorrelationCommandID, Request: entry.Command.Request,
@@ -985,13 +1018,35 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 	if err = db.QueryRow(`SELECT next_environment_sequence, next_journal_position FROM environment_state WHERE singleton=1`).Scan(&nextSequence, &storedPosition); err != nil {
 		return err
 	}
-	if nextSequence != int64(len(entries))+1 || storedPosition != int64(nextPosition) {
+	if storedPosition != int64(nextPosition) {
 		return ErrInvalidJournal
 	}
 	if err = checkBlobFiles(db, blobDir); err != nil {
 		return err
 	}
-	return checkInstallationDatabase(db, identity)
+	if err = checkInstallationDatabase(db, identity); err != nil {
+		return err
+	}
+	releaseSequences, releaseIDs, err := checkBirthReleaseAttempts(db, identity)
+	if err != nil {
+		return err
+	}
+	allSequences := append(commandSequences, releaseSequences...)
+	sort.Slice(allSequences, func(left, right int) bool { return allSequences[left] < allSequences[right] })
+	if nextSequence != int64(len(allSequences))+1 {
+		return ErrInvalidJournal
+	}
+	for index, sequence := range allSequences {
+		if sequence != uint64(index+1) {
+			return ErrInvalidJournal
+		}
+	}
+	for _, attemptID := range releaseIDs {
+		if _, exists := commandIDs[attemptID]; exists {
+			return ErrInvalidJournal
+		}
+	}
+	return nil
 }
 
 func verifyBlobReferences(db *sql.DB, blobDir string, blobs []operation.BlobInput) error {

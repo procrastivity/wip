@@ -13,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 // The protocol-1 controls are deliberately built independently of the M1
@@ -142,6 +145,228 @@ func claimTestReceipt(t *testing.T, status CommandStatus, code string, output ma
 		if r.Range == nil || r.Range.First != claimTestID(ids[0]) || r.Range.Last != claimTestID(ids[len(ids)-1]) || r.Range.Count != uint64(len(ids)) {
 			t.Fatalf("event range: %+v", r.Range)
 		}
+	}
+}
+
+func claimTestBirthStep(t *testing.T, f *claimTestFixture, id, event int) ([]byte, string, CommandStatus) {
+	t.Helper()
+	command := operation.Command{
+		ID: claimTestID(id), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
+		EnvironmentID: envA, EnvironmentSequence: 2,
+		ActedAt: "2026-09-23T11:59:00Z", CausationCommandID: claimTestID(10),
+		CorrelationCommandID: claimTestID(10),
+		Request: operation.Request{
+			Operation: operation.StepCreateV1.Metadata().Operation,
+			Actor:     operation.Actor("human"), Context: operation.Context{Repo: repoA},
+			Claim: &operation.ClaimContext{ID: f.matter, Epoch: "1"},
+			Input: operation.StepCreateInput{ParentID: f.matter, Title: "birth journal step"},
+		},
+	}
+	raw, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := f.s.SubmitCommand(context.Background(), command, hash, f.peer, f.now)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("submit birth Step: %+v %v", status, err)
+	}
+	result := operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+		ParentID: f.matter, Title: "birth journal step",
+	}}
+	status, err = f.s.CompleteCommand(context.Background(), status.Owner, result, claimTestID(id+100), claimTestID(event), f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete birth Step: %v", err)
+	}
+	return raw, hash, status
+}
+
+func claimTestBirthRelease(t *testing.T, f *claimTestFixture, id int, sequence uint64, barrier map[string]any) ([]byte, string) {
+	t.Helper()
+	raw, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": claimTestID(id),
+		"authority":   map[string]any{"domain_id": domainA, "expected_epoch": uint64(7)},
+		"environment": map[string]any{"id": envA, "sequence": sequence},
+		"acted_at":    "2026-09-23T11:59:00Z", "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": claimTestID(id),
+		"operation": map[string]any{"name": "claim.release", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": repoA, "clone_id": nil, "worktree_id": nil},
+		"claim":     map[string]any{"id": f.matter, "epoch": uint64(1)},
+		"input":     map[string]any{"barrier": barrier}, "blobs": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, digestBytes(append([]byte("wipd/request-hash/v1\x00"), raw...))
+}
+
+func claimTestBirthBarrier(t *testing.T, f *claimTestFixture, stepID string, stepHash string, stepStatus CommandStatus) (map[string]any, string) {
+	t.Helper()
+	var birthHash string
+	if err := f.s.db.QueryRow(`SELECT request_hash FROM submissions WHERE domain_id=? AND command_id=?`, domainA, claimTestID(10)).Scan(&birthHash); err != nil {
+		t.Fatal(err)
+	}
+	birth, err := f.s.QueryCommand(context.Background(), domainA, claimTestID(10), birthHash, 7, f.peer, envA, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readRange := func(status CommandStatus) *wipdwire.JournalBarrierRange {
+		receipt, readErr := readReceipt(status.Receipt)
+		if readErr != nil || receipt.Range == nil {
+			t.Fatalf("expected accepted event range in receipt: %+v %v", receipt, readErr)
+		}
+		return &wipdwire.JournalBarrierRange{First: receipt.Range.First, Last: receipt.Range.Last, Count: receipt.Range.Count}
+	}
+	entries := []wipdwire.JournalBarrierEntry{
+		{Position: 1, CommandID: claimTestID(10), RequestHash: birthHash, ResultCode: "result.succeeded", Range: readRange(birth)},
+		{Position: 2, CommandID: stepID, RequestHash: stepHash, ResultCode: "result.succeeded", Range: readRange(stepStatus)},
+	}
+	digest, err := wipdwire.JournalBarrierDigest(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": f.matter,
+		"claim":       map[string]any{"id": f.matter, "epoch": uint64(1)},
+		"entry_count": uint64(2), "last_position": uint64(2), "terminal_receipt_count": uint64(2),
+		"entries_digest": digest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0),
+	}
+	return barrier, digest
+}
+
+func claimTestBirthAck(t *testing.T, f *claimTestFixture, commandID, hash string, receipt []byte, anchor PrefixAnchor) wipdwire.BirthJournalAck {
+	t.Helper()
+	installed := wipdwire.PrefixAnchor{EventCount: anchor.EventCount, Digest: anchor.Digest}
+	if anchor.EventCount > 0 {
+		id := anchor.EventID
+		installed.EventID = &id
+	}
+	return wipdwire.BirthJournalAck{
+		Schema: "wipd.birth-journal-ack/1", DomainID: domainA, Epoch: 7,
+		MatterID: f.matter, CommandID: commandID, RequestHash: hash,
+		Receipt: bytes.Clone(receipt), Installed: installed,
+	}
+}
+
+func TestImplicitBirthJournalReleaseRequiresInstalledTerminalReceiptBarrier(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	_, stepHash, stepStatus := claimTestBirthStep(t, f, 31, 101)
+	barrier, barrierDigest := claimTestBirthBarrier(t, f, claimTestID(31), stepHash, stepStatus)
+
+	// Terminal authority receipts alone are insufficient. The pending barrier
+	// is refused until the Environment acknowledges the exact installed prefix.
+	badRaw, badHash := claimTestBirthRelease(t, f, 32, 3, barrier)
+	bad, err := f.s.SubmitClaimLifecycle(ctx, badRaw, badHash, f.peer, f.now, nil)
+	if err != nil || bad.Owner == nil {
+		t.Fatalf("submit incomplete release: %+v %v", bad, err)
+	}
+	refused, err := f.s.CompleteClaimLifecycle(ctx, bad.Owner, "", []string{claimTestID(102)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimTestReceipt(t, refused, "result.refused", nil)
+	refusedReceipt, err := readReceipt(refused.Receipt)
+	if err != nil || refusedReceipt.Result.Problem == nil || *refusedReceipt.Result.Problem != "refusal.claim-release-barrier" {
+		t.Fatalf("incomplete installed-receipt barrier refusal=%+v err=%v", refusedReceipt.Result, err)
+	}
+	var birthState string
+	if err = f.s.db.QueryRow(`SELECT state FROM birth_journals WHERE domain_id=? AND matter_id=?`, domainA, f.matter).Scan(&birthState); err != nil || birthState != "open" {
+		t.Fatalf("incomplete barrier changed birth-claim state=%q err=%v", birthState, err)
+	}
+
+	if err = f.s.AcknowledgeBirthJournalEntry(ctx, claimTestBirthAck(t, f, claimTestID(31), stepHash, stepStatus.Receipt, f.anchor(t)), f.peer, envA, f.now); !errors.Is(err, ErrPending) {
+		t.Fatalf("out-of-order Step receipt acknowledgment = %v, want ErrPending", err)
+	}
+	var birthHash string
+	if err = f.s.db.QueryRow(`SELECT request_hash FROM submissions WHERE domain_id=? AND command_id=?`, domainA, claimTestID(10)).Scan(&birthHash); err != nil {
+		t.Fatal(err)
+	}
+	birth, err := f.s.QueryCommand(ctx, domainA, claimTestID(10), birthHash, 7, f.peer, envA, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackAnchor := f.anchor(t)
+	if err = f.s.AcknowledgeBirthJournalEntry(ctx, claimTestBirthAck(t, f, claimTestID(10), birthHash, birth.Receipt, ackAnchor), f.peer, envA, f.now); err != nil {
+		t.Fatalf("acknowledge installed Matter receipt: %v", err)
+	}
+	if err = f.s.AcknowledgeBirthJournalEntry(ctx, claimTestBirthAck(t, f, claimTestID(31), stepHash, stepStatus.Receipt, ackAnchor), f.peer, envA, f.now); err != nil {
+		t.Fatalf("acknowledge installed Step receipt: %v", err)
+	}
+
+	releaseRaw, releaseHash := claimTestBirthRelease(t, f, 33, 4, barrier)
+	pending, err := f.s.SubmitClaimLifecycle(ctx, releaseRaw, releaseHash, f.peer, f.now, nil)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit complete release: %+v %v", pending, err)
+	}
+	var signCalls int
+	if _, err = f.s.CompleteClaimLifecycle(ctx, pending.Owner, "", []string{claimTestID(103)}, f.now, func(context.Context, []byte) ([]byte, error) {
+		signCalls++
+		return nil, errors.New("transient signer failure")
+	}); err == nil || signCalls != 1 {
+		t.Fatalf("injected signer failure = %v, calls=%d", err, signCalls)
+	}
+	if err = f.s.AbandonClaimLifecycleExecution(pending.Owner); err != nil {
+		t.Fatalf("release failed completion lease: %v", err)
+	}
+	retry, err := f.s.SubmitClaimLifecycle(ctx, releaseRaw, releaseHash, f.peer, f.now, nil)
+	if err != nil || !retry.Pending || retry.Owner != nil {
+		t.Fatalf("exact release retry = %+v, %v; want pending without a second owner", retry, err)
+	}
+	recovered, err := f.s.RecoverClaimLifecycle(ctx, releaseRaw, releaseHash)
+	if err != nil {
+		t.Fatalf("recover release continuation: %v", err)
+	}
+	released, err := f.s.CompleteClaimLifecycle(ctx, recovered, "", []string{claimTestID(103)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]any{"claim_id": f.matter, "claim_epoch": uint64(1), "dispatch_id": nil, "barrier_digest": barrierDigest}
+	claimTestReceipt(t, released, "result.succeeded", out, 103)
+	claimTestEvent(t, f, 3, 103, 33, releaseHash, "claim.released", f.matter, 4, out)
+	if replay, replayErr := f.s.SubmitClaimLifecycle(ctx, releaseRaw, releaseHash, f.peer, f.now, nil); replayErr != nil || !bytes.Equal(replay.Receipt, released.Receipt) || replay.Owner != nil {
+		t.Fatalf("exact release replay: %+v %v", replay, replayErr)
+	}
+	if err = f.s.AcknowledgeBirthJournalEntry(ctx, claimTestBirthAck(t, f, claimTestID(10), birthHash, birth.Receipt, f.anchor(t)), f.peer, envA, f.now); err != nil {
+		t.Fatalf("valid later-prefix ACK replay after release: %v", err)
+	}
+	if err = f.s.AcknowledgeBirthJournalEntry(ctx, claimTestBirthAck(t, f, claimTestID(10), birthHash, birth.Receipt, PrefixAnchor{
+		Digest: EmptyPrefixAnchor().Digest,
+	}), f.peer, envA, f.now); !errors.Is(err, ErrPrefixMismatch) {
+		t.Fatalf("ACK prefix omitting accepted range = %v, want ErrPrefixMismatch", err)
+	}
+	if err = f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.s, err = OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen released birth journal: %v", err)
+	}
+	if replay, replayErr := f.s.SubmitClaimLifecycle(ctx, releaseRaw, releaseHash, f.peer, f.now, nil); replayErr != nil || !bytes.Equal(replay.Receipt, released.Receipt) || replay.Owner != nil {
+		t.Fatalf("release replay after reopen: %+v %v", replay, replayErr)
+	}
+	step := operation.Command{
+		ID: claimTestID(34), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
+		EnvironmentID: envA, EnvironmentSequence: 5, ActedAt: "2026-09-23T11:59:00Z",
+		CausationCommandID: claimTestID(10), CorrelationCommandID: claimTestID(10),
+		Request: operation.Request{
+			Operation: operation.StepCreateV1.Metadata().Operation,
+			Actor:     "human", Context: operation.Context{Repo: repoA}, Claim: &operation.ClaimContext{ID: f.matter, Epoch: "1"},
+			Input: operation.StepCreateInput{ParentID: f.matter, Title: "must be fenced"},
+		},
+	}
+	stepHashAfterRelease, hashErr := step.RequestHash()
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	if _, err = f.s.SubmitCommand(ctx, step, stepHashAfterRelease, f.peer, f.now); !errors.Is(err, ErrFenced) {
+		t.Fatalf("post-release Step submission = %v, want authority fence", err)
+	}
+	if _, err = f.s.QueryCommand(ctx, domainA, step.ID, stepHashAfterRelease, 7, f.peer, envA, f.now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("fenced Step gained a receipt: %v", err)
 	}
 }
 

@@ -329,6 +329,20 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		app.serveReceiptQuery(writer, request, body, frame, environment)
 		return
+	case "birth-journal.ack":
+		if app.registry == nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveBirthJournalAck(writer, request, body, frame, environment)
+		return
+	case "claim.release":
+		if app.registry == nil || app.sign == nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveBirthClaimRelease(writer, request, body, frame, environment)
+		return
 	default:
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 		return

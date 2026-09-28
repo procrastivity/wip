@@ -65,7 +65,7 @@ func VerifyTransfer(domainID string, epoch uint64, start, end wipdwire.PrefixAnc
 	var byteCount uint64
 	for index, event := range records {
 		if !transferULID.MatchString(event.EventID) || event.EventID <= previousID || len(event.Record) == 0 || len(event.Record) > wipdwire.FrameLimit ||
-			uint64(len(event.Record)) > maxVerifiedEventBytes-byteCount || !validMatterEvent(event.Record, domainID, event.EventID) {
+			uint64(len(event.Record)) > maxVerifiedEventBytes-byteCount || !validAuthorityEvent(event.Record, domainID, event.EventID) {
 			return VerifiedTransfer{}, ErrInvalidTransfer
 		}
 		byteCount += uint64(len(event.Record))
@@ -174,11 +174,11 @@ func verifyManifest(manifest wipdwire.BlobManifest) error {
 	return nil
 }
 
-func validMatterEvent(record []byte, domainID, eventID string) bool {
+func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		(fields["kind"] != "matter.created" && fields["kind"] != "step.created") || !transferULID.MatchString(asString(fields["command_id"])) ||
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released") || !transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
 	}
@@ -206,6 +206,15 @@ func validMatterEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "title", "locator", "parent", "sort_key") &&
 			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(parent) &&
 			locatorOK && transferStepLocator.MatchString(locator) && titleOK && positiveUint(payload["sort_key"])
+	case "claim.released":
+		claimID := asString(payload["claim_id"])
+		epoch, epochOK := payload["claim_epoch"].(uint64)
+		barrier := asString(payload["barrier_digest"])
+		dispatch, dispatchPresent := payload["dispatch_id"]
+		dispatchValid := dispatchPresent && (dispatch == nil || transferULID.MatchString(asString(dispatch)))
+		return wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest") &&
+			transferULID.MatchString(claimID) && fields["subject_id"] == claimID && epochOK && epoch > 0 &&
+			dispatchValid && transferHash.MatchString(barrier)
 	default:
 		return false
 	}

@@ -565,6 +565,9 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 	if err != nil || r.Range == nil || len(events) != int(r.Range.Count) || len(events) == 0 {
 		return ErrInvalidStore
 	}
+	if c.name == "claim.release" && c.worktree == "" {
+		return checkBirthReleaseEvents(db, c, r, events)
+	}
 	type expectedEvent struct {
 		kind, subject string
 		payload       map[string]any
@@ -667,6 +670,37 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 		if e != nil || !bytes.Equal(payload, fields["payload"]) {
 			return ErrInvalidStore
 		}
+	}
+	return nil
+}
+
+func checkBirthReleaseEvents(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent) error {
+	if len(events) != 1 || c.claimID == "" || c.claimEpoch != 1 || c.barrier == nil || c.barrier.Journal != c.claimID ||
+		c.barrier.Claim != (claimRef{ID: c.claimID, Epoch: 1}) || receipt.Operation.Name != "claim.release" || receipt.Operation.Version != 1 {
+		return ErrInvalidStore
+	}
+	var matter, owner, repo, state, releaseID, barrierDigest string
+	var epoch uint64
+	if err := db.QueryRow(`SELECT matter_id,owner_environment_id,repo_id,claim_epoch,state,release_command_id,barrier_digest
+		FROM birth_journals WHERE domain_id=? AND matter_id=?`, c.domain, c.claimID).
+		Scan(&matter, &owner, &repo, &epoch, &state, &releaseID, &barrierDigest); err != nil ||
+		matter != c.claimID || owner != c.environment || repo != c.repo || epoch != 1 || state != "released" || releaseID != c.id || barrierDigest != c.barrier.Digest {
+		return ErrInvalidStore
+	}
+	output := map[string]any{"claim_id": matter, "claim_epoch": uint64(1), "dispatch_id": nil, "barrier_digest": barrierDigest}
+	encoded, err := artifactEncoder.Marshal(output)
+	if err != nil || !bytes.Equal(receipt.Result.Output, encoded) || receipt.Result.Code != "result.succeeded" || receipt.Range == nil ||
+		receipt.Range.Count != 1 || events[0].id != receipt.Range.First || events[0].id != receipt.Range.Last {
+		return ErrInvalidStore
+	}
+	var fields map[string]cbor.RawMessage
+	var value struct {
+		Kind    string `cbor:"kind"`
+		Subject string `cbor:"subject_id"`
+	}
+	if canonicalDecode(events[0].raw, &fields) != nil || artifactDecoder.Unmarshal(events[0].raw, &value) != nil ||
+		value.Kind != "claim.released" || value.Subject != matter || !bytes.Equal(fields["payload"], encoded) {
+		return ErrInvalidStore
 	}
 	return nil
 }

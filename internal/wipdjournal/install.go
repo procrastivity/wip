@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 
@@ -75,6 +76,46 @@ func createEnvironmentInstallSchema(executor sqlExecutor) error {
 		`CREATE TRIGGER installed_receipt_no_delete BEFORE DELETE ON installed_receipts BEGIN SELECT RAISE(ABORT,'retained installed receipt'); END`,
 		`CREATE TABLE environment_overlay(item_kind TEXT NOT NULL CHECK(item_kind IN ('folded','provisional')),item_id TEXT NOT NULL,environment_sequence INTEGER,source_bytes BLOB NOT NULL,PRIMARY KEY(item_kind,item_id),CHECK((item_kind='folded' AND environment_sequence IS NULL) OR (item_kind='provisional' AND environment_sequence IS NOT NULL AND environment_sequence>0))) STRICT, WITHOUT ROWID`,
 		`CREATE INDEX environment_overlay_order ON environment_overlay(item_kind,environment_sequence,item_id)`,
+	} {
+		if _, err := executor.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createBirthReleaseSchema(executor sqlExecutor) error {
+	for _, statement := range []string{
+		`CREATE TABLE birth_release_attempts(
+			command_id TEXT PRIMARY KEY,
+			environment_sequence INTEGER NOT NULL UNIQUE CHECK(environment_sequence>0),
+			request_hash TEXT NOT NULL CHECK(length(request_hash)=71),
+			canonical_bytes BLOB NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('attempt-prepared','returned')),
+			canonical_receipt BLOB,
+			result_code TEXT CHECK(result_code IS NULL OR result_code IN ('result.succeeded','result.rejected','result.refused','result.failed')),
+			CHECK((state='attempt-prepared' AND canonical_receipt IS NULL AND result_code IS NULL) OR
+				(state='returned' AND canonical_receipt IS NOT NULL AND result_code IS NOT NULL))
+		) STRICT, WITHOUT ROWID`,
+		`CREATE TRIGGER birth_release_identity_immutable BEFORE UPDATE OF command_id,environment_sequence,request_hash,canonical_bytes ON birth_release_attempts
+			BEGIN SELECT RAISE(ABORT,'immutable birth-release identity'); END`,
+		`CREATE TRIGGER birth_release_no_delete BEFORE DELETE ON birth_release_attempts
+			BEGIN SELECT RAISE(ABORT,'retained birth-release identity'); END`,
+		`CREATE TRIGGER birth_release_state_transition BEFORE UPDATE OF state ON birth_release_attempts
+			WHEN NOT (OLD.state='attempt-prepared' AND NEW.state='returned')
+			BEGIN SELECT RAISE(ABORT,'invalid birth-release transition'); END`,
+		`CREATE TRIGGER birth_release_before_insert BEFORE INSERT ON birth_release_attempts
+			WHEN EXISTS(SELECT 1 FROM commands WHERE state!='returned')
+			BEGIN SELECT RAISE(ABORT,'birth journal commands are unresolved'); END`,
+		`CREATE TRIGGER birth_release_command_id_conflict BEFORE INSERT ON birth_release_attempts
+			WHEN EXISTS(SELECT 1 FROM commands WHERE command_id=NEW.command_id)
+			BEGIN SELECT RAISE(ABORT,'birth-release command ID conflicts with journal command'); END`,
+		`CREATE TRIGGER command_after_pending_birth_release BEFORE INSERT ON commands
+			WHEN EXISTS(SELECT 1 FROM birth_release_attempts WHERE state='attempt-prepared')
+			BEGIN SELECT RAISE(ABORT,'birth release outcome is unresolved'); END`,
+		`CREATE TRIGGER command_birth_release_id_conflict BEFORE INSERT ON commands
+			WHEN EXISTS(SELECT 1 FROM birth_release_attempts WHERE command_id=NEW.command_id)
+			BEGIN SELECT RAISE(ABORT,'journal command ID conflicts with birth release'); END`,
 	} {
 		if _, err := executor.Exec(statement); err != nil {
 			return err
@@ -274,6 +315,159 @@ func (j *Journal) InstallFold(ctx context.Context, expected InstallExpectation, 
 		}
 		return updateInstallState(ctx, tx, state, transfer.end, transfer.manifest.Digest, manifest)
 	})
+}
+
+// InstallBirthRelease atomically commits the existing lifecycle receipt, its
+// verified authority tail, and the rebuilt overlay. A replay already committed
+// locally must match the exact retained receipt bytes.
+func (j *Journal) InstallBirthRelease(ctx context.Context, expected InstallExpectation, attempt BirthReleaseCommand, receipt []byte, transfer VerifiedTransfer) (InstallSnapshot, error) {
+	return j.installTransaction(ctx, expected, func(tx *sql.Tx, state storedInstallState) error {
+		persisted, err := readBirthReleaseAttempt(tx.QueryRow(`SELECT command_id,environment_sequence,request_hash,canonical_bytes,state,canonical_receipt,result_code FROM birth_release_attempts WHERE command_id=?`, attempt.ID))
+		if err != nil || !sameBirthReleaseAttempt(persisted, attempt) || !transfer.Valid() || transfer.domainID != j.identity.DomainID ||
+			transfer.epoch != j.identity.AuthorityEpoch || !sameTransferAnchor(transfer.start, state.anchor) {
+			return fmt.Errorf("%w: release identity or transfer anchor mismatch", ErrInvalidTransfer)
+		}
+		if persisted.Returned {
+			if !bytes.Equal(persisted.Receipt, receipt) {
+				return ErrInvalidTransfer
+			}
+			return nil
+		}
+		result, acceptedEventID, output, err := validateBirthReleaseReceipt(persisted, j.identity, receipt)
+		if err != nil {
+			return fmt.Errorf("validate birth-release receipt: %w", err)
+		}
+		if err = validateBirthReleaseEvent(tx, transfer, state.anchor, j.identity, persisted, acceptedEventID, output, result); err != nil {
+			return fmt.Errorf("validate birth-release event: %w", err)
+		}
+		if err = appendVerifiedEvents(ctx, tx, state.anchor.EventCount, transfer.records); err != nil {
+			return err
+		}
+		manifest, err := encodeManifest(transfer.manifest)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE birth_release_attempts SET state='returned',canonical_receipt=?,result_code=? WHERE command_id=? AND state='attempt-prepared'`, receipt, string(result), attempt.ID); err != nil {
+			return err
+		}
+		if err = rebuildOverlay(ctx, tx); err != nil {
+			return err
+		}
+		return updateInstallState(ctx, tx, state, transfer.end, transfer.manifest.Digest, manifest)
+	})
+}
+
+func sameBirthReleaseAttempt(left, right BirthReleaseCommand) bool {
+	return left.ID == right.ID && left.RequestHash == right.RequestHash && left.EnvironmentSeq == right.EnvironmentSeq &&
+		bytes.Equal(left.CanonicalBytes, right.CanonicalBytes) && bytes.Equal(encodeBirthBarrier(left.Barrier), encodeBirthBarrier(right.Barrier))
+}
+
+func validateBirthReleaseReceipt(attempt BirthReleaseCommand, identity Identity, raw []byte) (operation.ResultCode, string, []byte, error) {
+	var empty operation.ResultCode
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || fields["schema"] != "wipd.terminal-receipt/1" || fields["domain_id"] != identity.DomainID ||
+		fields["authority_epoch"] != identity.AuthorityEpoch || fields["identity_schema"] != "wipd.command/1" ||
+		fields["command_id"] != attempt.ID || fields["request_hash"] != attempt.RequestHash {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	operationFields, ok := fields["operation"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(operationFields, "name", "version") || operationFields["name"] != "claim.release" || operationFields["version"] != uint64(1) {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	environment, ok := fields["environment"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(environment, "id", "sequence") || environment["id"] != identity.EnvironmentID || environment["sequence"] != attempt.EnvironmentSeq {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	resultFields, ok := fields["result"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(resultFields, "code", "output", "problem_code") {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	codeText, ok := resultFields["code"].(string)
+	code := operation.ResultCode(codeText)
+	if !ok || (code != operation.ResultSucceeded && code != operation.ResultRejected && code != operation.ResultRefused && code != operation.ResultFailed) {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	accepted := fields["accepted_events"]
+	if code != operation.ResultSucceeded {
+		if accepted != nil || resultFields["output"] != nil {
+			return empty, "", nil, ErrInvalidTransfer
+		}
+		if problem, ok := resultFields["problem_code"].(string); !ok || problem == "" {
+			return empty, "", nil, ErrInvalidTransfer
+		}
+		return code, "", nil, nil
+	}
+	if resultFields["problem_code"] != nil {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	output, ok := resultFields["output"].([]byte)
+	if !ok {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	wantOutput, err := wipdwire.EncodeCanonical(map[string]any{
+		"claim_id": attempt.Barrier.Claim.ID, "claim_epoch": attempt.Barrier.Claim.Epoch,
+		"dispatch_id": nil, "barrier_digest": attempt.Barrier.Digest,
+	})
+	if err != nil || !bytes.Equal(output, wantOutput) {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	rangeFields, ok := accepted.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(rangeFields, "first_event_id", "last_event_id", "event_count") {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	first, firstOK := rangeFields["first_event_id"].(string)
+	last, lastOK := rangeFields["last_event_id"].(string)
+	count, countOK := rangeFields["event_count"].(uint64)
+	if !firstOK || !lastOK || !countOK || count != 1 || first != last || !identityPattern.MatchString(first) {
+		return empty, "", nil, ErrInvalidTransfer
+	}
+	return code, first, bytes.Clone(output), nil
+}
+
+func validateBirthReleaseEvent(tx *sql.Tx, transfer VerifiedTransfer, installed wipdwire.PrefixAnchor, identity Identity, attempt BirthReleaseCommand, eventID string, output []byte, result operation.ResultCode) error {
+	var matches int
+	if eventID != "" {
+		for _, record := range transfer.records {
+			if record.EventID == eventID && validBirthReleaseEventRecord(record.Record, identity, attempt, eventID, output) {
+				matches++
+			}
+		}
+		var raw []byte
+		var position int64
+		err := tx.QueryRow(`SELECT position,record FROM installed_events WHERE event_id=?`, eventID).Scan(&position, &raw)
+		if err == nil {
+			if position <= int64(installed.EventCount) && validBirthReleaseEventRecord(raw, identity, attempt, eventID, output) {
+				matches++
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if result == operation.ResultSucceeded {
+		if matches != 1 {
+			return ErrInvalidTransfer
+		}
+		return nil
+	}
+	if eventID != "" || matches != 0 {
+		return ErrInvalidTransfer
+	}
+	return nil
+}
+
+func validBirthReleaseEventRecord(raw []byte, identity Identity, attempt BirthReleaseCommand, eventID string, output []byte) bool {
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != identity.DomainID ||
+		fields["command_id"] != attempt.ID || fields["request_hash"] != attempt.RequestHash ||
+		fields["kind"] != "claim.released" || fields["subject_id"] != attempt.Barrier.Claim.ID || fields["repo_id"] != identity.RepoID {
+		return false
+	}
+	environment, ok := fields["environment"].(map[string]any)
+	payload, err := wipdwire.EncodeCanonical(fields["payload"])
+	return ok && environment["id"] == identity.EnvironmentID && environment["sequence"] == attempt.EnvironmentSeq &&
+		err == nil && bytes.Equal(payload, output)
 }
 
 func sameInstalledCommand(left, right Entry) bool {
@@ -506,7 +700,7 @@ func validFoldEvents(transfer VerifiedTransfer, entry Entry, acceptedEventIDs []
 				return false
 			}
 		}
-		if !validMatterEvent(record.Record, transfer.domainID, record.EventID) {
+		if !validAuthorityEvent(record.Record, transfer.domainID, record.EventID) {
 			return false
 		}
 	}
@@ -656,7 +850,7 @@ func checkInstallationDatabase(db *sql.DB, identity Identity) error {
 		if err = rows.Scan(&position, &eventID, &record); err != nil {
 			break
 		}
-		if position != int64(count+1) || !transferULID.MatchString(eventID) || previous != "" && eventID <= previous || !validMatterEvent(record, identity.DomainID, eventID) {
+		if position != int64(count+1) || !transferULID.MatchString(eventID) || previous != "" && eventID <= previous || !validAuthorityEvent(record, identity.DomainID, eventID) {
 			err = ErrInvalidJournal
 			break
 		}
@@ -832,6 +1026,46 @@ func upgradeSchemaV1(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if err = initializeEnvironmentInstall(tx, identity); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upgradeSchemaV2(db *sql.DB, identity Identity) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
+		return ErrInvalidJournal
+	}
+	var repoID, domainID, environmentID, marker string
+	var epoch int64
+	if err := db.QueryRow(`SELECT repo_id,domain_id,authority_epoch,environment_id FROM environment_state WHERE singleton=1`).Scan(&repoID, &domainID, &epoch, &environmentID); err != nil ||
+		repoID != identity.RepoID || domainID != identity.DomainID || epoch != int64(identity.AuthorityEpoch) || environmentID != identity.EnvironmentID {
+		return ErrInvalidIdentity
+	}
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=2`).Scan(&marker); err != nil || marker != "environment-command-start-installation" {
+		return ErrInvalidJournal
+	}
+	if err := checkInstallationDatabase(db, identity); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`DROP TABLE schema_migrations`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=3),name TEXT NOT NULL CHECK(name='environment-birth-release-receipt-barrier')) STRICT`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version,name) VALUES(3,'environment-birth-release-receipt-barrier')`); err != nil {
+		return err
+	}
+	if err = createBirthReleaseSchema(tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=3`); err != nil {
 		return err
 	}
 	return tx.Commit()

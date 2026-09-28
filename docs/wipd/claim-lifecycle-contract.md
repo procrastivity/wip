@@ -54,7 +54,7 @@ produced after the receipt.
 |---|---|
 | `claim.acquire@v1` | `{claim:{id:claim_id,epoch:claim_epoch},matter_id,batch_id,dispatch_id}` |
 | `claim.journal-repair@v1` | `{claim_id,archived_journal_id,new_journal_id,action}` |
-| `claim.release@v1` | `{claim_id,claim_epoch,dispatch_id,barrier_digest}` |
+| `claim.release@v1` | `{claim_id,claim_epoch,dispatch_id,barrier_digest}`; for the dispatch-less Step 8 birth claim, `dispatch_id` is null |
 | `claim.stand-down@v1` | `{claim_id,claim_epoch,dispatch_id,reason_digest}` |
 
 Each successful command appends exactly the following events in listed order,
@@ -68,7 +68,7 @@ increasing across the authority prefix, including adjacent events here.
 |---|---|
 | acquire | optional `batch.anonymous-created` → `{batch_id,matter_id}`; `claim.acquired` → `{claim_id,claim_epoch,matter_id,batch_id,dispatch_id,owner_environment_id,worktree_id}`; `dispatch.opened` → `{dispatch_id,matter_id,batch_id,claim_id,worktree_id}` |
 | repair | `claim.journal-repaired` → `{claim_id,archived_journal_id,new_journal_id,action}` |
-| release | `dispatch.closed` → `{dispatch_id,claim_id,claim_epoch}`; `claim.released` → `{claim_id,claim_epoch,dispatch_id,barrier_digest}` |
+| release | acquired claim: `dispatch.closed` → `{dispatch_id,claim_id,claim_epoch}` then `claim.released` → `{claim_id,claim_epoch,dispatch_id,barrier_digest}`; implicit birth claim: only `claim.released` with `dispatch_id:null` |
 | stand-down | `dispatch.closed` → `{dispatch_id,claim_id,claim_epoch}`; `claim.stood-down` → `{claim_id,claim_epoch,dispatch_id,owner_environment_id,acting_environment_id,reason_digest,loss_accepted:true}` |
 
 Every record uses the generic `wipd.event/1` envelope: `schema`, `event_id`,
@@ -390,6 +390,63 @@ install before local state becomes `closed`. Same-ID/hash replay returns the
 same receipt/close product. No subsequent command under the old epoch can be
 submitted.
 
+**Step 9 amendment — dispatch-less provisional birth claim.** The existing
+`claim.release@v1` command also releases the implicit claim created atomically
+with a successful Step 8 Matter birth. This is not a new operation or request
+schema. The canonical command keeps `operation:{name:"claim.release",
+version:1}`, names the birth Matter as `claim.id` at epoch 1, binds the
+Matter's Repo, and has null `clone_id` and `worktree_id`. Its
+`claim-release/1` wrapper and `JournalBarrier/1` fields are unchanged. For this
+case, `journal_id` is the Matter ULID and the claim is `{id: matter_id,
+epoch:1}`; the journal is nonempty and position 1 is the successful Matter
+birth command. Later entries are this Environment's `step.create@v1`
+commands, ordered by Environment sequence, whose parent and exact implicit
+claim are that Matter and whose causation and correlation both name the Matter
+birth command. No unrelated command is a member.
+
+Before release, the Environment returns the eligible journal prefix through
+the shared command-start coordinator. Each successful returned fold and its
+complete tail/manifest are atomically installed with its receipt and overlay
+rebuild. A refusal/quarantine is installed as its exact terminal receipt and
+stops the prefix; no suffix is returned and no release is attempted. An
+unresolved, unadmitted, unknown, or quarantined member blocks release.
+
+For each journal member in order, the Environment may send the existing M5
+control kind `birth-journal.ack` with the exact successful terminal receipt
+bytes and its installed `PrefixAnchor`. The authority authenticates the
+Environment as the birth owner, checks the receipt against the retained
+submission and complete accepted event range, verifies that the range is in
+the asserted installed prefix, and requires all earlier positions to be
+acknowledged first. It durably records the acknowledgement; the ACK is not a
+receipt and cannot infer installation from a sequence number, local journal,
+or command status. Repeating an ACK is safe; a retry may cite a later verified
+prefix if it still contains that exact accepted range, and cannot change the
+first recorded ACK. ACKs add no authority event and consume no Environment
+command sequence.
+
+The authority recomputes the complete barrier from its birth-journal entries,
+terminal receipts, accepted ranges, and ordered installation acknowledgments.
+Every entry must be terminal-success, acknowledged, and nonquarantined. A
+missing/pending/unknown receipt, missing ACK, unresolved entry, quarantine,
+extra/omitted member, or count/digest mismatch returns the normal terminal
+`result.refused` with `refusal.claim-release-barrier`; it does not release the
+claim. Local evidence never substitutes for an authority receipt or ACK.
+
+Successful dispatch-less release atomically stores the existing terminal
+receipt, one `claim.released` event with payload
+`{claim_id,claim_epoch,dispatch_id:null,barrier_digest}`, and durable released
+state in the authority-owned birth-journal projection. It emits no
+`dispatch.closed`, because this claim never owned a Dispatch. The event's
+`subject_id` is the Matter ULID. The immutable implicit-birth identity row is
+retained; the released birth-journal state fences subsequent Step commands
+using the old claim. Same-ID/hash retry returns the same terminal receipt and
+event range; same-ID/different-hash conflicts. The Environment records the
+exact release identity before submission and reports success only after the
+terminal receipt and complete tail are atomically installed with the overlay.
+If the outcome is unknown or local installation fails, commands remain
+blocked and recovery retries that exact identity; it never synthesizes a
+release or infers one from local state.
+
 ## 8. Cross-Environment stand-down
 
 Stand-down is an explicit loss operation, never a force release or a substitute
@@ -522,12 +579,12 @@ identities, state order, contention/cross-boundary refusal, return/fold and
 barrier behavior, stand-down guards, hydration, promotion fencing, and
 cancellation.
 
-This step changes no Step 6 transfer/read schema and adds no daemon, listener,
-authority store, migration, fresh authority state, production claim code,
-current CLI behavior, tracker/WIP/outbox mutation, or M3/M4 implementation.
-Step 8 owns broad conformance; Step 9 owns final cross-contract/security review.
+The Step 9 M5 amendment above is limited to the already authorized
+dispatch-less birth-claim release and does not alter acquired-claim release,
+stand-down, repair, or other protocol-1 schemas. All unrelated changes to
+one-Matter exclusion, claim/epoch assignment, grant closure, readiness, claim
+admission, journal repair, stand-down proof, fencing, or cancellation still
+require a separately negotiated protocol contract.
 
-There are no unresolved Step 7 decisions. Changes to one-Matter exclusion,
-claim/epoch assignment, grant closure, readiness, claim admission, journal
-repair, receipt barriers, stand-down proof, fencing, or cancellation require a
-new negotiated protocol contract; they are not implementation choices.
+There are no unresolved Step 7 decisions; the dispatch-less birth-claim
+amendment is the separately authorized M5 Step 9 scope described above.

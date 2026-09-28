@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 const step7VectorsPath = "../../docs/wipd/claim-lifecycle-vectors.json"
@@ -25,23 +27,93 @@ type step7Fixture struct {
 	ExactClaimGuards       []step7ClaimGuard     `json:"exact_claim_guards"`
 	ReturnRefusalAndRepair step7ReturnRepair     `json:"return_refusal_and_repair"`
 	Release                step7Release          `json:"release"`
+	BirthRelease           json.RawMessage       `json:"birth_release"`
 	StandDown              step7StandDown        `json:"stand_down"`
 	HandoffPromotion       step7HandoffPromotion `json:"handoff_promotion"`
 	Cancellation           []step7Cancellation   `json:"cancellation"`
 }
 
 type step7Schemas struct {
-	Identity      string `json:"identity"`
-	Receipt       string `json:"receipt"`
-	Acquire       string `json:"acquire"`
-	GrantStart    string `json:"grant_start"`
-	GrantEnd      string `json:"grant_end"`
-	Readiness     string `json:"readiness"`
-	ReturnCommand string `json:"return_command"`
-	FoldResult    string `json:"fold_result"`
-	Release       string `json:"release"`
-	Barrier       string `json:"barrier"`
-	StandDown     string `json:"stand_down"`
+	Identity          string `json:"identity"`
+	Receipt           string `json:"receipt"`
+	Acquire           string `json:"acquire"`
+	GrantStart        string `json:"grant_start"`
+	GrantEnd          string `json:"grant_end"`
+	Readiness         string `json:"readiness"`
+	ReturnCommand     string `json:"return_command"`
+	FoldResult        string `json:"fold_result"`
+	Release           string `json:"release"`
+	Barrier           string `json:"barrier"`
+	BirthJournalAck   string `json:"birth_journal_ack"`
+	BirthJournalAcked string `json:"birth_journal_acked"`
+	StandDown         string `json:"stand_down"`
+}
+
+type step9BirthReleaseVector struct {
+	Name      string `json:"name"`
+	Operation string `json:"operation"`
+	MatterID  string `json:"matter_id"`
+	JournalID string `json:"journal_id"`
+	Claim     struct {
+		ID    string `json:"id"`
+		Epoch uint64 `json:"epoch"`
+	} `json:"claim"`
+	Entries []struct {
+		Position      uint64 `json:"position"`
+		CommandID     string `json:"command_id"`
+		RequestHash   string `json:"request_hash"`
+		Result        string `json:"result"`
+		AcceptedRange *struct {
+			First string `json:"first_event_id"`
+			Last  string `json:"last_event_id"`
+			Count uint64 `json:"event_count"`
+		} `json:"accepted_range"`
+		ParentAndClaim          string `json:"parent_and_claim"`
+		CausationAndCorrelation string `json:"causation_and_correlation"`
+		InstalledBeforeAck      bool   `json:"installed_before_ack"`
+	} `json:"entries"`
+	Barrier struct {
+		EntryCount           uint64 `json:"entry_count"`
+		LastPosition         uint64 `json:"last_position"`
+		TerminalReceiptCount uint64 `json:"terminal_receipt_count"`
+		EntriesDigest        string `json:"entries_digest"`
+		Sealed               bool   `json:"sealed"`
+		UnresolvedCount      uint64 `json:"unresolved_count"`
+		QuarantinedCount     uint64 `json:"quarantined_count"`
+	} `json:"barrier"`
+	Order    []string `json:"order"`
+	Refusals []struct {
+		Name             string `json:"name"`
+		UnresolvedCount  uint64 `json:"unresolved_count"`
+		QuarantinedCount uint64 `json:"quarantined_count"`
+		Result           string `json:"result"`
+		ProblemCode      string `json:"problem_code"`
+		Released         bool   `json:"released"`
+	} `json:"refusals"`
+	Success struct {
+		AcknowledgedPositions []uint64 `json:"acknowledged_positions"`
+		Result                string   `json:"result"`
+		Events                []struct {
+			Kind      string `json:"kind"`
+			SubjectID string `json:"subject_id"`
+			Payload   struct {
+				ClaimID       string  `json:"claim_id"`
+				ClaimEpoch    uint64  `json:"claim_epoch"`
+				DispatchID    *string `json:"dispatch_id"`
+				BarrierDigest string  `json:"barrier_digest"`
+			} `json:"payload"`
+		} `json:"events"`
+		DispatchClosedEventCount uint64 `json:"dispatch_closed_event_count"`
+		BirthJournalState        string `json:"birth_journal_state"`
+		SameIDRetry              string `json:"same_id_retry"`
+		PostReleaseStep          string `json:"post_release_step"`
+	} `json:"success"`
+	UnknownOutcome struct {
+		State                 string `json:"state"`
+		CommandsBlocked       bool   `json:"commands_blocked"`
+		Recovery              string `json:"recovery"`
+		LocalInferenceAllowed bool   `json:"local_inference_allowed"`
+	} `json:"unknown_outcome"`
 }
 
 type step7Identity struct {
@@ -275,6 +347,7 @@ func TestStep7AcquireGrantExclusionAndHydration(t *testing.T) {
 		GrantEnd: "wipd.claim-grant-end/1", Readiness: "wipd.claim-readiness/1",
 		ReturnCommand: "wipd.return-command/1", FoldResult: "wipd.fold-result/1",
 		Release: "wipd.claim-release/1", Barrier: "wipd.journal-barrier/1",
+		BirthJournalAck: "wipd.birth-journal-ack/1", BirthJournalAcked: "wipd.birth-journal-acked/1",
 		StandDown: "wipd.claim-stand-down/1",
 	}) {
 		t.Fatalf("fixture headers = %#v / %#v", fixture.Notation, fixture.Schemas)
@@ -541,6 +614,78 @@ func TestStep7CancellationBoundaries(t *testing.T) {
 		!strings.Contains(cases["hydration-cancelled"].DurableState, "not-ready") {
 		t.Fatalf("return/hydration cancellation = %#v / %#v",
 			cases["return-after-possible-authority-submission"], cases["hydration-cancelled"])
+	}
+}
+
+func TestStep9BirthReleaseBarrierVector(t *testing.T) {
+	fixture := loadStep7Fixture(t)
+	var vector step9BirthReleaseVector
+	decoder := json.NewDecoder(bytes.NewReader(fixture.BirthRelease))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&vector); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("unexpected trailing birth-release vector data: %v", err)
+	}
+	if vector.Operation != "claim.release@v1" || vector.Name == "" ||
+		vector.MatterID != vector.JournalID || vector.Claim.ID != vector.MatterID || vector.Claim.Epoch != 1 ||
+		len(vector.Entries) != 2 || vector.Barrier.EntryCount != 2 || vector.Barrier.LastPosition != 2 ||
+		vector.Barrier.TerminalReceiptCount != 2 || !vector.Barrier.Sealed ||
+		vector.Barrier.UnresolvedCount != 0 || vector.Barrier.QuarantinedCount != 0 {
+		t.Fatalf("birth journal identity/barrier = %#v", vector)
+	}
+	entries := make([]wipdwire.JournalBarrierEntry, 0, len(vector.Entries))
+	for index, entry := range vector.Entries {
+		if entry.Position != uint64(index+1) || entry.Result != "result.succeeded" ||
+			!entry.InstalledBeforeAck || !step6ULIDPattern.MatchString(entry.CommandID) ||
+			!step6DigestPattern.MatchString(entry.RequestHash) || entry.AcceptedRange == nil ||
+			!step6ULIDPattern.MatchString(entry.AcceptedRange.First) ||
+			!step6ULIDPattern.MatchString(entry.AcceptedRange.Last) || entry.AcceptedRange.Count == 0 {
+			t.Fatalf("birth receipt entry %d = %#v", index, entry)
+		}
+		if index == 1 && (entry.ParentAndClaim != vector.MatterID ||
+			entry.CausationAndCorrelation != vector.Entries[0].CommandID) {
+			t.Fatalf("Step birth is not bound to Matter/preceding birth: %#v", entry)
+		}
+		rangeOfEvents := &wipdwire.JournalBarrierRange{
+			First: entry.AcceptedRange.First, Last: entry.AcceptedRange.Last, Count: entry.AcceptedRange.Count,
+		}
+		entries = append(entries, wipdwire.JournalBarrierEntry{
+			Position: entry.Position, CommandID: entry.CommandID, RequestHash: entry.RequestHash,
+			ResultCode: entry.Result, Range: rangeOfEvents,
+		})
+	}
+	digest, err := wipdwire.JournalBarrierDigest(entries)
+	if err != nil || digest != vector.Barrier.EntriesDigest {
+		t.Fatalf("birth barrier digest = %q, want %q (error %v)", digest, vector.Barrier.EntriesDigest, err)
+	}
+	if !reflect.DeepEqual(vector.Order, []string{
+		"return-step-prefix", "install-receipt-tail-manifest-overlay", "pull-and-install-tail",
+		"ack-position-1", "ack-position-2", "submit-existing-claim.release@v1", "install-release-receipt-tail-overlay",
+	}) || len(vector.Refusals) != 2 {
+		t.Fatalf("birth release ordering/refusals = %#v / %#v", vector.Order, vector.Refusals)
+	}
+	for _, refusal := range vector.Refusals {
+		if refusal.Result != "result.refused" || refusal.ProblemCode != "refusal.claim-release-barrier" || refusal.Released ||
+			((refusal.Name == "pending-or-unknown-receipt") != (refusal.UnresolvedCount == 1)) ||
+			((refusal.Name == "quarantined-step") != (refusal.QuarantinedCount == 1)) {
+			t.Errorf("birth release refusal = %#v", refusal)
+		}
+	}
+	success := vector.Success
+	if !reflect.DeepEqual(success.AcknowledgedPositions, []uint64{1, 2}) || success.Result != "result.succeeded" ||
+		len(success.Events) != 1 || success.Events[0].Kind != "claim.released" ||
+		success.Events[0].SubjectID != vector.MatterID || success.Events[0].Payload.ClaimID != vector.MatterID ||
+		success.Events[0].Payload.ClaimEpoch != 1 || success.Events[0].Payload.DispatchID != nil ||
+		success.Events[0].Payload.BarrierDigest != digest || success.DispatchClosedEventCount != 0 ||
+		success.BirthJournalState != "released" || success.SameIDRetry != "same-receipt-and-event-range" ||
+		success.PostReleaseStep != "claim.fenced" {
+		t.Fatalf("birth release success/fencing = %#v", success)
+	}
+	if vector.UnknownOutcome.State != "release-attempt-prepared" || !vector.UnknownOutcome.CommandsBlocked ||
+		vector.UnknownOutcome.LocalInferenceAllowed || vector.UnknownOutcome.Recovery != "exact-command-id-hash-barrier-retry" {
+		t.Fatalf("birth release unknown outcome = %#v", vector.UnknownOutcome)
 	}
 }
 

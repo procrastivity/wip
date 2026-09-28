@@ -1251,6 +1251,208 @@ func TestM5AuthenticatedMatterAndStepBirthReplayAcrossStoreReopen(t *testing.T) 
 	}
 }
 
+func TestM5BirthJournalReceiptBarrierLifecycleExchange(t *testing.T) {
+	fixture := newM5CommandFixture(t)
+	session := m5SessionWithStep(t, fixture.handler, fixture.peer, true)
+	matter := m5Command("01KZ7XHAQT1S46NYPN1PW1DX3F", 1, "birth-barrier")
+	_, matterFrames := m5Submit(t, session, fixture, matter)
+	if len(matterFrames) != 2 || matterFrames[1].Kind != "command.terminal" {
+		t.Fatalf("Matter birth response=%+v", matterFrames)
+	}
+	step := m5StepCommand("01KZ7XHAQT1S46NYPN1PW1DX3G", 2, m5TestMatter, matter.ID, "Barrier step")
+	_, stepFrames := m5Submit(t, session, fixture, step)
+	if len(stepFrames) != 2 || stepFrames[1].Kind != "command.terminal" {
+		t.Fatalf("Step birth response=%+v", stepFrames)
+	}
+	barrier := m5BirthJournalBarrier(t, m5TestMatter, matter.ID, m5CommandHash(t, matter), matterFrames[1].Payload,
+		step.ID, m5CommandHash(t, step), stepFrames[1].Payload)
+
+	// A terminal authority receipt is not a local-install acknowledgment. The
+	// authority must refuse release until both exact receipts are ACKed.
+	missingACKRaw, missingACKHash := m5BirthReleaseCommand(t, "01KZ7XHAQT1S46NYPN1PW1DX3H", 3, barrier)
+	missingACK := m5Exchange(t, fixture, session, "claim.release", wipdwire.ClaimRelease{
+		Schema: "wipd.claim-release/1", CanonicalCommand: missingACKRaw, RequestHash: missingACKHash, Barrier: barrier,
+	})
+	if len(missingACK) != 2 || missingACK[0].Kind != "submission.accepted" || missingACK[1].Kind != "command.terminal" ||
+		m5ReceiptResultCode(t, missingACK[1].Payload) != operation.ResultRefused {
+		t.Fatalf("release without install acknowledgments=%+v", missingACK)
+	}
+
+	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || anchor.EventCount != 2 {
+		t.Fatalf("birth installed prefix=%+v err=%v", anchor, err)
+	}
+	for _, item := range []struct {
+		id, hash string
+		receipt  []byte
+	}{{matter.ID, m5CommandHash(t, matter), matterFrames[1].Payload}, {step.ID, m5CommandHash(t, step), stepFrames[1].Payload}} {
+		ack := wipdwire.BirthJournalAck{
+			Schema: "wipd.birth-journal-ack/1", DomainID: m5TestDomain,
+			Epoch: 1, MatterID: m5TestMatter, CommandID: item.id, RequestHash: item.hash,
+			Receipt: item.receipt, Installed: m5WireAnchor(anchor),
+		}
+		frames := m5Exchange(t, fixture, session, "birth-journal.ack", ack)
+		if len(frames) != 1 || frames[0].Kind != "birth-journal.acknowledged" {
+			t.Fatalf("acknowledge installed %s receipt=%+v", item.id, frames)
+		}
+	}
+
+	releaseID := "01KZ7XHAQT1S46NYPN1PW1DX3K"
+	releaseRaw, releaseHash := m5BirthReleaseCommand(t, releaseID, 4, barrier)
+	releasePayload := wipdwire.ClaimRelease{
+		Schema: "wipd.claim-release/1", CanonicalCommand: releaseRaw, RequestHash: releaseHash, Barrier: barrier,
+	}
+	originalSigner := fixture.config.SignArtifact
+	signerFailed := false
+	fixture.config.SignArtifact = func(ctx context.Context, message []byte) ([]byte, error) {
+		if !signerFailed {
+			signerFailed = true
+			return nil, errors.New("transient release signer failure")
+		}
+		return originalSigner(ctx, message)
+	}
+	fixture.server = fixture.serverForStore(t, fixture.store)
+	fixture.handler = fixture.server.http.Handler
+	firstAttempt := m5Exchange(t, fixture, session, "claim.release", releasePayload)
+	if !signerFailed || len(firstAttempt) != 1 || firstAttempt[0].Kind != "submission.accepted" {
+		t.Fatalf("transient signer failure did not preserve accepted/pending release: %+v", firstAttempt)
+	}
+	pendingQuery := m5Exchange(t, fixture, session, "receipt.query", wipdwire.ReceiptQuery{
+		Schema: "wipd.receipt-query/1", DomainID: m5TestDomain, CommandID: releaseID, RequestHash: releaseHash,
+	})
+	if len(pendingQuery) != 1 || pendingQuery[0].Kind != "receipt.pending" {
+		t.Fatalf("release signer failure fabricated terminal outcome: %+v", pendingQuery)
+	}
+	released := m5Exchange(t, fixture, session, "claim.release", releasePayload)
+	if len(released) != 2 || released[0].Kind != "submission.accepted" || released[1].Kind != "command.terminal" ||
+		m5ReceiptResultCode(t, released[1].Payload) != operation.ResultSucceeded {
+		t.Fatalf("same-live-store release retry=%+v", released)
+	}
+	receipt, err := wipdwire.DecodeCanonicalMap(released[1].Payload,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || receipt["command_id"] != releaseID {
+		t.Fatalf("release receipt=%#v err=%v", receipt, err)
+	}
+	result := receipt["result"].(map[string]any)
+	output, ok := result["output"].([]byte)
+	if !ok {
+		t.Fatalf("release output has type %T", result["output"])
+	}
+	outputFields, err := wipdwire.DecodeCanonicalMap(output, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest")
+	if err != nil || outputFields["claim_id"] != m5TestMatter || outputFields["claim_epoch"] != uint64(1) ||
+		outputFields["dispatch_id"] != nil || outputFields["barrier_digest"] != barrier.Digest {
+		t.Fatalf("dispatch-less release output=%#v err=%v", outputFields, err)
+	}
+	replay := m5Exchange(t, fixture, session, "claim.release", releasePayload)
+	if len(replay) != 1 || replay[0].Kind != "command.terminal" || !bytes.Equal(replay[0].Payload, released[1].Payload) {
+		t.Fatalf("same-ID release replay=%+v", replay)
+	}
+	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || anchor.EventCount != 3 {
+		t.Fatalf("released authority prefix=%+v err=%v", anchor, err)
+	}
+	query := wipdwire.ReceiptQuery{Schema: "wipd.receipt-query/1", DomainID: m5TestDomain, CommandID: releaseID, RequestHash: releaseHash}
+	queried := m5Exchange(t, fixture, session, "receipt.query", query)
+	if len(queried) != 1 || queried[0].Kind != "command.terminal" || !bytes.Equal(queried[0].Payload, released[1].Payload) {
+		t.Fatalf("release receipt query=%+v", queried)
+	}
+
+	fencedStep := m5StepCommand("01KZ7XHAQT1S46NYPN1PW1DX3J", 5, m5TestMatter, matter.ID, "after release")
+	_, fenced := m5Submit(t, session, fixture, fencedStep)
+	if len(fenced) != 1 || fenced[0].Kind != "problem" || m5ProblemCode(t, fenced[0]) != "auth.environment-domain-mismatch" {
+		t.Fatalf("post-release Step was not authority-fenced: %+v", fenced)
+	}
+}
+
+func m5BirthJournalBarrier(t *testing.T, matterID, matterCommandID, matterHash string, matterReceipt []byte,
+	stepCommandID, stepHash string, stepReceipt []byte,
+) wipdwire.JournalBarrier {
+	t.Helper()
+	readRange := func(raw []byte) *wipdwire.JournalBarrierRange {
+		fields, err := wipdwire.DecodeCanonicalMap(raw,
+			"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted, ok := fields["accepted_events"].(map[string]any)
+		if !ok {
+			t.Fatalf("birth receipt lacks accepted range: %#v", fields["accepted_events"])
+		}
+		return &wipdwire.JournalBarrierRange{First: accepted["first_event_id"].(string), Last: accepted["last_event_id"].(string), Count: accepted["event_count"].(uint64)}
+	}
+	entries := []wipdwire.JournalBarrierEntry{
+		{Position: 1, CommandID: matterCommandID, RequestHash: matterHash, ResultCode: string(operation.ResultSucceeded), Range: readRange(matterReceipt)},
+		{Position: 2, CommandID: stepCommandID, RequestHash: stepHash, ResultCode: string(operation.ResultSucceeded), Range: readRange(stepReceipt)},
+	}
+	digest, err := wipdwire.JournalBarrierDigest(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wipdwire.JournalBarrier{
+		Schema: "wipd.journal-barrier/1", Journal: matterID,
+		Claim: wipdwire.ClaimRef{ID: matterID, Epoch: 1}, Count: 2, Last: 2, Receipts: 2,
+		Digest: digest, Sealed: true,
+	}
+}
+
+func m5BirthReleaseCommand(t *testing.T, id string, sequence uint64, barrier wipdwire.JournalBarrier) ([]byte, string) {
+	t.Helper()
+	raw, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": id,
+		"authority":   map[string]any{"domain_id": m5TestDomain, "expected_epoch": uint64(1)},
+		"environment": map[string]any{"id": m5TestEnv, "sequence": sequence},
+		"acted_at":    "2026-09-23T12:00:00Z", "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": id,
+		"operation": map[string]any{"name": "claim.release", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": m5TestRepo, "clone_id": nil, "worktree_id": nil},
+		"claim":     map[string]any{"id": barrier.Claim.ID, "epoch": barrier.Claim.Epoch},
+		"input":     map[string]any{"barrier": barrier}, "blobs": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(append([]byte("wipd/request-hash/v1\x00"), raw...))
+	return raw, "sha256:" + hex.EncodeToString(hash[:])
+}
+
+func m5WireAnchor(anchor authoritystore.PrefixAnchor) wipdwire.PrefixAnchor {
+	result := wipdwire.PrefixAnchor{EventCount: anchor.EventCount, Digest: anchor.Digest}
+	if anchor.EventCount != 0 {
+		eventID := anchor.EventID
+		result.EventID = &eventID
+	}
+	return result
+}
+
+func m5Exchange(t *testing.T, fixture *m5CommandFixture, session *labConnectionSession, kind string, payload any) []wipdwire.Frame {
+	t.Helper()
+	encoded, err := wipdwire.EncodeCanonical(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, request := m5Request(t, session, fixture.peer, kind, encoded, http.MethodPost, labExchangePath)
+	fixture.handler.ServeHTTP(response, request)
+	return m5ResponseFrames(t, response, 4)
+}
+
+func m5ReceiptResultCode(t *testing.T, raw []byte) operation.ResultCode {
+	t.Helper()
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("terminal receipt result=%#v", fields["result"])
+	}
+	code, ok := result["code"].(string)
+	if !ok {
+		t.Fatalf("terminal receipt code=%#v", result["code"])
+	}
+	return operation.ResultCode(code)
+}
+
 type m5SubmissionBarrierWriter struct {
 	*httptest.ResponseRecorder
 	store    *authoritystore.Store

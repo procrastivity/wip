@@ -370,6 +370,25 @@ claim-release = {
   "barrier": journal-barrier,
   "deadline": tstr / null
 }
+; Step 9 M5 controls: ACK is sent only after the exact successful receipt and
+; its complete accepted range are atomically installed through this prefix.
+birth-journal-ack = {
+  "schema": "wipd.birth-journal-ack/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "matter_id": ulid,
+  "command_id": ulid,
+  "request_hash": digest,
+  "terminal_receipt": bstr,
+  "installed_prefix": prefix-anchor
+}
+birth-journal-acked = {
+  "schema": "wipd.birth-journal-acked/1",
+  "domain_id": ulid,
+  "matter_id": ulid,
+  "command_id": ulid,
+  "request_hash": digest
+}
 claim-stand-down = {
   "schema": "wipd.claim-stand-down/1",
   "canonical_command": bstr,
@@ -403,7 +422,7 @@ claim-journal-repair-output = {
 claim-release-output = {
   "claim_id": ulid,
   "claim_epoch": positive,
-  "dispatch_id": ulid,
+  "dispatch_id": nullable-ulid,
   "barrier_digest": digest
 }
 claim-stand-down-output = {
@@ -442,6 +461,9 @@ claim-journal-repaired-payload = claim-journal-repair-output
 dispatch-closed-payload = {
   "dispatch_id": ulid, "claim_id": ulid, "claim_epoch": positive
 }
+; For acquired claims dispatch_id is an ULID and dispatch.closed precedes it.
+; For the Step 8 implicit birth claim dispatch_id is null and no Dispatch
+; projection or dispatch.closed event exists.
 claim-released-payload = claim-release-output
 claim-stood-down-payload = {
   "claim_id": ulid, "claim_epoch": positive, "dispatch_id": ulid,

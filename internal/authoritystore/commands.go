@@ -90,6 +90,10 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 		}
 		return nil
 	}
+	var afterInsert func(*sql.Tx) error
+	if command.Request.Operation == operation.StepCreateV1.Metadata().Operation {
+		afterInsert = func(tx *sql.Tx) error { return appendBirthJournalStep(ctx, tx, command, asserted) }
+	}
 	var beforeCommit func() error
 	if checkContext {
 		beforeCommit = func() error {
@@ -102,7 +106,7 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 			return nil
 		}
 	}
-	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, before, beforeCommit)
+	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, before, beforeCommit, afterInsert)
 }
 
 type commandIdentity struct {
@@ -121,7 +125,7 @@ type commandIdentity struct {
 
 // before runs after authentication and replay detection but before the durable
 // submission point. It may only read the caller-owned transaction.
-func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.ConnectionState, at time.Time, before func(*sql.Tx) error, beforeCommit func() error) (CommandStatus, error) {
+func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.ConnectionState, at time.Time, before func(*sql.Tx) error, beforeCommit func() error, afterInsert func(*sql.Tx) error) (CommandStatus, error) {
 	var out CommandStatus
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,6 +183,11 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state) VALUES(?,?,?,?,?,?,?,?,?,'submitted')`, d.ID, c.id, c.hash, c.encoded, d.ActiveEpoch, c.environment, c.sequence, c.name, c.version); err != nil {
 		return out, writeError(err)
+	}
+	if afterInsert != nil {
+		if err = afterInsert(tx); err != nil {
+			return out, err
+		}
 	}
 	if beforeCommit != nil {
 		if err = beforeCommit(); err != nil {
@@ -486,7 +495,43 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	} else {
 		problem = string(result.Problem.Code)
 	}
-	return s.finishCommandTx(ctx, tx, commandIdentity{domain: d.ID, epoch: d.ActiveEpoch, environment: cmd.EnvironmentID, sequence: cmd.EnvironmentSequence, id: cmd.ID, name: cmd.Request.Operation.Name, version: uint64(cmd.Request.Operation.Version), hash: owner.hash}, head, string(result.Code), output, problem, rangeValue, first, last, occurred, sign, nil)
+	var beforeCommit func([]byte, []byte, uint64, uint64) error
+	switch cmd.Request.Operation {
+	case operation.MatterCreateV1.Metadata().Operation:
+		if result.Code == operation.ResultSucceeded {
+			beforeCommit = func(_ []byte, _ []byte, _, _ uint64) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO birth_journals(domain_id,matter_id,claim_epoch,owner_environment_id,repo_id,birth_command_id,state)
+					VALUES(?,?,1,?,?,?,'open')`, d.ID, subjectID, cmd.EnvironmentID, cmd.Request.Context.Repo, cmd.ID); err != nil {
+					return writeError(err)
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO birth_journal_entries(domain_id,matter_id,position,command_id,request_hash,environment_sequence,state)
+					VALUES(?,?,1,?,?,?,'pending')`, d.ID, subjectID, cmd.ID, owner.hash, cmd.EnvironmentSequence)
+				return writeError(err)
+			}
+		}
+	case operation.StepCreateV1.Metadata().Operation:
+		beforeCommit = func(_ []byte, _ []byte, _, _ uint64) error {
+			if result.Code == operation.ResultSucceeded {
+				var state string
+				input := cmd.Request.Input.(operation.StepCreateInput)
+				if err := tx.QueryRowContext(ctx, `SELECT state FROM birth_journal_entries WHERE domain_id=? AND matter_id=? AND command_id=?`, d.ID, input.ParentID, cmd.ID).Scan(&state); err != nil || state != "pending" {
+					return ErrInvalidStore
+				}
+				return nil
+			}
+			input := cmd.Request.Input.(operation.StepCreateInput)
+			updated, err := tx.ExecContext(ctx, `UPDATE birth_journal_entries SET state='quarantined' WHERE domain_id=? AND matter_id=? AND command_id=? AND state='pending'`, d.ID, input.ParentID, cmd.ID)
+			if err != nil {
+				return err
+			}
+			count, err := updated.RowsAffected()
+			if err != nil || count != 1 {
+				return ErrInvalidStore
+			}
+			return nil
+		}
+	}
+	return s.finishCommandTx(ctx, tx, commandIdentity{domain: d.ID, epoch: d.ActiveEpoch, environment: cmd.EnvironmentID, sequence: cmd.EnvironmentSequence, id: cmd.ID, name: cmd.Request.Operation.Name, version: uint64(cmd.Request.Operation.Version), hash: owner.hash}, head, string(result.Code), output, problem, rangeValue, first, last, occurred, sign, beforeCommit)
 }
 
 type eventIdentity struct {
@@ -618,29 +663,6 @@ func birthDefinition(id operation.ID) (operation.Definition, bool) {
 	default:
 		return operation.Definition{}, false
 	}
-}
-
-func validateImplicitBirthClaim(ctx context.Context, tx *sql.Tx, command operation.Command) error {
-	input, ok := command.Request.Input.(operation.StepCreateInput)
-	if !ok || command.Request.Claim == nil || command.Request.Claim.ID != input.ParentID || command.Request.Claim.Epoch != "1" {
-		return ErrFenced
-	}
-	var ownerEnvironment, repo, birthCommand string
-	var epoch uint64
-	err := tx.QueryRowContext(ctx, `SELECT owner_environment_id,repo_id,birth_command_id,claim_epoch FROM implicit_birth_claims WHERE domain_id=? AND matter_id=?`,
-		command.AuthorityDomainID, input.ParentID).Scan(&ownerEnvironment, &repo, &birthCommand, &epoch)
-	if err != nil || ownerEnvironment != command.EnvironmentID || repo != command.Request.Context.Repo || epoch != 1 ||
-		command.CausationCommandID != birthCommand || command.CorrelationCommandID != birthCommand {
-		return ErrFenced
-	}
-	var birthSequence uint64
-	var birthState string
-	if err = tx.QueryRowContext(ctx, `SELECT environment_sequence,state FROM submissions WHERE domain_id=? AND command_id=? AND environment_id=?`,
-		command.AuthorityDomainID, birthCommand, command.EnvironmentID).Scan(&birthSequence, &birthState); err != nil ||
-		birthState != "terminal" || birthSequence >= command.EnvironmentSequence {
-		return ErrFenced
-	}
-	return nil
 }
 
 func digestRaw(value string) ([]byte, error) {

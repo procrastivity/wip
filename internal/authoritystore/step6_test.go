@@ -723,6 +723,9 @@ func TestStep6V3MigrationBackupRefusalAndNoMutation(t *testing.T) {
 	if err = UpgradeV6(root); err != nil {
 		t.Fatal(err)
 	}
+	if err = UpgradeV7(root); err != nil {
+		t.Fatal(err)
+	}
 	s, err := OpenExisting(root)
 	if err != nil {
 		t.Fatal(err)
