@@ -413,6 +413,243 @@ func TestPullInstallsStepProjectionWhenMatterIsInPriorPrefix(t *testing.T) {
 	}
 }
 
+func TestPullInstallsBirthClaimReleaseAndReopensForLaterPull(t *testing.T) {
+	fixture := newClientFixture(t)
+	artifactSigner := registerClientFixtureArtifactKey(t, fixture)
+	directory := t.TempDir()
+	state := enrollFixtureClient(t, fixture, directory)
+	peer := peerStateFromClient(t, state)
+	ctx := context.Background()
+	const (
+		matterCommandID = "01KZ7XHAQT1S46NYPN1PW1DX76"
+		matterID        = "01KZ7XHAQT1S46NYPN1PW1DX77"
+		matterEventID   = "01KZ7XHAQT1S46NYPN1PW1DX82"
+		stepCommandID   = "01KZ7XHAQT1S46NYPN1PW1DX78"
+		stepID          = "01KZ7XHAQT1S46NYPN1PW1DX79"
+		stepEventID     = "01KZ7XHAQT1S46NYPN1PW1DX83"
+		releaseID       = "01KZ7XHAQT1S46NYPN1PW1DX80"
+		releaseEventID  = "01KZ7XHAQT1S46NYPN1PW1DX84"
+		laterCommandID  = "01KZ7XHAQT1S46NYPN1PW1DX81"
+		laterMatterID   = "01KZ7XHAQT1S46NYPN1PW1DX85"
+		laterEventID    = "01KZ7XHAQT1S46NYPN1PW1DX86"
+	)
+
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, matterCommandID, matterID,
+		matterEventID, "Birth journal Matter", "birth-journal-matter", 1)
+	stepCommand := operation.Command{
+		ID: stepCommandID, AuthorityDomainID: state.DomainID, ExpectedAuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, EnvironmentSequence: 2, ActedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano),
+		CausationCommandID: matterCommandID, CorrelationCommandID: matterCommandID,
+		Request: operation.Request{
+			Operation: operation.StepCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: state.RepoID}, Claim: &operation.ClaimContext{ID: matterID, Epoch: "1"},
+			Input: operation.StepCreateInput{ParentID: matterID, Title: "Birth journal Step"}, Blobs: []operation.BlobInput{},
+		},
+	}
+	stepHash, err := stepCommand.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepSubmission, err := fixture.store.SubmitCommand(ctx, stepCommand, stepHash, peer, time.Now().UTC())
+	if err != nil || stepSubmission.Owner == nil {
+		t.Fatalf("submit birth Step: status=%+v err=%v", stepSubmission, err)
+	}
+	stepResult := operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+		ParentID: matterID, Title: "Birth journal Step",
+	}}
+	if _, err = fixture.store.CompleteCommand(ctx, stepSubmission.Owner, stepResult, stepID, stepEventID, time.Now().UTC(), func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(artifactSigner, message), nil
+	}); err != nil {
+		t.Fatalf("complete birth Step: %v", err)
+	}
+
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 2 || len(state.EventRecords) != 2 || state.EventRecords[1].EventID != stepEventID {
+		t.Fatalf("install birth journal prefix before release: prefix=%+v records=%+v err=%v", state.Prefix, state.EventRecords, err)
+	}
+
+	queryReceipt := func(record wipdwire.EventRecord) (string, string, []byte) {
+		t.Helper()
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		commandID, idOK := fields["command_id"].(string)
+		requestHash, hashOK := fields["request_hash"].(string)
+		if !idOK || !hashOK {
+			t.Fatalf("event lacks command identity: %+v", fields)
+		}
+		status, queryErr := fixture.store.QueryCommand(ctx, state.DomainID, commandID, requestHash, state.Epoch, peer, state.EnvironmentID, time.Now().UTC())
+		if queryErr != nil || status.Pending || len(status.Receipt) == 0 {
+			t.Fatalf("query terminal event receipt: status=%+v err=%v", status, queryErr)
+		}
+		return commandID, requestHash, status.Receipt
+	}
+	barrierEntries := make([]wipdwire.JournalBarrierEntry, 0, 2)
+	for index, record := range state.EventRecords {
+		commandID, requestHash, receiptBytes := queryReceipt(record)
+		receipt, decodeErr := wipdwire.DecodeCanonicalMap(receiptBytes,
+			"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+		if decodeErr != nil || receipt["command_id"] != commandID || receipt["request_hash"] != requestHash {
+			t.Fatalf("decode exact terminal receipt: receipt=%+v err=%v", receipt, decodeErr)
+		}
+		result, ok := receipt["result"].(map[string]any)
+		if !ok || result["code"] != "result.succeeded" {
+			t.Fatalf("birth journal receipt %s is not successful: %+v", commandID, result)
+		}
+		rangeFields, ok := receipt["accepted_events"].(map[string]any)
+		if !ok || !wipdwire.ExactMapKeys(rangeFields, "first_event_id", "last_event_id", "event_count") {
+			t.Fatalf("birth journal receipt %s has no exact event range: %+v", commandID, receipt["accepted_events"])
+		}
+		first, firstOK := rangeFields["first_event_id"].(string)
+		last, lastOK := rangeFields["last_event_id"].(string)
+		count, countOK := rangeFields["event_count"].(uint64)
+		if !firstOK || !lastOK || !countOK || count != 1 || first != record.EventID || last != record.EventID {
+			t.Fatalf("birth journal range %d does not exactly cover installed record %s: %+v", index+1, record.EventID, rangeFields)
+		}
+		ack := wipdwire.BirthJournalAck{
+			Schema: "wipd.birth-journal-ack/1", DomainID: state.DomainID, Epoch: state.Epoch,
+			MatterID: matterID, CommandID: commandID, RequestHash: requestHash,
+			Receipt: bytes.Clone(receiptBytes), Installed: state.Prefix,
+		}
+		if err = fixture.store.AcknowledgeBirthJournalEntry(ctx, ack, peer, state.EnvironmentID, time.Now().UTC()); err != nil {
+			t.Fatalf("acknowledge installed birth receipt %s: %v", commandID, err)
+		}
+		barrierEntries = append(barrierEntries, wipdwire.JournalBarrierEntry{
+			Position: uint64(index + 1), CommandID: commandID, RequestHash: requestHash,
+			ResultCode: "result.succeeded",
+			Range:      &wipdwire.JournalBarrierRange{First: first, Last: last, Count: count},
+		})
+	}
+	barrierDigest, err := wipdwire.JournalBarrierDigest(barrierEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": matterID,
+		"claim":       map[string]any{"id": matterID, "epoch": uint64(1)},
+		"entry_count": uint64(2), "last_position": uint64(2), "terminal_receipt_count": uint64(2),
+		"entries_digest": barrierDigest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0),
+	}
+	releaseRaw, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": releaseID,
+		"authority":   map[string]any{"domain_id": state.DomainID, "expected_epoch": state.Epoch},
+		"environment": map[string]any{"id": state.EnvironmentID, "sequence": uint64(3)},
+		"acted_at":    time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano), "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": releaseID,
+		"operation": map[string]any{"name": "claim.release", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": state.RepoID, "clone_id": nil, "worktree_id": nil},
+		"claim":     map[string]any{"id": matterID, "epoch": uint64(1)},
+		"input":     map[string]any{"barrier": barrier}, "blobs": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseHash := testDigest(append([]byte("wipd/request-hash/v1\x00"), releaseRaw...))
+	pending, err := fixture.store.SubmitClaimLifecycle(ctx, releaseRaw, releaseHash, peer, time.Now().UTC(), nil)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit birth claim release: status=%+v err=%v", pending, err)
+	}
+	released, err := fixture.store.CompleteClaimLifecycle(ctx, pending.Owner, "", []string{releaseEventID}, time.Now().UTC(), func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(artifactSigner, message), nil
+	})
+	if err != nil || released.Pending || len(released.Receipt) == 0 {
+		t.Fatalf("commit durable birth claim release: status=%+v err=%v", released, err)
+	}
+	releaseReceipt, err := wipdwire.DecodeCanonicalMap(released.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || releaseReceipt["command_id"] != releaseID || releaseReceipt["request_hash"] != releaseHash {
+		t.Fatalf("release terminal receipt identity=%+v err=%v", releaseReceipt, err)
+	}
+	resultFields, ok := releaseReceipt["result"].(map[string]any)
+	if !ok || resultFields["code"] != "result.succeeded" {
+		t.Fatalf("release receipt is not successful: %+v", resultFields)
+	}
+	outputBytes, ok := resultFields["output"].([]byte)
+	if !ok {
+		t.Fatalf("release receipt output has type %T", resultFields["output"])
+	}
+	output, err := wipdwire.DecodeCanonicalMap(outputBytes, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest")
+	if err != nil || output["claim_id"] != matterID || output["claim_epoch"] != uint64(1) || output["dispatch_id"] != nil || output["barrier_digest"] != barrierDigest {
+		t.Fatalf("birth release receipt output=%+v err=%v", output, err)
+	}
+
+	client := installedClient(t, fixture, state)
+	limits, err := negotiateRemote(ctx, client, fixture.profile.Origin())
+	if err != nil {
+		t.Fatalf("negotiate production pull client at pre-release prefix: %v", err)
+	}
+	requestFrame, requestID, err := encodeRequestFrame("pull.request", wipdwire.PullRequest{
+		Schema: "wipd.pull-request/1", DomainID: state.DomainID, Epoch: state.Epoch, Installed: state.Prefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := postFramesWithinSession(ctx, client, fixture.profile.Origin()+"/wipd/v1/exchange",
+		requestFrame, requestID, maxClientTransferEvents+3, limits)
+	if err != nil {
+		t.Fatalf("pull dispatch-less release tail over production mTLS exchange: %v", err)
+	}
+	verifiedTransfer, _, err := VerifyPullTransfer(fixture.profile, state, state.Prefix, frames)
+	client.CloseIdleConnections()
+	if err != nil || verifiedTransfer.End().EventCount != 3 {
+		t.Fatalf("verify production release pull tail: end=%+v err=%v", verifiedTransfer.End(), err)
+	}
+
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 3 || len(state.EventRecords) != 3 || state.EventRecords[2].EventID != releaseEventID {
+		t.Fatalf("pull/install dispatch-less claim.released: prefix=%+v records=%+v err=%v", state.Prefix, state.EventRecords, err)
+	}
+	if err = validateInstalledState(state, fixture.profile); err != nil {
+		t.Fatalf("validate installed release prefix: %v", err)
+	}
+	reopened, _, err := loadInstalledState(directory)
+	if err != nil || reopened.Prefix.EventCount != state.Prefix.EventCount || !reflect.DeepEqual(reopened.EventRecords, state.EventRecords) ||
+		!reflect.DeepEqual(reopened.Projections, state.Projections) || !reflect.DeepEqual(reopened.StepProjections, state.StepProjections) {
+		t.Fatalf("reopen did not retain verified release prefix/projection: state=%+v err=%v", reopened.Prefix, err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any, map[string]any){
+		"dispatch must be null": func(_ map[string]any, payload map[string]any) { payload["dispatch_id"] = laterCommandID },
+		"claim epoch is fixed":  func(_ map[string]any, payload map[string]any) { payload["claim_epoch"] = uint64(2) },
+		"subject is the claim":  func(event map[string]any, _ map[string]any) { event["subject_id"] = laterMatterID },
+		"barrier digest is exact": func(_ map[string]any, payload map[string]any) {
+			payload["barrier_digest"] = testDigest([]byte("wrong birth receipt barrier"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := append([]wipdwire.EventRecord(nil), state.EventRecords...)
+			event, decodeErr := wipdwire.DecodeCanonicalMap(candidate[2].Record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			payload, ok := event["payload"].(map[string]any)
+			if !ok {
+				t.Fatalf("release event payload type %T", event["payload"])
+			}
+			mutate(event, payload)
+			candidate[2].Record, decodeErr = wipdwire.EncodeCanonical(event)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if _, _, _, foldErr := foldEventRecords(candidate, state.DomainID); !errors.Is(foldErr, ErrInvalidClientState) {
+				t.Fatalf("malformed release event folded: %v", foldErr)
+			}
+		})
+	}
+
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, laterCommandID, laterMatterID,
+		laterEventID, "After release", "after-birth-release", 4)
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 4 || len(state.EventRecords) != 4 || state.EventRecords[3].EventID != laterEventID ||
+		len(state.Projections) != 2 || len(state.StepProjections) != 1 {
+		t.Fatalf("later pull from reopened release prefix: prefix=%+v records=%+v matters=%d steps=%d err=%v",
+			state.Prefix, state.EventRecords, len(state.Projections), len(state.StepProjections), err)
+	}
+}
+
 func enrollFixtureClient(t *testing.T, fixture *clientFixture, directory string) ClientState {
 	t.Helper()
 	if err := SavePending(directory, fixture.identity); err != nil {

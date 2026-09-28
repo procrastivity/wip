@@ -102,6 +102,29 @@ type stepCreatedEvent struct {
 	} `cbor:"payload"`
 }
 
+type claimReleasedEvent struct {
+	Schema      string `cbor:"schema"`
+	EventID     string `cbor:"event_id"`
+	DomainID    string `cbor:"domain_id"`
+	CommandID   string `cbor:"command_id"`
+	Hash        string `cbor:"request_hash"`
+	Environment struct {
+		ID       string `cbor:"id"`
+		Sequence uint64 `cbor:"sequence"`
+	} `cbor:"environment"`
+	ActedAt    string `cbor:"acted_at"`
+	OccurredAt string `cbor:"occurred_at"`
+	Kind       string `cbor:"kind"`
+	SubjectID  string `cbor:"subject_id"`
+	RepoID     string `cbor:"repo_id"`
+	Payload    struct {
+		ClaimID       string  `cbor:"claim_id"`
+		ClaimEpoch    uint64  `cbor:"claim_epoch"`
+		DispatchID    *string `cbor:"dispatch_id"`
+		BarrierDigest string  `cbor:"barrier_digest"`
+	} `cbor:"payload"`
+}
+
 // PullAndInstall fetches one bounded complete delta from the installed anchor,
 // validates the authority's event and manifest chains, folds the supported M1
 // projections, and atomically replaces the local base only after PullEnd.
@@ -450,6 +473,10 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 	seenIDs := make(map[string]struct{}, len(records))
 	seenLocators := make(map[string]struct{}, len(records))
 	matterRepos := make(map[string]string)
+	matterEnvironments := make(map[string]string)
+	birthJournalEntries := make(map[string][]wipdwire.JournalBarrierEntry)
+	birthJournalCommands := make(map[string]map[string]struct{})
+	releasedBirthClaims := make(map[string]struct{})
 	stepCounts := make(map[string]int)
 	previousEventID := ""
 	for _, record := range records {
@@ -485,6 +512,12 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			seenIDs[event.Payload.ID] = struct{}{}
 			seenLocators[locatorKey] = struct{}{}
 			matterRepos[event.Payload.ID] = event.RepoID
+			matterEnvironments[event.Payload.ID] = event.Environment.ID
+			birthJournalEntries[event.Payload.ID] = []wipdwire.JournalBarrierEntry{{
+				Position: event.Environment.Sequence, CommandID: event.CommandID, RequestHash: event.Hash, ResultCode: string(operation.ResultSucceeded),
+				Range: &wipdwire.JournalBarrierRange{First: event.EventID, Last: event.EventID, Count: 1},
+			}}
+			birthJournalCommands[event.Payload.ID] = map[string]struct{}{event.CommandID: {}}
 			projections = append(projections, eventProjection{
 				ID: event.Payload.ID, RepoID: event.RepoID, Locator: event.Payload.Locator,
 				Title: event.Payload.Title, BirthEventID: event.EventID,
@@ -512,11 +545,70 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			stepCounts[event.Payload.Parent] = count
 			seenIDs[event.SubjectID] = struct{}{}
+			if _, released := releasedBirthClaims[event.Payload.Parent]; !released && event.Environment.ID == matterEnvironments[event.Payload.Parent] {
+				commands := birthJournalCommands[event.Payload.Parent]
+				if _, duplicate := commands[event.CommandID]; duplicate {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				entries := birthJournalEntries[event.Payload.Parent]
+				if event.Environment.Sequence <= entries[0].Position {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				for _, entry := range entries {
+					if entry.Position == event.Environment.Sequence {
+						return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+					}
+				}
+				commands[event.CommandID] = struct{}{}
+				birthJournalEntries[event.Payload.Parent] = append(entries, wipdwire.JournalBarrierEntry{
+					Position: event.Environment.Sequence, CommandID: event.CommandID, RequestHash: event.Hash,
+					ResultCode: string(operation.ResultSucceeded),
+					Range:      &wipdwire.JournalBarrierRange{First: event.EventID, Last: event.EventID, Count: 1},
+				})
+			}
 			stepProjections = append(stepProjections, stepProjection{
 				ID: event.SubjectID, RepoID: event.RepoID, MatterID: event.Payload.Parent,
 				Locator: event.Payload.Locator, Title: event.Payload.Title, SortKey: event.Payload.SortKey,
 				State: "planned", BirthEventID: event.EventID,
 			})
+		case "claim.released":
+			var event claimReleasedEvent
+			if decodeClaimReleasedEvent(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
+				event.DomainID != domainID || !clientULIDPattern.MatchString(event.CommandID) || !validDigest(event.Hash) ||
+				!clientULIDPattern.MatchString(event.Environment.ID) || event.Environment.Sequence == 0 ||
+				!validUTC(event.ActedAt) || !validUTC(event.OccurredAt) || event.Kind != "claim.released" || !clientULIDPattern.MatchString(event.RepoID) ||
+				event.Payload.DispatchID != nil || event.Payload.ClaimEpoch != 1 || !clientULIDPattern.MatchString(event.Payload.ClaimID) ||
+				event.SubjectID != event.Payload.ClaimID || !validDigest(event.Payload.BarrierDigest) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			repo, exists := matterRepos[event.Payload.ClaimID]
+			entries := birthJournalEntries[event.Payload.ClaimID]
+			lastSequence := uint64(0)
+			for _, entry := range entries {
+				if entry.Position > lastSequence {
+					lastSequence = entry.Position
+				}
+			}
+			if !exists || repo != event.RepoID || matterEnvironments[event.Payload.ClaimID] != event.Environment.ID ||
+				len(entries) == 0 || event.Environment.Sequence <= lastSequence {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, alreadyReleased := releasedBirthClaims[event.Payload.ClaimID]; alreadyReleased {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			ordered := append([]wipdwire.JournalBarrierEntry(nil), entries...)
+			sort.Slice(ordered, func(left, right int) bool { return ordered[left].Position < ordered[right].Position })
+			for index := range ordered {
+				ordered[index].Position = uint64(index + 1)
+			}
+			barrierDigest, digestErr := wipdwire.JournalBarrierDigest(ordered)
+			if digestErr != nil || barrierDigest != event.Payload.BarrierDigest {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, duplicate := birthJournalCommands[event.Payload.ClaimID][event.CommandID]; duplicate {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			releasedBirthClaims[event.Payload.ClaimID] = struct{}{}
 		default:
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
@@ -602,6 +694,27 @@ func decodeStepEvent(data []byte, event *stepCreatedEvent) error {
 		if !ok || !wipdwire.ExactMapKeys(nested, expected...) {
 			return ErrInvalidClientState
 		}
+	}
+	if err = wipdwire.DecodeCanonical(data, event,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload"); err != nil {
+		return ErrInvalidClientState
+	}
+	return nil
+}
+
+func decodeClaimReleasedEvent(data []byte, event *claimReleasedEvent) error {
+	fields, err := wipdwire.DecodeCanonicalMap(data,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil {
+		return ErrInvalidClientState
+	}
+	environment, ok := fields["environment"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(environment, "id", "sequence") {
+		return ErrInvalidClientState
+	}
+	payload, ok := fields["payload"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest") || payload["dispatch_id"] != nil {
+		return ErrInvalidClientState
 	}
 	if err = wipdwire.DecodeCanonical(data, event,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload"); err != nil {
