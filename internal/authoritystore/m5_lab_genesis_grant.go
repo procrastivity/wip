@@ -3,6 +3,7 @@ package authoritystore
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -183,4 +184,29 @@ func (s *Store) BootstrapDomainWithM5LabGrant(ctx context.Context, domain Domain
 		return err
 	}
 	return tx.Commit()
+}
+
+// M5LabGenesisRepoID returns the immutable initial Repo recorded by the
+// consumed test-lab genesis grant. Later Repo memberships do not change it.
+func (s *Store) M5LabGenesisRepoID(ctx context.Context, domainID string) (string, error) {
+	if !ulid.MatchString(domainID) {
+		return "", errors.New("authoritystore: invalid domain ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return "", errors.New("authoritystore: closed")
+	}
+	var repoID string
+	err := s.db.QueryRowContext(ctx, `SELECT repo_id FROM m5_lab_genesis_grant_consumptions WHERE domain_id=?`, domainID).Scan(&repoID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if !ulid.MatchString(repoID) {
+		return "", ErrInvalidStore
+	}
+	return repoID, nil
 }

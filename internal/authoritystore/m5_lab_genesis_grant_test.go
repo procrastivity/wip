@@ -227,6 +227,28 @@ func TestM5LabGenesisGrantBootstrapPersistsIdentityHighWaterAndReplayFence(t *te
 	}
 }
 
+func TestM5LabGenesisRepoIDRemainsExactAfterAnotherRepoJoinsDomain(t *testing.T) {
+	store, _ := fresh(t)
+	domain, _ := identity(domainA, 1)
+	setupSigner := key("m5-lab-genesis-repo-pin")
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	grant := issueM5LabGrantForTest(t, setupSigner, domain, repoA, "create-domain", bytes.Repeat([]byte{0x51}, 16), now, now.Add(time.Minute))
+	if err := store.BootstrapDomainWithM5LabGrant(context.Background(), domain, repoA,
+		setupSigner.Public().(ed25519.PublicKey), grant, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachRepo(context.Background(), domain.ID, repoB); err != nil {
+		t.Fatalf("attach second valid domain Repo: %v", err)
+	}
+	if gotDomain, err := store.RepoDomain(context.Background(), repoB); err != nil || gotDomain != domain.ID {
+		t.Fatalf("second Repo membership = %q, %v", gotDomain, err)
+	}
+	got, err := store.M5LabGenesisRepoID(context.Background(), domain.ID)
+	if err != nil || got != repoA {
+		t.Fatalf("persisted genesis Repo = %q, %v; want original %q despite later member %q", got, err, repoA, repoB)
+	}
+}
+
 func TestM5LabBootstrapPreservesOfflineOwnerRootForEnrollmentGrant(t *testing.T) {
 	store, _ := fresh(t)
 	ctx := context.Background()

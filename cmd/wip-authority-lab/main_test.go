@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/authoritystore"
+	"github.com/procrastivity/wip/internal/wipdauthority"
 )
 
 func TestBootstrapFreshDomainPersistsAuthorizedIdentityAndEmptyHighWater(t *testing.T) {
@@ -95,6 +96,56 @@ func TestBootstrapFreshDomainPersistsAuthorizedIdentityAndEmptyHighWater(t *test
 				t.Errorf("%s persisted in %s", label, name)
 			}
 		}
+	}
+}
+
+func TestStep4PreflightRejectsAnotherMemberRepoAgainstPersistedBootstrapRecord(t *testing.T) {
+	ownerPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupPublic, setupPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const domainID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	const bootstrapRepoID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const requestedMemberRepoID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	domain, err := makeDomain(domainID, ownerPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	grant, err := authoritystore.CreateM5LabGenesisGrant(setupPrivate, domain, bootstrapRepoID,
+		bytes.Repeat([]byte{0x17}, 16), now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "authority")
+	if _, err = bootstrapFreshDomain(context.Background(), root, domain, bootstrapRepoID, setupPublic, grant, now); err != nil {
+		t.Fatal(err)
+	}
+	store, err := authoritystore.OpenExisting(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err = store.AttachRepo(context.Background(), domainID, requestedMemberRepoID); err != nil {
+		t.Fatalf("attach second valid Repo: %v", err)
+	}
+	if memberDomain, err := store.RepoDomain(context.Background(), requestedMemberRepoID); err != nil || memberDomain != domainID {
+		t.Fatalf("requested Repo membership = %q, %v", memberDomain, err)
+	}
+	persistedRepoID, err := store.M5LabGenesisRepoID(context.Background(), domainID)
+	if err != nil || persistedRepoID != bootstrapRepoID {
+		t.Fatalf("independent bootstrap Repo = %q, %v; want %q", persistedRepoID, err, bootstrapRepoID)
+	}
+	record := step4BootstrapRepoRecord{Schema: "wipd.m5-lab-bootstrap-repo/1", DomainID: domainID, RepoID: persistedRepoID}
+	if _, err = validateStep4BootstrapRepo(record, domainID, requestedMemberRepoID); !errors.Is(err, wipdauthority.ErrRepoBindingMismatch) {
+		t.Fatalf("Step 4 host preflight for member Repo B = %v, want bootstrap Repo mismatch", err)
+	}
+	if got, err := validateStep4BootstrapRepo(record, domainID, bootstrapRepoID); err != nil || got != bootstrapRepoID {
+		t.Fatalf("Step 4 host preflight for genesis Repo = %q, %v", got, err)
 	}
 }
 

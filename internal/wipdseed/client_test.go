@@ -113,11 +113,15 @@ func TestEnrollAndSeedInstallsOnlyVerifiedEmptyShadow(t *testing.T) {
 func TestEnrollAndSeedRejectsRepoDifferentFromBootstrapPinBeforeNetwork(t *testing.T) {
 	fixture := newClientFixture(t)
 	wrongRepoID := "01KZ7XHAQT1S46NYPN1PW1DX3E"
+	bootstrapRepoID, err := fixture.store.M5LabGenesisRepoID(context.Background(), testDomainID)
+	if err != nil || bootstrapRepoID != testRepoID || fixture.profile.M5LabRepoID() != bootstrapRepoID {
+		t.Fatalf("client Repo pin %q, persisted bootstrap Repo %q, error %v", fixture.profile.M5LabRepoID(), bootstrapRepoID, err)
+	}
 	directory := t.TempDir()
-	if err := SavePending(directory, fixture.identity); err != nil {
+	if err = SavePending(directory, fixture.identity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnrollAndSeed(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot,
+	if _, err = EnrollAndSeed(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot,
 		fixture.delegation, wrongRepoID, fixture.identity, fixture.grant, directory); !errors.Is(err, wipdauthority.ErrRepoBindingMismatch) {
 		t.Fatalf("wrong client Repo = %v, want pinned Repo refusal", err)
 	}
@@ -129,6 +133,54 @@ func TestEnrollAndSeedRejectsRepoDifferentFromBootstrapPinBeforeNetwork(t *testi
 	}
 	if calls := fixture.signerCalls.Load(); calls != 0 {
 		t.Fatalf("authority handler ran %d times for wrong client Repo, want zero", calls)
+	}
+}
+
+func TestM5LabServerRejectsAnotherValidMemberAsBootstrapRepo(t *testing.T) {
+	fixture := newClientFixture(t)
+	const repoB = "01KZ7XHAQT1S46NYPN1PW1DX3E"
+	if err := fixture.store.AttachRepo(context.Background(), testDomainID, repoB); err != nil {
+		t.Fatalf("attach second valid Repo to the same domain: %v", err)
+	}
+	if domain, err := fixture.store.RepoDomain(context.Background(), repoB); err != nil || domain != testDomainID {
+		t.Fatalf("Repo B membership = %q, %v", domain, err)
+	}
+	bootstrapRepoID, err := fixture.store.M5LabGenesisRepoID(context.Background(), testDomainID)
+	if err != nil || bootstrapRepoID != testRepoID {
+		t.Fatalf("persisted bootstrap Repo = %q, %v; want %q", bootstrapRepoID, err, testRepoID)
+	}
+
+	// These are the equivalent host inputs when --repo-id B is copied into
+	// both authority serve configuration and the client profile.
+	profileB, err := wipdauthority.NewProfile(fixture.profile.Origin(), testDomainID, 1, fixture.authorityPin, fixture.ownerKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileB, err = profileB.WithM5LabRepoID(repoB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = wipdauthority.NewM5LabServer(profileB, tlsCertificate(t, fixture.serverCertDER, fixture.serverPrivate), wipdauthority.M5LabConfig{
+		Store: fixture.store, RepoID: repoB, EnrollmentGrant: fixture.grant,
+		ExpectedCSRDER: fixture.identity.CSRDER, EnvironmentCACertificateDER: fixture.caDER,
+		SignEnvironmentLeaf: func(context.Context, string, uint64, string, []byte, time.Time) ([]byte, error) {
+			return nil, errors.New("unexpected signer call")
+		},
+	})
+	if !errors.Is(err, wipdauthority.ErrRepoBindingMismatch) {
+		t.Fatalf("server setup for member Repo B = %v, want persisted-genesis binding refusal", err)
+	}
+
+	directory := t.TempDir()
+	if err = SavePending(directory, fixture.identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = EnrollAndSeed(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot,
+		fixture.delegation, repoB, fixture.identity, fixture.grant, directory); !errors.Is(err, wipdauthority.ErrRepoBindingMismatch) {
+		t.Fatalf("client install using bootstrap pin A and requested member B = %v, want binding refusal", err)
+	}
+	if _, err = os.Stat(filepath.Join(directory, stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("member-B attempt installed client state: %v", err)
 	}
 }
 

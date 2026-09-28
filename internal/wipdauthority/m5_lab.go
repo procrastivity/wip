@@ -72,7 +72,8 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	if err != nil || repoDomain != profile.domainID {
 		return nil, ErrRepoMembershipMismatch
 	}
-	if profile.M5LabRepoID() != config.RepoID {
+	genesisRepoID, err := config.Store.M5LabGenesisRepoID(context.Background(), profile.domainID)
+	if err != nil || genesisRepoID != config.RepoID || profile.M5LabRepoID() != genesisRepoID {
 		return nil, ErrRepoBindingMismatch
 	}
 	ca, err := x509.ParseCertificate(config.EnvironmentCACertificateDER)

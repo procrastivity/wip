@@ -49,6 +49,17 @@ type clientPrepareRecord struct {
 	CSRDER []byte `json:"csr_der"`
 }
 
+type step4BootstrapRepoInput struct {
+	Schema   string `json:"schema"`
+	DomainID string `json:"domain_id"`
+}
+
+type step4BootstrapRepoRecord struct {
+	Schema   string `json:"schema"`
+	DomainID string `json:"domain_id"`
+	RepoID   string `json:"repo_id"`
+}
+
 type enrollmentResult struct {
 	Schema        string `json:"schema"`
 	DomainID      string `json:"domain_id"`
@@ -85,6 +96,7 @@ type labClientInput struct {
 	DomainID                string `json:"domain_id"`
 	Epoch                   uint64 `json:"authority_epoch"`
 	RepoID                  string `json:"repo_id"`
+	BootstrapRepoID         string `json:"bootstrap_repo_id"`
 	OwnerRootPublicKey      []byte `json:"owner_root_public_key"`
 	OwnerRootSPKI           string `json:"owner_root_spki"`
 	AuthoritySPKIPin        string `json:"authority_spki_pin"`
@@ -106,6 +118,8 @@ func runStep4Command(args []string) error {
 		return runClientEnrollWorker(args[1:])
 	case "authority-serve-worker":
 		return runAuthorityServeWorker(args[1:])
+	case "bootstrap-repo-worker":
+		return runStep4BootstrapRepoWorker(args[1:])
 	case "prepare-client":
 		return runHostPrepareClient(args[1:])
 	case "enroll":
@@ -176,6 +190,14 @@ func runHostEnroll(args []string) error {
 	if err := verifyOwnedContainer(*clientContainer, *project, "client-env"); err != nil {
 		return err
 	}
+	bootstrapRecord, err := fetchStep4BootstrapRepo(*authorityContainer, *domainID)
+	if err != nil {
+		return err
+	}
+	bootstrapRepoID, err := validateStep4BootstrapRepo(bootstrapRecord, *domainID, *repoID)
+	if err != nil {
+		return err
+	}
 	ownerPublic, err := decodePublicKey(*ownerRootValue)
 	if err != nil {
 		return errors.New("invalid offline owner-root public key")
@@ -242,7 +264,7 @@ func runHostEnroll(args []string) error {
 	stopFile := authorityStateRoot + "/.m5-enroll-stop-" + hex.EncodeToString(stopSuffix)
 	serveConfig := labAuthorityInput{
 		Schema: "wipd.m5-lab-authority-worker/1", Origin: "https://authority-env:8443",
-		DomainID: *domainID, Epoch: *epoch, RepoID: *repoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
+		DomainID: *domainID, Epoch: *epoch, RepoID: bootstrapRepoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
 		AuthoritySPKIPin: serverPin, EnrollmentGrant: grant, ExpectedCSRDER: clientCSR,
 		EnvironmentCACertificateDER: caDER, EnvironmentCAPrivateKeyDER: caKeyDER, EnvironmentCADelegation: delegation,
 		AuthorityCertificateDER: serverCertDER, AuthorityPrivateKeyDER: serverPrivateDER, StopFile: stopFile,
@@ -252,7 +274,7 @@ func runHostEnroll(args []string) error {
 	defer clear(serveConfig.EnrollmentGrant)
 	clientConfig := labClientInput{
 		Schema: "wipd.m5-lab-client-worker/1", Origin: "https://authority-env:8443", DomainID: *domainID,
-		Epoch: *epoch, RepoID: *repoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
+		Epoch: *epoch, RepoID: *repoID, BootstrapRepoID: bootstrapRepoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
 		OwnerRootSPKI: ownerSPKI, AuthoritySPKIPin: serverPin, AuthorityCertificateDER: serverCertDER,
 		EnvironmentCADelegation: delegation, EnrollmentGrant: grant,
 	}
@@ -296,6 +318,70 @@ func runHostEnroll(args []string) error {
 		return fmt.Errorf("client enrollment outcome-unknown domain_id=%s repo_id=%s: invalid result record", *domainID, *repoID)
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func fetchStep4BootstrapRepo(containerID, domainID string) (step4BootstrapRepoRecord, error) {
+	var empty step4BootstrapRepoRecord
+	worker, err := buildWorkerForContainer(containerID)
+	if err != nil {
+		return empty, err
+	}
+	defer func() { _ = os.RemoveAll(filepath.Dir(worker)) }()
+	workerPath, err := copyWorker(containerID, worker)
+	if err != nil {
+		return empty, err
+	}
+	defer removeWorker(containerID, workerPath)
+	input, err := json.Marshal(step4BootstrapRepoInput{Schema: "wipd.m5-lab-bootstrap-repo-request/1", DomainID: domainID})
+	if err != nil {
+		return empty, err
+	}
+	defer clear(input)
+	output, err := runContainerWorker(workerTimeout, containerID, workerPath, "bootstrap-repo-worker", input)
+	if err != nil {
+		return empty, fmt.Errorf("read persisted bootstrap Repo: %w", err)
+	}
+	var record step4BootstrapRepoRecord
+	if err = decodeStrictJSON(output, &record); err != nil {
+		return empty, fmt.Errorf("authority worker returned an invalid bootstrap Repo record: %w", err)
+	}
+	return record, nil
+}
+
+func validateStep4BootstrapRepo(record step4BootstrapRepoRecord, domainID, requestedRepoID string) (string, error) {
+	if record.Schema != "wipd.m5-lab-bootstrap-repo/1" || record.DomainID != domainID || !labULIDPattern.MatchString(record.RepoID) {
+		return "", errors.New("authority worker returned a mismatched bootstrap Repo record")
+	}
+	if requestedRepoID != record.RepoID {
+		return "", wipdauthority.ErrRepoBindingMismatch
+	}
+	return record.RepoID, nil
+}
+
+func runStep4BootstrapRepoWorker(args []string) error {
+	defer removeSelf()
+	if len(args) != 0 {
+		return errors.New("bootstrap-repo-worker does not accept arguments")
+	}
+	var input step4BootstrapRepoInput
+	if err := decodeLimitedStdin(maxServeWorkerInputSize, &input); err != nil {
+		return err
+	}
+	if input.Schema != "wipd.m5-lab-bootstrap-repo-request/1" || !labULIDPattern.MatchString(input.DomainID) {
+		return errors.New("invalid bootstrap Repo worker input")
+	}
+	store, err := authoritystore.OpenExisting(authorityDataRoot)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	repoID, err := store.M5LabGenesisRepoID(context.Background(), input.DomainID)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(step4BootstrapRepoRecord{
+		Schema: "wipd.m5-lab-bootstrap-repo/1", DomainID: input.DomainID, RepoID: repoID,
+	})
 }
 
 func runPrepareClientWorker(args []string) error {
@@ -343,7 +429,8 @@ func runClientEnrollWorker(args []string) error {
 	defer clear(input.EnrollmentGrant)
 	defer clear(input.EnvironmentCADelegation)
 	defer clear(input.OwnerRootPublicKey)
-	if input.Schema != "wipd.m5-lab-client-worker/1" || !labULIDPattern.MatchString(input.DomainID) || !labULIDPattern.MatchString(input.RepoID) || input.Epoch == 0 {
+	if input.Schema != "wipd.m5-lab-client-worker/1" || !labULIDPattern.MatchString(input.DomainID) ||
+		!labULIDPattern.MatchString(input.RepoID) || !labULIDPattern.MatchString(input.BootstrapRepoID) || input.Epoch == 0 {
 		return errors.New("invalid client enrollment worker input")
 	}
 	certificate, err := x509.ParseCertificate(input.AuthorityCertificateDER)
@@ -356,7 +443,7 @@ func runClientEnrollWorker(args []string) error {
 	if err != nil {
 		return err
 	}
-	profile, err = profile.WithM5LabRepoID(input.RepoID)
+	profile, err = profile.WithM5LabRepoID(input.BootstrapRepoID)
 	if err != nil {
 		return err
 	}
@@ -424,21 +511,28 @@ func runAuthorityServeWorker(args []string) error {
 	}
 	ownerDigest := sha256.Sum256(ownerSPKI)
 	ownerKeyID := "sha256:" + hex.EncodeToString(ownerDigest[:])
-	profile, err := wipdauthority.NewProfile(input.Origin, input.DomainID, input.Epoch, input.AuthoritySPKIPin, ownerKeyID)
-	if err != nil {
-		return err
-	}
-	profile, err = profile.WithM5LabRepoID(input.RepoID)
-	if err != nil {
-		return err
-	}
 	store, err := authoritystore.OpenExisting(authorityDataRoot)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
+	bootstrapRepoID, err := store.M5LabGenesisRepoID(context.Background(), input.DomainID)
+	if err != nil {
+		return err
+	}
+	if input.RepoID != bootstrapRepoID {
+		return wipdauthority.ErrRepoBindingMismatch
+	}
+	profile, err := wipdauthority.NewProfile(input.Origin, input.DomainID, input.Epoch, input.AuthoritySPKIPin, ownerKeyID)
+	if err != nil {
+		return err
+	}
+	profile, err = profile.WithM5LabRepoID(bootstrapRepoID)
+	if err != nil {
+		return err
+	}
 	server, err := wipdauthority.NewM5LabServer(profile, tlsCertificateDER(input.AuthorityCertificateDER, authorityPrivate), wipdauthority.M5LabConfig{
-		Store: store, RepoID: input.RepoID, EnrollmentGrant: input.EnrollmentGrant,
+		Store: store, RepoID: bootstrapRepoID, EnrollmentGrant: input.EnrollmentGrant,
 		ExpectedCSRDER: input.ExpectedCSRDER, EnvironmentCACertificateDER: input.EnvironmentCACertificateDER,
 		SignEnvironmentLeaf: func(_ context.Context, domain string, epoch uint64, environment string, csrDER []byte, at time.Time) ([]byte, error) {
 			return signEnvironmentLeaf(caPrivate, caCertificate, domain, epoch, environment, ownerKeyID, csrDER, at)
