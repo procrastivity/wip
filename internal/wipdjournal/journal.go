@@ -111,11 +111,13 @@ type StagedBlob struct {
 
 // Journal holds one Environment's durable state and exclusive writer lease.
 type Journal struct {
-	mu       sync.Mutex
-	db       *sql.DB
-	lock     *os.File
-	blobsDir string
-	identity Identity
+	mu                sync.Mutex
+	db                *sql.DB
+	lock              *os.File
+	blobsDir          string
+	identity          Identity
+	syncBlobFile      func(string, string, int64) error
+	syncBlobDirectory func(string) error
 }
 
 // Open creates a new journal only when its database path is absent. Existing
@@ -174,7 +176,10 @@ func Open(root string, identity Identity) (*Journal, error) {
 		_ = db.Close()
 		return fail(fmt.Errorf("%w: %w", ErrInvalidJournal, err))
 	}
-	return &Journal{db: db, lock: lock, blobsDir: blobDir, identity: identity}, nil
+	return &Journal{
+		db: db, lock: lock, blobsDir: blobDir, identity: identity,
+		syncBlobFile: syncVerifiedBlobFile, syncBlobDirectory: syncDirectory,
+	}, nil
 }
 
 // Close releases the database and writer lease. It is idempotent.
@@ -385,10 +390,14 @@ func (j *Journal) StageBlob(reader io.Reader, declaredSize int64) (StagedBlob, e
 	digest := digestPrefix + hex.EncodeToString(digestHash.Sum(nil))
 	name := strings.TrimPrefix(digest, digestPrefix)
 	path := filepath.Join(j.blobsDir, name)
-	if err = os.Link(temporaryPath, path); errors.Is(err, os.ErrExist) {
-		err = verifyBlobFile(path, digest, declaredSize)
-	} else if err == nil {
-		err = syncDirectory(j.blobsDir)
+	if err = os.Link(temporaryPath, path); err != nil && !errors.Is(err, os.ErrExist) {
+		return StagedBlob{}, fmt.Errorf("wipdjournal: publish staged blob: %w", err)
+	}
+	// The temporary inode was synced before linking. Sync and re-verify the
+	// published path on both new-link and orphan/retry paths, then always sync
+	// the directory entry before a database transaction can reference it.
+	if err = j.syncBlobFile(path, digest, declaredSize); err == nil {
+		err = j.syncBlobDirectory(j.blobsDir)
 	}
 	if err != nil {
 		return StagedBlob{}, fmt.Errorf("wipdjournal: publish staged blob: %w", err)
@@ -639,28 +648,45 @@ func validDigest(digest string) bool {
 }
 
 func verifyBlobFile(path, digest string, expectedSize int64) error {
-	if expectedSize < 0 || expectedSize > maxBlobSize || !validDigest(digest) {
-		return ErrInvalidJournal
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 || info.Size() != expectedSize {
-		return ErrInvalidJournal
-	}
-	file, err := os.Open(path)
+	file, err := openVerifiedBlob(path, digest, expectedSize)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
+	return file.Close()
+}
+
+func syncVerifiedBlobFile(path, digest string, expectedSize int64) error {
+	file, err := openVerifiedBlob(path, digest, expectedSize)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Sync(), file.Close())
+}
+
+func openVerifiedBlob(path, digest string, expectedSize int64) (*os.File, error) {
+	if expectedSize < 0 || expectedSize > maxBlobSize || !validDigest(digest) {
+		return nil, ErrInvalidJournal
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 || info.Size() != expectedSize {
+		return nil, ErrInvalidJournal
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return ErrInvalidJournal
+		_ = file.Close()
+		return nil, ErrInvalidJournal
 	}
 	h := sha256.New()
 	length, err := io.Copy(h, io.LimitReader(file, expectedSize+1))
 	if err != nil || length != expectedSize || digestPrefix+hex.EncodeToString(h.Sum(nil)) != digest {
-		return ErrInvalidJournal
+		_ = file.Close()
+		return nil, ErrInvalidJournal
 	}
-	return nil
+	return file, nil
 }
 
 func installSchema(db *sql.DB, identity Identity) error {

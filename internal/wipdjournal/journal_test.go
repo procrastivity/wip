@@ -265,6 +265,88 @@ func TestDurableBlobOrphanAfterWriterCrashIsInvisibleAndAdoptable(t *testing.T) 
 	readAndCompareBlob(t, journal, blob, content)
 }
 
+func TestStageBlobRetryResyncsOrphanBeforeMetadataCommit(t *testing.T) {
+	journal, err := Open(filepath.Join(t.TempDir(), "client-profile"), testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	if _, err = journal.db.Exec(`
+		CREATE TABLE journal_test_blob_sync (file_synced INTEGER NOT NULL, directory_synced INTEGER NOT NULL);
+		INSERT INTO journal_test_blob_sync(file_synced, directory_synced) VALUES(0, 0);
+		CREATE TRIGGER journal_test_require_blob_sync BEFORE INSERT ON staged_blobs
+		WHEN NOT EXISTS (SELECT 1 FROM journal_test_blob_sync WHERE file_synced=1 AND directory_synced=1)
+		BEGIN SELECT RAISE(ABORT, 'blob durability barrier was not crossed'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	content := []byte("sync barrier retry\x00\xff")
+	digest := operation.BlobDigest(content)
+	var events []string
+	actualFileSync := journal.syncBlobFile
+	journal.syncBlobFile = func(path, digest string, size int64) error {
+		if err := actualFileSync(path, digest, size); err != nil {
+			return err
+		}
+		if _, err := journal.db.Exec(`UPDATE journal_test_blob_sync SET file_synced=1`); err != nil {
+			return err
+		}
+		events = append(events, "file-synced")
+		return nil
+	}
+	directorySyncFailed := errors.New("injected first blob directory sync failure")
+	directorySyncCalls := 0
+	journal.syncBlobDirectory = func(path string) error {
+		directorySyncCalls++
+		if directorySyncCalls == 1 {
+			events = append(events, "directory-sync-failed")
+			return directorySyncFailed
+		}
+		if err := syncDirectory(path); err != nil {
+			return err
+		}
+		if _, err := journal.db.Exec(`UPDATE journal_test_blob_sync SET directory_synced=1`); err != nil {
+			return err
+		}
+		events = append(events, "directory-synced")
+		return nil
+	}
+
+	if _, err = journal.StageBlob(bytes.NewReader(content), int64(len(content))); !errors.Is(err, directorySyncFailed) {
+		t.Fatalf("first StageBlob() error = %v; want injected directory-sync failure", err)
+	}
+	if len(events) != 2 || events[0] != "file-synced" || events[1] != "directory-sync-failed" {
+		t.Fatalf("new-link sync order before injected failure = %v; want file sync then directory failure", events)
+	}
+	var rows int
+	if err = journal.db.QueryRow(`SELECT count(*) FROM staged_blobs WHERE digest=?`, digest).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("metadata rows after failed directory sync = %d, %v; want none", rows, err)
+	}
+	path := filepath.Join(journal.blobsDir, strings.TrimPrefix(digest, digestPrefix))
+	if err = verifyBlobFile(path, digest, int64(len(content))); err != nil {
+		t.Fatalf("linked orphan after failed directory sync is not intact: %v", err)
+	}
+
+	// Make the retry prove both barriers again rather than relying on any
+	// successful file sync from the failed attempt.
+	if _, err = journal.db.Exec(`UPDATE journal_test_blob_sync SET file_synced=0, directory_synced=0`); err != nil {
+		t.Fatal(err)
+	}
+	events = nil
+	blob, err := journal.StageBlob(bytes.NewReader(content), int64(len(content)))
+	if err != nil || blob.Digest != digest || blob.Size != int64(len(content)) {
+		t.Fatalf("EEXIST StageBlob() retry = %+v, %v; want same verified blob", blob, err)
+	}
+	if len(events) != 2 || events[0] != "file-synced" || events[1] != "directory-synced" {
+		t.Fatalf("successful retry sync order = %v; want file then directory before metadata commit", events)
+	}
+	if err = journal.db.QueryRow(`SELECT count(*) FROM staged_blobs WHERE digest=?`, digest).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("metadata rows after synced retry = %d, %v; want one", rows, err)
+	}
+	readAndCompareBlob(t, journal, blob, content)
+}
+
 func TestStageBlobOrphanCrashHelper(t *testing.T) {
 	if os.Getenv("WIPDJOURNAL_ORPHAN_HELPER") != "1" {
 		return
