@@ -1,6 +1,7 @@
-// Package wipdwire contains the closed M2 enrollment and M2/M6 seed records
-// used by the bounded online-authority lab. It does not define new protocol
-// schemas; all encoded maps correspond to docs/wipd/conformance-schemas.cddl.
+// Package wipdwire contains the closed M2 enrollment, command, receipt, and
+// transfer records used by the bounded online-authority lab. It does not
+// define new protocol schemas; all encoded maps follow the existing M2
+// contracts and docs/wipd/conformance-schemas.cddl.
 package wipdwire
 
 import (
@@ -26,7 +27,7 @@ var (
 	// ErrInvalidRecord reports malformed or non-conformant wire records.
 	ErrInvalidRecord = errors.New("wipdwire: invalid record")
 	requestIDPattern = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	kindPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$`)
+	kindPattern      = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$`)
 	encoder          = mustEncoder()
 	decoder          = mustDecoder()
 )
@@ -61,6 +62,41 @@ type Frame struct {
 	Sequence  uint64 `cbor:"sequence"`
 	Kind      string `cbor:"kind"`
 	Payload   []byte `cbor:"payload"`
+}
+
+// CommandSubmit carries the exact canonical command identity and its asserted
+// hash. Deadline is transport-only and is never included in that identity.
+type CommandSubmit struct {
+	Schema           string  `cbor:"schema"`
+	CanonicalCommand []byte  `cbor:"canonical_command"`
+	RequestHash      string  `cbor:"request_hash"`
+	Deadline         *string `cbor:"deadline"`
+}
+
+// SubmissionAccepted acknowledges only the durable submission point.
+type SubmissionAccepted struct {
+	Schema      string `cbor:"schema"`
+	DomainID    string `cbor:"domain_id"`
+	Epoch       uint64 `cbor:"authority_epoch"`
+	CommandID   string `cbor:"command_id"`
+	RequestHash string `cbor:"request_hash"`
+}
+
+// ReceiptQuery is a read-only lookup scoped to one command identity.
+type ReceiptQuery struct {
+	Schema      string `cbor:"schema"`
+	DomainID    string `cbor:"domain_id"`
+	CommandID   string `cbor:"command_id"`
+	RequestHash string `cbor:"request_hash"`
+}
+
+// ReceiptNotFound records an authenticated same-epoch absence without
+// submitting or executing a command.
+type ReceiptNotFound struct {
+	Schema      string `cbor:"schema"`
+	DomainID    string `cbor:"domain_id"`
+	CommandID   string `cbor:"command_id"`
+	RequestHash string `cbor:"request_hash"`
 }
 
 // EncodeFrame encodes one length-prefixed deterministic-CBOR frame.

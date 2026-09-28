@@ -16,6 +16,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/procrastivity/wip/internal/authoritystore"
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -32,8 +33,10 @@ var ulidAlphabet = []byte("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 // keep its CA private key outside SQLite and return only the certificate DER.
 type EnvironmentLeafSigner func(context.Context, string, uint64, string, []byte, time.Time) ([]byte, error)
 
-// M5LabConfig binds the lab-only enrollment and initial-seed endpoints to the
-// persisted authority store and one exact initial Repo membership.
+// M5LabConfig binds the lab-only enrollment, transfer, and optional command
+// endpoints to the persisted authority store and one exact initial Repo. A
+// non-nil Registry enables only matter.create@v1 and requires the offline
+// owner-certified authority-artifact key plus its restricted signer.
 type M5LabConfig struct {
 	Store                       *authoritystore.Store
 	RepoID                      string
@@ -41,20 +44,27 @@ type M5LabConfig struct {
 	ExpectedCSRDER              []byte
 	EnvironmentCACertificateDER []byte
 	SignEnvironmentLeaf         EnvironmentLeafSigner
+	Registry                    *operation.Registry
+	ArtifactKeyCertificate      []byte
+	SignArtifact                authoritystore.Signer
 }
 
 type m5LabHandler struct {
-	profile  Profile
-	store    *authoritystore.Store
-	repoID   string
-	grant    []byte
-	csrDER   []byte
-	caDER    []byte
-	signLeaf EnvironmentLeafSigner
+	profile    Profile
+	store      *authoritystore.Store
+	repoID     string
+	grant      []byte
+	csrDER     []byte
+	caDER      []byte
+	signLeaf   EnvironmentLeafSigner
+	registry   *operation.Registry
+	operations []operation.Definition
+	sign       authoritystore.Signer
 }
 
-// NewM5LabServer exposes the existing M2 enrollment and seed/exchange records
-// for one exact Repo in the disposable M5 lab. NewServer remains health-only.
+// NewM5LabServer exposes the existing M2 enrollment and negotiated exchange
+// records for one exact Repo in the disposable M5 lab. NewServer remains
+// health-only.
 func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
 	if config.Store == nil || !ulidPattern.MatchString(config.RepoID) || len(config.EnrollmentGrant) == 0 || len(config.EnrollmentGrant) > 4096 ||
 		len(config.ExpectedCSRDER) == 0 || len(config.ExpectedCSRDER) > 16_384 || len(config.EnvironmentCACertificateDER) == 0 || config.SignEnvironmentLeaf == nil {
@@ -80,10 +90,42 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	if err != nil || !ca.IsCA || !ca.BasicConstraintsValid || !ca.MaxPathLenZero || ca.MaxPathLen != 0 {
 		return nil, ErrInvalidLabConfig
 	}
+	var operations []operation.Definition
+	if config.Registry != nil {
+		operations = config.Registry.Definitions()
+		if len(operations) != 1 || operations[0].Metadata().Operation != operation.MatterCreateV1.Metadata().Operation ||
+			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
+			return nil, ErrInvalidLabConfig
+		}
+		if len(certificate.Certificate) == 0 {
+			return nil, ErrInvalidLabConfig
+		}
+		tlsLeaf, parseErr := x509.ParseCertificate(certificate.Certificate[0])
+		artifactPublic, keyErr := artifactCertificatePublicKey(config.ArtifactKeyCertificate)
+		if parseErr != nil || keyErr != nil {
+			return nil, ErrInvalidLabConfig
+		}
+		artifactSPKI, artifactErr := x509.MarshalPKIXPublicKey(artifactPublic)
+		if artifactErr != nil {
+			return nil, ErrInvalidLabConfig
+		}
+		for _, channelKey := range []any{tlsLeaf.PublicKey, ca.PublicKey, csr.PublicKey} {
+			channelSPKI, marshalErr := x509.MarshalPKIXPublicKey(channelKey)
+			if marshalErr != nil || bytes.Equal(channelSPKI, artifactSPKI) {
+				return nil, ErrInvalidLabConfig
+			}
+		}
+		if err = config.Store.EnsureArtifactKey(context.Background(), profile.domainID, config.ArtifactKeyCertificate, time.Now().UTC()); err != nil {
+			return nil, err
+		}
+	} else if len(config.ArtifactKeyCertificate) != 0 || config.SignArtifact != nil {
+		return nil, ErrInvalidLabConfig
+	}
 	app := &m5LabHandler{
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
 		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf,
+		registry: config.Registry, operations: operations, sign: config.SignArtifact,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", serveHealth)
@@ -202,7 +244,8 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
-	if _, err := app.authenticateEnvironment(request); err != nil {
+	environment, err := app.authenticateEnvironment(request)
+	if err != nil {
 		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
 		return
 	}
@@ -218,6 +261,7 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 	}
 	session.mu.Lock()
 	negotiated := session.negotiated && !session.failed && !session.negotiating
+	operations := session.operations
 	if !negotiated {
 		session.failed = true
 	}
@@ -255,6 +299,24 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		kind = "pull"
 		start = authorityAnchor(pull.Installed)
+	case "command.submit":
+		if app.registry == nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		if _, ok := operations[operation.MatterCreateV1.Metadata().Operation]; !ok {
+			writeLabProblem(writer, frame.RequestID, "operation.unknown")
+			return
+		}
+		app.serveCommandSubmit(writer, request, frame)
+		return
+	case "receipt.query":
+		if app.registry == nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveReceiptQuery(writer, request, frame, environment)
+		return
 	default:
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 		return
@@ -318,7 +380,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
 		return
 	}
-	hello, parameters, problem := negotiateLab(frame.Payload)
+	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations)
 	if problem != "" {
 		writeLabProblem(writer, frame.RequestID, problem)
 		return
@@ -342,6 +404,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		return
 	}
 	session.mu.Lock()
+	session.operations = operations
 	session.negotiated = true
 	succeeded = true
 	session.mu.Unlock()

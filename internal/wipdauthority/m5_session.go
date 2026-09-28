@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -28,6 +29,7 @@ type labConnectionSession struct {
 	negotiating bool
 	negotiated  bool
 	failed      bool
+	operations  map[operation.ID]struct{}
 }
 
 func labConnectionContext(ctx context.Context, _ net.Conn) context.Context {
@@ -39,16 +41,16 @@ func connectionSession(request *http.Request) *labConnectionSession {
 	return session
 }
 
-func negotiateLab(payload []byte) ([]byte, []byte, string) {
+func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []byte, map[operation.ID]struct{}, string) {
 	fields, err := wipdwire.DecodeCanonicalMap(payload,
 		"protocol_min", "protocol_max", "identity_schemas", "operations", "store_schemas", "features")
 	if err != nil {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	minimum, minOK := fields["protocol_min"].([]any)
 	maximum, maxOK := fields["protocol_max"].([]any)
 	if !minOK || !maxOK || len(minimum) != 2 || len(maximum) != 2 {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	minMajor, minMajorOK := minimum[0].(uint64)
 	minMinor, minMinorOK := minimum[1].(uint64)
@@ -56,38 +58,60 @@ func negotiateLab(payload []byte) ([]byte, []byte, string) {
 	maxMinor, maxMinorOK := maximum[1].(uint64)
 	if !minMajorOK || !minMinorOK || !maxMajorOK || !maxMinorOK || minMajor == 0 || minMajor != maxMajor || minMajor > 65535 || minMinor > 65535 || maxMinor > 65535 ||
 		minMinor > maxMinor {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	if minMajor != 1 || minMinor > 0 || maxMajor != 1 {
-		return nil, nil, labProtocolProblemIncompatibleVersion
+		return nil, nil, nil, labProtocolProblemIncompatibleVersion
 	}
 	identitySchemas, ok := sortedStrings(fields["identity_schemas"])
 	if !ok {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	storeSchemas, ok := sortedStrings(fields["store_schemas"])
 	if !ok {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	features, ok := sortedStrings(fields["features"])
 	if !ok {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
-	if _, ok = operationCapabilities(fields["operations"]); !ok {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+	clientOperations, ok := operationCapabilities(fields["operations"])
+	if !ok {
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
+	}
+	for _, capability := range clientOperations {
+		for _, schema := range capability.schemas {
+			if !containsString(identitySchemas, schema) {
+				return nil, nil, nil, labProtocolProblemInvalidCapabilities
+			}
+		}
 	}
 	if !containsString(identitySchemas, "wipd.command/1") || !containsString(storeSchemas, "wipd.store/1") || !containsString(features, "wipd.frame/1") {
-		return nil, nil, labProtocolProblemUnsupportedExtension
+		return nil, nil, nil, labProtocolProblemUnsupportedExtension
+	}
+	selected := make(map[operation.ID]struct{})
+	selectedCapabilities := make([]any, 0, len(supported))
+	selectedSchemas := []string{"wipd.command/1"}
+	for _, definition := range supported {
+		id := definition.Metadata().Operation
+		client, found := findCapability(clientOperations, id.Name)
+		if !found || !containsVersion(client.versions, uint64(id.Version)) || !containsString(client.schemas, "wipd.command/1") || !containsString(identitySchemas, "wipd.command/1") {
+			continue
+		}
+		selected[id] = struct{}{}
+		selectedCapabilities = append(selectedCapabilities, map[string]any{
+			"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{"wipd.command/1"},
+		})
 	}
 	serverHello, err := wipdwire.EncodeCanonical(map[string]any{
 		"selected_protocol": []any{uint64(1), uint64(0)},
-		"identity_schemas":  []any{"wipd.command/1"},
-		"operations":        []any{},
+		"identity_schemas":  stringsToAny(selectedSchemas),
+		"operations":        selectedCapabilities,
 		"store_schemas":     []any{"wipd.store/1"},
 		"features":          []any{"wipd.frame/1"},
 	})
 	if err != nil {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
 	parameters, err := wipdwire.EncodeCanonical(map[string]any{
 		"frame_schema":             "wipd.frame/1",
@@ -98,9 +122,15 @@ func negotiateLab(payload []byte) ([]byte, []byte, string) {
 		"receive_window_bytes":     uint64(1_048_576),
 	})
 	if err != nil {
-		return nil, nil, labProtocolProblemInvalidCapabilities
+		return nil, nil, nil, labProtocolProblemInvalidCapabilities
 	}
-	return serverHello, parameters, ""
+	return serverHello, parameters, selected, ""
+}
+
+type labOperationCapability struct {
+	name     string
+	versions []uint64
+	schemas  []string
 }
 
 func sortedStrings(value any) ([]string, bool) {
@@ -119,12 +149,12 @@ func sortedStrings(value any) ([]string, bool) {
 	return result, true
 }
 
-func operationCapabilities(value any) ([][]string, bool) {
+func operationCapabilities(value any) ([]labOperationCapability, bool) {
 	values, ok := value.([]any)
 	if !ok {
 		return nil, false
 	}
-	result := make([][]string, 0, len(values))
+	result := make([]labOperationCapability, 0, len(values))
 	previous := ""
 	for _, item := range values {
 		fields, ok := item.(map[string]any)
@@ -151,10 +181,35 @@ func operationCapabilities(value any) ([][]string, bool) {
 		if !ok || len(schemas) == 0 {
 			return nil, false
 		}
+		versionsTyped := make([]uint64, len(versions))
+		for i := range versions {
+			versionsTyped[i] = versions[i].(uint64)
+		}
 		previous = name
-		result = append(result, schemas)
+		result = append(result, labOperationCapability{name: name, versions: versionsTyped, schemas: schemas})
 	}
 	return result, true
+}
+
+func findCapability(values []labOperationCapability, name string) (labOperationCapability, bool) {
+	index := sort.Search(len(values), func(i int) bool { return values[i].name >= name })
+	if index == len(values) || values[index].name != name {
+		return labOperationCapability{}, false
+	}
+	return values[index], true
+}
+
+func containsVersion(values []uint64, target uint64) bool {
+	index := sort.Search(len(values), func(i int) bool { return values[i] >= target })
+	return index < len(values) && values[index] == target
+}
+
+func stringsToAny(values []string) []any {
+	result := make([]any, len(values))
+	for i := range values {
+		result[i] = values[i]
+	}
+	return result
 }
 
 func containsString(values []string, target string) bool {

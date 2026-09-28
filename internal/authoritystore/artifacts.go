@@ -185,6 +185,17 @@ func domainOwner(ctx context.Context, tx *sql.Tx, domain string) (Domain, error)
 // RegisterArtifactKey retains an owner-certified generation. A predecessor
 // must have its owner-signed final fence committed first.
 func (s *Store) RegisterArtifactKey(ctx context.Context, domain string, wrapper []byte, at time.Time) error {
+	return s.registerArtifactKey(ctx, domain, wrapper, at, false)
+}
+
+// EnsureArtifactKey registers an owner-certified key, treating an exact retry
+// of the currently active certificate as success. It is used when an adapter
+// restarts with the same externally held restricted signer.
+func (s *Store) EnsureArtifactKey(ctx context.Context, domain string, wrapper []byte, at time.Time) error {
+	return s.registerArtifactKey(ctx, domain, wrapper, at, true)
+}
+
+func (s *Store) registerArtifactKey(ctx context.Context, domain string, wrapper []byte, at time.Time, allowExactRetry bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
@@ -219,10 +230,20 @@ func (s *Store) RegisterArtifactKey(ctx context.Context, domain string, wrapper 
 		return ErrInvalidProof
 	}
 	var generation sql.NullInt64
-	var fence []byte
-	err = tx.QueryRowContext(ctx, `SELECT generation, fence FROM artifact_keys WHERE domain_id = ? AND epoch = ? ORDER BY generation DESC LIMIT 1`, domain, d.ActiveEpoch).Scan(&generation, &fence)
+	var keyID, notBefore, notAfter string
+	var public, certificate, fence []byte
+	err = tx.QueryRowContext(ctx, `SELECT generation,key_id,public_key,certificate,not_before,not_after,fence FROM artifact_keys WHERE domain_id = ? AND epoch = ? ORDER BY generation DESC LIMIT 1`, domain, d.ActiveEpoch).Scan(&generation, &keyID, &public, &certificate, &notBefore, &notAfter, &fence)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if generation.Valid && p.Generation == uint64(generation.Int64) {
+		if fence == nil && keyID == p.KeyID && bytes.Equal(public, p.PublicKey) && bytes.Equal(certificate, wrapper) && notBefore == p.NotBefore && notAfter == p.NotAfter {
+			if allowExactRetry {
+				return tx.Commit()
+			}
+			return ErrExists
+		}
+		return ErrFenced
 	}
 	if (generation.Valid && (p.Generation != uint64(generation.Int64)+1 || fence == nil)) || (!generation.Valid && p.Generation != 1) {
 		return ErrFenced
