@@ -86,7 +86,7 @@ func TestBirthClaimReleaseCancellationBeforeDurableAttempt(t *testing.T) {
 			if mode == "stream-reset" {
 				requestContext, cancel := context.WithCancel(context.Background())
 				cancelRequest = cancel
-				call, requestWriter, writeDone = postResettableBirthReleaseRequest(t, client, requestContext, requestFrame)
+				call, requestWriter, writeDone = postResettableBirthReleaseRequest(requestContext, t, client, requestFrame)
 				defer cancelRequest()
 			} else {
 				var err error
@@ -269,7 +269,7 @@ func birthReleaseRequestFrame(t *testing.T, requestID, matterID, commandID strin
 	return frame
 }
 
-func postResettableBirthReleaseRequest(t *testing.T, client *Client, ctx context.Context, frame []byte) (<-chan httpCallResult, *io.PipeWriter, <-chan error) {
+func postResettableBirthReleaseRequest(ctx context.Context, t *testing.T, client *Client, frame []byte) (<-chan httpCallResult, *io.PipeWriter, <-chan error) {
 	t.Helper()
 	reader, writer := io.Pipe()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://wipd"+exchangePath, reader)

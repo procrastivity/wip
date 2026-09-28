@@ -77,7 +77,7 @@ func (s *Server) serveBirthClaimRelease(
 		result, releaseErr := coordinator.releaseBirthClaim(preSubmissionContext, state.ctx, gate, matterID, commandID, actor)
 		if releaseErr != nil {
 			switch {
-			case errors.Is(releaseErr, ErrBirthReleaseCancelled):
+			case errors.Is(releaseErr, errBirthReleaseCancelled):
 				dispatchOutcomes <- birthReleaseDispatchOutcome{problemCode: "transport.cancelled-before-submission"}
 			case errors.Is(releaseErr, ErrCommandStartBlocked), errors.Is(releaseErr, wipdjournal.ErrBirthBarrierIncomplete):
 				dispatchOutcomes <- birthReleaseDispatchOutcome{problemCode: "claim.release-barrier-incomplete"}

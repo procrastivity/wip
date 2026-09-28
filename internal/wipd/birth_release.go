@@ -21,7 +21,7 @@ type BirthClaimReleaseResult struct {
 	Snapshot CommandStartSnapshot
 }
 
-var ErrBirthReleaseCancelled = errors.New("wipd: birth release cancelled before durable submission")
+var errBirthReleaseCancelled = errors.New("wipd: birth release cancelled before durable submission")
 
 // birthReleaseBoundary serializes validated cancellation with the durable
 // PrepareBirthRelease commit. After that commit, cancellation stops only the
@@ -69,7 +69,7 @@ func (boundary *birthReleaseBoundary) checkBeforeSubmission(ctx context.Context)
 		if cancel != nil {
 			cancel()
 		}
-		return ErrBirthReleaseCancelled
+		return errBirthReleaseCancelled
 	}
 	boundary.mu.Unlock()
 	return nil
@@ -86,7 +86,7 @@ func (boundary *birthReleaseBoundary) prepare(ctx context.Context, journal *wipd
 		if cancel != nil {
 			cancel()
 		}
-		return wipdjournal.BirthReleaseCommand{}, ErrBirthReleaseCancelled
+		return wipdjournal.BirthReleaseCommand{}, errBirthReleaseCancelled
 	}
 	attempt, err := journal.PrepareBirthRelease(commandID, barrier, actor)
 	if err != nil {
@@ -180,7 +180,7 @@ func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionCon
 	release, acquired := coordinator.lanes.acquire(operationContext, coordinator.domainID)
 	if !acquired {
 		if !submitted {
-			return empty, ErrBirthReleaseCancelled
+			return empty, errBirthReleaseCancelled
 		}
 		return empty, operationContext.Err()
 	}
@@ -294,7 +294,7 @@ func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionCon
 
 func birthReleasePreSubmissionError(ctx context.Context, boundary *birthReleaseBoundary, err error) error {
 	if boundary.checkBeforeSubmission(ctx) != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return ErrBirthReleaseCancelled
+		return errBirthReleaseCancelled
 	}
 	return err
 }
