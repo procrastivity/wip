@@ -402,7 +402,7 @@ func (c *Client) negotiate(ctx context.Context) error {
 			"identity_schemas": []any{identitySchemaV1},
 		}},
 		"store_schemas": []any{storeSchemaV1},
-		"features":      []any{frameSchema},
+		"features":      []any{birthReleaseFeature, frameSchema},
 	})
 	if err != nil {
 		return err
@@ -481,7 +481,8 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !equalStrings(features, []string{frameSchema}) {
+	if err != nil || !containsString(features, frameSchema) || len(features) > 2 ||
+		(len(features) == 2 && features[0] != birthReleaseFeature) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	operations, err := parseOperationCapabilities(fields["operations"])

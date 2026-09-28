@@ -34,9 +34,10 @@ type Server struct {
 	commandStart           *CommandStartCoordinator
 }
 
-// ConfigureConnectedCommands enables the Step 8 durable connected birth path
-// for this daemon. Configure it before Serve; local fixture servers that do
-// not call this method retain their existing in-process dispatch behavior.
+// ConfigureConnectedCommands enables the durable connected birth, command-
+// start, and Step 9 birth-release paths for this daemon. Configure it before
+// Serve; local fixture servers that do not call this method retain their
+// existing in-process dispatch behavior.
 func (s *Server) ConfigureConnectedCommands(domainID string, journal *wipdjournal.Journal, authority CommandStartAuthority, environment CommandStartEnvironment) error {
 	if s == nil {
 		return errors.New("wipd: server is required")
@@ -257,7 +258,7 @@ func (s *Server) serveNegotiate(writer http.ResponseWriter, request *http.Reques
 		}
 		abortHTTP2Stream()
 	}
-	selected, parameters, err := negotiateCapabilities(hello, s.registry)
+	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease())
 	if err != nil {
 		if errors.Is(err, errInvalidCapabilities) || errors.Is(err, errIncompatibleVersion) || errors.Is(err, errUnsupportedExtension) {
 			s.writeProblem(writer, frame.requestID, 0, err.Error(), bootstrapFrameBodyLimit)
@@ -332,6 +333,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	}
 	if frame.sequence != 0 {
 		abortHTTP2Stream()
+	}
+	if frame.kind == "claim.release" {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveBirthClaimRelease(writer, request, state, hello, parameters, frame)
+		return
 	}
 	if frame.kind != "command.submit" {
 		abortHTTP2Stream()

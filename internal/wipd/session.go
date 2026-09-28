@@ -12,6 +12,7 @@ import (
 const (
 	identitySchemaV1      = "wipd.command/1"
 	storeSchemaV1         = "wipd.store/1"
+	birthReleaseFeature   = "wipd.birth-claim-release/1"
 	defaultChunkSize      = uint64(65_536)
 	defaultStreamMax      = uint64(8_589_934_592)
 	absoluteStreamMax     = uint64(1_099_511_627_776)
@@ -118,7 +119,7 @@ func decodeClientHello(payload []byte) (capabilityHello, error) {
 	return hello, nil
 }
 
-func negotiateCapabilities(client capabilityHello, registry *operation.Registry) (serverHello, sessionParameters, error) {
+func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease bool) (serverHello, sessionParameters, error) {
 	const supportedMajor, supportedMinor = uint16(1), uint16(0)
 	if client.protocolMin.major != supportedMajor || client.protocolMin.minor > supportedMinor ||
 		client.protocolMax.major != supportedMajor || client.protocolMax.minor < supportedMinor {
@@ -127,12 +128,17 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry)
 
 	selected := protocolVersion{major: supportedMajor, minor: supportedMinor}
 	serverOps := registeredOperationCapabilities(registry)
+	serverFeatures := []string{frameSchema}
+	if birthRelease {
+		serverFeatures = append(serverFeatures, birthReleaseFeature)
+		sort.Strings(serverFeatures)
+	}
 	result := serverHello{
 		selectedProtocol: selected,
 		identitySchemas:  intersectStrings(client.identitySchemas, []string{identitySchemaV1}),
 		operations:       intersectOperations(client.operations, serverOps),
 		storeSchemas:     intersectStrings(client.storeSchemas, []string{storeSchemaV1}),
-		features:         intersectStrings(client.features, []string{frameSchema}),
+		features:         intersectStrings(client.features, serverFeatures),
 	}
 	if !containsString(result.identitySchemas, identitySchemaV1) ||
 		!containsString(result.storeSchemas, storeSchemaV1) || !containsString(result.features, frameSchema) {

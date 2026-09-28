@@ -23,6 +23,7 @@ type fixture struct {
 	Notation                    string                       `json:"notation"`
 	Limits                      limits                       `json:"limits"`
 	FrameVectors                []frameVector                `json:"frame_vectors"`
+	ConnectedActionVectors      []connectedActionVector      `json:"connected_action_vectors"`
 	IdentityIndependenceVectors []identityIndependenceVector `json:"identity_independence_vectors"`
 	SecurityVectors             []securityVector             `json:"security_vectors"`
 	LimitVectors                []limitVector                `json:"limit_vectors"`
@@ -53,6 +54,26 @@ type frameVector struct {
 	WireHex      string `json:"wire_hex"`
 	BodySHA256   string `json:"body_sha256"`
 	Expected     string `json:"expected"`
+}
+
+type connectedActionVector struct {
+	Name                  string                    `json:"name"`
+	NegotiatedFeature     *string                   `json:"negotiated_feature"`
+	RequestKind           string                    `json:"request_kind"`
+	RequestPayload        *birthClaimReleaseRequest `json:"request_payload"`
+	ResponseKind          string                    `json:"response_kind"`
+	ResponsePayloadSchema string                    `json:"response_payload_schema"`
+	RetryIdentity         []string                  `json:"retry_identity"`
+	Expected              string                    `json:"expected"`
+	ExpectedCode          string                    `json:"expected_code"`
+	Submitted             *bool                     `json:"submitted"`
+}
+
+type birthClaimReleaseRequest struct {
+	Schema    string `json:"schema"`
+	MatterID  string `json:"matter_id"`
+	CommandID string `json:"command_id"`
+	Actor     string `json:"actor"`
 }
 
 type identityIndependenceVector struct {
@@ -190,6 +211,31 @@ func TestStep4FrameGoldenVector(t *testing.T) {
 	}
 	assertArray(t, operation["versions"], uint64(1))
 	assertArray(t, operation["identity_schemas"], "wipd.command/1")
+}
+
+func TestBirthClaimReleaseLocalActionVectors(t *testing.T) {
+	vectors := loadFixture(t).ConnectedActionVectors
+	if len(vectors) != 2 {
+		t.Fatalf("connected action vector count = %d, want 2", len(vectors))
+	}
+	release := vectors[0]
+	if release.Name != "local-birth-claim-release" || release.NegotiatedFeature == nil ||
+		*release.NegotiatedFeature != "wipd.birth-claim-release/1" || release.RequestKind != "claim.release" ||
+		release.RequestPayload == nil || *release.RequestPayload != (birthClaimReleaseRequest{
+		Schema: "wipd.local-birth-claim-release/1", MatterID: "01KZ7XHAQT1S46NYPN1PW1DX3E",
+		CommandID: "01KZ7XHAQT1S46NYPN1PW1DX4C", Actor: "human",
+	}) || release.ResponseKind != "response.end" ||
+		release.ResponsePayloadSchema != "wipd.local-birth-claim-release-result/1" ||
+		!reflect.DeepEqual(release.RetryIdentity, []string{"matter_id", "command_id", "actor"}) ||
+		release.Expected != "receipt-and-verified-tail-installed-before-final-response" {
+		t.Fatalf("birth release action vector = %#v", release)
+	}
+	defaultDaemon := vectors[1]
+	if defaultDaemon.Name != "default-local-daemon-does-not-release-birth-claim" ||
+		defaultDaemon.NegotiatedFeature != nil || defaultDaemon.RequestKind != "claim.release" ||
+		defaultDaemon.ExpectedCode != "protocol.unsupported-extension" || defaultDaemon.Submitted == nil || *defaultDaemon.Submitted {
+		t.Fatalf("default daemon action vector = %#v", defaultDaemon)
+	}
 }
 
 func TestStep4CanonicalIdentityIsTransportIndependent(t *testing.T) {

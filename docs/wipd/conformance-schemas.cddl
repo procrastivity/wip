@@ -123,6 +123,22 @@ command-submit = {
   "request_hash": digest,
   "deadline": tstr / null
 }
+; Local-only Step 9 action. It is accepted only when the authenticated
+; session negotiated wipd.birth-claim-release/1. The daemon constructs the
+; immutable claim.release@v1 command from its journal and this stable retry key.
+local-birth-claim-release = {
+  "schema": "wipd.local-birth-claim-release/1",
+  "matter_id": ulid,
+  "command_id": ulid,
+  "actor": tstr
+}
+local-birth-claim-release-result = {
+  "schema": "wipd.local-birth-claim-release-result/1",
+  "command_id": ulid,
+  "result_code": "result.succeeded" / "result.rejected" /
+                 "result.refused" / "result.failed",
+  "terminal_receipt": bstr
+}
 query-request = {
   "schema": "wipd.query-request/1",
   "query": operation,

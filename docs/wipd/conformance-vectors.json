@@ -5,7 +5,7 @@
     {
       "path": "docs/wipd/frame-security-execution-vectors.json",
       "notation": "wipd.frame-security-vector/1",
-      "sha256": "7d379a104ed279120eb51201a82757d2389487aa25e978f542f46d8be20368f7"
+      "sha256": "c1ac483310e2ffb131af83c216f36e1efdcdd7d83c7ce12def8f0e8955959d66"
     },
     {
       "path": "docs/wipd/result-receipt-idempotency-vectors.json",

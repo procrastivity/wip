@@ -29,7 +29,7 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 		features:     []string{frameSchema},
 	}
 
-	selected, parameters, err := negotiateCapabilities(client, registry)
+	selected, parameters, err := negotiateCapabilities(client, registry, false)
 	if err != nil {
 		t.Fatalf("negotiateCapabilities() error = %v", err)
 	}
@@ -47,27 +47,43 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 
 	withoutFrame := client
 	withoutFrame.features = nil
-	if _, _, err := negotiateCapabilities(withoutFrame, registry); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutFrame, registry, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.frame/1 error = %v, want unsupported extension", err)
 	}
 
 	withoutIdentity := client
 	withoutIdentity.identitySchemas = nil
-	if _, _, err := negotiateCapabilities(withoutIdentity, registry); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutIdentity, registry, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.command/1 error = %v, want unsupported extension", err)
 	}
 
 	noCommonMinor := client
 	noCommonMinor.protocolMin = protocolVersion{major: 1, minor: 1}
-	if _, _, err := negotiateCapabilities(noCommonMinor, registry); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(noCommonMinor, registry, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("no common protocol minor error = %v, want incompatible version", err)
 	}
 
 	wrongMajor := client
 	wrongMajor.protocolMin = protocolVersion{major: 2, minor: 0}
 	wrongMajor.protocolMax = protocolVersion{major: 2, minor: 2}
-	if _, _, err := negotiateCapabilities(wrongMajor, registry); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(wrongMajor, registry, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("incompatible protocol major error = %v, want incompatible version", err)
+	}
+}
+
+func TestBirthClaimReleaseFeatureIsAdvertisedOnlyWhenConfigured(t *testing.T) {
+	client := capabilityHello{
+		protocolMin: protocolVersion{major: 1, minor: 0}, protocolMax: protocolVersion{major: 1, minor: 0},
+		identitySchemas: []string{identitySchemaV1}, storeSchemas: []string{storeSchemaV1},
+		features: []string{birthReleaseFeature, frameSchema},
+	}
+	withoutRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), false)
+	if err != nil || !equalStrings(withoutRelease.features, []string{frameSchema}) {
+		t.Fatalf("unconfigured release feature = %v, %v; want frame-only", withoutRelease.features, err)
+	}
+	withRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), true)
+	if err != nil || !equalStrings(withRelease.features, []string{birthReleaseFeature, frameSchema}) {
+		t.Fatalf("configured release feature = %v, %v; want negotiated release feature", withRelease.features, err)
 	}
 }
 

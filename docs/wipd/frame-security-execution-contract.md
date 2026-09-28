@@ -257,6 +257,7 @@ The first client record on `/exchange` is exactly one of:
 | Kind | Required payload | Boundary |
 |---|---|---|
 | `command.submit` | `CommandSubmit` below | One immutable command attempt. The embedded bytes own all semantic identity. |
+| `claim.release` | `LocalBirthClaimRelease` below; only with negotiated `wipd.birth-claim-release/1` | Authenticated local request to run the configured command-start birth-journal barrier. It is not authority submission bytes. |
 | `query.request` | `QueryRequest` below | Read-only request. It has no command ID, receipt, or mutation semantics. |
 | `receipt.query` | command ID and request hash | Reserved integration point for Step 5, which owns its payload and response schema. |
 | transfer/claim kinds | selected feature plus kind-specific start payload | Reserved for Steps 6–7; Step 4 supplies only framing, limits, authentication, and cancellation. |
@@ -285,6 +286,34 @@ query version's fields, consistency/snapshot policy, and output. Unknown fields
 in either outer message reject under the negotiated protocol rather than being
 silently copied into the semantic payload.
 
+The Step 9 local birth-claim release feature is negotiated only by a daemon
+whose connected command-start coordinator has an authority-backed release
+adapter. Its request is the closed map
+`{"schema":"wipd.local-birth-claim-release/1","matter_id":ULID,
+"command_id":ULID,"actor":text}`. The daemon, not the caller, returns and
+installs the eligible birth prefix, acknowledges its exact installed terminal
+receipts, constructs or recovers the existing immutable `claim.release@v1`
+identity, and submits it through the configured mTLS authority path. The local
+`command_id` and actor are stable retry inputs; transport request IDs are fresh
+per attempt. A `response.end` uses the closed map
+`{"schema":"wipd.local-birth-claim-release-result/1","command_id":ULID,
+"result_code":terminal-code,"terminal_receipt":bytes}` and is sent only
+after the exact receipt and complete verified authority tail are installed
+with the Environment overlay. A returned authority refusal is terminal and
+includes its exact receipt. If submission may have occurred but that terminal
+result cannot be installed or delivered, the caller receives an uncertain
+outcome and MUST retry the same Matter ID, command ID, and actor; it MUST NOT
+mint a new release identity or infer success from local state. The feature
+does not add an M1 catalogue operation and is absent from default or
+unconfigured local daemons.
+
+Before authority release submission, an unresolved, refused, or quarantined
+birth-journal prefix returns the no-release problem
+`claim.release-barrier-incomplete`. A command-ID conflict diagnosed before
+authority submission returns `command.id-conflict`. Once release submission
+may have occurred, failures that prevent a locally installed terminal result
+return `transport.outcome-unknown` instead.
+
 After the first client record, the only generic client record is
 `control.cancel` with an empty-map payload. The request side remains open until
 the server sends a final record or the client cancels/resets it. Generic server
@@ -294,6 +323,12 @@ set. Negotiation uses `client.hello`, `server.hello`, `session.parameters`, and
 `problem`. Enrollment uses `enrollment.request`, `enrollment.issued`, and
 `problem`. A kind in the wrong endpoint, direction, or state is
 `protocol.unsupported-kind` or `protocol.out-of-order` as applicable.
+
+`claim.release` is available only as the first client record on a local
+`/exchange` when `wipd.birth-claim-release/1` was selected in that session. It
+returns the generic `response.end` or `problem`; it does not accept a raw
+`command.submit` for `claim.release@v1`, because the command identity and
+receipt barrier are owned by the Environment journal/coordinator.
 
 For a read-only or transfer exchange, validated post-first-frame client
 outcomes are published to a shared per-exchange arbiter, which serializes

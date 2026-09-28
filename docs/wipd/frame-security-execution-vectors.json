@@ -25,6 +25,30 @@
       "expected": "protocol-negotiation-only-no-command-identity"
     }
   ],
+  "connected_action_vectors": [
+    {
+      "name": "local-birth-claim-release",
+      "negotiated_feature": "wipd.birth-claim-release/1",
+      "request_kind": "claim.release",
+      "request_payload": {
+        "schema": "wipd.local-birth-claim-release/1",
+        "matter_id": "01KZ7XHAQT1S46NYPN1PW1DX3E",
+        "command_id": "01KZ7XHAQT1S46NYPN1PW1DX4C",
+        "actor": "human"
+      },
+      "response_kind": "response.end",
+      "response_payload_schema": "wipd.local-birth-claim-release-result/1",
+      "retry_identity": ["matter_id", "command_id", "actor"],
+      "expected": "receipt-and-verified-tail-installed-before-final-response"
+    },
+    {
+      "name": "default-local-daemon-does-not-release-birth-claim",
+      "negotiated_feature": null,
+      "request_kind": "claim.release",
+      "expected_code": "protocol.unsupported-extension",
+      "submitted": false
+    }
+  ],
   "identity_independence_vectors": [
     {
       "name": "same-command-different-transport",
