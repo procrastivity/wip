@@ -140,6 +140,23 @@ replay is stable. The `matter.create@v1` output map is exactly `{id, locator,
 title}`; `locator` is the assigned locator. The immutable command retains the
 requested locator, while later event/read schemas own repair-condition detail.
 
+For the Step 8 `step.create@v1` extension, the output map is exactly
+`{id, parent_id, matter_id, locator, title, sort_key, state}`. The authority
+assigns `id`, `locator`, and `sort_key`; `parent_id` and `matter_id` both equal
+the canonical input `parent_id`; `title` equals the input title; and `state`
+is `planned`. Its successful `step.created` event has the Step ID as
+`subject_id` and exactly `{title, locator, parent, sort_key}` as payload, with
+`parent` equal to the input Matter ID. The receipt's accepted range contains
+that one event and no other event. The event, Step projection, receipt, and
+terminal submission state are one authority transaction.
+
+The Matter birth transaction also creates one immutable implicit claim at
+epoch 1, bound to the Matter, Repo, Environment, and successful birth command.
+Step creation MUST present that exact claim, use the Matter birth command as
+both causation and correlation, and have a greater sequence in the same
+Environment and Repo. A terminal-success birth receipt is required; fixture
+Matter state and legacy local state do not establish authority claim truth.
+
 For `result.succeeded`, one authority transaction MUST:
 
 1. append one or more contiguous authority events, each carrying the same

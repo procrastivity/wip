@@ -41,14 +41,15 @@ const (
 )
 
 // ClaimRequirement says whether the caller must supply an exact claim proof.
-// Provisional operations establish an implicit claim but require no existing
-// claim, so they use ClaimNone.
 type ClaimRequirement string
 
-// ClaimNone and ClaimExact distinguish operations with and without claim proof.
+// ClaimNone, ClaimExact, and ClaimImplicitBirth distinguish operations with
+// no proof, an M3 claim proof, or the narrow implicit claim created by a
+// provisional Matter birth.
 const (
-	ClaimNone  ClaimRequirement = "none"
-	ClaimExact ClaimRequirement = "exact"
+	ClaimNone          ClaimRequirement = "none"
+	ClaimExact         ClaimRequirement = "exact"
+	ClaimImplicitBirth ClaimRequirement = "implicit-birth"
 )
 
 // Footprint is one stable, machine-readable guard or write region. Definitions
@@ -56,11 +57,15 @@ const (
 // rather than falling back to prose such as "various rows".
 type Footprint string
 
-// FootprintRepoMatterLocators and FootprintNewbornMatter classify the first
-// catalogue operation; later operations add only the regions they use.
+// Birth footprints and the Step 8 guards name the narrow Matter/Step subset.
 const (
 	FootprintRepoMatterLocators Footprint = "repo.matter-locators"
 	FootprintNewbornMatter      Footprint = "newborn-matter-subtree"
+	FootprintNewbornStep        Footprint = "newborn-step"
+	FootprintImplicitBirthClaim Footprint = "matter.implicit-birth-claim"
+	FootprintStepParent         Footprint = "step.parent"
+	FootprintStepLocator        Footprint = "matter.step-locators"
+	FootprintStepSortKey        Footprint = "step.sibling-sort-key"
 )
 
 // BlobSpec statically names one accepted staged blob input.
@@ -204,7 +209,7 @@ func ValidateMetadata(m Metadata) error {
 		return fmt.Errorf("%s: %w", m.Operation, err)
 	}
 	switch m.Claim {
-	case ClaimNone, ClaimExact:
+	case ClaimNone, ClaimExact, ClaimImplicitBirth:
 	default:
 		return fmt.Errorf("%s: claim requirement is incomplete or unknown", m.Operation)
 	}

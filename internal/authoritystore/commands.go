@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -38,12 +39,12 @@ type Execution struct {
 	completionRunning bool
 }
 
-// CommandCompletion is the evaluated M1 result awaiting its atomic fold and
+// CommandCompletion is the evaluated birth result awaiting its atomic fold and
 // receipt commit. It is retained only in memory while the same Store is live.
 type CommandCompletion struct {
-	Result            operation.Result
-	MatterID, EventID string
-	Occurred          time.Time
+	Result             operation.Result
+	SubjectID, EventID string
+	Occurred           time.Time
 }
 
 // CommandStatus carries either a pending acknowledgment and optional new owner,
@@ -79,8 +80,15 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if err != nil {
 		return out, err
 	}
-	if command.Request.Operation != operation.MatterCreateV1.Metadata().Operation || command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation) ||
+		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
+	}
+	before := func(tx *sql.Tx) error {
+		if command.Request.Operation == operation.StepCreateV1.Metadata().Operation {
+			return validateImplicitBirthClaim(ctx, tx, command)
+		}
+		return nil
 	}
 	var beforeCommit func() error
 	if checkContext {
@@ -94,7 +102,7 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 			return nil
 		}
 	}
-	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, nil, beforeCommit)
+	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, before, beforeCommit)
 }
 
 type commandIdentity struct {
@@ -320,22 +328,25 @@ func (s *Store) ClaimPendingCommandCompletion(command operation.Command, hash st
 // exactly the artifact preimage; the store checks the resulting signature.
 type Signer func(context.Context, []byte) ([]byte, error)
 
-// CompleteCommand commits the sole currently supported typed fold. A semantic
-// rejection/refusal/failure is no-effect; a successful matter.create@v1 must
-// create one event and matching projection. No current version declares no-op.
-func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result operation.Result, matterID, eventID string, occurred time.Time, sign Signer) (CommandStatus, error) {
+// CompleteCommand commits one supported birth fold. A successful Matter or Step
+// create writes its exact event range and projection with the receipt.
+func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result operation.Result, subjectID, eventID string, occurred time.Time, sign Signer) (CommandStatus, error) {
 	var out CommandStatus
 	if owner == nil || owner.store != s || sign == nil {
 		return out, ErrNotOwner
 	}
 	cmd := owner.command
-	if err := operation.MatterCreateV1.ValidateResult(result); err != nil {
-		return out, err
-	}
-	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && (!ulid.MatchString(matterID) || !ulid.MatchString(eventID))) {
+	definition, ok := birthDefinition(cmd.Request.Operation)
+	if !ok {
 		return out, ErrInvalidProof
 	}
-	if result.Code != operation.ResultSucceeded && (matterID != "" || eventID != "") {
+	if err := definition.ValidateResult(result); err != nil {
+		return out, err
+	}
+	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) {
+		return out, ErrInvalidProof
+	}
+	if result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
 		return out, ErrInvalidProof
 	}
 	s.mu.Lock()
@@ -344,7 +355,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if s.db == nil || !s.owners[key] || s.executions[key] != owner {
 		return out, ErrNotOwner
 	}
-	completion := CommandCompletion{Result: result, MatterID: matterID, EventID: eventID, Occurred: occurred}
+	completion := CommandCompletion{Result: result, SubjectID: subjectID, EventID: eventID, Occurred: occurred}
 	if owner.completion != nil && !sameCommandCompletion(*owner.completion, completion) {
 		return out, ErrConflict
 	}
@@ -386,36 +397,92 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	var rangeValue any
 	var output any
 	var problem any
+	var position uint64
 	if result.Code == operation.ResultSucceeded {
-		input := cmd.Request.Input.(operation.MatterCreateInput)
-		got := result.Output.(operation.MatterCreateOutput)
-		locator := input.Locator
-		if locator == "" {
-			locator = matterLocator(input.Title)
+		switch cmd.Request.Operation {
+		case operation.MatterCreateV1.Metadata().Operation:
+			input := cmd.Request.Input.(operation.MatterCreateInput)
+			got := result.Output.(operation.MatterCreateOutput)
+			locator := input.Locator
+			if locator == "" {
+				locator = matterLocator(input.Title)
+			}
+			if locator == "" || matterLocator(locator) != locator || got.ID != subjectID || got.Locator != locator || got.Title != input.Title {
+				return out, ErrInvalidProof
+			}
+			var n int
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM matters WHERE domain_id=? AND repo_id=? AND locator=?`, d.ID, cmd.Request.Context.Repo, locator).Scan(&n); err != nil {
+				return out, err
+			}
+			if n != 0 {
+				return out, ErrFenced
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{"id": got.ID, "locator": got.Locator, "title": got.Title})
+			if err != nil {
+				return out, err
+			}
+			position, err = appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}, occurred, eventID, "matter.created", subjectID, map[string]any{"id": subjectID, "locator": got.Locator, "title": got.Title})
+			if err != nil {
+				return out, err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO matters VALUES(?,?,?,?,?,?)`, d.ID, subjectID, cmd.Request.Context.Repo, got.Locator, got.Title, eventID); err != nil {
+				return out, writeError(err)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO implicit_birth_claims VALUES(?,?,1,?,?,?)`, d.ID, subjectID, cmd.EnvironmentID, cmd.Request.Context.Repo, cmd.ID); err != nil {
+				return out, writeError(err)
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
+		case operation.StepCreateV1.Metadata().Operation:
+			input := cmd.Request.Input.(operation.StepCreateInput)
+			got := result.Output.(operation.StepCreateOutput)
+			if got.ParentID != input.ParentID || got.Title != input.Title || got.ID != "" || got.MatterID != "" || got.Locator != "" || got.SortKey != 0 || got.State != "" {
+				return out, ErrInvalidProof
+			}
+			var matterRepo string
+			if err = tx.QueryRowContext(ctx, `SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, d.ID, input.ParentID).Scan(&matterRepo); err != nil || matterRepo != cmd.Request.Context.Repo {
+				return out, ErrFenced
+			}
+			if err = validateImplicitBirthClaim(ctx, tx, cmd); err != nil {
+				return out, err
+			}
+			var count int
+			var highest sql.NullInt64
+			if err = tx.QueryRowContext(ctx, `SELECT count(*),max(sort_key) FROM steps WHERE domain_id=? AND matter_id=?`, d.ID, input.ParentID).Scan(&count, &highest); err != nil {
+				return out, err
+			}
+			if count == math.MaxInt || highest.Valid && highest.Int64 > math.MaxInt64-1000 {
+				return out, ErrResourceLimit
+			}
+			locator := fmt.Sprintf("step-%02d", count+1)
+			sortKey := int64(1000)
+			if highest.Valid {
+				sortKey = highest.Int64 + 1000
+			}
+			assigned := operation.StepCreateOutput{
+				ID: subjectID, ParentID: input.ParentID, MatterID: input.ParentID,
+				Locator: locator, Title: input.Title, SortKey: sortKey, State: "planned",
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{
+				"id": assigned.ID, "parent_id": assigned.ParentID, "matter_id": assigned.MatterID,
+				"locator": assigned.Locator, "title": assigned.Title, "sort_key": assigned.SortKey, "state": assigned.State,
+			})
+			if err != nil {
+				return out, err
+			}
+			position, err = appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}, occurred, eventID, "step.created", subjectID, map[string]any{
+				"title": input.Title, "locator": locator, "parent": input.ParentID, "sort_key": sortKey,
+			})
+			if err != nil {
+				return out, err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO steps VALUES(?,?,?,?,?,?,?,?,?,?)`, d.ID, subjectID, cmd.Request.Context.Repo,
+				input.ParentID, input.ParentID, locator, input.Title, sortKey, "planned", eventID); err != nil {
+				return out, writeError(err)
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
 		}
-		if locator == "" || matterLocator(locator) != locator || got.ID != matterID || got.Locator != locator || got.Title != input.Title {
-			return out, ErrInvalidProof
-		}
-		var n int
-		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM matters WHERE domain_id=? AND repo_id=? AND locator=?`, d.ID, cmd.Request.Context.Repo, locator).Scan(&n); err != nil {
-			return out, err
-		}
-		if n != 0 {
-			return out, ErrFenced
-		}
-		output, err = artifactEncoder.Marshal(map[string]any{"id": got.ID, "locator": got.Locator, "title": got.Title})
-		if err != nil {
-			return out, err
-		}
-		position, e := appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}, occurred, eventID, "matter.created", matterID, map[string]any{"id": matterID, "locator": got.Locator, "title": got.Title})
-		if e != nil {
-			return out, e
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO matters VALUES(?,?,?,?,?,?)`, d.ID, matterID, cmd.Request.Context.Repo, got.Locator, got.Title, eventID); err != nil {
-			return out, writeError(err)
-		}
-		first, last = position, position
-		rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
 	} else {
 		problem = string(result.Problem.Code)
 	}
@@ -538,8 +605,42 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 }
 
 func sameCommandCompletion(left, right CommandCompletion) bool {
-	return reflect.DeepEqual(left.Result, right.Result) && left.MatterID == right.MatterID &&
+	return reflect.DeepEqual(left.Result, right.Result) && left.SubjectID == right.SubjectID &&
 		left.EventID == right.EventID && left.Occurred.Equal(right.Occurred)
+}
+
+func birthDefinition(id operation.ID) (operation.Definition, bool) {
+	switch id {
+	case operation.MatterCreateV1.Metadata().Operation:
+		return operation.MatterCreateV1, true
+	case operation.StepCreateV1.Metadata().Operation:
+		return operation.StepCreateV1, true
+	default:
+		return operation.Definition{}, false
+	}
+}
+
+func validateImplicitBirthClaim(ctx context.Context, tx *sql.Tx, command operation.Command) error {
+	input, ok := command.Request.Input.(operation.StepCreateInput)
+	if !ok || command.Request.Claim == nil || command.Request.Claim.ID != input.ParentID || command.Request.Claim.Epoch != "1" {
+		return ErrFenced
+	}
+	var ownerEnvironment, repo, birthCommand string
+	var epoch uint64
+	err := tx.QueryRowContext(ctx, `SELECT owner_environment_id,repo_id,birth_command_id,claim_epoch FROM implicit_birth_claims WHERE domain_id=? AND matter_id=?`,
+		command.AuthorityDomainID, input.ParentID).Scan(&ownerEnvironment, &repo, &birthCommand, &epoch)
+	if err != nil || ownerEnvironment != command.EnvironmentID || repo != command.Request.Context.Repo || epoch != 1 ||
+		command.CausationCommandID != birthCommand || command.CorrelationCommandID != birthCommand {
+		return ErrFenced
+	}
+	var birthSequence uint64
+	var birthState string
+	if err = tx.QueryRowContext(ctx, `SELECT environment_sequence,state FROM submissions WHERE domain_id=? AND command_id=? AND environment_id=?`,
+		command.AuthorityDomainID, birthCommand, command.EnvironmentID).Scan(&birthSequence, &birthState); err != nil ||
+		birthState != "terminal" || birthSequence >= command.EnvironmentSequence {
+		return ErrFenced
+	}
+	return nil
 }
 
 func digestRaw(value string) ([]byte, error) {

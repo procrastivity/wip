@@ -21,6 +21,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdfixture"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"golang.org/x/net/http2"
 )
 
@@ -236,6 +237,111 @@ func TestAuthenticatedHTTP2UnixNegotiationAndCommandBoundary(t *testing.T) {
 	})
 	if got := handlerCalls.Load(); got != 4 {
 		t.Fatalf("semantic Handler ran %d times, want accepted first records to dispatch and invalid first records to be rejected", got)
+	}
+}
+
+func TestConfiguredDaemonRoutesMatterAndStepBirthThroughCommandStart(t *testing.T) {
+	_, journal, environment, authority, _, server := newCommandStartFixture(t)
+	var localDispatch atomic.Int32
+	registry := server.registry
+	if err := registry.Register(operation.MatterCreateV1, func(context.Context, operation.Request) operation.Result {
+		localDispatch.Add(1)
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: commandStartCommandPrefix + "80", Locator: "local", Title: "local"}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(operation.StepCreateV1, func(_ context.Context, request operation.Request) operation.Result {
+		localDispatch.Add(1)
+		input := request.Input.(operation.StepCreateInput)
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{ParentID: input.ParentID, Title: input.Title}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
+	authority.returnContinue = []bool{false, false}
+	if err := server.ConfigureConnectedCommands(commandStartDomainID, journal, authority, environment); err != nil {
+		t.Fatal(err)
+	}
+	client, _ := startHTTP2UnixServer(t, server)
+
+	operations := []any{
+		map[string]any{"name": "matter.create", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1}},
+		map[string]any{"name": "step.create", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1}},
+	}
+	helloPayload, err := encodePayload(map[string]any{
+		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
+		"identity_schemas": []any{identitySchemaV1}, "operations": operations,
+		"store_schemas": []any{storeSchemaV1}, "features": []any{frameSchema},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	helloFrame, err := encodeFrame(frameRecord{requestID: commandStartCommandPrefix + "81", kind: "client.hello", payload: helloPayload}, bootstrapFrameBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := postFrameRequest(client, negotiatePath, helloFrame)
+	if err != nil {
+		t.Fatalf("negotiate birth command session: %v", err)
+	}
+	if frames := readResponseFrames(t, response); len(frames) != 2 || frames[0].kind != "server.hello" || frames[1].kind != "session.parameters" {
+		t.Fatalf("birth session negotiation frames=%+v", frames)
+	}
+
+	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"82", 1, "", commandStartCommandPrefix+"82",
+		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Authority matter", Locator: "authority-matter"}, nil)
+	environment.setCurrentID(matter.ID)
+	matterResponse := submitConnectedCommand(t, client, matter, commandStartCommandPrefix+"83")
+	matterResult, err := decodeOperationResultPayload(matter.Request.Operation, matterResponse.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matterOutput, ok := matterResult.Output.(operation.MatterCreateOutput)
+	if matterResponse.kind != "response.end" || !ok || matterOutput.ID != commandStartCommandPrefix+"44" ||
+		matterOutput.Locator != "authority-matter" || matterOutput.Title != "Authority matter" {
+		t.Fatalf("daemon Matter response=%+v typed=%#v", matterResponse, matterResult)
+	}
+
+	step := commandStartCanonicalCommand(commandStartCommandPrefix+"84", 2, matter.ID, matter.ID,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Authority Step"},
+		&operation.ClaimContext{ID: matterOutput.ID, Epoch: "1"})
+	environment.setCurrentID(step.ID)
+	stepResponse := submitConnectedCommand(t, client, step, commandStartCommandPrefix+"85")
+	if stepResponse.kind != "response.end" {
+		t.Fatalf("Step command returned protocol problem %q: %s", m2ProblemCode(t, stepResponse.payload), stepResponse.kind)
+	}
+	stepResult, err := decodeOperationResultPayload(step.Request.Operation, stepResponse.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepOutput, ok := stepResult.Output.(operation.StepCreateOutput)
+	if stepResponse.kind != "response.end" || !ok || stepOutput.ID != commandStartCommandPrefix+"46" || stepOutput.ParentID != matterOutput.ID ||
+		stepOutput.MatterID != matterOutput.ID || stepOutput.Locator != "step-01" || stepOutput.Title != "Authority Step" ||
+		stepOutput.SortKey != 1000 || stepOutput.State != "planned" {
+		t.Fatalf("daemon Step response=%+v typed=%#v", stepResponse, stepResult)
+	}
+	if localDispatch.Load() != 0 {
+		t.Fatalf("connected daemon dispatched locally %d times; expected authority-only execution", localDispatch.Load())
+	}
+	stepReceipt := append([]byte(nil), journalReceipt(t, journal, step.ID)...)
+
+	replay := submitConnectedCommand(t, client, step, commandStartCommandPrefix+"86")
+	replayedResult, err := decodeOperationResultPayload(step.Request.Operation, replay.payload)
+	if err != nil || replay.kind != "response.end" || !reflect.DeepEqual(replayedResult, stepResult) || authority.returnIndex != 2 {
+		t.Fatalf("same-ID/hash daemon replay=%+v result=%+v returnIndex=%d err=%v", replay, replayedResult, authority.returnIndex, err)
+	}
+	if !bytes.Equal(stepReceipt, journalReceipt(t, journal, step.ID)) || localDispatch.Load() != 0 {
+		t.Fatal("exact daemon replay changed receipt or invoked local semantic dispatch")
+	}
+	conflict := step
+	conflict.Request.Input = operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Conflicting title"}
+	conflictResponse := submitConnectedCommand(t, client, conflict, commandStartCommandPrefix+"87")
+	if conflictResponse.kind != "problem" || m2ProblemCode(t, conflictResponse.payload) != "command.id-conflict" || authority.returnIndex != 2 {
+		t.Fatalf("conflicting daemon retry=%+v authority returns=%d", conflictResponse, authority.returnIndex)
+	}
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil || len(installed.Receipts) != 2 || installed.Anchor.EventCount != 5 {
+		t.Fatalf("daemon birth replay duplicated terminal effect: snapshot=%+v err=%v", installed, err)
 	}
 }
 
@@ -1536,6 +1642,50 @@ func readResponseFrames(t *testing.T, response *http.Response) []frameRecord {
 		}
 		frames = append(frames, frame)
 	}
+}
+
+func submitConnectedCommand(t *testing.T, client *http.Client, command operation.Command, requestID string) frameRecord {
+	t.Helper()
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := mustCommandFrame(t, requestID, canonical, hash)
+	response, err := postFrameRequest(client, exchangePath, wire)
+	if err != nil {
+		t.Fatalf("submit connected %s command: %v", command.Request.Operation, err)
+	}
+	frames := readResponseFrames(t, response)
+	if len(frames) != 1 || frames[0].requestID != requestID || frames[0].sequence != 0 {
+		t.Fatalf("connected command response frames=%+v", frames)
+	}
+	return frames[0]
+}
+
+func journalReceipt(t *testing.T, journal *wipdjournal.Journal, commandID string) []byte {
+	t.Helper()
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, ok := installed.Receipts[commandID]
+	if !ok {
+		t.Fatalf("journal has no terminal receipt for %s", commandID)
+	}
+	return append([]byte(nil), receipt.CanonicalReceipt...)
+}
+
+func m2ProblemCode(t *testing.T, payload []byte) string {
+	t.Helper()
+	code, err := problemCodeFromPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code
 }
 
 func assertHTTP2StreamReset(t *testing.T, client *http.Client, wire []byte) {

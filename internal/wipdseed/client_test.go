@@ -319,6 +319,100 @@ func TestPullInstallsAsymmetricAuthorityEventOrderAndProjection(t *testing.T) {
 	}
 }
 
+func TestPullInstallsStepProjectionWhenMatterIsInPriorPrefix(t *testing.T) {
+	fixture := newClientFixture(t)
+	artifactSigner := registerClientFixtureArtifactKey(t, fixture)
+	directory := t.TempDir()
+	state := enrollFixtureClient(t, fixture, directory)
+	peer := peerStateFromClient(t, state)
+	ctx := context.Background()
+
+	matterCommandID := "01KZ7XHAQT1S46NYPN1PW1DX70"
+	matterID := "01KZ7XHAQT1S46NYPN1PW1DX71"
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, matterCommandID, matterID,
+		"01KZ7XHAQT1S46NYPN1PW1DX72", "Authority Matter", "authority-matter", 1)
+	state, err := PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 1 || len(state.Projections) != 1 || len(state.StepProjections) != 0 {
+		t.Fatalf("install preceding Matter prefix: state=%+v err=%v", state.Prefix, err)
+	}
+	state.StepProjections = nil // A Step 7 client-state file predates this derived projection.
+	legacyState, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyFields map[string]json.RawMessage
+	if err = json.Unmarshal(legacyState, &legacyFields); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacyFields, "step_projections")
+	legacyState, err = json.Marshal(legacyFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(directory, stateName), legacyState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stepCommandID := "01KZ7XHAQT1S46NYPN1PW1DX73"
+	stepID := "01KZ7XHAQT1S46NYPN1PW1DX74"
+	stepEventID := "01KZ7XHAQT1S46NYPN1PW1DX75"
+	stepCommand := operation.Command{
+		ID: stepCommandID, AuthorityDomainID: state.DomainID, ExpectedAuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, EnvironmentSequence: 2, ActedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano),
+		CausationCommandID: matterCommandID, CorrelationCommandID: matterCommandID,
+		Request: operation.Request{
+			Operation: operation.StepCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: state.RepoID}, Claim: &operation.ClaimContext{ID: matterID, Epoch: "1"},
+			Input: operation.StepCreateInput{ParentID: matterID, Title: "First Step"}, Blobs: []operation.BlobInput{},
+		},
+	}
+	stepHash, err := stepCommand.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepSubmission, err := fixture.store.SubmitCommand(ctx, stepCommand, stepHash, peer, time.Now().UTC())
+	if err != nil || stepSubmission.Owner == nil {
+		t.Fatalf("submit Step birth: status=%+v err=%v", stepSubmission, err)
+	}
+	stepResult := operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+		ParentID: matterID, Title: "First Step",
+	}}
+	if _, err = fixture.store.CompleteCommand(ctx, stepSubmission.Owner, stepResult, stepID, stepEventID, time.Now().UTC(), func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(artifactSigner, message), nil
+	}); err != nil {
+		t.Fatalf("complete Step birth: %v", err)
+	}
+
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Prefix.EventCount != 2 || len(state.EventRecords) != 2 || len(state.Projections) != 1 || len(state.StepProjections) != 1 ||
+		state.EventRecords[1].EventID != stepEventID {
+		t.Fatalf("incremental Step pull did not install complete birth state: prefix=%+v matters=%d steps=%d records=%+v",
+			state.Prefix, len(state.Projections), len(state.StepProjections), state.EventRecords)
+	}
+	var projection stepProjection
+	if err = json.Unmarshal(state.StepProjections[0], &projection); err != nil {
+		t.Fatal(err)
+	}
+	if projection != (stepProjection{
+		ID: stepID, RepoID: state.RepoID, MatterID: matterID, Locator: "step-01", Title: "First Step",
+		SortKey: 1000, State: "planned", BirthEventID: stepEventID,
+	}) {
+		t.Fatalf("incremental Step projection = %+v", projection)
+	}
+	if err = validateInstalledState(state, fixture.profile); err != nil {
+		t.Fatalf("valid pulled Matter+Step state failed integrity check: %v", err)
+	}
+	corrupt := state
+	corrupt.StepProjections = append([]json.RawMessage(nil), state.StepProjections...)
+	corrupt.StepProjections[0] = json.RawMessage(`{"id":"01KZ7XHAQT1S46NYPN1PW1DX74","repo_id":"01KZ7XHAQT1S46NYPN1PW1DX3C","matter_id":"01KZ7XHAQT1S46NYPN1PW1DX71","locator":"step-02","title":"First Step","sort_key":1000,"state":"planned","birth_event_id":"01KZ7XHAQT1S46NYPN1PW1DX75"}`)
+	if err = validateInstalledState(corrupt, fixture.profile); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("corrupt Step projection = %v, want integrity refusal", err)
+	}
+}
+
 func enrollFixtureClient(t *testing.T, fixture *clientFixture, directory string) ClientState {
 	t.Helper()
 	if err := SavePending(directory, fixture.identity); err != nil {

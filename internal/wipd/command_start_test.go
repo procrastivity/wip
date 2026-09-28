@@ -1,6 +1,7 @@
 package wipd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -54,11 +55,14 @@ func (environment *commandStartTracedEnvironment) Snapshot(ctx context.Context) 
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
 	}
-	if environment.currentID != "" {
-		if _, err := environment.journal.Get(environment.currentID); err != nil {
+	environment.mu.Lock()
+	currentID := environment.currentID
+	environment.mu.Unlock()
+	if currentID != "" {
+		if _, err := environment.journal.Get(currentID); err != nil {
 			return CommandStartSnapshot{}, fmt.Errorf("snapshot preceded durable command admission: %w", err)
 		}
-		environment.trace.add("snapshot:" + environment.currentID)
+		environment.trace.add("snapshot:" + currentID)
 	} else {
 		environment.trace.add("stable-snapshot")
 	}
@@ -120,6 +124,12 @@ func (environment *commandStartTracedEnvironment) commandStartJournal() *wipdjou
 	return environment.journal
 }
 
+func (environment *commandStartTracedEnvironment) setCurrentID(commandID string) {
+	environment.mu.Lock()
+	environment.currentID = commandID
+	environment.mu.Unlock()
+}
+
 type commandStartFakeAuthority struct {
 	trace          *commandStartTrace
 	returnResults  []operation.ResultCode
@@ -136,7 +146,7 @@ func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipd
 		return CommandFold{}, errors.New("unexpected authority return")
 	}
 	eventID := nextCommandStartEventID(start)
-	record := commandStartEventRecord(eventID, entry.Command.ID, entry.RequestHash, entry.Command.EnvironmentID, entry.EnvironmentSeq)
+	record := commandStartEventRecordForEntry(eventID, entry)
 	transfer, err := commandStartVerifiedTransfer(start, []wipdwire.EventRecord{{EventID: eventID, Record: record}})
 	if err != nil {
 		return CommandFold{}, err
@@ -305,6 +315,89 @@ func TestConnectedCommandStartWithoutPendingPullsBeforeGuard(t *testing.T) {
 	}
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
 		t.Fatalf("empty-prefix command-start trace = %v, want %v", got, want)
+	}
+}
+
+func TestConnectedCanonicalMatterAndStepBirthReplayThroughTerminalCoordinator(t *testing.T) {
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
+	authority.returnContinue = []bool{false, false}
+
+	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"73", 1, "", commandStartCommandPrefix+"73",
+		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "M5 birth", Locator: "m5-birth"}, nil)
+	environment.currentID = matter.ID
+	matterResult, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), matter, func(_ context.Context, snapshot CommandStartSnapshot, got operation.Command) error {
+		if snapshot.Anchor.EventCount != 1 || got.ID != matter.ID {
+			return fmt.Errorf("Matter callback preceded command-start pull: snapshot=%+v command=%s", snapshot, got.ID)
+		}
+		trace.add("matter-guard-after-pull")
+		return nil
+	})
+	if err != nil || !matterResult.Returned || matterResult.SemanticResult.Code != operation.ResultSucceeded {
+		t.Fatalf("Matter terminal result=%+v err=%v", matterResult, err)
+	}
+	matterOutput, ok := matterResult.SemanticResult.Output.(operation.MatterCreateOutput)
+	if !ok || matterOutput.ID != commandStartCommandPrefix+"44" || matterOutput.Locator != "m5-birth" || matterOutput.Title != "M5 birth" {
+		t.Fatalf("Matter authority output=%#v", matterResult.SemanticResult.Output)
+	}
+
+	step := commandStartCanonicalCommand(commandStartCommandPrefix+"74", 2, matter.ID, matter.ID,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateInput{ParentID: matterOutput.ID, Title: "First Step"},
+		&operation.ClaimContext{ID: matterOutput.ID, Epoch: "1"})
+	environment.currentID = step.ID
+	stepResult, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), step, func(_ context.Context, snapshot CommandStartSnapshot, got operation.Command) error {
+		if snapshot.Anchor.EventCount != 3 || got.ID != step.ID {
+			return fmt.Errorf("Step callback preceded command-start pull: snapshot=%+v command=%s", snapshot, got.ID)
+		}
+		trace.add("step-guard-after-pull")
+		return nil
+	})
+	if err != nil || !stepResult.Returned || stepResult.SemanticResult.Code != operation.ResultSucceeded {
+		t.Fatalf("Step terminal result=%+v err=%v", stepResult, err)
+	}
+	stepOutput, ok := stepResult.SemanticResult.Output.(operation.StepCreateOutput)
+	if !ok || stepOutput.ID != commandStartCommandPrefix+"46" || stepOutput.ParentID != matterOutput.ID ||
+		stepOutput.MatterID != matterOutput.ID || stepOutput.Locator != "step-01" || stepOutput.Title != "First Step" || stepOutput.SortKey != 1000 || stepOutput.State != "planned" {
+		t.Fatalf("Step authority output=%#v", stepResult.SemanticResult.Output)
+	}
+	if matterResult.Entry.RequestHash != mustCommandStartHash(t, matter) || stepResult.Entry.RequestHash != mustCommandStartHash(t, step) {
+		t.Fatalf("daemon journal changed canonical command identities: Matter=%s Step=%s", matterResult.Entry.RequestHash, stepResult.Entry.RequestHash)
+	}
+
+	stepEntry, err := journal.Get(step.ID)
+	if err != nil || stepEntry.State != wipdjournal.StateReturned || stepEntry.Command.CausationCommandID != matter.ID ||
+		stepEntry.Command.CorrelationCommandID != matter.ID || stepEntry.Command.Request.Claim == nil || stepEntry.Command.Request.Claim.ID != matterOutput.ID {
+		t.Fatalf("durable Step command binding=%+v err=%v", stepEntry, err)
+	}
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil || installed.Anchor.EventCount != 4 {
+		t.Fatalf("installed Matter+Step prefix=%+v err=%v", installed.Anchor, err)
+	}
+	stepReceipt := append([]byte(nil), stepResult.Receipt...)
+	_, err = coordinator.RunConnectedCanonicalTerminal(context.Background(), step, func(context.Context, CommandStartSnapshot, operation.Command) error {
+		t.Fatal("exact terminal replay reran the guard")
+		return nil
+	})
+	if err != nil || authority.returnIndex != 2 {
+		t.Fatalf("exact Step replay returned again: returnIndex=%d err=%v", authority.returnIndex, err)
+	}
+	replayedEntry, err := journal.InstallSnapshot(context.Background())
+	if err != nil || replayedEntry.Anchor.EventCount != 5 || len(replayedEntry.Receipts) != 2 {
+		t.Fatalf("exact replay duplicated a birth fold or receipt: anchor=%+v receipts=%d err=%v", replayedEntry.Anchor, len(replayedEntry.Receipts), err)
+	}
+	if !bytes.Equal(stepReceipt, replayedEntry.Receipts[step.ID].CanonicalReceipt) {
+		t.Fatal("exact Step replay changed the installed terminal receipt")
+	}
+	if got := trace.all(); !containsCommandStartTrace(got, "matter-guard-after-pull") || !containsCommandStartTrace(got, "step-guard-after-pull") {
+		t.Fatalf("terminal coordinator omitted post-pull birth guards: %v", got)
+	}
+	conflict := step
+	conflict.Request.Input = operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Different intent"}
+	if _, err = coordinator.RunConnectedCanonicalTerminal(context.Background(), conflict, func(context.Context, CommandStartSnapshot, operation.Command) error {
+		t.Fatal("conflicting Step identity reached guard")
+		return nil
+	}); !errors.Is(err, wipdjournal.ErrCommandIDConflict) || authority.returnIndex != 2 {
+		t.Fatalf("conflicting Step replay err=%v returnIndex=%d", err, authority.returnIndex)
 	}
 }
 
@@ -590,7 +683,19 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 	}
 	var output, problem any
 	if code == operation.ResultSucceeded {
-		output = []byte{0xa0}
+		switch entry.Command.Request.Operation {
+		case operation.MatterCreateV1.Metadata().Operation:
+			input := entry.Command.Request.Input.(operation.MatterCreateInput)
+			output, _ = wipdwire.EncodeCanonical(map[string]any{"id": eventIDs[0], "locator": input.Locator, "title": input.Title})
+		case operation.StepCreateV1.Metadata().Operation:
+			input := entry.Command.Request.Input.(operation.StepCreateInput)
+			output, _ = wipdwire.EncodeCanonical(map[string]any{
+				"id": eventIDs[0], "parent_id": input.ParentID, "matter_id": input.ParentID,
+				"locator": "step-01", "title": input.Title, "sort_key": int64(1000), "state": "planned",
+			})
+		default:
+			return nil, ErrCommandStartIdentity
+		}
 	} else {
 		problem = "operation.invalid-request"
 	}
@@ -645,6 +750,63 @@ func commandStartEventRecord(eventID, commandID, requestHash, environmentID stri
 		"payload": map[string]any{"id": eventID, "locator": "test:" + eventID, "title": "title " + eventID},
 	})
 	return encoded
+}
+
+func commandStartEventRecordForEntry(eventID string, entry wipdjournal.Entry) []byte {
+	switch entry.Command.Request.Operation {
+	case operation.MatterCreateV1.Metadata().Operation:
+		input := entry.Command.Request.Input.(operation.MatterCreateInput)
+		encoded, _ := wipdwire.EncodeCanonical(map[string]any{
+			"schema": "wipd.event/1", "event_id": eventID, "domain_id": commandStartDomainID,
+			"command_id": entry.Command.ID, "request_hash": entry.RequestHash,
+			"environment": map[string]any{"id": entry.Command.EnvironmentID, "sequence": entry.EnvironmentSeq},
+			"acted_at":    entry.Command.ActedAt, "occurred_at": "2026-09-28T00:00:00Z",
+			"kind": "matter.created", "subject_id": eventID, "repo_id": commandStartRepoID,
+			"payload": map[string]any{"id": eventID, "locator": input.Locator, "title": input.Title},
+		})
+		return encoded
+	case operation.StepCreateV1.Metadata().Operation:
+		input := entry.Command.Request.Input.(operation.StepCreateInput)
+		encoded, _ := wipdwire.EncodeCanonical(map[string]any{
+			"schema": "wipd.event/1", "event_id": eventID, "domain_id": commandStartDomainID,
+			"command_id": entry.Command.ID, "request_hash": entry.RequestHash,
+			"environment": map[string]any{"id": entry.Command.EnvironmentID, "sequence": entry.EnvironmentSeq},
+			"acted_at":    entry.Command.ActedAt, "occurred_at": "2026-09-28T00:00:00Z",
+			"kind": "step.created", "subject_id": eventID, "repo_id": commandStartRepoID,
+			"payload": map[string]any{"title": input.Title, "locator": "step-01", "parent": input.ParentID, "sort_key": int64(1000)},
+		})
+		return encoded
+	default:
+		return nil
+	}
+}
+
+func commandStartCanonicalCommand(id string, sequence uint64, causationID, correlationID string, operationID operation.ID, input operation.Input, claim *operation.ClaimContext) operation.Command {
+	return operation.Command{
+		ID: id, AuthorityDomainID: commandStartDomainID, ExpectedAuthorityEpoch: 7,
+		EnvironmentID: commandStartEnvironmentID, EnvironmentSequence: sequence,
+		ActedAt: "2026-09-28T00:00:00Z", CausationCommandID: causationID,
+		CorrelationCommandID: correlationID,
+		Request:              operation.Request{Operation: operationID, Actor: "human", Context: operation.Context{Repo: commandStartRepoID}, Claim: claim, Input: input},
+	}
+}
+
+func mustCommandStartHash(t *testing.T, command operation.Command) string {
+	t.Helper()
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+func containsCommandStartTrace(trace []string, step string) bool {
+	for _, item := range trace {
+		if item == step {
+			return true
+		}
+	}
+	return false
 }
 
 func commandStartVerifiedTransfer(start wipdwire.PrefixAnchor, records []wipdwire.EventRecord) (wipdjournal.VerifiedTransfer, error) {

@@ -18,8 +18,9 @@ const (
 )
 
 var (
-	transferULID = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	transferHash = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	transferULID        = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	transferHash        = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	transferStepLocator = regexp.MustCompile(`^step-[0-9]{2,}$`)
 	// ErrInvalidTransfer means transfer records do not prove the advertised
 	// complete prefix delta and manifest.
 	ErrInvalidTransfer = errors.New("wipdjournal: invalid verified transfer")
@@ -177,7 +178,7 @@ func validMatterEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		fields["kind"] != "matter.created" || !transferULID.MatchString(asString(fields["command_id"])) ||
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created") || !transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
 	}
@@ -190,11 +191,24 @@ func validMatterEvent(record []byte, domainID, eventID string) bool {
 		return false
 	}
 	payload, ok := fields["payload"].(map[string]any)
-	if !ok || !wipdwire.ExactMapKeys(payload, "id", "locator", "title") || !transferULID.MatchString(asString(payload["id"])) ||
-		fields["subject_id"] != payload["id"] || asString(payload["locator"]) == "" || asString(payload["title"]) == "" {
+	if !ok {
 		return false
 	}
-	return true
+	switch fields["kind"] {
+	case "matter.created":
+		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
+			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&
+			asString(payload["locator"]) != "" && asString(payload["title"]) != ""
+	case "step.created":
+		parent := asString(payload["parent"])
+		locator, locatorOK := payload["locator"].(string)
+		_, titleOK := payload["title"].(string)
+		return wipdwire.ExactMapKeys(payload, "title", "locator", "parent", "sort_key") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(parent) &&
+			locatorOK && transferStepLocator.MatchString(locator) && titleOK && positiveUint(payload["sort_key"])
+	default:
+		return false
+	}
 }
 
 func canonicalUTC(value any) bool {

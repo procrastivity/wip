@@ -1,6 +1,7 @@
 # M2 Step 2: canonical semantic schema and identity
 
-Status: specified and executable for the sealed M1 catalogue. The implementation
+Status: specified and executable for the sealed M1 catalogue and the Step 8
+provisional Matter/Step birth subset. The implementation
 is `internal/operation/command_identity.go` and `canonical_cbor.go`; focused
 vectors are in `command_identity_test.go`. This record closes M2 questions Q01
 and Q02 and the identity part of Q24. It does not define a transport, a protocol
@@ -120,6 +121,33 @@ intent and differs from null, which this schema does not admit. D127's assigned
 locator and `locator-repair-required` are authority output/event facts and do
 not rewrite the immutable request. Their result/event schema belongs to later
 M2 work.
+
+### `step.create@v1` (Step 8 provisional-birth extension)
+
+The exact `input` map is:
+
+```text
+{
+  "parent_id": <canonical Matter ULID>,
+  "title": <NFC text>
+}
+```
+
+The parent is the stable ID of a Matter in the command's Repo; a locator or
+path is not accepted. `claim` is exactly `{ "id": parent_id, "epoch": 1 }`.
+The command's `causation_command_id` and `correlation_command_id` MUST both be
+the command ID of that Matter's successful `matter.create@v1` birth. The
+authority binds that birth to the same Environment and Repo, requires its
+terminal-success receipt and a strictly later Environment sequence, and
+rechecks these facts in the submission/fold transaction. A claim-shaped input
+alone is not proof of the implicit birth claim.
+
+These fields use the existing `wipd.command/1` deterministic-CBOR map and
+request-hash domain. The operation ID is `step.create@v1`; therefore the
+operation, parent, title, claim, causation, correlation, and other ordinary
+command identity fields all participate in `request_hash`. Retries retain the
+same command ID and exact canonical bytes; assigned Step identity and event
+facts are not added to the request.
 
 ## 4. Digests and domain separation
 

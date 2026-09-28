@@ -134,6 +134,23 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
 		return
 	}
+	session := connectionSession(request)
+	if session == nil {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	session.mu.Lock()
+	negotiated := session.negotiated && !session.failed && !session.negotiating
+	_, supportsOperation := session.operations[command.Request.Operation]
+	session.mu.Unlock()
+	if !negotiated {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	if !supportsOperation {
+		writeLabProblem(writer, frame.RequestID, "operation.unknown")
+		return
+	}
 	computedHash, err := command.RequestHash()
 	if err != nil || computedHash != submit.RequestHash {
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
@@ -143,11 +160,6 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		writeLabProblem(writer, frame.RequestID, "auth.authority-binding-mismatch")
 		return
 	}
-	if command.Request.Operation != operation.MatterCreateV1.Metadata().Operation {
-		writeLabProblem(writer, frame.RequestID, "operation.unknown")
-		return
-	}
-
 	admissionParent := request.Context()
 	var cancelDeadline context.CancelFunc
 	if !deadline.IsZero() {
@@ -345,13 +357,28 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
 	result := app.registry.Dispatch(context.Background(), command.Request)
-	var matterID, eventID string
+	var subjectID, eventID string
 	if result.Code == operation.ResultSucceeded {
-		output, ok := result.Output.(operation.MatterCreateOutput)
-		if !ok {
+		switch command.Request.Operation {
+		case operation.MatterCreateV1.Metadata().Operation:
+			output, ok := result.Output.(operation.MatterCreateOutput)
+			if !ok {
+				return nil, authoritystore.ErrInvalidProof
+			}
+			subjectID = output.ID
+		case operation.StepCreateV1.Metadata().Operation:
+			_, ok := result.Output.(operation.StepCreateOutput)
+			if !ok {
+				return nil, authoritystore.ErrInvalidProof
+			}
+			var err error
+			subjectID, err = randomULID(time.Now().UTC())
+			if err != nil {
+				return nil, err
+			}
+		default:
 			return nil, authoritystore.ErrInvalidProof
 		}
-		matterID = output.ID
 		var err error
 		eventID, err = randomULID(time.Now().UTC().Add(time.Millisecond))
 		if err != nil {
@@ -359,14 +386,14 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 		}
 	}
 	completion := authoritystore.CommandCompletion{
-		Result: result, MatterID: matterID, EventID: eventID, Occurred: time.Now().UTC(),
+		Result: result, SubjectID: subjectID, EventID: eventID, Occurred: time.Now().UTC(),
 	}
 	return app.completeContinuation(owner, completion)
 }
 
 func (app *m5LabHandler) completeContinuation(owner *authoritystore.Execution, completion authoritystore.CommandCompletion) ([]byte, error) {
 	status, err := app.store.CompleteCommand(context.Background(), owner, completion.Result,
-		completion.MatterID, completion.EventID, completion.Occurred, app.sign)
+		completion.SubjectID, completion.EventID, completion.Occurred, app.sign)
 	if err != nil {
 		return nil, err
 	}

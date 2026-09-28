@@ -102,7 +102,8 @@ func checkStep4State(db *sql.DB) error {
 	}
 	var terminals int
 	for _, s := range all {
-		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 || (s.operation != "matter.create" && !lifecycleOperation(s.operation)) || s.version != 1 {
+		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation)) || s.version != 1 {
 			return ErrInvalidStore
 		}
 		if lifecycleOperation(s.operation) {
@@ -162,7 +163,7 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		if code == "result.succeeded" {
-			if !first.Valid || !last.Valid || (s.operation == "matter.create" && first.Int64 != last.Int64) || r.Range == nil || (s.operation == "matter.create" && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
+			if !first.Valid || !last.Valid || ((s.operation == "matter.create" || s.operation == "step.create") && first.Int64 != last.Int64) || r.Range == nil || ((s.operation == "matter.create" || s.operation == "step.create") && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
 			if lifecycleOperation(s.operation) {
@@ -175,11 +176,13 @@ func checkStep4State(db *sql.DB) error {
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
 					return ErrInvalidStore
 				}
-			} else {
+			} else if s.operation == "matter.create" || s.operation == "step.create" {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
 					return ErrInvalidStore
 				}
+			} else {
+				return ErrInvalidStore
 			}
 		} else if (code == "result.rejected" || code == "result.refused" || code == "result.failed") && !first.Valid && !last.Valid && r.Range == nil && r.Result.Output == nil && r.Result.Problem != nil {
 			prefix := string(*r.Result.Problem)
@@ -190,7 +193,7 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		var eventCount int
-		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && s.operation == "matter.create" && eventCount != 1) || (code == "result.succeeded" && lifecycleOperation(s.operation) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
+		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && (s.operation == "matter.create" || s.operation == "step.create") && eventCount != 1) || (code == "result.succeeded" && lifecycleOperation(s.operation) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -207,7 +210,17 @@ func checkStep4State(db *sql.DB) error {
 	if terminals+grants != count {
 		return ErrInvalidStore
 	}
-	return checkStep4Events(db, all)
+	if err = checkStep4Events(db, all); err != nil {
+		return err
+	}
+	var version int
+	if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 7 {
+		return checkStep8State(db, all)
+	}
+	return nil
 }
 
 func validResultProblem(code, problem string) bool {
@@ -301,6 +314,66 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 				break
 			}
 			lifecycleEvents[ownerKey(d, cmd)] = append(lifecycleEvents[ownerKey(d, cmd)], lifecycleEvent{pos, id, raw})
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if s.operation == "step.create" {
+			var event struct {
+				Schema      string `cbor:"schema"`
+				ID          string `cbor:"event_id"`
+				Domain      string `cbor:"domain_id"`
+				Command     string `cbor:"command_id"`
+				Hash        string `cbor:"request_hash"`
+				Kind        string `cbor:"kind"`
+				Subject     string `cbor:"subject_id"`
+				Repo        string `cbor:"repo_id"`
+				Acted       string `cbor:"acted_at"`
+				Occurred    string `cbor:"occurred_at"`
+				Environment struct {
+					ID       string `cbor:"id"`
+					Sequence uint64 `cbor:"sequence"`
+				} `cbor:"environment"`
+				Payload struct {
+					Title   string `cbor:"title"`
+					Locator string `cbor:"locator"`
+					Parent  string `cbor:"parent"`
+					SortKey int64  `cbor:"sort_key"`
+				} `cbor:"payload"`
+			}
+			var fields map[string]cbor.RawMessage
+			if closedPayload(raw, &event, "schema", "event_id", "domain_id", "command_id", "request_hash", "kind", "subject_id", "repo_id", "acted_at", "occurred_at", "environment", "payload") != nil || canonicalDecode(raw, &fields) != nil {
+				err = ErrInvalidStore
+				break
+			}
+			var nested map[string]cbor.RawMessage
+			if canonicalDecode(fields["environment"], &nested) != nil || !exactKeys(nested, "id", "sequence") {
+				err = ErrInvalidStore
+				break
+			}
+			nested = nil
+			if canonicalDecode(fields["payload"], &nested) != nil || !exactKeys(nested, "title", "locator", "parent", "sort_key") ||
+				event.Schema != "wipd.event/1" || event.ID != id || event.Domain != d || event.Command != cmd || event.Hash != s.hash ||
+				event.Kind != "step.created" || !ulid.MatchString(event.Subject) || event.Environment.ID != s.env || event.Environment.Sequence != s.seq ||
+				event.Repo == "" || event.Acted == "" || !ulid.MatchString(event.Payload.Parent) || event.Payload.Locator == "" || event.Payload.SortKey <= 0 {
+				err = ErrInvalidStore
+				break
+			}
+			if _, e := utcTime(event.Occurred); e != nil {
+				err = ErrInvalidStore
+				break
+			}
 			var length [8]byte
 			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
 			h := sha256.New()

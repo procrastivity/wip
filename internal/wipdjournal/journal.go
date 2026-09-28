@@ -316,6 +316,97 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 	return cloneEntry(entry), nil
 }
 
+// PrepareCanonicalCommand persists an already canonical Environment command
+// without rewriting its ID, sequence, timestamp, or hash. It is for the
+// authenticated daemon ingress boundary: the command must match this journal's
+// Environment identity and the exact next sequence. Ordinary callers should
+// use PrepareCommand and let the Environment assign those fields.
+func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, error) {
+	if j == nil {
+		return Entry{}, ErrClosed
+	}
+	input := CommandInput{
+		ID: command.ID, CausationCommandID: command.CausationCommandID,
+		CorrelationCommandID: command.CorrelationCommandID, Request: command.Request,
+	}
+	delivery, correlation, err := validateInput(j.identity, input)
+	if err != nil || correlation != command.CorrelationCommandID || command.AuthorityDomainID != j.identity.DomainID ||
+		command.ExpectedAuthorityEpoch != j.identity.AuthorityEpoch || command.EnvironmentID != j.identity.EnvironmentID {
+		return Entry{}, ErrInvalidCommand
+	}
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		return Entry{}, fmt.Errorf("%w: canonical identity: %v", ErrInvalidCommand, err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		return Entry{}, fmt.Errorf("%w: request hash: %v", ErrInvalidCommand, err)
+	}
+
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return Entry{}, ErrClosed
+	}
+	if entry, lookupErr := lookup(j.db, command.ID); lookupErr == nil {
+		if err = j.verifyEntry(entry); err != nil {
+			return Entry{}, err
+		}
+		if !bytes.Equal(entry.CanonicalBytes, canonical) {
+			return Entry{}, ErrCommandIDConflict
+		}
+		return cloneEntry(entry), nil
+	} else if !errors.Is(lookupErr, ErrNotFound) {
+		return Entry{}, lookupErr
+	}
+	if err = j.verifyCommandBlobs(command.Request.Blobs); err != nil {
+		return Entry{}, err
+	}
+	tx, err := j.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var nextSequence, nextPosition int64
+	if err = tx.QueryRow(`SELECT next_environment_sequence, next_journal_position FROM environment_state WHERE singleton=1`).Scan(&nextSequence, &nextPosition); err != nil {
+		return Entry{}, err
+	}
+	if nextSequence < 1 || nextPosition < 1 || nextSequence == int64(^uint64(0)>>1) ||
+		command.EnvironmentSequence != uint64(nextSequence) ||
+		(delivery != operation.DeliveryAuthority && nextPosition == int64(^uint64(0)>>1)) {
+		return Entry{}, ErrInvalidCommand
+	}
+	state := StatePreAdmission
+	var position any = nextPosition
+	if delivery == operation.DeliveryAuthority {
+		state = StateAttemptPrepared
+		position = nil
+	}
+	if _, err = tx.Exec(`INSERT INTO commands(command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`, command.ID, nextSequence, position, hash, canonical, string(delivery), string(state)); err != nil {
+		return Entry{}, err
+	}
+	if delivery == operation.DeliveryAuthority {
+		_, err = tx.Exec(`UPDATE environment_state SET next_environment_sequence=? WHERE singleton=1 AND next_environment_sequence=?`, nextSequence+1, nextSequence)
+	} else {
+		_, err = tx.Exec(`UPDATE environment_state SET next_environment_sequence=?, next_journal_position=? WHERE singleton=1 AND next_environment_sequence=? AND next_journal_position=?`, nextSequence+1, nextPosition+1, nextSequence, nextPosition)
+	}
+	if err != nil {
+		return Entry{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Entry{}, err
+	}
+	entry := Entry{
+		Command: cloneCommand(command), CanonicalBytes: bytes.Clone(canonical), RequestHash: hash,
+		EnvironmentSeq: command.EnvironmentSequence, Delivery: delivery, State: state, Created: true,
+	}
+	if delivery != operation.DeliveryAuthority {
+		entry.JournalPosition = uint64(nextPosition)
+	}
+	return cloneEntry(entry), nil
+}
+
 // Get returns one exact retained command by its caller-allocated ID.
 func (j *Journal) Get(commandID string) (Entry, error) {
 	if j == nil {
@@ -658,6 +749,11 @@ func cloneEntry(entry Entry) Entry {
 	entry.CanonicalBytes = bytes.Clone(entry.CanonicalBytes)
 	entry.Command.Request = cloneRequest(entry.Command.Request)
 	return entry
+}
+
+func cloneCommand(command operation.Command) operation.Command {
+	command.Request = cloneRequest(command.Request)
+	return command
 }
 
 func cloneRequest(request operation.Request) operation.Request {

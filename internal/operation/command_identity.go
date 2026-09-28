@@ -212,6 +212,11 @@ func canonicalInput(input Input) (canonicalMap, error) {
 			"title":             input.Title,
 			"requested_locator": input.Locator,
 		}, nil
+	case StepCreateInput:
+		return canonicalMap{
+			"parent_id": input.ParentID,
+			"title":     input.Title,
+		}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}

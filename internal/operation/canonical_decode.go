@@ -200,22 +200,38 @@ func commandDecodeClaim(value any) (*ClaimContext, error) {
 }
 
 func commandDecodeInput(id ID, value any) (Input, error) {
-	fields, err := commandMap(value, "input", "title", "requested_locator")
-	if err != nil {
-		return nil, err
-	}
-	if id != MatterCreateV1.Metadata().Operation {
+	switch id {
+	case MatterCreateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "title", "requested_locator")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		locator, err := commandString(fields, "requested_locator")
+		if err != nil {
+			return nil, err
+		}
+		return MatterCreateInput{Title: title, Locator: locator}, nil
+	case StepCreateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "parent_id", "title")
+		if err != nil {
+			return nil, err
+		}
+		parent, err := commandString(fields, "parent_id")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		return StepCreateInput{ParentID: parent, Title: title}, nil
+	default:
 		return nil, fmt.Errorf("operation: no canonical identity schema for %s", id)
 	}
-	title, err := commandString(fields, "title")
-	if err != nil {
-		return nil, err
-	}
-	locator, err := commandString(fields, "requested_locator")
-	if err != nil {
-		return nil, err
-	}
-	return MatterCreateInput{Title: title, Locator: locator}, nil
 }
 
 func commandDecodeBlobs(value any) ([]BlobInput, error) {

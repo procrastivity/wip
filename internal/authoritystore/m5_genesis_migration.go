@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-var m5GenesisMigrationMarker = schemaObject{"schema_migrations", "table", `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK (version IN (1, 2, 3, 4, 5, 6)), name TEXT NOT NULL CHECK ((version = 1 AND name = 'baseline') OR (version = 2 AND name = 'environment-and-artifacts') OR (version = 3 AND name = 'submissions-and-receipts') OR (version = 4 AND name = 'prefix-snapshot-blob-transfer') OR (version = 5 AND name = 'claims-grants-journals-close') OR (version = 6 AND name = 'm5-lab-genesis-grant-consumption'))) STRICT`}
+var m5GenesisV6MigrationMarker = schemaObject{"schema_migrations", "table", `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK (version IN (1, 2, 3, 4, 5, 6)), name TEXT NOT NULL CHECK ((version = 1 AND name = 'baseline') OR (version = 2 AND name = 'environment-and-artifacts') OR (version = 3 AND name = 'submissions-and-receipts') OR (version = 4 AND name = 'prefix-snapshot-blob-transfer') OR (version = 5 AND name = 'claims-grants-journals-close') OR (version = 6 AND name = 'm5-lab-genesis-grant-consumption'))) STRICT`}
 
 var m5GenesisSchema = []schemaObject{
 	{"m5_lab_genesis_grant_consumptions", "table", `CREATE TABLE m5_lab_genesis_grant_consumptions (
@@ -32,7 +32,7 @@ func installM5Genesis(db *sql.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`DROP TABLE schema_migrations`, m5GenesisMigrationMarker.sql,
+		`DROP TABLE schema_migrations`, m5GenesisV6MigrationMarker.sql,
 		`INSERT INTO schema_migrations VALUES (1,'baseline'),(2,'environment-and-artifacts'),(3,'submissions-and-receipts'),(4,'prefix-snapshot-blob-transfer'),(5,'claims-grants-journals-close'),(6,'m5-lab-genesis-grant-consumption')`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {

@@ -66,6 +66,7 @@ type ClientState struct {
 	ManifestDigest  string                       `json:"manifest_digest"`
 	ManifestEntries []wipdwire.BlobManifestEntry `json:"manifest_entries"`
 	Projections     []json.RawMessage            `json:"projections"`
+	StepProjections []json.RawMessage            `json:"step_projections"`
 }
 
 // PrepareIdentity creates a private Environment key and CSR. The caller keeps

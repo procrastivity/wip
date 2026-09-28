@@ -44,6 +44,17 @@ type eventProjection struct {
 	BirthEventID string `json:"birth_event_id"`
 }
 
+type stepProjection struct {
+	ID           string `json:"id"`
+	RepoID       string `json:"repo_id"`
+	MatterID     string `json:"matter_id"`
+	Locator      string `json:"locator"`
+	Title        string `json:"title"`
+	SortKey      int64  `json:"sort_key"`
+	State        string `json:"state"`
+	BirthEventID string `json:"birth_event_id"`
+}
+
 type matterCreatedEvent struct {
 	Schema      string `cbor:"schema"`
 	EventID     string `cbor:"event_id"`
@@ -63,6 +74,29 @@ type matterCreatedEvent struct {
 		ID      string `cbor:"id"`
 		Locator string `cbor:"locator"`
 		Title   string `cbor:"title"`
+	} `cbor:"payload"`
+}
+
+type stepCreatedEvent struct {
+	Schema      string `cbor:"schema"`
+	EventID     string `cbor:"event_id"`
+	DomainID    string `cbor:"domain_id"`
+	CommandID   string `cbor:"command_id"`
+	Hash        string `cbor:"request_hash"`
+	Environment struct {
+		ID       string `cbor:"id"`
+		Sequence uint64 `cbor:"sequence"`
+	} `cbor:"environment"`
+	ActedAt    string `cbor:"acted_at"`
+	OccurredAt string `cbor:"occurred_at"`
+	Kind       string `cbor:"kind"`
+	SubjectID  string `cbor:"subject_id"`
+	RepoID     string `cbor:"repo_id"`
+	Payload    struct {
+		Title   string `cbor:"title"`
+		Locator string `cbor:"locator"`
+		Parent  string `cbor:"parent"`
+		SortKey int64  `cbor:"sort_key"`
 	} `cbor:"payload"`
 }
 
@@ -313,7 +347,7 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 			return zero, ErrInvalidClientState
 		}
 	}
-	anchor, projections, err := foldEventRecords(records, domainID)
+	anchor, projections, stepProjections, err := foldEventRecords(records, domainID)
 	if err != nil || !anchorEqual(anchor, endAnchor) {
 		return zero, ErrInvalidClientState
 	}
@@ -322,6 +356,7 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 		EnvironmentID: environmentID, OwnerKeyID: profile.OwnerRootSPKI(), SPKIDigest: spkiDigest,
 		Prefix: endAnchor, EventRecords: records, ManifestDigest: manifest.Digest,
 		ManifestEntries: append([]wipdwire.BlobManifestEntry{}, manifest.Entries...), Projections: projections,
+		StepProjections: stepProjections,
 	}, nil
 }
 
@@ -351,33 +386,83 @@ func decodeManifest(payload []byte) (wipdwire.BlobManifest, error) {
 	return result, nil
 }
 
-func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire.PrefixAnchor, []json.RawMessage, error) {
+func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire.PrefixAnchor, []json.RawMessage, []json.RawMessage, error) {
 	chain := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
 	projections := make([]eventProjection, 0, len(records))
+	stepProjections := make([]stepProjection, 0, len(records))
 	seenIDs := make(map[string]struct{}, len(records))
 	seenLocators := make(map[string]struct{}, len(records))
+	matterRepos := make(map[string]string)
+	stepCounts := make(map[string]int)
 	previousEventID := ""
 	for _, record := range records {
 		if !clientULIDPattern.MatchString(record.EventID) || previousEventID != "" && record.EventID <= previousEventID {
-			return wipdwire.PrefixAnchor{}, nil, ErrInvalidClientState
+			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
-		var event matterCreatedEvent
-		if decodeM1Event(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
-			event.DomainID != domainID || !clientULIDPattern.MatchString(event.CommandID) || !validDigest(event.Hash) ||
-			!clientULIDPattern.MatchString(event.Environment.ID) || event.Environment.Sequence == 0 || event.Kind != "matter.created" ||
-			event.SubjectID != event.Payload.ID || !clientULIDPattern.MatchString(event.Payload.ID) || !clientULIDPattern.MatchString(event.RepoID) ||
-			event.Payload.Locator == "" || event.Payload.Title == "" || !validUTC(event.ActedAt) || !validUTC(event.OccurredAt) {
-			return wipdwire.PrefixAnchor{}, nil, ErrInvalidClientState
+		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil {
+			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
-		if _, exists := seenIDs[event.Payload.ID]; exists {
-			return wipdwire.PrefixAnchor{}, nil, ErrInvalidClientState
+		kind, ok := fields["kind"].(string)
+		if !ok {
+			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
-		locatorKey := event.RepoID + "\x00" + event.Payload.Locator
-		if _, exists := seenLocators[locatorKey]; exists {
-			return wipdwire.PrefixAnchor{}, nil, ErrInvalidClientState
+		switch kind {
+		case "matter.created":
+			var event matterCreatedEvent
+			if decodeM1Event(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
+				event.DomainID != domainID || !clientULIDPattern.MatchString(event.CommandID) || !validDigest(event.Hash) ||
+				!clientULIDPattern.MatchString(event.Environment.ID) || event.Environment.Sequence == 0 ||
+				event.SubjectID != event.Payload.ID || !clientULIDPattern.MatchString(event.Payload.ID) || !clientULIDPattern.MatchString(event.RepoID) ||
+				event.Payload.Locator == "" || event.Payload.Title == "" || !validUTC(event.ActedAt) || !validUTC(event.OccurredAt) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := seenIDs[event.Payload.ID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			locatorKey := event.RepoID + "\x00" + event.Payload.Locator
+			if _, exists := seenLocators[locatorKey]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			seenIDs[event.Payload.ID] = struct{}{}
+			seenLocators[locatorKey] = struct{}{}
+			matterRepos[event.Payload.ID] = event.RepoID
+			projections = append(projections, eventProjection{
+				ID: event.Payload.ID, RepoID: event.RepoID, Locator: event.Payload.Locator,
+				Title: event.Payload.Title, BirthEventID: event.EventID,
+			})
+		case "step.created":
+			var event stepCreatedEvent
+			if decodeStepEvent(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
+				event.DomainID != domainID || !clientULIDPattern.MatchString(event.CommandID) || !validDigest(event.Hash) ||
+				!clientULIDPattern.MatchString(event.Environment.ID) || event.Environment.Sequence == 0 ||
+				!clientULIDPattern.MatchString(event.SubjectID) || !clientULIDPattern.MatchString(event.RepoID) ||
+				!validUTC(event.ActedAt) || !validUTC(event.OccurredAt) || !clientULIDPattern.MatchString(event.Payload.Parent) ||
+				event.Payload.Locator == "" || event.Payload.SortKey <= 0 {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			repo, parentExists := matterRepos[event.Payload.Parent]
+			if !parentExists || repo != event.RepoID {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := seenIDs[event.SubjectID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			count := stepCounts[event.Payload.Parent] + 1
+			if event.Payload.Locator != fmt.Sprintf("step-%02d", count) || event.Payload.SortKey != int64(count)*1000 {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			stepCounts[event.Payload.Parent] = count
+			seenIDs[event.SubjectID] = struct{}{}
+			stepProjections = append(stepProjections, stepProjection{
+				ID: event.SubjectID, RepoID: event.RepoID, MatterID: event.Payload.Parent,
+				Locator: event.Payload.Locator, Title: event.Payload.Title, SortKey: event.Payload.SortKey,
+				State: "planned", BirthEventID: event.EventID,
+			})
+		default:
+			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
-		seenIDs[event.Payload.ID] = struct{}{}
-		seenLocators[locatorKey] = struct{}{}
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(record.Record)))
 		hash := sha256.New()
@@ -386,11 +471,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		_, _ = hash.Write(length[:])
 		_, _ = hash.Write(record.Record)
 		copy(chain[:], hash.Sum(nil))
-		projections = append(projections, eventProjection{
-			ID: event.Payload.ID, RepoID: event.RepoID, Locator: event.Payload.Locator,
-			Title: event.Payload.Title, BirthEventID: event.EventID,
-		})
-		previousEventID = event.EventID
+		previousEventID = record.EventID
 	}
 	sort.Slice(projections, func(i, j int) bool {
 		if projections[i].Locator != projections[j].Locator {
@@ -402,16 +483,33 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 	for _, projection := range projections {
 		encoded, err := json.Marshal(projection)
 		if err != nil {
-			return wipdwire.PrefixAnchor{}, nil, err
+			return wipdwire.PrefixAnchor{}, nil, nil, err
 		}
 		rawProjections = append(rawProjections, encoded)
+	}
+	sort.Slice(stepProjections, func(i, j int) bool {
+		if stepProjections[i].MatterID != stepProjections[j].MatterID {
+			return stepProjections[i].MatterID < stepProjections[j].MatterID
+		}
+		if stepProjections[i].SortKey != stepProjections[j].SortKey {
+			return stepProjections[i].SortKey < stepProjections[j].SortKey
+		}
+		return stepProjections[i].ID < stepProjections[j].ID
+	})
+	rawStepProjections := make([]json.RawMessage, 0, len(stepProjections))
+	for _, projection := range stepProjections {
+		encoded, err := json.Marshal(projection)
+		if err != nil {
+			return wipdwire.PrefixAnchor{}, nil, nil, err
+		}
+		rawStepProjections = append(rawStepProjections, encoded)
 	}
 	anchor := wipdwire.PrefixAnchor{EventCount: uint64(len(records)), Digest: "sha256:" + hex.EncodeToString(chain[:])}
 	if len(records) > 0 {
 		last := records[len(records)-1].EventID
 		anchor.EventID = &last
 	}
-	return anchor, rawProjections, nil
+	return anchor, rawProjections, rawStepProjections, nil
 }
 
 func decodeM1Event(data []byte, event *matterCreatedEvent) error {
@@ -431,6 +529,28 @@ func decodeM1Event(data []byte, event *matterCreatedEvent) error {
 	}
 	return wipdwire.DecodeCanonical(data, event,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+}
+
+func decodeStepEvent(data []byte, event *stepCreatedEvent) error {
+	fields, err := wipdwire.DecodeCanonicalMap(data,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil {
+		return ErrInvalidClientState
+	}
+	for key, expected := range map[string][]string{
+		"environment": {"id", "sequence"},
+		"payload":     {"title", "locator", "parent", "sort_key"},
+	} {
+		nested, ok := fields[key].(map[string]any)
+		if !ok || !wipdwire.ExactMapKeys(nested, expected...) {
+			return ErrInvalidClientState
+		}
+	}
+	if err = wipdwire.DecodeCanonical(data, event,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload"); err != nil {
+		return ErrInvalidClientState
+	}
+	return nil
 }
 
 func clientManifestChain(entries []wipdwire.BlobManifestEntry) (string, error) {
@@ -474,8 +594,11 @@ func validateInstalledState(state ClientState, profile wipdauthority.Profile) er
 		!validDigest(state.ManifestDigest) || state.Projections == nil {
 		return ErrInvalidClientState
 	}
-	anchor, projections, err := foldEventRecords(state.EventRecords, state.DomainID)
-	if err != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) {
+	anchor, projections, stepProjections, err := foldEventRecords(state.EventRecords, state.DomainID)
+	// Step projections are derived entirely from retained event records. Missing
+	// data is a pre-Step-8 client-state shape and is rebuilt on the next pull.
+	if err != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
+		state.StepProjections != nil && !equalJSONRaw(stepProjections, state.StepProjections) {
 		return ErrInvalidClientState
 	}
 	digest, err := clientManifestChain(state.ManifestEntries)

@@ -151,6 +151,16 @@ func newM5CommandFixture(t *testing.T) *m5CommandFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	err = registry.Register(operation.StepCreateV1, func(_ context.Context, request operation.Request) operation.Result {
+		calls.Add(1)
+		input := request.Input.(operation.StepCreateInput)
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+			ParentID: input.ParentID, Title: input.Title,
+		}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -292,6 +302,16 @@ func m5Command(id string, sequence uint64, locator string) operation.Command {
 	}
 }
 
+func m5StepCommand(id string, sequence uint64, parentID, birthCommandID, title string) operation.Command {
+	command := m5Command(id, sequence, "")
+	command.CausationCommandID = birthCommandID
+	command.CorrelationCommandID = birthCommandID
+	command.Request.Operation = operation.StepCreateV1.Metadata().Operation
+	command.Request.Claim = &operation.ClaimContext{ID: parentID, Epoch: "1"}
+	command.Request.Input = operation.StepCreateInput{ParentID: parentID, Title: title}
+	return command
+}
+
 func m5CommandHash(t *testing.T, command operation.Command) string {
 	t.Helper()
 	hash, err := command.RequestHash()
@@ -302,12 +322,20 @@ func m5CommandHash(t *testing.T, command operation.Command) string {
 }
 
 func m5Session(t *testing.T, handler http.Handler, peer tls.ConnectionState) *labConnectionSession {
+	return m5SessionWithStep(t, handler, peer, false)
+}
+
+func m5SessionWithStep(t *testing.T, handler http.Handler, peer tls.ConnectionState, includeStep bool) *labConnectionSession {
 	t.Helper()
 	session := &labConnectionSession{}
+	operations := []any{map[string]any{"name": "matter.create", "versions": []any{uint64(1)}, "identity_schemas": []any{"wipd.command/1"}}}
+	if includeStep {
+		operations = append(operations, map[string]any{"name": "step.create", "versions": []any{uint64(1)}, "identity_schemas": []any{"wipd.command/1"}})
+	}
 	hello, err := wipdwire.EncodeCanonical(map[string]any{
 		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{"wipd.command/1"},
-		"operations":       []any{map[string]any{"name": "matter.create", "versions": []any{uint64(1)}, "identity_schemas": []any{"wipd.command/1"}}},
+		"operations":       operations,
 		"store_schemas":    []any{"wipd.store/1"}, "features": []any{"wipd.frame/1"},
 	})
 	if err != nil {
@@ -325,13 +353,19 @@ func m5Session(t *testing.T, handler http.Handler, peer tls.ConnectionState) *la
 		t.Fatal(err)
 	}
 	ops, ok := selected["operations"].([]any)
-	if !ok || len(ops) != 1 {
+	wantCount := 1
+	if includeStep {
+		wantCount = 2
+	}
+	if !ok || len(ops) != wantCount {
 		t.Fatalf("selected operations = %#v", selected["operations"])
 	}
-	capability, ok := ops[0].(map[string]any)
-	if !ok || !wipdwire.ExactMapKeys(capability, "name", "versions", "identity_schemas") || capability["name"] != "matter.create" ||
-		!reflect.DeepEqual(capability["versions"], []any{uint64(1)}) || !reflect.DeepEqual(capability["identity_schemas"], []any{"wipd.command/1"}) {
-		t.Fatalf("selected operation capability = %#v", ops[0])
+	for i, name := range []string{"matter.create", "step.create"}[:wantCount] {
+		capability, ok := ops[i].(map[string]any)
+		if !ok || !wipdwire.ExactMapKeys(capability, "name", "versions", "identity_schemas") || capability["name"] != name ||
+			!reflect.DeepEqual(capability["versions"], []any{uint64(1)}) || !reflect.DeepEqual(capability["identity_schemas"], []any{"wipd.command/1"}) {
+			t.Fatalf("selected operation capability = %#v", ops[i])
+		}
 	}
 	return session
 }
@@ -1077,6 +1111,136 @@ func TestM5AuthenticatedSubmitReplayConflictAndReceiptQueries(t *testing.T) {
 	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
 	if err != nil || anchor.EventCount != 1 || fixture.calls.Load() != 1 {
 		t.Fatalf("state after replay/conflict/pending: anchor=%+v calls=%d err=%v", anchor, fixture.calls.Load(), err)
+	}
+}
+
+func TestM5AuthenticatedMatterAndStepBirthReplayAcrossStoreReopen(t *testing.T) {
+	fixture := newM5CommandFixture(t)
+	session := m5SessionWithStep(t, fixture.handler, fixture.peer, true)
+
+	matter := m5Command("01KZ7XHAQT1S46NYPN1PW1DX3F", 1, "birth-matter")
+	_, matterFrames := m5Submit(t, session, fixture, matter)
+	if len(matterFrames) != 2 || matterFrames[0].Kind != "submission.accepted" || matterFrames[1].Kind != "command.terminal" {
+		t.Fatalf("Matter birth response = %+v", matterFrames)
+	}
+	matterTerminal := append([]byte(nil), matterFrames[1].Payload...)
+	matterReceipt, err := wipdwire.DecodeCanonicalMap(matterTerminal,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matterEvents, ok := matterReceipt["accepted_events"].(map[string]any)
+	if matterReceipt["command_id"] != matter.ID || !ok || matterEvents["event_count"] != uint64(1) || matterEvents["first_event_id"] != matterEvents["last_event_id"] {
+		t.Fatalf("Matter birth receipt = %#v", matterReceipt)
+	}
+
+	step := m5StepCommand("01KZ7XHAQT1S46NYPN1PW1DX3G", 2, m5TestMatter, matter.ID, "First Step")
+	_, stepFrames := m5Submit(t, session, fixture, step)
+	if len(stepFrames) != 2 || stepFrames[0].Kind != "submission.accepted" || stepFrames[1].Kind != "command.terminal" {
+		t.Fatalf("Step birth response = %+v", stepFrames)
+	}
+	stepTerminal := append([]byte(nil), stepFrames[1].Payload...)
+	stepReceipt, err := wipdwire.DecodeCanonicalMap(stepTerminal,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := stepReceipt["result"].(map[string]any)
+	if stepReceipt["command_id"] != step.ID || !ok || result["code"] != string(operation.ResultSucceeded) {
+		t.Fatalf("Step terminal receipt = %#v", stepReceipt)
+	}
+	outputBytes, ok := result["output"].([]byte)
+	if !ok {
+		t.Fatalf("Step receipt output has type %T", result["output"])
+	}
+	output, err := wipdwire.DecodeCanonicalMap(outputBytes, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := output["id"].(string)
+	stepEvents, ok := stepReceipt["accepted_events"].(map[string]any)
+	if stepID == "" || output["parent_id"] != m5TestMatter || output["matter_id"] != m5TestMatter ||
+		output["locator"] != "step-01" || output["title"] != "First Step" || output["sort_key"] != uint64(1000) || output["state"] != "planned" ||
+		!ok || stepEvents["event_count"] != uint64(1) || stepEvents["first_event_id"] != stepEvents["last_event_id"] || stepEvents["first_event_id"] == matterEvents["first_event_id"] {
+		t.Fatalf("Step output/range = output %#v, events %#v", output, stepReceipt["accepted_events"])
+	}
+	if fixture.calls.Load() != 2 {
+		t.Fatalf("M1 handler calls after Matter and Step birth = %d, want 2", fixture.calls.Load())
+	}
+
+	_, replay := m5Submit(t, session, fixture, step)
+	if len(replay) != 1 || replay[0].Kind != "command.terminal" || !bytes.Equal(replay[0].Payload, stepTerminal) {
+		t.Fatalf("exact Step retry = %+v", replay)
+	}
+	conflict := m5StepCommand(step.ID, step.EnvironmentSequence, m5TestMatter, matter.ID, "Different title")
+	_, conflicting := m5Submit(t, session, fixture, conflict)
+	if len(conflicting) != 1 || conflicting[0].Kind != "problem" || m5ProblemCode(t, conflicting[0]) != "command.id-conflict" ||
+		bytes.Contains(conflicting[0].Payload, []byte(stepID)) {
+		t.Fatalf("conflicting Step retry disclosed the original outcome: %+v", conflicting)
+	}
+	if fixture.calls.Load() != 2 {
+		t.Fatalf("replay/conflict reran handler; calls = %d", fixture.calls.Load())
+	}
+	for _, want := range []struct {
+		id, hash string
+		terminal []byte
+	}{{matter.ID, m5CommandHash(t, matter), matterTerminal}, {step.ID, m5CommandHash(t, step), stepTerminal}} {
+		queried := m5Query(t, session, fixture, want.id, want.hash)
+		if len(queried) != 1 || queried[0].Kind != "command.terminal" || !bytes.Equal(queried[0].Payload, want.terminal) {
+			t.Fatalf("terminal query for %s = %+v", want.id, queried)
+		}
+	}
+
+	oldStore := fixture.store
+	if err = oldStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := authoritystore.OpenExisting(fixture.root)
+	if err != nil {
+		t.Fatalf("reopen authority after two births: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	fixture.store = reopened
+	fixture.server = fixture.serverForStore(t, reopened)
+	fixture.handler = fixture.server.http.Handler
+	session = m5SessionWithStep(t, fixture.handler, fixture.peer, true)
+	for _, want := range []struct {
+		id, hash string
+		terminal []byte
+	}{{matter.ID, m5CommandHash(t, matter), matterTerminal}, {step.ID, m5CommandHash(t, step), stepTerminal}} {
+		queried := m5Query(t, session, fixture, want.id, want.hash)
+		if len(queried) != 1 || queried[0].Kind != "command.terminal" || !bytes.Equal(queried[0].Payload, want.terminal) {
+			t.Fatalf("reopened terminal query for %s = %+v", want.id, queried)
+		}
+	}
+	anchor, err := reopened.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || anchor.EventCount != 2 || anchor.EventID != stepEvents["last_event_id"] || fixture.calls.Load() != 2 {
+		t.Fatalf("reopened birth state: anchor=%+v calls=%d err=%v", anchor, fixture.calls.Load(), err)
+	}
+	snapshotID, err := randomULID(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := reopened.PinSnapshot(context.Background(), m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(), snapshotID, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("pin reopened birth events: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.ReleaseSnapshot(context.Background(), m5TestDomain, 1, snapshotID) })
+	if len(snapshot.Delta.Events) != 2 {
+		t.Fatalf("reopened authority event delta has %d events", len(snapshot.Delta.Events))
+	}
+	wantEvents := []struct{ id, commandID, kind, subject string }{
+		{matterEvents["first_event_id"].(string), matter.ID, "matter.created", m5TestMatter},
+		{stepEvents["first_event_id"].(string), step.ID, "step.created", stepID},
+	}
+	for i, want := range wantEvents {
+		eventID := snapshot.Delta.Events[i].EventID
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(snapshot.Delta.Events[i].Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil || eventID != want.id || fields["event_id"] != want.id || fields["command_id"] != want.commandID ||
+			fields["kind"] != want.kind || fields["subject_id"] != want.subject {
+			t.Fatalf("reopened event %d = %#v, err=%v", i, fields, decodeErr)
+		}
 	}
 }
 

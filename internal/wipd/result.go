@@ -6,13 +6,10 @@ import (
 	"github.com/procrastivity/wip/internal/operation"
 )
 
-// encodeM1ResultPayload maps one validated M1 semantic Result into the
-// already-defined terminal-result CBOR map. Step 7 uses this map only as the
-// payload of response.end for an explicitly composed local fixture Handler;
-// it is not a terminal receipt or an authority outcome.
-func encodeM1ResultPayload(result operation.Result) ([]byte, error) {
-	if err := operation.MatterCreateV1.ValidateResult(result); err != nil {
-		return nil, fmt.Errorf("wipd: invalid local M1 result: %w", err)
+func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]byte, error) {
+	definition, found := operationDefinition(id)
+	if !found || definition.ValidateResult(result) != nil {
+		return nil, fmt.Errorf("wipd: invalid %s result", id)
 	}
 	fields := map[string]any{
 		"code":         string(result.Code),
@@ -20,15 +17,27 @@ func encodeM1ResultPayload(result operation.Result) ([]byte, error) {
 		"problem_code": nil,
 	}
 	if result.Code == operation.ResultSucceeded {
-		output, ok := result.Output.(operation.MatterCreateOutput)
-		if !ok || !validRequestID(output.ID) {
+		var output map[string]any
+		switch id {
+		case operation.MatterCreateV1.Metadata().Operation:
+			matter, ok := result.Output.(operation.MatterCreateOutput)
+			if !ok || !validRequestID(matter.ID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"id": matter.ID, "locator": matter.Locator, "title": matter.Title}
+		case operation.StepCreateV1.Metadata().Operation:
+			step, ok := result.Output.(operation.StepCreateOutput)
+			if !ok || !validRequestID(step.ID) || !validRequestID(step.ParentID) || !validRequestID(step.MatterID) || step.SortKey <= 0 {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{
+				"id": step.ID, "parent_id": step.ParentID, "matter_id": step.MatterID,
+				"locator": step.Locator, "title": step.Title, "sort_key": step.SortKey, "state": step.State,
+			}
+		default:
 			return nil, errMalformedMessage
 		}
-		encodedOutput, err := encodePayload(map[string]any{
-			"id":      output.ID,
-			"locator": output.Locator,
-			"title":   output.Title,
-		})
+		encodedOutput, err := encodePayload(output)
 		if err != nil {
 			return nil, err
 		}
@@ -44,6 +53,14 @@ func encodeM1ResultPayload(result operation.Result) ([]byte, error) {
 // retains only the stable problem code and uses a non-authoritative
 // presentation message.
 func decodeM1ResultPayload(payload []byte) (operation.Result, error) {
+	return decodeOperationResultPayload(operation.MatterCreateV1.Metadata().Operation, payload)
+}
+
+func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Result, error) {
+	definition, found := operationDefinition(id)
+	if !found {
+		return operation.Result{}, errMalformedMessage
+	}
 	value, err := decodePayload(payload)
 	if err != nil {
 		return operation.Result{}, err
@@ -70,16 +87,43 @@ func decodeM1ResultPayload(payload []byte) (operation.Result, error) {
 			return operation.Result{}, err
 		}
 		outputFields, ok := outputValue.(map[string]any)
-		if !ok || !exactFields(outputFields, "id", "locator", "title") {
+		if !ok {
 			return operation.Result{}, errMalformedMessage
 		}
-		id, idOK := outputFields["id"].(string)
-		locator, locatorOK := outputFields["locator"].(string)
-		title, titleOK := outputFields["title"].(string)
-		if !idOK || !validRequestID(id) || !locatorOK || !titleOK {
+		switch id {
+		case operation.MatterCreateV1.Metadata().Operation:
+			if !exactFields(outputFields, "id", "locator", "title") {
+				return operation.Result{}, errMalformedMessage
+			}
+			matterID, idOK := outputFields["id"].(string)
+			locator, locatorOK := outputFields["locator"].(string)
+			title, titleOK := outputFields["title"].(string)
+			if !idOK || !validRequestID(matterID) || !locatorOK || !titleOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.MatterCreateOutput{ID: matterID, Locator: locator, Title: title}
+		case operation.StepCreateV1.Metadata().Operation:
+			if !exactFields(outputFields, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state") {
+				return operation.Result{}, errMalformedMessage
+			}
+			stepID, idOK := outputFields["id"].(string)
+			parentID, parentOK := outputFields["parent_id"].(string)
+			matterID, matterOK := outputFields["matter_id"].(string)
+			locator, locatorOK := outputFields["locator"].(string)
+			title, titleOK := outputFields["title"].(string)
+			sortKey, sortOK := outputFields["sort_key"].(uint64)
+			state, stateOK := outputFields["state"].(string)
+			if !idOK || !validRequestID(stepID) || !parentOK || !validRequestID(parentID) || !matterOK || !validRequestID(matterID) ||
+				!locatorOK || !titleOK || !sortOK || sortKey == 0 || sortKey > uint64(^uint64(0)>>1) || !stateOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.StepCreateOutput{
+				ID: stepID, ParentID: parentID, MatterID: matterID, Locator: locator, Title: title,
+				SortKey: int64(sortKey), State: state,
+			}
+		default:
 			return operation.Result{}, errMalformedMessage
 		}
-		result.Output = operation.MatterCreateOutput{ID: id, Locator: locator, Title: title}
 	} else {
 		if fields["output"] != nil {
 			return operation.Result{}, errMalformedMessage
@@ -93,8 +137,17 @@ func decodeM1ResultPayload(payload []byte) (operation.Result, error) {
 			Message: "local Handler returned " + problemCode,
 		}
 	}
-	if err := operation.MatterCreateV1.ValidateResult(result); err != nil {
+	if err := definition.ValidateResult(result); err != nil {
 		return operation.Result{}, fmt.Errorf("%w: invalid M1 result: %v", errMalformedMessage, err)
 	}
 	return result, nil
+}
+
+func operationDefinition(id operation.ID) (operation.Definition, bool) {
+	for _, definition := range operation.Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
+	return operation.Definition{}, false
 }

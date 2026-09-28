@@ -22,7 +22,7 @@ func TestReplaceInstalledStateSerializesCrossProcessCompareAndRename(t *testing.
 		Schema: "wipd.m5-client-state/1", RepoID: testRepoID, DomainID: testDomainID, Epoch: 1,
 		EnvironmentID: "01KZ7XHAQT1S46NYPN1PW1DX3D", OwnerKeyID: "sha256:" + strings.Repeat("a", 64),
 		SPKIDigest: "sha256:" + strings.Repeat("b", 64), Prefix: emptyWireAnchor(),
-		ManifestDigest: emptyManifestDigest(), Projections: []json.RawMessage{},
+		ManifestDigest: emptyManifestDigest(), Projections: []json.RawMessage{}, StepProjections: []json.RawMessage{},
 	}
 	previousBytes, err := json.Marshal(previous)
 	if err != nil {

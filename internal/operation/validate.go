@@ -29,7 +29,7 @@ func (d Definition) ValidateRequest(request Request) error {
 			return fmt.Errorf("required %s context is empty", dimension)
 		}
 	}
-	if d.metadata.Claim == ClaimExact {
+	if d.metadata.Claim == ClaimExact || d.metadata.Claim == ClaimImplicitBirth {
 		if request.Claim == nil || request.Claim.ID == "" || request.Claim.Epoch == "" {
 			return fmt.Errorf("operation requires an exact claim ID and epoch")
 		}
@@ -38,6 +38,12 @@ func (d Definition) ValidateRequest(request Request) error {
 	}
 	if request.Input == nil || reflect.TypeOf(request.Input) != d.inputType {
 		return fmt.Errorf("input type is %T, want %s", request.Input, d.inputType)
+	}
+	if d.metadata.Claim == ClaimImplicitBirth {
+		input := request.Input.(StepCreateInput)
+		if !ulidPattern.MatchString(input.ParentID) || request.Claim.ID != input.ParentID || request.Claim.Epoch != "1" {
+			return fmt.Errorf("step.create@v1 requires the parent Matter's implicit birth claim at epoch 1")
+		}
 	}
 	return d.validateBlobs(request.Blobs)
 }

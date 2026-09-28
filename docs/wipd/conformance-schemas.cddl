@@ -49,6 +49,7 @@ server-hello = {
 }
 
 matter-create-input = { "title": tstr, "requested_locator": tstr }
+step-create-input = { "parent_id": ulid, "title": tstr }
 matter-create-v2-output = {
   "id": ulid,
   "title": tstr,
@@ -97,7 +98,7 @@ claim-stand-down-input = {
   "reason": tstr,
   "acknowledge_unreturned_work_loss": true
 }
-command-input = matter-create-input / claim-acquire-input /
+command-input = matter-create-input / step-create-input / claim-acquire-input /
                 claim-journal-repair-input / claim-release-input /
                 claim-stand-down-input / matter-locator-repair-input /
                 cursor-move-input
@@ -482,12 +483,32 @@ claim-stood-down-event = {
   "kind": "claim.stood-down",
   "payload": claim-stood-down-payload
 }
+step-created-payload = {
+  "title": tstr,
+  "locator": tstr,
+  "parent": ulid,
+  "sort_key": int
+}
+step-created-event = {
+  lifecycle-event-fields,
+  "kind": "step.created",
+  "payload": step-created-payload
+}
 lifecycle-event = batch-anonymous-created-event / claim-acquired-event /
                   dispatch-opened-event / claim-journal-repaired-event /
-                  dispatch-closed-event / claim-released-event /
+                  dispatch-closed-event / claim-released-event / step-created-event /
                   claim-stood-down-event
 
 matter-create-v1-output = { "id": ulid, "locator": tstr, "title": tstr }
+step-create-v1-output = {
+  "id": ulid,
+  "parent_id": ulid,
+  "matter_id": ulid,
+  "locator": tstr,
+  "title": tstr,
+  "sort_key": int,
+  "state": "planned"
+}
 matter-locator-repair-required-event = {
   "requested_locator": tstr,
   "assigned_locator": tstr

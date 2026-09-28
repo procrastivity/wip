@@ -36,7 +36,7 @@ type EnvironmentLeafSigner func(context.Context, string, uint64, string, []byte,
 
 // M5LabConfig binds the lab-only enrollment, transfer, and optional command
 // endpoints to the persisted authority store and one exact initial Repo. A
-// non-nil Registry enables only matter.create@v1 and requires the offline
+// non-nil Registry enables matter.create@v1 and optionally step.create@v1; it requires the offline
 // owner-certified authority-artifact key plus its restricted signer.
 type M5LabConfig struct {
 	Store                       *authoritystore.Store
@@ -94,8 +94,22 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	var operations []operation.Definition
 	if config.Registry != nil {
 		operations = config.Registry.Definitions()
-		if len(operations) != 1 || operations[0].Metadata().Operation != operation.MatterCreateV1.Metadata().Operation ||
+		if len(operations) == 0 || len(operations) > 2 ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
+			return nil, ErrInvalidLabConfig
+		}
+		matterRegistered := false
+		for _, definition := range operations {
+			id := definition.Metadata().Operation
+			switch id {
+			case operation.MatterCreateV1.Metadata().Operation:
+				matterRegistered = true
+			case operation.StepCreateV1.Metadata().Operation:
+			default:
+				return nil, ErrInvalidLabConfig
+			}
+		}
+		if !matterRegistered {
 			return nil, ErrInvalidLabConfig
 		}
 		if len(certificate.Certificate) == 0 {
@@ -264,7 +278,6 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 	}
 	session.mu.Lock()
 	negotiated := session.negotiated && !session.failed && !session.negotiating
-	operations := session.operations
 	if !negotiated {
 		session.failed = true
 	}
@@ -305,10 +318,6 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 	case "command.submit":
 		if app.registry == nil {
 			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
-			return
-		}
-		if _, ok := operations[operation.MatterCreateV1.Metadata().Operation]; !ok {
-			writeLabProblem(writer, frame.RequestID, "operation.unknown")
 			return
 		}
 		app.serveCommandSubmit(writer, request, body, frame, environment)

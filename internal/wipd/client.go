@@ -308,7 +308,7 @@ func (c *Client) ExecuteCommand(ctx context.Context, command operation.Command) 
 	if frame.kind != "response.end" {
 		return operation.Result{}, uncertainExchange(errUnsupportedKind)
 	}
-	result, err := decodeM1ResultPayload(frame.payload)
+	result, err := decodeOperationResultPayload(command.Request.Operation, frame.payload)
 	if err != nil {
 		return operation.Result{}, uncertainExchange(err)
 	}

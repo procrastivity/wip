@@ -9,7 +9,8 @@ or storage owner.
 
 An operation is identified by the pair `(name, version)`, rendered only for
 diagnostics as `name@vN`. Names use lowercase dot-separated semantic nouns and
-verbs. The first definition is `matter.create@v1`. The numeric version changes
+verbs. The first definition is `matter.create@v1`; Step 8 adds the narrowly
+scoped `step.create@v1` provisional-birth operation below. The numeric version changes
 only for an incompatible semantic input, output, or behavior contract. M2 owns
 how this pair is negotiated or encoded.
 
@@ -75,6 +76,55 @@ makes an incomplete definition fail at construction and in focused tests.
 The delivery classification is D120/D127's future class. This step does not
 change the current in-process write path, locator behavior, event/projection
 shape, or ownership in `internal/writesurface` and `internal/store`.
+
+### Step 8: `step.create@v1`
+
+`step.create@v1` creates one Planned Step directly under a Matter born by
+`matter.create@v1` in the same Environment. Its typed input is
+`StepCreateInput{ParentID, Title}` and its canonical input map is exactly
+`{parent_id, title}`. The parent is a canonical Matter ULID in the requested
+Repo. The caller supplies the Matter's implicit birth claim at epoch 1 and
+sets both causation and correlation to the Matter birth command. The authority
+requires that birth command to have a terminal-success receipt in the same
+Environment and Repo, with a lower Environment sequence; it will not infer a
+claim from fixture or legacy state.
+
+The definition is a mutation with provisional delivery, Repo context, no blob
+inputs, no external effects, and these complete footprints:
+
+| dimension | value |
+|---|---|
+| guards | `repo.matter-locators`, `matter.implicit-birth-claim`, `step.parent`, `matter.step-locators`, `step.sibling-sort-key` |
+| writes | `newborn-step` |
+| claim | implicit Matter birth claim `{id: parent_id, epoch: 1}` |
+
+Within the authority transaction, the parent must exist in the command Repo
+and the claim/causation/correlation checks above must hold. The authority
+assigns the Step ULID, the next sibling locator `step-%02d` (starting at
+`step-01`), and the next sort key (maximum sibling key plus 1000, or 1000 for
+the first Step). The resulting state is `planned`. Successful output is
+exactly `{id, parent_id, matter_id, locator, title, sort_key, state}`; both
+parent fields equal the input parent, and the remaining assigned fields equal
+the authority projection. The operation emits exactly one `step.created`
+event with the Step ULID as `subject_id` and payload
+`{title, locator, parent, sort_key}`. Its terminal receipt accepts exactly
+that one-event range. Authority event, Step projection, and terminal receipt
+commit atomically.
+
+Successful `matter.create@v1` also establishes the Matter's immutable epoch-1
+implicit birth claim in the same transaction as its event, projection, and
+receipt. This Step 8 claim is a direct birth dependency, not M3
+`claim.acquire`, and authorizes no other operation. A Step command cannot be
+admitted or folded if that exact Matter birth is absent, unsuccessful, from a
+different Environment/Repo, or not earlier in the Environment sequence.
+
+The connected command path MUST journal the immutable command and pass through
+the shared D120/D128 command-start coordinator. It returns eligible pending
+work and installs the authority tail before guard evaluation, keeps the
+per-domain lane through the terminal authority outcome, and installs the
+receipt/event tail/overlay atomically. Exact replay resolves from the original
+identity and receipt without another Step event; conflicting intent under the
+same command ID is refused without changing or disclosing the original.
 
 ## Mechanical coupling rule
 

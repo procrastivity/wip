@@ -160,7 +160,7 @@ func registeredOperationCapabilities(registry *operation.Registry) []operationCa
 }
 
 func identitySchemaFor(id operation.ID) (string, bool) {
-	if id == operation.MatterCreateV1.Metadata().Operation {
+	if id == operation.MatterCreateV1.Metadata().Operation || id == operation.StepCreateV1.Metadata().Operation {
 		return identitySchemaV1, true
 	}
 	return "", false

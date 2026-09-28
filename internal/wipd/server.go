@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"golang.org/x/net/http2"
 )
 
@@ -29,6 +30,37 @@ type Server struct {
 	exchangeSlots          chan struct{}
 	preflightSlots         chan struct{}
 	executionLanes         *executionLanes
+	commandStartMu         sync.RWMutex
+	commandStart           *CommandStartCoordinator
+}
+
+// ConfigureConnectedCommands enables the Step 8 durable connected birth path
+// for this daemon. Configure it before Serve; local fixture servers that do
+// not call this method retain their existing in-process dispatch behavior.
+func (s *Server) ConfigureConnectedCommands(domainID string, journal *wipdjournal.Journal, authority CommandStartAuthority, environment CommandStartEnvironment) error {
+	if s == nil {
+		return errors.New("wipd: server is required")
+	}
+	coordinator, err := s.NewCommandStartCoordinator(domainID, journal, authority, environment)
+	if err != nil {
+		return err
+	}
+	s.commandStartMu.Lock()
+	defer s.commandStartMu.Unlock()
+	if s.commandStart != nil {
+		return errors.New("wipd: connected command path is already configured")
+	}
+	s.commandStart = coordinator
+	return nil
+}
+
+func (s *Server) connectedCommandStart() *CommandStartCoordinator {
+	if s == nil {
+		return nil
+	}
+	s.commandStartMu.RLock()
+	defer s.commandStartMu.RUnlock()
+	return s.commandStart
 }
 
 type connectionSession struct {
@@ -340,6 +372,26 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	go func() {
 		defer close(dispatchDone)
 		outcome := func() dispatchOutcome {
+			if coordinator := s.connectedCommandStart(); coordinator != nil {
+				if !gate.begin(request.Context()) {
+					return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
+				}
+				connected, err := coordinator.RunConnectedCanonicalTerminal(state.ctx, command,
+					func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+				if err != nil {
+					if errors.Is(err, wipdjournal.ErrCommandIDConflict) {
+						return dispatchOutcome{problemCode: "command.id-conflict"}
+					}
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return dispatchOutcome{problemCode: "transport.outcome-unknown"}
+					}
+					return dispatchOutcome{problemCode: "authority.unavailable"}
+				}
+				if !connected.Returned {
+					return dispatchOutcome{problemCode: "authority.unavailable"}
+				}
+				return dispatchOutcome{result: connected.SemanticResult}
+			}
 			// M2 D128's domain lane encloses semantic dispatch only. Later
 			// return/pull barriers belong immediately before this point; frame
 			// reads, cancellation waits, and response writes remain outside it.
@@ -424,7 +476,7 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 				nextFrame = nil
 			default:
 			}
-			payload, err := encodeM1ResultPayload(outcome.result)
+			payload, err := encodeOperationResultPayload(command.Request.Operation, outcome.result)
 			if err != nil {
 				abortHTTP2Stream()
 			}
@@ -518,8 +570,11 @@ func compatibilityProblem(id operation.ID, capabilities []operationCapability) m
 			supportedVersions = append(supportedVersions, uint64(version))
 		}
 	}
-	if id == operation.MatterCreateV1.Metadata().Operation {
-		knownName = true
+	for _, definition := range operation.Catalogue() {
+		if definition.Metadata().Operation.Name == id.Name {
+			knownName = true
+			break
+		}
 	}
 	code := string(operation.ProblemUnknownOperation)
 	if knownName {
