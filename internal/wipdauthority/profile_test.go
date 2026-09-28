@@ -207,6 +207,25 @@ func TestNewProfileRequiresExplicitM2Values(t *testing.T) {
 	}
 }
 
+func TestM5LabRepoPinIsExplicitLocalProfileState(t *testing.T) {
+	fixture, err := NewProfile("https://authority.example:443", testDomainID, 1,
+		"sha256:"+strings.Repeat("a", 64), testOwnerDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.M5LabRepoID() != "" {
+		t.Fatalf("M2-only profile unexpectedly has M5 Repo pin %q", fixture.M5LabRepoID())
+	}
+	const repoID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	bound, err := fixture.WithM5LabRepoID(repoID)
+	if err != nil || bound.M5LabRepoID() != repoID || fixture.M5LabRepoID() != "" {
+		t.Fatalf("Repo-bound profile = %q, error %v; original M2 profile Repo = %q", bound.M5LabRepoID(), err, fixture.M5LabRepoID())
+	}
+	if _, err = fixture.WithM5LabRepoID("01M4FIXTURE0000000000000001"); !errors.Is(err, ErrInvalidProfile) {
+		t.Fatalf("invalid Repo pin error = %v, want ErrInvalidProfile", err)
+	}
+}
+
 func TestPinnedHTTPClientRejectsWrongPinAndAuthorityBindingBeforeHandler(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -27,6 +27,8 @@ var (
 	ErrAuthorityPinMismatch = errors.New("wipdauthority: authority SPKI pin mismatch")
 	// ErrAuthorityBindingMismatch means the authority certificate does not match the configured identity.
 	ErrAuthorityBindingMismatch = errors.New("wipdauthority: authority certificate binding mismatch")
+	// ErrRepoBindingMismatch means the M5 lab Repo pin differs from the requested route.
+	ErrRepoBindingMismatch = errors.New("wipdauthority: M5 lab Repo binding mismatch")
 	// ErrHTTP2Required means TLS did not negotiate HTTP/2 via ALPN.
 	ErrHTTP2Required = errors.New("wipdauthority: HTTP/2 ALPN is required")
 	// ErrOriginMismatch means a request targets anything other than the explicit HTTPS origin.
@@ -54,6 +56,7 @@ type Profile struct {
 	epoch         uint64
 	authoritySPKI [sha256.Size]byte
 	ownerRootSPKI [sha256.Size]byte
+	labRepoID     string
 }
 
 // NewProfile requires every M2 trust value. Pins use the repository's
@@ -108,6 +111,20 @@ func (profile Profile) Epoch() uint64 { return profile.epoch }
 func (profile Profile) OwnerRootSPKI() string {
 	return "sha256:" + hex.EncodeToString(profile.ownerRootSPKI[:])
 }
+
+// WithM5LabRepoID binds the lab-only Repo value supplied by the trusted
+// bootstrap record. It is local profile state, not an M2 wire field.
+func (profile Profile) WithM5LabRepoID(repoID string) (Profile, error) {
+	if err := profile.validate(); err != nil || !canonicalDomainIDPattern.MatchString(repoID) {
+		return Profile{}, fmt.Errorf("%w: invalid M5 lab Repo ID", ErrInvalidProfile)
+	}
+	profile.labRepoID = repoID
+	return profile, nil
+}
+
+// M5LabRepoID returns the Repo pinned by the trusted M5 lab bootstrap record,
+// or an empty string when the profile is M2-only.
+func (profile Profile) M5LabRepoID() string { return profile.labRepoID }
 
 // HealthURL returns the stateless process-readiness endpoint for this origin.
 func (profile Profile) HealthURL() string { return profile.origin + "/healthz" }

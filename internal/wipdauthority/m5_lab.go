@@ -72,6 +72,9 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	if err != nil || repoDomain != profile.domainID {
 		return nil, ErrRepoMembershipMismatch
 	}
+	if profile.M5LabRepoID() != config.RepoID {
+		return nil, ErrRepoBindingMismatch
+	}
 	ca, err := x509.ParseCertificate(config.EnvironmentCACertificateDER)
 	if err != nil || !ca.IsCA || !ca.BasicConstraintsValid || !ca.MaxPathLenZero || ca.MaxPathLen != 0 {
 		return nil, ErrInvalidLabConfig

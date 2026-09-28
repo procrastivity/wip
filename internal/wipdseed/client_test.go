@@ -110,6 +110,28 @@ func TestEnrollAndSeedInstallsOnlyVerifiedEmptyShadow(t *testing.T) {
 	}
 }
 
+func TestEnrollAndSeedRejectsRepoDifferentFromBootstrapPinBeforeNetwork(t *testing.T) {
+	fixture := newClientFixture(t)
+	wrongRepoID := "01KZ7XHAQT1S46NYPN1PW1DX3E"
+	directory := t.TempDir()
+	if err := SavePending(directory, fixture.identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnrollAndSeed(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot,
+		fixture.delegation, wrongRepoID, fixture.identity, fixture.grant, directory); !errors.Is(err, wipdauthority.ErrRepoBindingMismatch) {
+		t.Fatalf("wrong client Repo = %v, want pinned Repo refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wrong-Repo attempt installed client state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, pendingName)); err != nil {
+		t.Fatalf("wrong-Repo attempt changed pending identity: %v", err)
+	}
+	if calls := fixture.signerCalls.Load(); calls != 0 {
+		t.Fatalf("authority handler ran %d times for wrong client Repo, want zero", calls)
+	}
+}
+
 func TestNegotiationIsRequiredBeforeSeedExchange(t *testing.T) {
 	fixture := newClientFixture(t)
 	state := enrollFixtureClient(t, fixture, t.TempDir())
@@ -337,6 +359,10 @@ func TestEnrollAndSeedWrongDomainOrGrantLeavesNoClientState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wrongDomain, err = wrongDomain.WithM5LabRepoID(testRepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	directory := t.TempDir()
 	if _, err = EnrollAndSeed(context.Background(), wrongDomain, fixture.roots, fixture.ownerRoot, fixture.delegation, testRepoID, identity, fixture.grant, directory); err == nil {
 		t.Fatal("wrong authority domain was accepted")
@@ -394,6 +420,10 @@ func TestExpiredEnrollmentGrantRefusesBeforeExternalCASigning(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile, err := wipdauthority.NewProfile(fmt.Sprintf("https://localhost:%d", port), testDomainID, 1, testDigest(serverSPKI), fixture.ownerKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err = profile.WithM5LabRepoID(testRepoID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,6 +638,10 @@ func newClientFixture(t *testing.T) *clientFixture {
 	}
 	serverPin := testDigest(serverSPKI)
 	profile, err := wipdauthority.NewProfile(fmt.Sprintf("https://localhost:%d", port), domain.ID, 1, serverPin, ownerKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err = profile.WithM5LabRepoID(testRepoID)
 	if err != nil {
 		t.Fatal(err)
 	}

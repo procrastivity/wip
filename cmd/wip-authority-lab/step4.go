@@ -356,6 +356,10 @@ func runClientEnrollWorker(args []string) error {
 	if err != nil {
 		return err
 	}
+	profile, err = profile.WithM5LabRepoID(input.RepoID)
+	if err != nil {
+		return err
+	}
 	identity, err := wipdseed.LoadPending(clientDataRoot)
 	if err != nil {
 		return err
@@ -421,6 +425,10 @@ func runAuthorityServeWorker(args []string) error {
 	ownerDigest := sha256.Sum256(ownerSPKI)
 	ownerKeyID := "sha256:" + hex.EncodeToString(ownerDigest[:])
 	profile, err := wipdauthority.NewProfile(input.Origin, input.DomainID, input.Epoch, input.AuthoritySPKIPin, ownerKeyID)
+	if err != nil {
+		return err
+	}
+	profile, err = profile.WithM5LabRepoID(input.RepoID)
 	if err != nil {
 		return err
 	}

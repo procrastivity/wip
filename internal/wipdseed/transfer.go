@@ -21,6 +21,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/wipdauthority"
 	"github.com/procrastivity/wip/internal/wipdwire"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -467,6 +468,7 @@ func clientManifestChain(entries []wipdwire.BlobManifestEntry) (string, error) {
 
 func validateInstalledState(state ClientState, profile wipdauthority.Profile) error {
 	if state.Schema != "wipd.m5-client-state/1" || state.DomainID != profile.DomainID() || state.Epoch != profile.Epoch() ||
+		profile.M5LabRepoID() != state.RepoID ||
 		state.OwnerKeyID != profile.OwnerRootSPKI() || !clientULIDPattern.MatchString(state.RepoID) ||
 		!clientULIDPattern.MatchString(state.EnvironmentID) || !validDigest(state.SPKIDigest) || !validAnchor(state.Prefix) ||
 		!validDigest(state.ManifestDigest) || state.Projections == nil {
@@ -538,6 +540,18 @@ func loadInstalledState(directory string) (ClientState, []byte, error) {
 }
 
 func replaceInstalledState(directory string, previous []byte, state ClientState) error {
+	lock, err := lockInstalledState(directory)
+	if err != nil {
+		return err
+	}
+	err = replaceInstalledStateLocked(directory, previous, state)
+	if closeErr := lock.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func replaceInstalledStateLocked(directory string, previous []byte, state ClientState) error {
 	target := filepath.Join(directory, stateName)
 	current, err := os.ReadFile(target)
 	if err != nil || !bytes.Equal(current, previous) {
@@ -570,6 +584,28 @@ func replaceInstalledState(directory string, previous []byte, state ClientState)
 		return err
 	}
 	return syncDirectory(directory)
+}
+
+func lockInstalledState(directory string) (*os.File, error) {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(directory, ".client-state.lock")
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	lock := os.NewFile(uintptr(fd), path)
+	info, err := lock.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		_ = lock.Close()
+		return nil, ErrInvalidClientState
+	}
+	if err = unix.Flock(fd, unix.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return lock, nil
 }
 
 func validAnchor(anchor wipdwire.PrefixAnchor) bool {

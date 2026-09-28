@@ -155,6 +155,9 @@ func EnrollAndSeed(ctx context.Context, profile wipdauthority.Profile, roots *x5
 	if ctx == nil || !clientULIDPattern.MatchString(repoID) || len(grant) == 0 || len(grant) > 4096 {
 		return empty, ErrInvalidClientState
 	}
+	if profile.M5LabRepoID() != repoID {
+		return empty, wipdauthority.ErrRepoBindingMismatch
+	}
 	trustedEnvironmentCA, err := wipdauthority.VerifyEnvironmentCADelegation(profile, ownerRoot, caDelegation, time.Now().UTC())
 	if err != nil {
 		return empty, ErrInvalidClientState
