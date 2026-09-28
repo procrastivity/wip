@@ -12,26 +12,31 @@ import (
 )
 
 func (app *m5LabHandler) serveTransferExchange(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, kind string, start authoritystore.PrefixAnchor) {
-	ctx, cancel, control, ok := app.beginReadOnlyExchange(writer, request, body, frame.RequestID)
+	ctx, cancel, arbiter, ok := app.beginReadOnlyExchange(writer, request, body, frame.RequestID)
 	if !ok {
 		return
 	}
 	defer cancel(context.Canceled)
 	product, err := app.transferProduct(ctx, kind, start, time.Now().UTC())
-	if readOnlyExchangeStopped(ctx, writer, frame.RequestID, control) {
-		return
-	}
 	if err != nil {
 		code := "transfer.incomplete"
 		if errors.Is(err, authoritystore.ErrPrefixMismatch) {
 			code = "transfer.prefix-mismatch"
 		}
-		writeLabProblem(writer, frame.RequestID, code)
+		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, code)
 		return
 	}
-	_ = writeLabFrames(writer, frame.RequestID, product, func() error {
-		return readOnlyExchangeCause(ctx, control)
+	responseStarted := false
+	writeErr := writeLabFrames(writer, frame.RequestID, product, func(final bool) error {
+		if err := arbiter.beginResponse(ctx, final); err != nil {
+			return err
+		}
+		responseStarted = true
+		return nil
 	})
+	if !responseStarted && errors.Is(writeErr, errLabControlInvalid) {
+		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, "protocol.out-of-order")
+	}
 }
 
 func (app *m5LabHandler) transferProduct(ctx context.Context, kind string, start authoritystore.PrefixAnchor, now time.Time) ([]labFrameRecord, error) {
@@ -167,7 +172,7 @@ func authorityAnchor(anchor wipdwire.PrefixAnchor) authoritystore.PrefixAnchor {
 	return result
 }
 
-func writeLabFrames(writer http.ResponseWriter, requestID string, records []labFrameRecord, beforeWrite func() error) error {
+func writeLabFrames(writer http.ResponseWriter, requestID string, records []labFrameRecord, beforeWrite func(final bool) error) error {
 	frames := make([][]byte, 0, len(records))
 	var total int
 	for sequence, record := range records {
@@ -182,9 +187,9 @@ func writeLabFrames(writer http.ResponseWriter, requestID string, records []labF
 	}
 	writer.Header().Set("Content-Type", "application/cbor")
 	writer.Header().Set("Cache-Control", "no-store")
-	for _, wire := range frames {
+	for sequence, wire := range frames {
 		if beforeWrite != nil {
-			if err := beforeWrite(); err != nil {
+			if err := beforeWrite(sequence == len(frames)-1); err != nil {
 				return err
 			}
 		}

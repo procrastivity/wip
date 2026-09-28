@@ -800,77 +800,6 @@ func TestM5ReadOnlyExchangesRejectBufferedTrailingFrames(t *testing.T) {
 	}
 }
 
-type m5ReadOnlyPipeBody struct {
-	reader        *io.PipeReader
-	reads         atomic.Int32
-	firstRead     chan struct{}
-	continueFirst chan struct{}
-	waiting       chan struct{}
-	firstOnce     sync.Once
-	waitOnce      sync.Once
-}
-
-func (body *m5ReadOnlyPipeBody) Read(data []byte) (int, error) {
-	switch read := body.reads.Add(1); read {
-	case 1:
-		body.firstOnce.Do(func() { close(body.firstRead) })
-		<-body.continueFirst
-	case 2:
-		body.waitOnce.Do(func() { close(body.waiting) })
-	}
-	return body.reader.Read(data)
-}
-
-func (body *m5ReadOnlyPipeBody) Close() error { return body.reader.Close() }
-
-func m5PendingCommand(t *testing.T, fixture *m5CommandFixture) (operation.Command, *authoritystore.Execution) {
-	t.Helper()
-	command := m5Command("01KZ7XHAQT1S46NYPN1PW1DX3G", 1, "alpha")
-	status, err := fixture.store.SubmitCommand(context.Background(), command, m5CommandHash(t, command), fixture.peer, fixture.now)
-	if err != nil || status.Owner == nil {
-		t.Fatalf("create pending command to hold store lock: status=%+v err=%v", status, err)
-	}
-	return command, status.Owner
-}
-
-func holdM5StoreLock(t *testing.T, fixture *m5CommandFixture, owner *authoritystore.Execution) (func(), func() error) {
-	t.Helper()
-	entered := make(chan struct{})
-	releaseChannel := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseChannel) }) }
-	finished := make(chan error, 1)
-	go func() {
-		_, completeErr := fixture.store.CompleteCommand(context.Background(), owner,
-			operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{
-				ID: m5TestMatter, Locator: "alpha", Title: "A title",
-			}}, m5TestMatter, "01KZ7XHAQT1S46NYPN1PW1DX3F", fixture.now,
-			func(context.Context, []byte) ([]byte, error) {
-				close(entered)
-				<-releaseChannel
-				return nil, errors.New("injected completion signing failure")
-			})
-		finished <- completeErr
-	}()
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		release()
-		t.Fatal("completion did not reach signer while holding store lock")
-	}
-	var waitOnce sync.Once
-	var completionErr error
-	wait := func() error {
-		waitOnce.Do(func() { completionErr = <-finished })
-		return completionErr
-	}
-	t.Cleanup(func() {
-		release()
-		_ = wait()
-	})
-	return release, wait
-}
-
 type m5GatedResponseWriter struct {
 	*httptest.ResponseRecorder
 	entered chan struct{}
@@ -905,7 +834,8 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 			bodyReader, bodyWriter := io.Pipe()
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(context.Canceled)
-			control := watchLabControl(ctx, bodyReader, requestID, cancel)
+			arbiter := &labExchangeArbiter{}
+			watchLabControl(ctx, bodyReader, requestID, cancel, arbiter)
 			records := []labFrameRecord{
 				{kind: "seed.start", payload: []byte{0xa0}},
 				{kind: "event.record", payload: []byte{0xa0}},
@@ -925,8 +855,8 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 			}()
 			writeDone := make(chan error, 1)
 			go func() {
-				writeDone <- writeLabFrames(writer, requestID, records, func() error {
-					return readOnlyExchangeCause(ctx, control)
+				writeDone <- writeLabFrames(writer, requestID, records, func(final bool) error {
+					return arbiter.beginResponse(ctx, final)
 				})
 			}()
 			select {
@@ -945,8 +875,13 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 				t.Fatalf("send %s control frame: %v", test.name, err)
 			}
 			_ = bodyWriter.Close()
-			if outcome := <-control.result; !errors.Is(outcome, test.wantCause) {
-				t.Fatalf("parsed control outcome = %v, want %v", outcome, test.wantCause)
+			select {
+			case <-ctx.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatalf("%s control was not published to the exchange arbiter", test.name)
+			}
+			if outcome := arbiter.causeFor(ctx); !errors.Is(outcome, test.wantCause) {
+				t.Fatalf("published control outcome = %v, want %v", outcome, test.wantCause)
 			}
 			releaseWriter()
 			if err = <-writeDone; !errors.Is(err, test.wantCause) {
@@ -960,66 +895,87 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 	}
 }
 
-func TestM5ReadOnlyExchangeWaitsForDeliveredControlValidation(t *testing.T) {
+func TestM5ControlPublicationBeforeFinalSuppressesReceipt(t *testing.T) {
 	requestID := "01KZ7XHAQT1S46NYPN1PW1DX3G"
 	frame, err := wipdwire.EncodeFrame(wipdwire.Frame{
-		RequestID: requestID, Sequence: 1, Kind: "control.cancel",
-		Payload: []byte{0xa1, 0x61, 0x78, 0x01},
+		RequestID: requestID, Sequence: 1, Kind: "event.record", Payload: []byte{0xa0},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(context.Canceled)
-	readEntered := make(chan struct{})
-	releaseRead := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseParser := func() { releaseOnce.Do(func() { close(releaseRead) }) }
-	defer releaseParser()
-	var readOnce sync.Once
-	control := watchLabControlWithDeliveryHook(ctx, bytes.NewReader(frame), requestID, cancel, func() {
-		readOnce.Do(func() {
-			close(readEntered)
-			<-releaseRead
-		})
-	})
+	arbiter := &labExchangeArbiter{}
+	watchLabControl(ctx, bytes.NewReader(frame), requestID, cancel, arbiter)
 	select {
-	case <-readEntered:
+	case <-ctx.Done():
 	case <-time.After(3 * time.Second):
-		t.Fatal("control reader did not reach the held parser boundary")
+		t.Fatal("parsed control was not published before finalization")
+	}
+	if cause := arbiter.causeFor(ctx); !errors.Is(cause, errLabControlInvalid) {
+		t.Fatalf("published control outcome = %v, want invalid-control cause", cause)
 	}
 	response := httptest.NewRecorder()
-	responseDone := make(chan error, 1)
+	writeReadOnlyFinal(ctx, arbiter, response, requestID,
+		wipdwire.Frame{RequestID: requestID, Kind: "receipt.pending", Payload: []byte{0xa0}}, "")
+	frames := m5ResponseFrames(t, response, 4)
+	if len(frames) != 1 || frames[0].Kind != "problem" || m5ProblemCode(t, frames[0]) != "protocol.out-of-order" {
+		t.Fatalf("final response after earlier control publication = %+v", frames)
+	}
+}
+
+func TestM5FinalizationBeforeLatePublicationWinsBeforeWrite(t *testing.T) {
+	requestID := "01KZ7XHAQT1S46NYPN1PW1DX3G"
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	arbiter := &labExchangeArbiter{}
+	response := httptest.NewRecorder()
+	finalStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	defer release()
+	type finalResult struct {
+		cause   error
+		started bool
+	}
+	done := make(chan finalResult, 1)
 	go func() {
-		if cause := readOnlyExchangeCause(ctx, control); cause != nil {
-			responseDone <- cause
-			return
-		}
-		writeLabFrame(response, wipdwire.Frame{
-			RequestID: requestID, Kind: "receipt.pending", Payload: []byte{0xa0},
+		started, cause := arbiter.writeFinal(ctx, false, func() {
+			close(finalStarted)
+			<-releaseWrite
+			writeLabFrame(response, wipdwire.Frame{
+				RequestID: requestID, Kind: "receipt.pending", Payload: []byte{0xa0},
+			})
 		})
-		responseDone <- nil
+		done <- finalResult{cause: cause, started: started}
 	}()
 	select {
-	case <-control.validationWaiting:
+	case <-finalStarted:
 	case <-time.After(3 * time.Second):
-		t.Fatal("receipt response did not wait for delivered-frame validation")
+		t.Fatal("arbiter did not commit final-response start")
+	}
+	if arbiter.publish(errLabControlInvalid) {
+		t.Fatal("late control publication won after final-response start")
+	}
+	if err := arbiter.beginResponse(ctx, false); !errors.Is(err, errLabFinalAlreadyStarted) {
+		t.Fatalf("post-final check returned %v, want final-started sentinel", err)
 	}
 	if response.Body.Len() != 0 {
-		t.Fatalf("receipt response was emitted while delivered frame was unparsed: %q", response.Body.String())
+		t.Fatalf("response bytes escaped before the gated write: %q", response.Body.String())
 	}
-
-	releaseParser()
+	release()
 	select {
-	case err := <-responseDone:
-		if !errors.Is(err, errLabControlInvalid) {
-			t.Fatalf("read-only result ended with %v, want invalid-control cause", err)
+	case result := <-done:
+		if result.cause != nil || !result.started {
+			t.Fatalf("final write result = %+v, want committed successful start", result)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("read-only result remained blocked after validation completed")
+		t.Fatal("final response did not complete after releasing the gated write")
 	}
-	if response.Body.Len() != 0 {
-		t.Fatalf("receipt response emitted after invalid control: %q", response.Body.String())
+	frames := m5ResponseFrames(t, response, 4)
+	if len(frames) != 1 || frames[0].Kind != "receipt.pending" {
+		t.Fatalf("final response after losing late publication = %+v", frames)
 	}
 }
 
@@ -1031,134 +987,21 @@ func TestM5ReadOnlyExchangeDoesNotWaitForIdleOpenBody(t *testing.T) {
 	}()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(context.Canceled)
-	control := watchLabControl(ctx, bodyReader, "01KZ7XHAQT1S46NYPN1PW1DX3G", cancel)
-	done := make(chan error, 1)
-	go func() { done <- readOnlyExchangeCause(ctx, control) }()
+	arbiter := &labExchangeArbiter{}
+	watchLabControl(ctx, bodyReader, "01KZ7XHAQT1S46NYPN1PW1DX3G", cancel, arbiter)
+	response := httptest.NewRecorder()
+	done := make(chan bool, 1)
+	go func() {
+		done <- writeReadOnlyFinal(ctx, arbiter, response, "01KZ7XHAQT1S46NYPN1PW1DX3G",
+			wipdwire.Frame{RequestID: "01KZ7XHAQT1S46NYPN1PW1DX3G", Kind: "receipt.pending", Payload: []byte{0xa0}}, "")
+	}()
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("idle open request body produced a control cause: %v", err)
+	case started := <-done:
+		if !started {
+			t.Fatal("idle open body suppressed final response")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("read-only result waited for an idle open request body")
-	}
-}
-
-func TestM5ReadOnlyExchangeControlDuringTransferAndQuery(t *testing.T) {
-	for _, exchange := range []string{"seed.request", "receipt.query"} {
-		for _, trailing := range []struct {
-			name        string
-			kind        string
-			payload     []byte
-			wantProblem bool
-		}{
-			{name: "cancel", kind: "control.cancel", payload: []byte{0xa0}},
-			{name: "wrong-direction", kind: "event.record", payload: []byte{0xa0}, wantProblem: true},
-			{name: "malformed-cancel", kind: "control.cancel", payload: []byte{0xa1, 0x61, 0x78, 0x01}, wantProblem: true},
-		} {
-			t.Run(exchange+"/"+trailing.name, func(t *testing.T) {
-				fixture := newM5CommandFixture(t)
-				session := m5Session(t, fixture.handler, fixture.peer)
-				command, owner := m5PendingCommand(t, fixture)
-				requestID, err := randomULID(time.Now().UTC())
-				if err != nil {
-					t.Fatal(err)
-				}
-				var firstPayload []byte
-				switch exchange {
-				case "seed.request":
-					firstPayload, err = wipdwire.EncodeCanonical(wipdwire.SeedRequest{
-						Schema: "wipd.seed-request/1", DomainID: m5TestDomain, Epoch: 1, StoreSchema: "wipd.store/1",
-					})
-				case "receipt.query":
-					firstPayload, err = wipdwire.EncodeCanonical(wipdwire.ReceiptQuery{
-						Schema: "wipd.receipt-query/1", DomainID: m5TestDomain,
-						CommandID: command.ID, RequestHash: m5CommandHash(t, command),
-					})
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				first, err := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: requestID, Kind: exchange, Payload: firstPayload})
-				if err != nil {
-					t.Fatal(err)
-				}
-				bodyReader, bodyWriter := io.Pipe()
-				body := &m5ReadOnlyPipeBody{
-					reader: bodyReader, firstRead: make(chan struct{}), continueFirst: make(chan struct{}), waiting: make(chan struct{}),
-				}
-				request := httptest.NewRequest(http.MethodPost, labExchangePath, nil)
-				request.Body = body
-				request.Header.Set("Content-Type", "application/cbor")
-				request.TLS = &fixture.peer
-				request = request.WithContext(context.WithValue(request.Context(), labSessionContextKey{}, session))
-				response := httptest.NewRecorder()
-				handlerDone := make(chan struct{})
-				go func() {
-					fixture.handler.ServeHTTP(response, request)
-					close(handlerDone)
-				}()
-				var continueOnce sync.Once
-				continueFirst := func() { continueOnce.Do(func() { close(body.continueFirst) }) }
-				var releaseStore func()
-				var waitStore func() error
-				defer func() {
-					continueFirst()
-					_ = bodyWriter.Close()
-					if releaseStore != nil {
-						releaseStore()
-						_ = waitStore()
-					}
-					select {
-					case <-handlerDone:
-					case <-time.After(3 * time.Second):
-						t.Error("read-only test handler did not stop during cleanup")
-					}
-				}()
-				select {
-				case <-body.firstRead:
-				case <-time.After(3 * time.Second):
-					t.Fatalf("%s handler did not read request after authentication", exchange)
-				}
-				releaseStore, waitStore = holdM5StoreLock(t, fixture, owner)
-				continueFirst()
-				if _, err = bodyWriter.Write(first); err != nil {
-					t.Fatalf("write initial %s frame: %v", exchange, err)
-				}
-				select {
-				case <-body.waiting:
-				case <-time.After(3 * time.Second):
-					t.Fatalf("%s handler did not begin reading post-first-frame control", exchange)
-				}
-				control, err := wipdwire.EncodeFrame(wipdwire.Frame{
-					RequestID: requestID, Sequence: 1, Kind: trailing.kind, Payload: trailing.payload,
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err = bodyWriter.Write(control); err != nil {
-					t.Fatalf("write %s trailing frame: %v", trailing.name, err)
-				}
-				_ = bodyWriter.Close()
-				releaseStore()
-				if err = waitStore(); err == nil || err.Error() != "injected completion signing failure" {
-					t.Fatalf("synthetic lock holder completion error = %v", err)
-				}
-				select {
-				case <-handlerDone:
-				case <-time.After(3 * time.Second):
-					t.Fatalf("%s handler did not stop after control input", exchange)
-				}
-				frames := m5ResponseFrames(t, response, 4)
-				if trailing.wantProblem {
-					if len(frames) != 1 || frames[0].Kind != "problem" || m5ProblemCode(t, frames[0]) != "protocol.out-of-order" {
-						t.Fatalf("response to in-flight invalid %s control = %+v", exchange, frames)
-					}
-				} else if len(frames) != 0 {
-					t.Fatalf("response after in-flight cancel during %s = %+v", exchange, frames)
-				}
-			})
-		}
 	}
 }
 

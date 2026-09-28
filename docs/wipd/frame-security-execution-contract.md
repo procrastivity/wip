@@ -295,6 +295,16 @@ set. Negotiation uses `client.hello`, `server.hello`, `session.parameters`, and
 `problem`. A kind in the wrong endpoint, direction, or state is
 `protocol.unsupported-kind` or `protocol.out-of-order` as applicable.
 
+For a read-only or transfer exchange, validated post-first-frame client
+outcomes are published to a shared per-exchange arbiter, which serializes
+publication against response-record start and final-response start. A frame
+takes effect when its validated outcome is published; the final response
+starts when the arbiter commits that start. Whichever transition wins
+determines the exchange: an earlier publication suppresses the result, while a
+later publication is after finalization even if the request-body reader had
+copied bytes before publishing it. An idle open request body does not delay
+final-response start.
+
 The server responds on the same HTTP/2 stream and request ID. It may send a
 bounded `response.start`, zero or more ordered `stream.chunk` records, then one
 `response.end` or `problem`. A streaming start declares content kind, exact
