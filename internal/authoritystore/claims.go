@@ -278,7 +278,7 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 				return ErrFenced
 			}
 			return nil
-		})
+		}, nil)
 	}
 	if len(ownerAuthorization) == 0 {
 		return CommandStatus{}, ErrInvalidProof
@@ -289,7 +289,7 @@ func (s *Store) SubmitClaimLifecycle(ctx context.Context, canonical []byte, hash
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO claim_stand_down_proofs VALUES(?,?,?,?,?)`, c.domain, c.id, c.ownerNonce, ownerAuthorization, at.UTC().Format(time.RFC3339Nano))
 		return writeError(err)
-	})
+	}, nil)
 }
 
 func verifyStandDownAuthorization(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, ownerAuthorization []byte, at time.Time) error {
@@ -389,7 +389,7 @@ func (s *Store) SubmitClaimAcquire(ctx context.Context, canonical []byte, hash s
 		}
 		_, e = tx.ExecContext(ctx, `INSERT INTO claim_acquire_intents VALUES(?,?,?,?,?)`, c.domain, c.id, installed.EventCount, eventID, installed.Digest)
 		return e
-	})
+	}, nil)
 }
 
 // RecoverClaimAcquire claims an abandoned pending execution without altering
@@ -446,8 +446,11 @@ func (s *Store) recoverLifecycleWithProof(ctx context.Context, c *lifecycleComma
 			return nil, e
 		}
 	}
-	s.owners[ownerKey(c.domain, c.id)] = true
-	return &Execution{store: s, lifecycle: c, hash: hash}, nil
+	key := ownerKey(c.domain, c.id)
+	owner := &Execution{store: s, lifecycle: c, hash: hash}
+	s.owners[key] = true
+	s.executions[key] = owner
+	return owner, nil
 }
 
 type journalCommand struct {

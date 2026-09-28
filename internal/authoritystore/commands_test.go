@@ -524,8 +524,8 @@ func TestCommandDerivedLocatorAndCollision(t *testing.T) {
 		t.Fatalf("collision succeeded: %v", err)
 	}
 	rejected := operation.Result{Code: operation.ResultRejected, Problem: &operation.Problem{Code: operation.ProblemLocatorCollision, Message: "already exists"}}
-	if _, err = s.CompleteCommand(ctx, out.Owner, rejected, "", "", now, signWith(k)); err != nil {
-		t.Fatal(err)
+	if _, err = s.CompleteCommand(ctx, out.Owner, rejected, "", "", now, signWith(k)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("completion result changed after an attempted fold: %v", err)
 	}
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
@@ -538,6 +538,10 @@ func TestCommandDerivedLocatorAndCollision(t *testing.T) {
 	var eventCount int
 	if err = s.db.QueryRow(`SELECT count(*) FROM authority_events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("collision appended event: %d %v", eventCount, err)
+	}
+	pending, err := s.QueryCommand(ctx, domainA, next.ID, hashCommand(t, next), 7, peer, envA, now)
+	if err != nil || !pending.Pending || len(pending.Receipt) != 0 {
+		t.Fatalf("completion result substitution cleared pending work: %+v %v", pending, err)
 	}
 }
 
@@ -636,5 +640,31 @@ func TestCommandProcessCrashBoundaries(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSubmitCommandDeadlineIsRecheckedAfterStoreLockDelay(t *testing.T) {
+	s, _, peer, _, now := commandFixture(t)
+	defer func() { _ = s.Close() }()
+
+	command := matterCommand(domainB, 1, "deadline")
+	hash := hashCommand(t, command)
+	deadline := time.Now().Add(100 * time.Millisecond)
+	s.mu.Lock()
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := s.SubmitCommandWithDeadline(context.Background(), command, hash, peer, now, deadline)
+		result <- err
+	}()
+	<-started
+	time.Sleep(time.Until(deadline) + 20*time.Millisecond)
+	s.mu.Unlock()
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired deadline submission error = %v", err)
+	}
+	if _, err := s.QueryCommand(context.Background(), domainA, command.ID, hash, 7, peer, envA, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired command crossed the submission point: %v", err)
 	}
 }

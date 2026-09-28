@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -29,10 +30,20 @@ var (
 // Execution is an unforgeable in-process owner for one durable submission. A
 // recovered owner requires the exact retained command and a new writer lease.
 type Execution struct {
-	store     *Store
-	command   operation.Command
-	lifecycle *lifecycleCommand
-	hash      string
+	store             *Store
+	command           operation.Command
+	lifecycle         *lifecycleCommand
+	hash              string
+	completion        *CommandCompletion
+	completionRunning bool
+}
+
+// CommandCompletion is the evaluated M1 result awaiting its atomic fold and
+// receipt commit. It is retained only in memory while the same Store is live.
+type CommandCompletion struct {
+	Result            operation.Result
+	MatterID, EventID string
+	Occurred          time.Time
 }
 
 // CommandStatus carries either a pending acknowledgment and optional new owner,
@@ -49,6 +60,17 @@ func ownerKey(domain, id string) string { return domain + "/" + id }
 // completed TLS state supplied by the eventual authenticated adapter; neither
 // actor text nor a forwarded certificate is proof of Environment identity.
 func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at time.Time) (CommandStatus, error) {
+	return s.submitCommand(ctx, command, asserted, peer, at, time.Time{}, false)
+}
+
+// SubmitCommandWithDeadline performs a final deadline and context check after
+// the submission row is staged in its transaction and immediately before
+// commit. A zero deadline means the caller has no transport deadline.
+func (s *Store) SubmitCommandWithDeadline(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at, deadline time.Time) (CommandStatus, error) {
+	return s.submitCommand(ctx, command, asserted, peer, at, deadline, true)
+}
+
+func (s *Store) submitCommand(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at, deadline time.Time, checkContext bool) (CommandStatus, error) {
 	var out CommandStatus
 	if err := operation.VerifyRequestHash(command, asserted); err != nil {
 		return out, err
@@ -60,7 +82,19 @@ func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, as
 	if command.Request.Operation != operation.MatterCreateV1.Metadata().Operation || command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
 	}
-	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, nil)
+	var beforeCommit func() error
+	if checkContext {
+		beforeCommit = func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				return context.DeadlineExceeded
+			}
+			return nil
+		}
+	}
+	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, nil, beforeCommit)
 }
 
 type commandIdentity struct {
@@ -79,7 +113,7 @@ type commandIdentity struct {
 
 // before runs after authentication and replay detection but before the durable
 // submission point. It may only read the caller-owned transaction.
-func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.ConnectionState, at time.Time, before func(*sql.Tx) error) (CommandStatus, error) {
+func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.ConnectionState, at time.Time, before func(*sql.Tx) error, beforeCommit func() error) (CommandStatus, error) {
 	var out CommandStatus
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,15 +172,23 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state) VALUES(?,?,?,?,?,?,?,?,?,'submitted')`, d.ID, c.id, c.hash, c.encoded, d.ActiveEpoch, c.environment, c.sequence, c.name, c.version); err != nil {
 		return out, writeError(err)
 	}
+	if beforeCommit != nil {
+		if err = beforeCommit(); err != nil {
+			return out, err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return out, err
 	}
-	s.owners[ownerKey(d.ID, c.id)] = true
-	out.Pending = true
-	out.Owner = &Execution{store: s, hash: c.hash, lifecycle: c.lifecycle}
+	key := ownerKey(d.ID, c.id)
+	owner := &Execution{store: s, hash: c.hash, lifecycle: c.lifecycle}
 	if c.m1 != nil {
-		out.Owner.command = *c.m1
+		owner.command = *c.m1
 	}
+	s.owners[key] = true
+	s.executions[key] = owner
+	out.Pending = true
+	out.Owner = owner
 	return out, nil
 }
 
@@ -235,8 +277,43 @@ func (s *Store) RecoverCommand(ctx context.Context, command operation.Command, h
 	if state != "submitted" {
 		return nil, ErrNotOwner
 	}
+	owner := &Execution{store: s, command: command, hash: hash}
 	s.owners[key] = true
-	return &Execution{store: s, command: command, hash: hash}, nil
+	s.executions[key] = owner
+	return owner, nil
+}
+
+// ClaimPendingCommandCompletion safely claims an already-evaluated result for
+// another completion attempt. It retains the same execution owner and never
+// reruns the semantic handler.
+func (s *Store) ClaimPendingCommandCompletion(command operation.Command, hash string) (*Execution, CommandCompletion, bool, error) {
+	var empty CommandCompletion
+	if err := operation.VerifyRequestHash(command, hash); err != nil {
+		return nil, empty, false, err
+	}
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		return nil, empty, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil, empty, false, errors.New("authoritystore: closed")
+	}
+	key := ownerKey(command.AuthorityDomainID, command.ID)
+	owner := s.executions[key]
+	if owner == nil || !s.owners[key] || owner.lifecycle != nil || owner.completion == nil || owner.completionRunning {
+		return nil, empty, false, nil
+	}
+	stored, err := owner.command.CanonicalBytes()
+	if err != nil {
+		return nil, empty, false, err
+	}
+	if owner.hash != hash || !bytes.Equal(canonical, stored) {
+		return nil, empty, false, ErrConflict
+	}
+	owner.completionRunning = true
+	return owner, *owner.completion, true, nil
 }
 
 // Signer holds the restricted authority private key outside SQLite. It signs
@@ -263,9 +340,19 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil || !s.owners[ownerKey(cmd.AuthorityDomainID, cmd.ID)] {
+	key := ownerKey(cmd.AuthorityDomainID, cmd.ID)
+	if s.db == nil || !s.owners[key] || s.executions[key] != owner {
 		return out, ErrNotOwner
 	}
+	completion := CommandCompletion{Result: result, MatterID: matterID, EventID: eventID, Occurred: occurred}
+	if owner.completion != nil && !sameCommandCompletion(*owner.completion, completion) {
+		return out, ErrConflict
+	}
+	if owner.completion == nil {
+		owner.completion = &completion
+	}
+	owner.completionRunning = true
+	defer func() { owner.completionRunning = false }()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return out, err
@@ -445,8 +532,14 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 		return out, err
 	}
 	delete(s.owners, ownerKey(c.domain, c.id))
+	delete(s.executions, ownerKey(c.domain, c.id))
 	out.Receipt, out.SignedReceipt = receipt, wrapper
 	return out, nil
+}
+
+func sameCommandCompletion(left, right CommandCompletion) bool {
+	return reflect.DeepEqual(left.Result, right.Result) && left.MatterID == right.MatterID &&
+		left.EventID == right.EventID && left.Occurred.Equal(right.Occurred)
 }
 
 func digestRaw(value string) ([]byte, error) {

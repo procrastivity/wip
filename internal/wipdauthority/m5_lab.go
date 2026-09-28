@@ -249,7 +249,7 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
 		return
 	}
-	frame, err := readSingleFrame(request.Body)
+	frame, err := wipdwire.ReadFrame(request.Body)
 	if err != nil {
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
@@ -308,7 +308,7 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 			writeLabProblem(writer, frame.RequestID, "operation.unknown")
 			return
 		}
-		app.serveCommandSubmit(writer, request, frame)
+		app.serveCommandSubmit(writer, request, frame, environment)
 		return
 	case "receipt.query":
 		if app.registry == nil {

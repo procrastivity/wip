@@ -93,11 +93,12 @@ type Domain struct {
 // Store holds one exclusive host-local writer lease for the lifetime of its DB.
 // Close releases the lease; a process exit releases it even without Close.
 type Store struct {
-	mu     sync.Mutex
-	db     *sql.DB
-	lock   *os.File
-	blobs  string
-	owners map[string]bool
+	mu         sync.Mutex
+	db         *sql.DB
+	lock       *os.File
+	blobs      string
+	owners     map[string]bool
+	executions map[string]*Execution
 }
 
 // CreateEmpty creates a dedicated, absent root and installs each schema
@@ -153,7 +154,10 @@ func CreateEmpty(root string) (*Store, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("authoritystore: initialize: %w", err)
 	}
-	return &Store{db: db, lock: lock, blobs: filepath.Join(path, "blobs"), owners: make(map[string]bool)}, nil
+	return &Store{
+		db: db, lock: lock, blobs: filepath.Join(path, "blobs"),
+		owners: make(map[string]bool), executions: make(map[string]*Execution),
+	}, nil
 }
 
 // installBaseline commits schema objects and both version markers together.
@@ -213,7 +217,10 @@ func OpenExisting(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: blobs: %v", ErrInvalidStore, err)
 	}
-	store := &Store{db: db, lock: lock, blobs: filepath.Join(path, "blobs"), owners: make(map[string]bool)}
+	store := &Store{
+		db: db, lock: lock, blobs: filepath.Join(path, "blobs"),
+		owners: make(map[string]bool), executions: make(map[string]*Execution),
+	}
 	lock = nil
 	return store, nil
 }

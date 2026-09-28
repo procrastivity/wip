@@ -21,6 +21,7 @@ import (
 	"net/http/httptrace"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -479,6 +480,199 @@ func TestM5CommandExchangeUsesNegotiatedAuthenticatedHTTP2(t *testing.T) {
 	}
 }
 
+func TestM5OpenBodyFlushesAcceptedBeforeTerminalAndControlCancelOnlyStopsWait(t *testing.T) {
+	for _, mode := range []string{"control.cancel", "HTTP/2 stream reset"} {
+		t.Run(mode, func(t *testing.T) { testM5OpenBodyCancellation(t, mode) })
+	}
+}
+
+func testM5OpenBodyCancellation(t *testing.T, mode string) {
+	fixture := newM5CommandFixture(t)
+	releaseDispatch := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(releaseDispatch) }) }
+	dispatchEntered := make(chan struct{})
+	var enterOnce sync.Once
+	registry := operation.NewRegistry()
+	if err := registry.Register(operation.MatterCreateV1, func(_ context.Context, request operation.Request) operation.Result {
+		fixture.calls.Add(1)
+		enterOnce.Do(func() { close(dispatchEntered) })
+		<-releaseDispatch
+		input := request.Input.(operation.MatterCreateInput)
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{
+			ID: m5TestMatter, Locator: input.Locator, Title: input.Title,
+		}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.config.Registry = registry
+	server := fixture.serverForStore(t, fixture.store)
+	ctx, cancel := context.WithCancel(context.Background())
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(ctx, fixture.listener) }()
+	client, err := fixture.profile.HTTPClientWithCertificate(fixture.serverRoots, &fixture.clientCert)
+	if err != nil {
+		unblock()
+		cancel()
+		t.Fatal(err)
+	}
+	var connection net.Conn
+	t.Cleanup(func() {
+		unblock()
+		client.CloseIdleConnections()
+		cancel()
+		select {
+		case err := <-serveResult:
+			if err != nil {
+				t.Errorf("authority server stopped with error: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("authority server did not stop after context cancellation")
+		}
+	})
+
+	hello, err := wipdwire.EncodeCanonical(map[string]any{
+		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
+		"identity_schemas": []any{"wipd.command/1"},
+		"operations":       []any{map[string]any{"name": "matter.create", "versions": []any{uint64(1)}, "identity_schemas": []any{"wipd.command/1"}}},
+		"store_schemas":    []any{"wipd.store/1"}, "features": []any{"wipd.frame/1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	negotiated := m5HTTPSExchange(t, client, fixture.profile, labNegotiatePath, "client.hello", hello, &connection)
+	if len(negotiated) != 2 || negotiated[0].Kind != "server.hello" || negotiated[1].Kind != "session.parameters" {
+		t.Fatalf("negotiation response = %+v", negotiated)
+	}
+
+	command := m5Command("01KZ7XHAQT1S46NYPN1PW1DX3F", 1, "alpha")
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := wipdwire.EncodeCanonical(wipdwire.CommandSubmit{
+		Schema: "wipd.command-submit/1", CanonicalCommand: canonical, RequestHash: m5CommandHash(t, command),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := randomULID(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFrame, err := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: requestID, Kind: "command.submit", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestReader, requestWriter := io.Pipe()
+	t.Cleanup(func() { _ = requestWriter.Close() })
+	request, err := http.NewRequest(http.MethodPost, fixture.profile.Origin()+labExchangePath, requestReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestContext, resetRequest := context.WithCancel(request.Context())
+	defer resetRequest()
+	request.Header.Set("Content-Type", "application/cbor")
+	var exchangeConnection net.Conn
+	request = request.WithContext(httptrace.WithClientTrace(requestContext, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { exchangeConnection = info.Conn },
+	}))
+	responseCh := make(chan struct {
+		response *http.Response
+		err      error
+	}, 1)
+	go func() {
+		response, requestErr := client.Do(request)
+		responseCh <- struct {
+			response *http.Response
+			err      error
+		}{response: response, err: requestErr}
+	}()
+	if _, err = requestWriter.Write(firstFrame); err != nil {
+		t.Fatalf("write first command frame: %v", err)
+	}
+	var response *http.Response
+	select {
+	case result := <-responseCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		response = result.response
+	case <-time.After(3 * time.Second):
+		t.Fatal("open-body command did not receive a response before request EOF")
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.ProtoMajor != 2 || response.TLS == nil || response.TLS.Version != tls.VersionTLS13 || exchangeConnection != connection {
+		t.Fatalf("open-body response status=%d protocol=%s TLS=%v reused=%v", response.StatusCode, response.Proto, response.TLS, exchangeConnection == connection)
+	}
+	ack, err := wipdwire.ReadFrame(response.Body)
+	if err != nil || ack.Kind != "submission.accepted" || ack.Sequence != 0 || ack.RequestID != requestID {
+		t.Fatalf("open-body acknowledgment = %+v, %v", ack, err)
+	}
+	select {
+	case <-dispatchEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted command did not enter the blocking operation")
+	}
+	terminalRead := make(chan struct {
+		frame wipdwire.Frame
+		err   error
+	}, 1)
+	go func() {
+		frame, readErr := wipdwire.ReadFrame(response.Body)
+		terminalRead <- struct {
+			frame wipdwire.Frame
+			err   error
+		}{frame: frame, err: readErr}
+	}()
+	select {
+	case result := <-terminalRead:
+		t.Fatalf("terminal response arrived while operation remained blocked: %+v %v", result.frame, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if mode == "control.cancel" {
+		cancelFrame, encodeErr := wipdwire.EncodeFrame(wipdwire.Frame{
+			RequestID: requestID, Sequence: 1, Kind: "control.cancel", Payload: []byte{0xa0},
+		})
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		if _, err = requestWriter.Write(cancelFrame); err != nil {
+			t.Fatalf("write control.cancel: %v", err)
+		}
+		_ = requestWriter.Close()
+	} else {
+		resetRequest()
+		_ = requestWriter.CloseWithError(context.Canceled)
+	}
+	select {
+	case result := <-terminalRead:
+		if result.err == nil || (mode == "control.cancel" && !errors.Is(result.err, io.EOF)) {
+			t.Fatalf("%s response stream did not stop without a terminal record: %+v %v", mode, result.frame, result.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s did not stop waiting on the response stream", mode)
+	}
+	unblock()
+	waitM5Terminal(t, fixture.store, fixture.peer, command)
+	if fixture.calls.Load() != 1 {
+		t.Fatalf("cancelled accepted command handler calls=%d, want 1", fixture.calls.Load())
+	}
+	query := wipdwire.ReceiptQuery{
+		Schema: "wipd.receipt-query/1", DomainID: m5TestDomain,
+		CommandID: command.ID, RequestHash: m5CommandHash(t, command),
+	}
+	queryPayload, err := wipdwire.EncodeCanonical(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryFrames := m5HTTPSExchange(t, client, fixture.profile, labExchangePath, "receipt.query", queryPayload, &connection)
+	if len(queryFrames) != 1 || queryFrames[0].Kind != "command.terminal" {
+		t.Fatalf("receipt query after %s = %+v", mode, queryFrames)
+	}
+}
+
 func TestM5ArtifactSignerCannotReuseCAOrEnvironmentKey(t *testing.T) {
 	fixture := newM5CommandFixture(t)
 	ca, err := x509.ParseCertificate(fixture.config.EnvironmentCACertificateDER)
@@ -785,8 +979,12 @@ func TestM5LostTerminalResponseReplaysStoredReceipt(t *testing.T) {
 	lost := &m5LostTerminalWriter{cancel: cancel}
 	fixture.handler.ServeHTTP(lost, request)
 	first, err := wipdwire.ReadFrames(lost.body.Bytes(), 2)
-	if err != nil || len(first) != 1 || first[0].Kind != "submission.accepted" || fixture.calls.Load() != 1 || requestContext.Err() != context.Canceled {
+	if err != nil || len(first) != 1 || first[0].Kind != "submission.accepted" || requestContext.Err() != context.Canceled {
 		t.Fatalf("simulated lost terminal response frames=%+v calls=%d err=%v", first, fixture.calls.Load(), err)
+	}
+	waitM5Terminal(t, fixture.store, fixture.peer, command)
+	if fixture.calls.Load() != 1 {
+		t.Fatalf("lost response execution calls=%d, want 1", fixture.calls.Load())
 	}
 	if err := fixture.store.Close(); err != nil {
 		t.Fatal(err)
@@ -806,6 +1004,114 @@ func TestM5LostTerminalResponseReplaysStoredReceipt(t *testing.T) {
 	if !bytes.Equal(retry[0].Payload, fixtureStoredReceipt(t, fixture.store, fixture.peer, command)) {
 		t.Fatal("retry did not return the exact durable receipt")
 	}
+}
+
+func TestM5SameLiveStoreRetryContinuesAfterTransientSignerFailure(t *testing.T) {
+	fixture := newM5CommandFixture(t)
+	var signerCalls atomic.Int32
+	baseSigner := fixture.config.SignArtifact
+	fixture.config.SignArtifact = func(ctx context.Context, preimage []byte) ([]byte, error) {
+		if signerCalls.Add(1) == 1 {
+			return nil, errors.New("injected transient signer failure")
+		}
+		return baseSigner(ctx, preimage)
+	}
+	fixture.handler = fixture.handlerForStore(t, fixture.store)
+	session := m5Session(t, fixture.handler, fixture.peer)
+	command := m5Command("01KZ7XHAQT1S46NYPN1PW1DX3F", 1, "alpha")
+	hash := m5CommandHash(t, command)
+
+	_, first := m5Submit(t, session, fixture, command)
+	if len(first) != 1 || first[0].Kind != "submission.accepted" || fixture.calls.Load() != 1 {
+		t.Fatalf("first attempt after signer failure = %+v; handler calls=%d", first, fixture.calls.Load())
+	}
+	pending := m5Query(t, session, fixture, command.ID, hash)
+	if len(pending) != 1 || pending[0].Kind != "receipt.pending" {
+		t.Fatalf("receipt after transient signer failure = %+v", pending)
+	}
+	status, err := fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, hash, 1,
+		fixture.peer, m5TestEnv, time.Now().UTC())
+	if err != nil || !status.Pending || len(status.Receipt) != 0 {
+		t.Fatalf("same-store status after transient signer failure = %+v, %v", status, err)
+	}
+
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, request := m5CommandRequest(t, session, fixture.peer, "command.submit", wipdwire.CommandSubmit{
+		Schema: "wipd.command-submit/1", CanonicalCommand: canonical, RequestHash: hash,
+	})
+	flushEntered := make(chan struct{})
+	releaseFlush := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFlush) }) }
+	t.Cleanup(release)
+	barrier := &m5FlushBarrierWriter{ResponseRecorder: response, entered: flushEntered, release: releaseFlush}
+	retryDone := make(chan struct{}, 1)
+	go func() {
+		fixture.handler.ServeHTTP(barrier, request)
+		retryDone <- struct{}{}
+	}()
+	select {
+	case <-flushEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("exact retry did not claim the retained completion before acknowledgment")
+	}
+	_, concurrentRetry := m5Submit(t, session, fixture, command)
+	if len(concurrentRetry) != 1 || concurrentRetry[0].Kind != "submission.accepted" {
+		t.Fatalf("concurrent exact retry created another completion owner: %+v", concurrentRetry)
+	}
+	if fixture.calls.Load() != 1 || signerCalls.Load() != 1 {
+		t.Fatalf("concurrent retry dispatched before continuation release: handlers=%d signers=%d", fixture.calls.Load(), signerCalls.Load())
+	}
+	release()
+	select {
+	case <-retryDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("claimed completion did not finish after releasing the acknowledgment barrier")
+	}
+	retried := m5ResponseFrames(t, response, 4)
+	if len(retried) != 2 || retried[0].Kind != "submission.accepted" || retried[1].Kind != "command.terminal" {
+		t.Fatalf("same-live-store exact retry = %+v", retried)
+	}
+	if fixture.calls.Load() != 1 || signerCalls.Load() != 2 {
+		t.Fatalf("retry repeated semantic execution or skipped signer retry: handler calls=%d signer calls=%d", fixture.calls.Load(), signerCalls.Load())
+	}
+	queried := m5Query(t, session, fixture, command.ID, hash)
+	if len(queried) != 1 || queried[0].Kind != "command.terminal" || !bytes.Equal(queried[0].Payload, retried[1].Payload) {
+		t.Fatalf("same-store terminal receipt query = %+v", queried)
+	}
+	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || anchor.EventCount != 1 {
+		t.Fatalf("fold count after same-store retry = %+v, %v", anchor, err)
+	}
+}
+
+type m5FlushBarrierWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (writer *m5FlushBarrierWriter) Flush() {
+	close(writer.entered)
+	<-writer.release
+	writer.ResponseRecorder.Flush()
+}
+
+func waitM5Terminal(t *testing.T, store *authoritystore.Store, peer tls.ConnectionState, command operation.Command) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := store.QueryCommand(context.Background(), m5TestDomain, command.ID,
+			m5CommandHash(t, command), 1, peer, m5TestEnv, time.Now().UTC())
+		if err == nil && !status.Pending && len(status.Receipt) > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("command did not reach a terminal receipt")
 }
 
 func fixtureStoredReceipt(t *testing.T, store *authoritystore.Store, peer tls.ConnectionState, command operation.Command) []byte {
