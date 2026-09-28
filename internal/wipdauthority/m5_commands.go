@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/procrastivity/wip/internal/authoritystore"
@@ -43,6 +45,57 @@ var (
 	errLabControlCancel  = errors.New("wipdauthority: client canceled exchange")
 	errLabControlInvalid = errors.New("wipdauthority: invalid post-first-frame control frame")
 )
+
+type labControlWatch struct {
+	result            chan error
+	frameDelivered    chan struct{} // A complete frame is available for validation.
+	frameParsed       chan struct{}
+	validationWaiting chan struct{}
+	deliveredOnce     sync.Once
+	waitingOnce       sync.Once
+}
+
+type labControlProgressReader struct {
+	reader        io.Reader
+	watch         *labControlWatch
+	afterDelivery func()
+	prefix        [4]byte
+	prefixN       int
+	expected      int
+	received      int
+}
+
+func (reader *labControlProgressReader) Read(data []byte) (int, error) {
+	n, err := reader.reader.Read(data)
+	if n > 0 {
+		reader.received += n
+		if reader.prefixN < len(reader.prefix) {
+			copied := copy(reader.prefix[reader.prefixN:], data[:n])
+			reader.prefixN += copied
+		}
+		if reader.prefixN == len(reader.prefix) && reader.expected == 0 {
+			length := binary.BigEndian.Uint32(reader.prefix[:])
+			if length == 0 || length > wipdwire.FrameLimit {
+				reader.markDelivered()
+			} else {
+				reader.expected = len(reader.prefix) + int(length)
+			}
+		}
+		if reader.expected > 0 && reader.received >= reader.expected {
+			reader.markDelivered()
+		}
+	}
+	return n, err
+}
+
+func (reader *labControlProgressReader) markDelivered() {
+	reader.watch.deliveredOnce.Do(func() {
+		close(reader.watch.frameDelivered)
+		if reader.afterDelivery != nil {
+			reader.afterDelivery()
+		}
+	})
+}
 
 func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request *http.Request, body io.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
 	var submit wipdwire.CommandSubmit
@@ -202,19 +255,29 @@ func watchLabCommandControl(ctx context.Context, body io.Reader, requestID strin
 	_ = watchLabControl(ctx, body, requestID, cancel)
 }
 
-func watchLabControl(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc) <-chan error {
-	control := make(chan error, 1)
+func watchLabControl(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc) *labControlWatch {
+	return watchLabControlWithDeliveryHook(ctx, body, requestID, cancel, nil)
+}
+
+// watchLabControlWithDeliveryHook makes the complete-frame/validation boundary
+// controllable in tests without changing the production reader path.
+func watchLabControlWithDeliveryHook(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc, afterDelivery func()) *labControlWatch {
+	watch := &labControlWatch{
+		result: make(chan error, 1), frameDelivered: make(chan struct{}),
+		frameParsed: make(chan struct{}), validationWaiting: make(chan struct{}),
+	}
 	go func() {
-		outcome := readLabControlFrame(body, requestID)
+		outcome := readLabControlFrame(&labControlProgressReader{reader: body, watch: watch, afterDelivery: afterDelivery}, requestID)
 		if outcome != io.EOF {
 			if cause := context.Cause(ctx); cause != nil {
 				outcome = cause
 			}
 			cancel(outcome)
 		}
-		control <- outcome
+		close(watch.frameParsed)
+		watch.result <- outcome
 	}()
-	return control
+	return watch
 }
 
 func readLabControlFrame(body io.Reader, requestID string) error {
@@ -232,7 +295,7 @@ func readLabControlFrame(body io.Reader, requestID string) error {
 	return errLabControlCancel
 }
 
-func (app *m5LabHandler) beginReadOnlyExchange(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, requestID string) (context.Context, context.CancelCauseFunc, <-chan error, bool) {
+func (app *m5LabHandler) beginReadOnlyExchange(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, requestID string) (context.Context, context.CancelCauseFunc, *labControlWatch, bool) {
 	if body.Buffered() > 0 {
 		outcome := readLabControlFrame(body, requestID)
 		if errors.Is(outcome, errLabControlCancel) {
@@ -249,9 +312,23 @@ func (app *m5LabHandler) beginReadOnlyExchange(writer http.ResponseWriter, reque
 	return ctx, cancel, control, true
 }
 
-func readOnlyExchangeCause(ctx context.Context, control <-chan error) error {
+func readOnlyExchangeCause(ctx context.Context, control *labControlWatch) error {
 	select {
-	case outcome := <-control:
+	case <-control.frameDelivered:
+		select {
+		case <-control.frameParsed:
+		default:
+			control.waitingOnce.Do(func() { close(control.validationWaiting) })
+			select {
+			case <-control.frameParsed:
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
+		}
+	default:
+	}
+	select {
+	case outcome := <-control.result:
 		if outcome == nil || outcome == io.EOF {
 			return context.Cause(ctx)
 		}
@@ -261,7 +338,7 @@ func readOnlyExchangeCause(ctx context.Context, control <-chan error) error {
 	}
 }
 
-func readOnlyExchangeStopped(ctx context.Context, writer http.ResponseWriter, requestID string, control <-chan error) bool {
+func readOnlyExchangeStopped(ctx context.Context, writer http.ResponseWriter, requestID string, control *labControlWatch) bool {
 	if outcome := readOnlyExchangeCause(ctx, control); outcome != nil {
 		if errors.Is(outcome, errLabControlInvalid) {
 			writeLabProblem(writer, requestID, "protocol.out-of-order")

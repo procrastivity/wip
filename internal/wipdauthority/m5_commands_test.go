@@ -945,7 +945,7 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 				t.Fatalf("send %s control frame: %v", test.name, err)
 			}
 			_ = bodyWriter.Close()
-			if outcome := <-control; !errors.Is(outcome, test.wantCause) {
+			if outcome := <-control.result; !errors.Is(outcome, test.wantCause) {
 				t.Fatalf("parsed control outcome = %v, want %v", outcome, test.wantCause)
 			}
 			releaseWriter()
@@ -957,6 +957,90 @@ func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
 				t.Fatalf("frames after %s during first output write: writes=%d frames=%+v", test.name, writer.writes.Load(), frames)
 			}
 		})
+	}
+}
+
+func TestM5ReadOnlyExchangeWaitsForDeliveredControlValidation(t *testing.T) {
+	requestID := "01KZ7XHAQT1S46NYPN1PW1DX3G"
+	frame, err := wipdwire.EncodeFrame(wipdwire.Frame{
+		RequestID: requestID, Sequence: 1, Kind: "control.cancel",
+		Payload: []byte{0xa1, 0x61, 0x78, 0x01},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseParser := func() { releaseOnce.Do(func() { close(releaseRead) }) }
+	defer releaseParser()
+	var readOnce sync.Once
+	control := watchLabControlWithDeliveryHook(ctx, bytes.NewReader(frame), requestID, cancel, func() {
+		readOnce.Do(func() {
+			close(readEntered)
+			<-releaseRead
+		})
+	})
+	select {
+	case <-readEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("control reader did not reach the held parser boundary")
+	}
+	response := httptest.NewRecorder()
+	responseDone := make(chan error, 1)
+	go func() {
+		if cause := readOnlyExchangeCause(ctx, control); cause != nil {
+			responseDone <- cause
+			return
+		}
+		writeLabFrame(response, wipdwire.Frame{
+			RequestID: requestID, Kind: "receipt.pending", Payload: []byte{0xa0},
+		})
+		responseDone <- nil
+	}()
+	select {
+	case <-control.validationWaiting:
+	case <-time.After(3 * time.Second):
+		t.Fatal("receipt response did not wait for delivered-frame validation")
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("receipt response was emitted while delivered frame was unparsed: %q", response.Body.String())
+	}
+
+	releaseParser()
+	select {
+	case err := <-responseDone:
+		if !errors.Is(err, errLabControlInvalid) {
+			t.Fatalf("read-only result ended with %v, want invalid-control cause", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("read-only result remained blocked after validation completed")
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("receipt response emitted after invalid control: %q", response.Body.String())
+	}
+}
+
+func TestM5ReadOnlyExchangeDoesNotWaitForIdleOpenBody(t *testing.T) {
+	bodyReader, bodyWriter := io.Pipe()
+	defer func() {
+		_ = bodyReader.Close()
+		_ = bodyWriter.Close()
+	}()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	control := watchLabControl(ctx, bodyReader, "01KZ7XHAQT1S46NYPN1PW1DX3G", cancel)
+	done := make(chan error, 1)
+	go func() { done <- readOnlyExchangeCause(ctx, control) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("idle open request body produced a control cause: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read-only result waited for an idle open request body")
 	}
 }
 
