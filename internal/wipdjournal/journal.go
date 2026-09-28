@@ -101,6 +101,10 @@ type Entry struct {
 	JournalPosition uint64
 	Delivery        operation.DeliveryClass
 	State           State
+	// Created is true only for the call to PrepareCommand that committed this
+	// entry. It is not persisted; exact retries load the original entry with
+	// Created=false so callers never repeat accepted effects.
+	Created bool
 }
 
 // StagedBlob identifies durable content without exposing a local path.
@@ -280,7 +284,7 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 	}
 	entry := Entry{
 		Command: command, CanonicalBytes: bytes.Clone(canonical), RequestHash: hash,
-		EnvironmentSeq: uint64(nextSequence), Delivery: delivery, State: state,
+		EnvironmentSeq: uint64(nextSequence), Delivery: delivery, State: state, Created: true,
 	}
 	if delivery != operation.DeliveryAuthority {
 		entry.JournalPosition = uint64(nextPosition)
