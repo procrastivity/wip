@@ -29,7 +29,9 @@ func (app *m5LabHandler) serveTransferExchange(writer http.ResponseWriter, reque
 		writeLabProblem(writer, frame.RequestID, code)
 		return
 	}
-	_ = writeLabFrames(writer, frame.RequestID, product)
+	_ = writeLabFrames(writer, frame.RequestID, product, func() error {
+		return readOnlyExchangeCause(ctx, control)
+	})
 }
 
 func (app *m5LabHandler) transferProduct(ctx context.Context, kind string, start authoritystore.PrefixAnchor, now time.Time) ([]labFrameRecord, error) {
@@ -165,7 +167,7 @@ func authorityAnchor(anchor wipdwire.PrefixAnchor) authoritystore.PrefixAnchor {
 	return result
 }
 
-func writeLabFrames(writer http.ResponseWriter, requestID string, records []labFrameRecord) error {
+func writeLabFrames(writer http.ResponseWriter, requestID string, records []labFrameRecord, beforeWrite func() error) error {
 	frames := make([][]byte, 0, len(records))
 	var total int
 	for sequence, record := range records {
@@ -181,6 +183,11 @@ func writeLabFrames(writer http.ResponseWriter, requestID string, records []labF
 	writer.Header().Set("Content-Type", "application/cbor")
 	writer.Header().Set("Cache-Control", "no-store")
 	for _, wire := range frames {
+		if beforeWrite != nil {
+			if err := beforeWrite(); err != nil {
+				return err
+			}
+		}
 		if _, err := writer.Write(wire); err != nil {
 			return err
 		}

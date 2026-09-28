@@ -199,16 +199,22 @@ func (app *m5LabHandler) reconcileSubmissionError(ctx context.Context, command o
 }
 
 func watchLabCommandControl(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc) {
+	_ = watchLabControl(ctx, body, requestID, cancel)
+}
+
+func watchLabControl(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc) <-chan error {
+	control := make(chan error, 1)
 	go func() {
 		outcome := readLabControlFrame(body, requestID)
-		if outcome == io.EOF {
-			return
+		if outcome != io.EOF {
+			if cause := context.Cause(ctx); cause != nil {
+				outcome = cause
+			}
+			cancel(outcome)
 		}
-		if cause := context.Cause(ctx); cause != nil {
-			outcome = cause
-		}
-		cancel(outcome)
+		control <- outcome
 	}()
+	return control
 }
 
 func readLabControlFrame(body io.Reader, requestID string) error {
@@ -239,36 +245,24 @@ func (app *m5LabHandler) beginReadOnlyExchange(writer http.ResponseWriter, reque
 		return nil, nil, nil, false
 	}
 	ctx, cancel := context.WithCancelCause(request.Context())
-	control := make(chan error, 1)
-	go func() {
-		outcome := readLabControlFrame(body, requestID)
-		if outcome != io.EOF {
-			if cause := context.Cause(ctx); cause != nil {
-				outcome = cause
-			}
-			cancel(outcome)
-		}
-		control <- outcome
-	}()
+	control := watchLabControl(ctx, body, requestID, cancel)
 	return ctx, cancel, control, true
 }
 
-func readOnlyExchangeStopped(ctx context.Context, writer http.ResponseWriter, requestID string, control <-chan error) bool {
+func readOnlyExchangeCause(ctx context.Context, control <-chan error) error {
 	select {
 	case outcome := <-control:
 		if outcome == nil || outcome == io.EOF {
-			if context.Cause(ctx) == nil {
-				return false
-			}
-			outcome = context.Cause(ctx)
+			return context.Cause(ctx)
 		}
-		if errors.Is(outcome, errLabControlInvalid) {
-			writeLabProblem(writer, requestID, "protocol.out-of-order")
-		}
-		return true
+		return outcome
 	default:
+		return context.Cause(ctx)
 	}
-	if outcome := context.Cause(ctx); outcome != nil {
+}
+
+func readOnlyExchangeStopped(ctx context.Context, writer http.ResponseWriter, requestID string, control <-chan error) bool {
+	if outcome := readOnlyExchangeCause(ctx, control); outcome != nil {
 		if errors.Is(outcome, errLabControlInvalid) {
 			writeLabProblem(writer, requestID, "protocol.out-of-order")
 		}

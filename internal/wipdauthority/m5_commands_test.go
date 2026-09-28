@@ -871,6 +871,95 @@ func holdM5StoreLock(t *testing.T, fixture *m5CommandFixture, owner *authorityst
 	return release, wait
 }
 
+type m5GatedResponseWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+	writes  atomic.Int32
+	once    sync.Once
+}
+
+func (writer *m5GatedResponseWriter) Write(data []byte) (int, error) {
+	writer.writes.Add(1)
+	writer.once.Do(func() {
+		close(writer.entered)
+		<-writer.release
+	})
+	return writer.ResponseRecorder.Write(data)
+}
+
+func TestM5TransferOutputStopsBetweenFramesOnControl(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		kind      string
+		wantCause error
+	}{
+		{name: "cancel", kind: "control.cancel", wantCause: errLabControlCancel},
+		{name: "wrong direction", kind: "event.record", wantCause: errLabControlInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requestID, err := randomULID(time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodyReader, bodyWriter := io.Pipe()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(context.Canceled)
+			control := watchLabControl(ctx, bodyReader, requestID, cancel)
+			records := []labFrameRecord{
+				{kind: "seed.start", payload: []byte{0xa0}},
+				{kind: "event.record", payload: []byte{0xa0}},
+				{kind: "blob.manifest", payload: []byte{0xa0}},
+				{kind: "seed.end", payload: []byte{0xa0}},
+			}
+			response := httptest.NewRecorder()
+			writer := &m5GatedResponseWriter{
+				ResponseRecorder: response, entered: make(chan struct{}), release: make(chan struct{}),
+			}
+			var releaseOnce sync.Once
+			releaseWriter := func() { releaseOnce.Do(func() { close(writer.release) }) }
+			defer func() {
+				releaseWriter()
+				_ = bodyReader.Close()
+				_ = bodyWriter.Close()
+			}()
+			writeDone := make(chan error, 1)
+			go func() {
+				writeDone <- writeLabFrames(writer, requestID, records, func() error {
+					return readOnlyExchangeCause(ctx, control)
+				})
+			}()
+			select {
+			case <-writer.entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("transfer writer did not block on its first frame")
+			}
+			payload := []byte{0xa0}
+			trailing, err := wipdwire.EncodeFrame(wipdwire.Frame{
+				RequestID: requestID, Sequence: 1, Kind: test.kind, Payload: payload,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = bodyWriter.Write(trailing); err != nil {
+				t.Fatalf("send %s control frame: %v", test.name, err)
+			}
+			_ = bodyWriter.Close()
+			if outcome := <-control; !errors.Is(outcome, test.wantCause) {
+				t.Fatalf("parsed control outcome = %v, want %v", outcome, test.wantCause)
+			}
+			releaseWriter()
+			if err = <-writeDone; !errors.Is(err, test.wantCause) {
+				t.Fatalf("transfer writer stop cause = %v, want %v", err, test.wantCause)
+			}
+			frames := m5ResponseFrames(t, response, 4)
+			if writer.writes.Load() != 1 || len(frames) != 1 || frames[0].Kind != "seed.start" || frames[0].Sequence != 0 {
+				t.Fatalf("frames after %s during first output write: writes=%d frames=%+v", test.name, writer.writes.Load(), frames)
+			}
+		})
+	}
+}
+
 func TestM5ReadOnlyExchangeControlDuringTransferAndQuery(t *testing.T) {
 	for _, exchange := range []string{"seed.request", "receipt.query"} {
 		for _, trailing := range []struct {
