@@ -37,8 +37,14 @@ func (s *Server) supportsBirthClaimRelease() bool {
 	return ok
 }
 
-func (s *Server) serveBirthClaimRelease(writer http.ResponseWriter, request *http.Request, state *connectionSession,
-	hello serverHello, parameters sessionParameters, frame frameRecord) {
+func (s *Server) serveBirthClaimRelease(
+	writer http.ResponseWriter,
+	request *http.Request,
+	state *connectionSession,
+	hello serverHello,
+	parameters sessionParameters,
+	frame frameRecord,
+) {
 	if !containsString(hello.features, birthReleaseFeature) || !s.supportsBirthClaimRelease() {
 		s.writeProblem(writer, frame.requestID, 0, errUnsupportedExtension.Error(), uint32(parameters.maxFrameBody))
 		return
@@ -61,21 +67,18 @@ func (s *Server) serveBirthClaimRelease(writer http.ResponseWriter, request *htt
 		}
 	}()
 
-	_, cancelDispatch := context.WithCancel(request.Context())
-	defer cancelDispatch()
-	gate := &dispatchGate{cancel: cancelDispatch}
+	preSubmissionContext, gate, stopGate := newBirthReleaseBoundary(request.Context(), state.ctx)
+	defer stopGate()
 	dispatchDone := make(chan struct{})
 	dispatchOutcomes := make(chan birthReleaseDispatchOutcome, 1)
 	coordinator := s.connectedCommandStart()
 	go func() {
 		defer close(dispatchDone)
-		if !gate.begin(request.Context()) {
-			dispatchOutcomes <- birthReleaseDispatchOutcome{problemCode: "transport.cancelled-before-submission"}
-			return
-		}
-		result, releaseErr := coordinator.ReleaseBirthClaim(state.ctx, matterID, commandID, actor)
+		result, releaseErr := coordinator.releaseBirthClaim(preSubmissionContext, state.ctx, gate, matterID, commandID, actor)
 		if releaseErr != nil {
 			switch {
+			case errors.Is(releaseErr, ErrBirthReleaseCancelled):
+				dispatchOutcomes <- birthReleaseDispatchOutcome{problemCode: "transport.cancelled-before-submission"}
 			case errors.Is(releaseErr, ErrCommandStartBlocked), errors.Is(releaseErr, wipdjournal.ErrBirthBarrierIncomplete):
 				dispatchOutcomes <- birthReleaseDispatchOutcome{problemCode: "claim.release-barrier-incomplete"}
 			case errors.Is(releaseErr, wipdjournal.ErrCommandIDConflict):
@@ -117,12 +120,17 @@ func (s *Server) serveBirthClaimRelease(writer http.ResponseWriter, request *htt
 				nextFrame = nil
 				continue
 			}
-			if incoming.err != nil || validateCancelFrame(frame, incoming.frame) != nil {
-				_ = gate.cancelBeforeDispatch()
+			if incoming.err != nil {
+				gate.cancelBeforeSubmission()
 				transferSlotToDispatch()
 				abortHTTP2Stream()
 			}
-			if gate.cancelBeforeDispatch() {
+			if validateCancelFrame(frame, incoming.frame) != nil {
+				gate.cancelBeforeSubmission()
+				transferSlotToDispatch()
+				abortHTTP2Stream()
+			}
+			if gate.cancelBeforeSubmission() {
 				transferSlotToDispatch()
 				s.writeProblem(writer, frame.requestID, 0, "transport.cancelled-before-submission", uint32(parameters.maxFrameBody))
 				return
@@ -130,7 +138,7 @@ func (s *Server) serveBirthClaimRelease(writer http.ResponseWriter, request *htt
 			transferSlotToDispatch()
 			abortHTTP2Stream()
 		case <-request.Context().Done():
-			_ = gate.cancelBeforeDispatch()
+			gate.cancelBeforeSubmission()
 			transferSlotToDispatch()
 			return
 		case outcome := <-dispatchOutcomes:

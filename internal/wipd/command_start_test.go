@@ -158,6 +158,8 @@ type commandStartFakeAuthority struct {
 	releaseCalls    int
 	releaseFailure  error
 	releaseAttempts []wipdjournal.BirthReleaseCommand
+	releaseStarted  chan struct{}
+	releaseContinue <-chan struct{}
 }
 
 func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipdjournal.Entry, start wipdwire.PrefixAnchor) (CommandFold, error) {
@@ -225,12 +227,25 @@ func (authority *commandStartFakeAuthority) AcknowledgeBirthJournalEntry(_ conte
 	return nil
 }
 
-func (authority *commandStartFakeAuthority) SubmitBirthClaimRelease(_ context.Context, attempt wipdjournal.BirthReleaseCommand, start wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error) {
+func (authority *commandStartFakeAuthority) SubmitBirthClaimRelease(ctx context.Context, attempt wipdjournal.BirthReleaseCommand, start wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error) {
 	authority.releaseCalls++
 	copyAttempt := attempt
 	copyAttempt.CanonicalBytes = bytes.Clone(attempt.CanonicalBytes)
 	copyAttempt.Receipt = bytes.Clone(attempt.Receipt)
 	authority.releaseAttempts = append(authority.releaseAttempts, copyAttempt)
+	if authority.releaseStarted != nil {
+		select {
+		case authority.releaseStarted <- struct{}{}:
+		default:
+		}
+	}
+	if authority.releaseContinue != nil {
+		select {
+		case <-authority.releaseContinue:
+		case <-ctx.Done():
+			return nil, "", CommandPull{}, ctx.Err()
+		}
+	}
 	if authority.releaseFailure != nil {
 		authority.trace.add("submit-release-unknown:" + attempt.ID)
 		return nil, "", CommandPull{}, authority.releaseFailure

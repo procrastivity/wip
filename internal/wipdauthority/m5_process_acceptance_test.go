@@ -353,8 +353,10 @@ func assertBirthMatterCanBeAcquiredAgain(t *testing.T, fixture *m5CommandFixture
 		"operation": map[string]any{"name": "claim.acquire", "version": uint64(1)},
 		"context":   map[string]any{"repo_id": m5TestRepo, "clone_id": cloneID, "worktree_id": worktreeID},
 		"claim":     nil,
-		"input": map[string]any{"matter_id": matterID, "worktree_id": worktreeID,
-			"dispatch_mode": "anonymous-matter", "requested_dispatch_id": dispatchID},
+		"input": map[string]any{
+			"matter_id": matterID, "worktree_id": worktreeID,
+			"dispatch_mode": "anonymous-matter", "requested_dispatch_id": dispatchID,
+		},
 		"blobs": []any{},
 	})
 	if err != nil {

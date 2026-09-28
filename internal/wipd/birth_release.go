@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
@@ -20,42 +21,198 @@ type BirthClaimReleaseResult struct {
 	Snapshot CommandStartSnapshot
 }
 
+var ErrBirthReleaseCancelled = errors.New("wipd: birth release cancelled before durable submission")
+
+// birthReleaseBoundary serializes validated cancellation with the durable
+// PrepareBirthRelease commit. After that commit, cancellation stops only the
+// exchange wait; resolution continues under the daemon context.
+type birthReleaseBoundary struct {
+	mu             sync.Mutex
+	requestContext context.Context
+	serverContext  context.Context
+	cancelled      bool
+	crossed        bool
+	cancel         context.CancelFunc
+}
+
+func (boundary *birthReleaseBoundary) cancelBeforeSubmission() bool {
+	boundary.mu.Lock()
+	if boundary.cancelled || boundary.crossed {
+		boundary.mu.Unlock()
+		return false
+	}
+	boundary.cancelled = true
+	cancel := boundary.cancel
+	boundary.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
+}
+
+func (boundary *birthReleaseBoundary) markSubmitted() {
+	boundary.mu.Lock()
+	boundary.crossed = true
+	boundary.mu.Unlock()
+}
+
+func (boundary *birthReleaseBoundary) checkBeforeSubmission(ctx context.Context) error {
+	boundary.mu.Lock()
+	if boundary.crossed {
+		boundary.mu.Unlock()
+		return nil
+	}
+	if boundary.cancelled || ctx.Err() != nil || boundary.requestContext.Err() != nil || boundary.serverContext.Err() != nil {
+		boundary.cancelled = true
+		cancel := boundary.cancel
+		boundary.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return ErrBirthReleaseCancelled
+	}
+	boundary.mu.Unlock()
+	return nil
+}
+
+func (boundary *birthReleaseBoundary) prepare(ctx context.Context, journal *wipdjournal.Journal,
+	commandID string, barrier wipdwire.JournalBarrier, actor string,
+) (wipdjournal.BirthReleaseCommand, error) {
+	boundary.mu.Lock()
+	if boundary.cancelled || ctx.Err() != nil || boundary.requestContext.Err() != nil || boundary.serverContext.Err() != nil {
+		boundary.cancelled = true
+		cancel := boundary.cancel
+		boundary.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return wipdjournal.BirthReleaseCommand{}, ErrBirthReleaseCancelled
+	}
+	attempt, err := journal.PrepareBirthRelease(commandID, barrier, actor)
+	if err != nil {
+		persisted, lookupErr := journal.BirthReleaseAttempt(commandID)
+		if lookupErr == nil && sameBirthBarrier(persisted.Barrier, barrier) && birthReleaseActor(persisted.CanonicalBytes) == actor {
+			boundary.crossed = true
+			boundary.mu.Unlock()
+			return persisted, nil
+		}
+		boundary.mu.Unlock()
+		return wipdjournal.BirthReleaseCommand{}, err
+	}
+	boundary.crossed = true
+	boundary.mu.Unlock()
+	return attempt, nil
+}
+
+func newBirthReleaseBoundary(requestContext, serverContext context.Context) (context.Context, *birthReleaseBoundary, func()) {
+	preSubmissionContext, cancel := context.WithCancel(context.WithoutCancel(requestContext))
+	boundary := &birthReleaseBoundary{
+		requestContext: requestContext,
+		serverContext:  serverContext,
+		cancel:         cancel,
+	}
+	stopWatch := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-requestContext.Done():
+			boundary.cancelBeforeSubmission()
+		case <-serverContext.Done():
+			boundary.cancelBeforeSubmission()
+		case <-stopWatch:
+		}
+	}()
+	stop := func() {
+		close(stopWatch)
+		<-watchDone
+		cancel()
+	}
+	return preSubmissionContext, boundary, stop
+}
+
 // ReleaseBirthClaim returns the complete eligible Environment prefix, installs
 // each exact terminal fold and resulting tail, acknowledges the installed
 // birth-journal receipts in order, and only then submits the durable release
 // command. The shared domain lane excludes connected writes throughout.
 func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Context, matterID, commandID string, actor operation.Actor) (BirthClaimReleaseResult, error) {
+	if ctx == nil {
+		return BirthClaimReleaseResult{}, errors.New("wipd: birth-release context is required")
+	}
+	preSubmissionContext, boundary, stop := newBirthReleaseBoundary(ctx, ctx)
+	defer stop()
+	return coordinator.releaseBirthClaim(preSubmissionContext, context.WithoutCancel(ctx), boundary, matterID, commandID, actor)
+}
+
+func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionContext context.Context, boundary *birthReleaseBoundary,
+	matterID, commandID string, actor operation.Actor,
+) (BirthClaimReleaseResult, error) {
 	var empty BirthClaimReleaseResult
+	var err error
 	if coordinator == nil || coordinator.journal == nil || coordinator.lanes == nil || coordinator.authority == nil ||
-		coordinator.environment == nil || ctx == nil || actor == "" {
+		coordinator.environment == nil || ctx == nil || resolutionContext == nil || boundary == nil || actor == "" {
 		return empty, errors.New("wipd: birth-release dependencies are required")
 	}
-	release, acquired := coordinator.lanes.acquire(ctx, coordinator.domainID)
-	if !acquired {
-		return empty, ctx.Err()
-	}
-	defer release()
 	authority, ok := coordinator.authority.(BirthReleaseAuthority)
 	if !ok {
 		return empty, errors.New("wipd: authority does not support birth-journal release")
 	}
-
 	attempt, attemptErr := coordinator.journal.BirthReleaseAttempt(commandID)
 	if attemptErr != nil && !errors.Is(attemptErr, wipdjournal.ErrNotFound) {
 		return empty, attemptErr
 	}
-	if attemptErr == nil && attempt.Returned {
+	operationContext := ctx
+	submitted := false
+	if attemptErr == nil {
 		if attempt.Barrier.Journal != matterID || birthReleaseActor(attempt.CanonicalBytes) != string(actor) {
 			return empty, ErrCommandStartIdentity
 		}
-		return BirthClaimReleaseResult{
-			Attempt: attempt, Code: attempt.ResultCode,
-			Receipt: bytes.Clone(attempt.Receipt),
-		}, nil
+		if attempt.Returned {
+			return BirthClaimReleaseResult{
+				Attempt: attempt, Code: attempt.ResultCode,
+				Receipt: bytes.Clone(attempt.Receipt),
+			}, nil
+		}
+		boundary.markSubmitted()
+		submitted = true
+		operationContext = resolutionContext
+	}
+	release, acquired := coordinator.lanes.acquire(operationContext, coordinator.domainID)
+	if !acquired {
+		if !submitted {
+			return empty, ErrBirthReleaseCancelled
+		}
+		return empty, operationContext.Err()
+	}
+	defer release()
+
+	attempt, attemptErr = coordinator.journal.BirthReleaseAttempt(commandID)
+	if attemptErr != nil && !errors.Is(attemptErr, wipdjournal.ErrNotFound) {
+		return empty, attemptErr
+	}
+	if attemptErr == nil {
+		if attempt.Barrier.Journal != matterID || birthReleaseActor(attempt.CanonicalBytes) != string(actor) {
+			return empty, ErrCommandStartIdentity
+		}
+		if attempt.Returned {
+			return BirthClaimReleaseResult{
+				Attempt: attempt, Code: attempt.ResultCode,
+				Receipt: bytes.Clone(attempt.Receipt),
+			}, nil
+		}
+		boundary.markSubmitted()
+		submitted = true
+		operationContext = resolutionContext
+	} else {
+		submitted = false
+		operationContext = ctx
+		if err = boundary.checkBeforeSubmission(ctx); err != nil {
+			return empty, err
+		}
 	}
 	if attemptErr != nil {
-		if err := coordinator.returnEligiblePrefix(ctx); err != nil {
-			return empty, err
+		if err = coordinator.returnEligiblePrefix(operationContext, boundary); err != nil {
+			return empty, birthReleasePreSubmissionError(operationContext, boundary, err)
 		}
 	}
 
@@ -66,9 +223,9 @@ func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Contex
 	if attemptErr == nil && !sameBirthBarrier(attempt.Barrier, barrier) {
 		return empty, ErrCommandStartIdentity
 	}
-	installed, err := coordinator.environment.Snapshot(ctx)
+	installed, err := coordinator.environment.Snapshot(operationContext)
 	if err != nil {
-		return empty, err
+		return empty, birthReleasePreSubmissionError(operationContext, boundary, err)
 	}
 	installed = cloneCommandStartSnapshot(installed)
 	if installed.DomainID != coordinator.domainID || installed.Epoch == 0 || installed.EnvironmentID == "" ||
@@ -77,6 +234,9 @@ func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Contex
 	}
 	if attemptErr != nil {
 		for _, item := range journalReceipts {
+			if err = boundary.checkBeforeSubmission(operationContext); err != nil {
+				return empty, err
+			}
 			ackAnchor := installed.Anchor
 			if installed.Anchor.EventID != nil {
 				eventID := *installed.Anchor.EventID
@@ -87,21 +247,25 @@ func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Contex
 				MatterID: matterID, CommandID: item.Entry.Command.ID, RequestHash: item.Entry.RequestHash,
 				Receipt: bytes.Clone(item.Receipt.CanonicalReceipt), Installed: ackAnchor,
 			}
-			if err = authority.AcknowledgeBirthJournalEntry(ctx, ack); err != nil {
+			if err = authority.AcknowledgeBirthJournalEntry(operationContext, ack); err != nil {
+				return empty, birthReleasePreSubmissionError(operationContext, boundary, err)
+			}
+			if err = boundary.checkBeforeSubmission(operationContext); err != nil {
 				return empty, err
 			}
 		}
 	}
 	if attemptErr != nil {
-		attempt, err = coordinator.journal.PrepareBirthRelease(commandID, barrier, string(actor))
+		attempt, err = boundary.prepare(operationContext, coordinator.journal, commandID, barrier, string(actor))
 		if err != nil {
 			return empty, err
 		}
+		operationContext = resolutionContext
 	}
 	if !sameBirthBarrier(attempt.Barrier, barrier) {
 		return empty, ErrCommandStartIdentity
 	}
-	receipt, code, tail, err := authority.SubmitBirthClaimRelease(ctx, attempt, installed.Anchor)
+	receipt, code, tail, err := authority.SubmitBirthClaimRelease(operationContext, attempt, installed.Anchor)
 	if err != nil {
 		return empty, err
 	}
@@ -112,7 +276,7 @@ func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Contex
 		return empty, err
 	}
 	previous := installed
-	installed, err = coordinator.environment.InstallBirthRelease(ctx, previous, attempt, receipt, tail)
+	installed, err = coordinator.environment.InstallBirthRelease(operationContext, previous, attempt, receipt, tail)
 	if err != nil {
 		return empty, err
 	}
@@ -128,7 +292,17 @@ func (coordinator *CommandStartCoordinator) ReleaseBirthClaim(ctx context.Contex
 	return BirthClaimReleaseResult{Attempt: attempt, Code: code, Receipt: bytes.Clone(receipt), Snapshot: installed}, nil
 }
 
-func (coordinator *CommandStartCoordinator) returnEligiblePrefix(ctx context.Context) error {
+func birthReleasePreSubmissionError(ctx context.Context, boundary *birthReleaseBoundary, err error) error {
+	if boundary.checkBeforeSubmission(ctx) != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ErrBirthReleaseCancelled
+	}
+	return err
+}
+
+func (coordinator *CommandStartCoordinator) returnEligiblePrefix(ctx context.Context, boundary *birthReleaseBoundary) error {
+	if err := boundary.checkBeforeSubmission(ctx); err != nil {
+		return err
+	}
 	installed, err := coordinator.environment.Snapshot(ctx)
 	if err != nil {
 		return err
@@ -168,12 +342,18 @@ func (coordinator *CommandStartCoordinator) returnEligiblePrefix(ctx context.Con
 		}
 	}
 	for index, entry := range pending {
+		if err = boundary.checkBeforeSubmission(ctx); err != nil {
+			return err
+		}
 		if err = coordinator.validateReturnEligibility(entry, installed); err != nil {
 			return err
 		}
 		fold, foldErr := coordinator.authority.Return(ctx, entry, installed.Anchor)
 		if foldErr != nil {
 			return foldErr
+		}
+		if err = boundary.checkBeforeSubmission(ctx); err != nil {
+			return err
 		}
 		if err = validateCommandFold(entry, installed.Anchor, fold); err != nil {
 			return err
@@ -204,8 +384,14 @@ func (coordinator *CommandStartCoordinator) returnEligiblePrefix(ctx context.Con
 			return fmt.Errorf("%w: authority stopped before birth-journal suffix command %s", ErrCommandStartBlocked, pending[index+1].Command.ID)
 		}
 	}
+	if err = boundary.checkBeforeSubmission(ctx); err != nil {
+		return err
+	}
 	pull, err := coordinator.authority.Pull(ctx, installed.Anchor)
 	if err != nil {
+		return err
+	}
+	if err = boundary.checkBeforeSubmission(ctx); err != nil {
 		return err
 	}
 	if err = validateBirthReleaseTail(pull, installed, coordinator.domainID); err != nil {
