@@ -89,6 +89,15 @@ local pending-return acceptance: before bytes are sent the Environment may
 persist attempt/outcome evidence, but that evidence never authorizes future
 execution.
 
+The Environment may persist exact caller-allocated identity and canonical
+bytes in a `pre-admission` state before command-start pull. This preserves
+same-ID retry evidence but is not `pending-return`: it MUST NOT be sent to
+`ReturnCommand`, and an earlier pre-admission row blocks later return and guard
+evaluation. After pull, the Environment commits the rebuilt provisional
+overlay and the transition to `pending-return` in one durable transaction.
+After a crash, an exact retry may resume pull and admission; no recoverable
+state may expose the eligibility marker without its matching overlay.
+
 ## 3. Terminal transaction and receipt
 
 The terminal receipt identity is `(domain_id, command_id)`. There is no second

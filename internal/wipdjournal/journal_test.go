@@ -3,6 +3,7 @@ package wipdjournal
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -87,8 +88,24 @@ func TestPrepareCommandSurvivesLostResponseAndRestart(t *testing.T) {
 		t.Fatalf("ordered journal entries = %+v; want the two exact committed commands", entries)
 	}
 	journaled, err := journal.JournaledCommands()
+	if err != nil || len(journaled) != 0 {
+		t.Fatalf("JournaledCommands() before overlay admission = %+v, %v; want no eligible return heads", journaled, err)
+	}
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err = journal.AdmitPending(context.Background(), installed.Expectation(), firstInput.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = journal.AdmitPending(context.Background(), installed.Expectation(), secondInput.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journaled, err = journal.JournaledCommands()
 	if err != nil || len(journaled) != 2 || journaled[0].JournalPosition != 1 || journaled[1].JournalPosition != 2 {
-		t.Fatalf("JournaledCommands() = %+v, %v; want both entries in journal order", journaled, err)
+		t.Fatalf("JournaledCommands() after atomic overlay admission = %+v, %v; want both eligible entries in order", journaled, err)
 	}
 
 	if err = journal.Close(); err != nil {
@@ -100,8 +117,9 @@ func TestPrepareCommandSurvivesLostResponseAndRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
 	gotEntries, err := restarted.Entries()
-	if err != nil || len(gotEntries) != 2 || !sameEntryIdentity(gotEntries[0], retried) || !sameEntryIdentity(gotEntries[1], second) {
-		t.Fatalf("entries after second restart = %+v, %v; want exact bytes, IDs, order, and pending state", gotEntries, err)
+	if err != nil || len(gotEntries) != 2 || !sameEntryBytes(gotEntries[0], retried) || !sameEntryBytes(gotEntries[1], second) ||
+		gotEntries[0].State != StatePendingReturn || gotEntries[1].State != StatePendingReturn {
+		t.Fatalf("entries after second restart = %+v, %v; want exact bytes/IDs/order and admitted pending state", gotEntries, err)
 	}
 }
 
@@ -612,6 +630,12 @@ func sameEntryIdentity(left, right Entry) bool {
 		left.JournalPosition == right.JournalPosition && left.RequestHash == right.RequestHash &&
 		left.Delivery == right.Delivery && left.State == right.State &&
 		bytes.Equal(left.CanonicalBytes, right.CanonicalBytes)
+}
+
+func sameEntryBytes(left, right Entry) bool {
+	return left.Command.ID == right.Command.ID && left.EnvironmentSeq == right.EnvironmentSeq &&
+		left.JournalPosition == right.JournalPosition && left.RequestHash == right.RequestHash &&
+		left.Delivery == right.Delivery && bytes.Equal(left.CanonicalBytes, right.CanonicalBytes)
 }
 
 func readAndCompareBlob(t *testing.T, journal *Journal, expected StagedBlob, want []byte) {

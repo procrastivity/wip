@@ -3,9 +3,11 @@ package wipd
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -39,16 +41,16 @@ func (trace *commandStartTrace) all() []string {
 	return append([]string(nil), trace.steps...)
 }
 
-type commandStartMemoryEnvironment struct {
+type commandStartTracedEnvironment struct {
 	mu          sync.Mutex
-	snapshot    CommandStartSnapshot
 	journal     *wipdjournal.Journal
+	durable     *JournalCommandStartEnvironment
 	currentID   string
 	trace       *commandStartTrace
 	failInstall error
 }
 
-func (environment *commandStartMemoryEnvironment) Snapshot(ctx context.Context) (CommandStartSnapshot, error) {
+func (environment *commandStartTracedEnvironment) Snapshot(ctx context.Context) (CommandStartSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
 	}
@@ -60,74 +62,62 @@ func (environment *commandStartMemoryEnvironment) Snapshot(ctx context.Context) 
 	} else {
 		environment.trace.add("stable-snapshot")
 	}
-	environment.mu.Lock()
-	defer environment.mu.Unlock()
-	return cloneCommandStartSnapshot(environment.snapshot), nil
+	return environment.durable.Snapshot(ctx)
 }
 
-func (environment *commandStartMemoryEnvironment) InstallFold(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry, fold CommandFold) (CommandStartSnapshot, error) {
+func (environment *commandStartTracedEnvironment) InstallFold(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry, fold CommandFold) (CommandStartSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
 	}
 	environment.mu.Lock()
 	defer environment.mu.Unlock()
-	if !sameCommandStartSnapshot(expected, environment.snapshot) {
-		return CommandStartSnapshot{}, ErrCommandStartIdentity
-	}
 	if environment.failInstall != nil {
 		return CommandStartSnapshot{}, environment.failInstall
 	}
-	// This fake models one SQLite transaction: construct the new receipt,
-	// prefix, and overlay revision before publishing any of them.
-	next := cloneCommandStartSnapshot(environment.snapshot)
-	next.Anchor = fold.End
-	next.ManifestDigest = fold.Manifest.Digest
-	next.Revision++
-	if next.Receipts == nil {
-		next.Receipts = make(map[string]InstalledCommandReceipt)
+	installed, err := environment.durable.InstallFold(ctx, expected, entry, fold)
+	if err != nil {
+		return CommandStartSnapshot{}, err
 	}
-	next.Receipts[entry.Command.ID] = InstalledCommandReceipt{
-		RequestHash: entry.RequestHash, EnvironmentSeq: entry.EnvironmentSeq,
-		JournalPosition: entry.JournalPosition, ResultCode: fold.ResultCode,
-		CanonicalReceipt: append([]byte(nil), fold.CanonicalReceipt...),
-	}
-	environment.snapshot = next
 	environment.trace.add("install-fold+receipt+tail+overlay:" + entry.Command.ID)
-	return cloneCommandStartSnapshot(next), nil
+	return installed, nil
 }
 
-func (environment *commandStartMemoryEnvironment) InstallPull(ctx context.Context, expected CommandStartSnapshot, pull CommandPull) (CommandStartSnapshot, error) {
+func (environment *commandStartTracedEnvironment) InstallPull(ctx context.Context, expected CommandStartSnapshot, pull CommandPull) (CommandStartSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
 	}
 	environment.mu.Lock()
 	defer environment.mu.Unlock()
-	if !sameCommandStartSnapshot(expected, environment.snapshot) {
-		return CommandStartSnapshot{}, ErrCommandStartIdentity
+	if environment.failInstall != nil {
+		return CommandStartSnapshot{}, environment.failInstall
 	}
-	next := cloneCommandStartSnapshot(environment.snapshot)
-	next.Anchor = pull.End
-	next.ManifestDigest = pull.Manifest.Digest
-	next.Revision++
-	environment.snapshot = next
+	installed, err := environment.durable.InstallPull(ctx, expected, pull)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
 	environment.trace.add("install-pull+overlay")
-	return cloneCommandStartSnapshot(next), nil
+	return installed, nil
 }
 
-func (environment *commandStartMemoryEnvironment) AdmitPending(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry) (CommandStartSnapshot, error) {
+func (environment *commandStartTracedEnvironment) AdmitPending(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry) (CommandStartSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CommandStartSnapshot{}, err
 	}
 	environment.mu.Lock()
 	defer environment.mu.Unlock()
-	if !sameCommandStartSnapshot(expected, environment.snapshot) {
-		return CommandStartSnapshot{}, ErrCommandStartIdentity
+	if environment.failInstall != nil {
+		return CommandStartSnapshot{}, environment.failInstall
 	}
-	next := cloneCommandStartSnapshot(environment.snapshot)
-	next.Revision++
-	environment.snapshot = next
+	installed, err := environment.durable.AdmitPending(ctx, expected, entry)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
 	environment.trace.add("admit+overlay:" + entry.Command.ID)
-	return cloneCommandStartSnapshot(next), nil
+	return installed, nil
+}
+
+func (environment *commandStartTracedEnvironment) commandStartJournal() *wipdjournal.Journal {
+	return environment.journal
 }
 
 type commandStartFakeAuthority struct {
@@ -136,6 +126,7 @@ type commandStartFakeAuthority struct {
 	returnContinue []bool
 	returnIndex    int
 	pullEventID    string
+	pullFailure    error
 }
 
 func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipdjournal.Entry, start wipdwire.PrefixAnchor) (CommandFold, error) {
@@ -144,15 +135,24 @@ func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipd
 	if index >= len(authority.returnResults) {
 		return CommandFold{}, errors.New("unexpected authority return")
 	}
-	eventID := fmt.Sprintf("01KZ7XHAQT1S46NYPN1PW1DX%02d", index+41)
-	end := commandStartAnchor(start.EventCount+1, eventID)
+	eventID := nextCommandStartEventID(start)
+	record := commandStartEventRecord(eventID, entry.Command.ID, entry.RequestHash, entry.Command.EnvironmentID, entry.EnvironmentSeq)
+	transfer, err := commandStartVerifiedTransfer(start, []wipdwire.EventRecord{{EventID: eventID, Record: record}})
+	if err != nil {
+		return CommandFold{}, err
+	}
+	end := transfer.End()
 	code := authority.returnResults[index]
 	continueReturn := authority.returnContinue[index]
 	authority.trace.add("return:" + entry.Command.ID)
-	manifest := commandStartManifest(entry.Command.AuthorityDomainID, entry.Command.ExpectedAuthorityEpoch, end)
-	ids := []string(nil)
-	if code == operation.ResultSucceeded {
-		ids = []string{eventID}
+	ids := transfer.EventIDs()
+	if code != operation.ResultSucceeded {
+		transfer, err = commandStartVerifiedTransfer(start, nil)
+		if err != nil {
+			return CommandFold{}, err
+		}
+		end = transfer.End()
+		ids = nil
 	}
 	receipt, err := commandStartReceipt(entry, code, ids)
 	if err != nil {
@@ -163,20 +163,32 @@ func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipd
 		CommandID: entry.Command.ID, RequestHash: entry.RequestHash, EnvironmentID: entry.Command.EnvironmentID,
 		EnvironmentSeq: entry.EnvironmentSeq, JournalPosition: entry.JournalPosition,
 		Start: start, End: end, ResultCode: code, Continue: continueReturn,
-		CanonicalReceipt: receipt, AcceptedEventIDs: ids, Manifest: manifest, VerifiedTransfer: struct{}{},
+		CanonicalReceipt: receipt, Manifest: transfer.Manifest(), VerifiedTransfer: transfer,
 	}, nil
 }
 
 func (authority *commandStartFakeAuthority) Pull(_ context.Context, start wipdwire.PrefixAnchor) (CommandPull, error) {
-	end := commandStartAnchor(start.EventCount+1, authority.pullEventID)
+	if authority.pullFailure != nil {
+		return CommandPull{}, authority.pullFailure
+	}
+	eventID := authority.pullEventID
+	if eventID <= commandStartAnchorEventID(start) {
+		eventID = nextCommandStartEventID(start)
+	}
+	record := commandStartEventRecord(eventID, commandStartCommandPrefix+"99", commandStartHashForTest(), commandStartEnvironmentID, 99)
+	transfer, err := commandStartVerifiedTransfer(start, []wipdwire.EventRecord{{EventID: eventID, Record: record}})
+	if err != nil {
+		return CommandPull{}, err
+	}
+	end := transfer.End()
 	authority.trace.add("pull:" + fmt.Sprint(start.EventCount))
 	return CommandPull{
 		DomainID: commandStartDomainID, Epoch: 7, Start: start, End: end,
-		Manifest: commandStartManifest(commandStartDomainID, 7, end), VerifiedTransfer: struct{}{},
+		Manifest: transfer.Manifest(), VerifiedTransfer: transfer,
 	}, nil
 }
 
-func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartMemoryEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
+func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartTracedEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
 	t.Helper()
 	journal, err := wipdjournal.Open(t.TempDir()+"/journal", wipdjournal.Identity{
 		RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID,
@@ -186,16 +198,7 @@ func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjourna
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 	trace := &commandStartTrace{}
-	emptyAnchor := commandStartEmptyAnchor()
-	emptyManifest := commandStartManifest(commandStartDomainID, 7, emptyAnchor)
-	environment := &commandStartMemoryEnvironment{
-		journal: journal, trace: trace, currentID: commandStartCommandPrefix + "01",
-		snapshot: CommandStartSnapshot{
-			DomainID: commandStartDomainID, Epoch: 7, EnvironmentID: commandStartEnvironmentID,
-			Revision: 1, Anchor: emptyAnchor, ManifestDigest: emptyManifest.Digest,
-			Receipts: make(map[string]InstalledCommandReceipt),
-		},
-	}
+	environment := newCommandStartTestEnvironment(t, journal, trace, commandStartCommandPrefix+"01")
 	authority := &commandStartFakeAuthority{
 		trace: trace, pullEventID: "01KZ7XHAQT1S46NYPN1PW1DX43",
 	}
@@ -205,6 +208,15 @@ func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjourna
 		t.Fatal(err)
 	}
 	return coordinator, journal, environment, authority, trace, server
+}
+
+func newCommandStartTestEnvironment(t *testing.T, journal *wipdjournal.Journal, trace *commandStartTrace, currentID string) *commandStartTracedEnvironment {
+	t.Helper()
+	durable, err := NewJournalCommandStartEnvironment(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &commandStartTracedEnvironment{journal: journal, durable: durable, trace: trace, currentID: currentID}
 }
 
 func commandStartInput(id, locator string) wipdjournal.CommandInput {
@@ -228,6 +240,7 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 		if _, err := journal.PrepareCommand(commandStartInput(command.id, command.locator)); err != nil {
 			t.Fatal(err)
 		}
+		admitCommandStartTestEntry(t, journal, command.id)
 	}
 	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
 	authority.returnContinue = []bool{true, false}
@@ -235,7 +248,7 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 	var guardRan bool
 	result, err := coordinator.RunConnected(context.Background(), commandStartInput(environment.currentID, "current"), func(_ context.Context, snapshot CommandStartSnapshot, command operation.Command) error {
 		guardRan = true
-		if snapshot.Revision != 5 || snapshot.Anchor.EventCount != 3 || snapshot.ManifestDigest == "" {
+		if snapshot.Revision != 7 || snapshot.Anchor.EventCount != 3 || snapshot.ManifestDigest == "" {
 			return fmt.Errorf("guard received unstable post-install snapshot: %+v", snapshot)
 		}
 		trace.add("guard+write:" + command.ID)
@@ -260,7 +273,11 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
 		t.Fatalf("pending command-start trace = %v, want %v", got, want)
 	}
-	if anchor := environment.snapshot.Anchor; anchor.EventCount != 3 || anchor.EventID == nil || *anchor.EventID != authority.pullEventID {
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anchor := installed.Anchor; anchor.EventCount != 3 || anchor.EventID == nil || *anchor.EventID != authority.pullEventID {
 		t.Fatalf("installed authority prefix = %+v, want both folds then pull tail", anchor)
 	}
 }
@@ -291,12 +308,86 @@ func TestConnectedCommandStartWithoutPendingPullsBeforeGuard(t *testing.T) {
 	}
 }
 
+func TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead(t *testing.T) {
+	root := t.TempDir() + "/journal"
+	identity := wipdjournal.Identity{RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID}
+	journal, err := wipdjournal.Open(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := &commandStartTrace{}
+	firstID := commandStartCommandPrefix + "71"
+	environment := newCommandStartTestEnvironment(t, journal, trace, firstID)
+	authority := &commandStartFakeAuthority{trace: trace, pullEventID: commandStartCommandPrefix + "43", pullFailure: errors.New("injected pull failure")}
+	server := newServer(operation.NewRegistry(), 4)
+	coordinator, err := server.NewCommandStartCoordinator(commandStartDomainID, journal, authority, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstInput := commandStartInput(firstID, "pull-fails")
+	guardRan := false
+	if _, err = coordinator.RunConnected(context.Background(), firstInput, func(context.Context, CommandStartSnapshot, operation.Command) error {
+		guardRan = true
+		return nil
+	}); err == nil || guardRan {
+		t.Fatalf("first command pull failure: guardRan=%v err=%v; want failure before guard", guardRan, err)
+	}
+	first, err := journal.Get(firstID)
+	if err != nil || first.State != wipdjournal.StatePreAdmission {
+		t.Fatalf("failed command disposition = %+v, %v; want durable pre-admission identity", first, err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	journal, err = wipdjournal.Open(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	trace = &commandStartTrace{}
+	environment = newCommandStartTestEnvironment(t, journal, trace, commandStartCommandPrefix+"72")
+	authority = &commandStartFakeAuthority{trace: trace, pullEventID: commandStartCommandPrefix + "43"}
+	server = newServer(operation.NewRegistry(), 4)
+	coordinator, err = server.NewCommandStartCoordinator(commandStartDomainID, journal, authority, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGuardRan := false
+	if _, err = coordinator.RunConnected(context.Background(), commandStartInput(environment.currentID, "later"), func(context.Context, CommandStartSnapshot, operation.Command) error {
+		secondGuardRan = true
+		return nil
+	}); !errors.Is(err, ErrCommandStartBlocked) || secondGuardRan || authority.returnIndex != 0 {
+		t.Fatalf("later command crossed pre-admission head: guardRan=%v returns=%d err=%v", secondGuardRan, authority.returnIndex, err)
+	}
+	if got := trace.all(); !equalCommandStartTrace(got, []string{"snapshot:" + environment.currentID}) {
+		t.Fatalf("later command trace = %v; want blocked before return/pull", got)
+	}
+
+	environment.currentID = firstID
+	resumedGuardRan := false
+	if _, err = coordinator.RunConnected(context.Background(), firstInput, func(_ context.Context, snapshot CommandStartSnapshot, _ operation.Command) error {
+		resumedGuardRan = true
+		if snapshot.Revision != 3 || snapshot.Anchor.EventCount != 1 {
+			return fmt.Errorf("resumed command received unexpected admitted snapshot: %+v", snapshot)
+		}
+		return nil
+	}); err != nil || !resumedGuardRan {
+		t.Fatalf("exact retry could not recover pre-admission work: guardRan=%v err=%v", resumedGuardRan, err)
+	}
+	first, err = journal.Get(firstID)
+	if err != nil || first.State != wipdjournal.StatePendingReturn {
+		t.Fatalf("resumed command disposition = %+v, %v; want pending-return only after overlay commit", first, err)
+	}
+}
+
 func TestConnectedCommandStartRefusalInstallsReceiptThenBlocksPull(t *testing.T) {
 	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
 	pendingID := commandStartCommandPrefix + "31"
 	if _, err := journal.PrepareCommand(commandStartInput(pendingID, "refused")); err != nil {
 		t.Fatal(err)
 	}
+	admitCommandStartTestEntry(t, journal, pendingID)
 	currentID := commandStartCommandPrefix + "32"
 	environment.currentID = currentID
 	authority.returnResults = []operation.ResultCode{operation.ResultRejected}
@@ -317,8 +408,12 @@ func TestConnectedCommandStartRefusalInstallsReceiptThenBlocksPull(t *testing.T)
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
 		t.Fatalf("refused pending command trace = %v, want %v", got, want)
 	}
-	if receipt, ok := environment.snapshot.Receipts[pendingID]; !ok || receipt.ResultCode != operation.ResultRejected {
-		t.Fatalf("non-success receipt was not atomically installed: %+v", environment.snapshot.Receipts)
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, ok := installed.Receipts[pendingID]; !ok || receipt.ResultCode != operation.ResultRejected {
+		t.Fatalf("non-success receipt was not atomically installed: %+v", installed.Receipts)
 	}
 }
 
@@ -360,6 +455,7 @@ func TestConnectedCommandStartAtomicFoldInstallFailureStopsBeforePull(t *testing
 	if _, err := journal.PrepareCommand(commandStartInput(pendingID, "install-fails")); err != nil {
 		t.Fatal(err)
 	}
+	admitCommandStartTestEntry(t, journal, pendingID)
 	currentID := commandStartCommandPrefix + "62"
 	environment.currentID = currentID
 	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded}
@@ -374,8 +470,12 @@ func TestConnectedCommandStartAtomicFoldInstallFailureStopsBeforePull(t *testing
 	if !errors.Is(err, wantErr) || guardRan {
 		t.Fatalf("failed fold install: guardRan=%v err=%v; want atomic failure before pull/write", guardRan, err)
 	}
-	if environment.snapshot.Anchor.EventCount != 0 || len(environment.snapshot.Receipts) != 0 {
-		t.Fatalf("failed atomic install changed Environment state: %+v", environment.snapshot)
+	installed, snapshotErr := journal.InstallSnapshot(context.Background())
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
+	if installed.Anchor.EventCount != 0 || len(installed.Receipts) != 0 {
+		t.Fatalf("failed atomic install changed Environment state: %+v", installed)
 	}
 	want := []string{"snapshot:" + currentID, "return:" + pendingID}
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
@@ -392,14 +492,21 @@ func TestConnectedCommandStartReplaysInstalledNonSuccessReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admitCommandStartTestEntry(t, journal, commandID)
 	receipt, err := commandStartReceipt(entry, operation.ResultRejected, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	environment.snapshot.Receipts[commandID] = InstalledCommandReceipt{
-		RequestHash: entry.RequestHash, EnvironmentSeq: entry.EnvironmentSeq,
-		JournalPosition: entry.JournalPosition, ResultCode: operation.ResultRejected,
-		CanonicalReceipt: receipt,
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := commandStartVerifiedTransfer(installed.Anchor, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.InstallFold(context.Background(), installed.Expectation(), entry, operation.ResultRejected, receipt, transfer); err != nil {
+		t.Fatal(err)
 	}
 	guardRan := false
 	result, err := coordinator.RunConnected(context.Background(), input, func(context.Context, CommandStartSnapshot, operation.Command) error {
@@ -499,26 +606,82 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 }
 
 func commandStartManifest(domain string, epoch uint64, anchor wipdwire.PrefixAnchor) wipdwire.BlobManifest {
-	digest := sha256.Sum256([]byte("manifest:" + fmt.Sprint(anchor.EventCount)))
+	digest := sha256.Sum256([]byte("wipd/blob-manifest/v1\x00"))
 	return wipdwire.BlobManifest{
 		Schema: "wipd.blob-manifest/1", DomainID: domain, Epoch: epoch, AsOf: anchor,
 		Entries: []wipdwire.BlobManifestEntry{}, Digest: "sha256:" + hex.EncodeToString(digest[:]),
 	}
 }
 
-func commandStartEmptyAnchor() wipdwire.PrefixAnchor {
-	digest := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
-	return wipdwire.PrefixAnchor{Digest: "sha256:" + hex.EncodeToString(digest[:])}
+func commandStartHashForTest() string {
+	digest := sha256.Sum256([]byte("command-start test event hash"))
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func commandStartAnchor(count uint64, eventID string) wipdwire.PrefixAnchor {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("authority-prefix-%d-%s", count, eventID)))
-	return wipdwire.PrefixAnchor{EventCount: count, EventID: &eventID, Digest: "sha256:" + hex.EncodeToString(digest[:])}
+func commandStartAnchorEventID(anchor wipdwire.PrefixAnchor) string {
+	if anchor.EventID == nil {
+		return ""
+	}
+	return *anchor.EventID
 }
 
-func sameCommandStartSnapshot(left, right CommandStartSnapshot) bool {
-	return left.DomainID == right.DomainID && left.Epoch == right.Epoch && left.EnvironmentID == right.EnvironmentID &&
-		left.Revision == right.Revision && left.ManifestDigest == right.ManifestDigest && sameCommandStartAnchor(left.Anchor, right.Anchor)
+func nextCommandStartEventID(anchor wipdwire.PrefixAnchor) string {
+	number := 40
+	if anchor.EventID != nil {
+		if parsed, err := strconv.Atoi((*anchor.EventID)[len(commandStartCommandPrefix):]); err == nil {
+			number = parsed
+		}
+	}
+	return fmt.Sprintf("%s%02d", commandStartCommandPrefix, number+1)
+}
+
+func commandStartEventRecord(eventID, commandID, requestHash, environmentID string, sequence uint64) []byte {
+	encoded, _ := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": commandStartDomainID,
+		"command_id": commandID, "request_hash": requestHash,
+		"environment": map[string]any{"id": environmentID, "sequence": sequence},
+		"acted_at":    "2026-09-28T00:00:00Z", "occurred_at": "2026-09-28T00:00:00Z",
+		"kind": "matter.created", "subject_id": eventID, "repo_id": commandStartRepoID,
+		"payload": map[string]any{"id": eventID, "locator": "test:" + eventID, "title": "title " + eventID},
+	})
+	return encoded
+}
+
+func commandStartVerifiedTransfer(start wipdwire.PrefixAnchor, records []wipdwire.EventRecord) (wipdjournal.VerifiedTransfer, error) {
+	chain, err := hex.DecodeString(start.Digest[len("sha256:"):])
+	if err != nil {
+		return wipdjournal.VerifiedTransfer{}, err
+	}
+	for _, record := range records {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(record.Record)))
+		hash := sha256.New()
+		_, _ = hash.Write([]byte("wipd/event-prefix-step/v1\x00"))
+		_, _ = hash.Write(chain)
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(record.Record)
+		chain = hash.Sum(nil)
+	}
+	end := wipdwire.PrefixAnchor{EventCount: start.EventCount + uint64(len(records)), Digest: "sha256:" + hex.EncodeToString(chain)}
+	if len(records) == 0 {
+		end.EventID = start.EventID
+	} else {
+		eventID := records[len(records)-1].EventID
+		end.EventID = &eventID
+	}
+	manifest := commandStartManifest(commandStartDomainID, 7, end)
+	return wipdjournal.VerifyTransfer(commandStartDomainID, 7, start, end, records, manifest)
+}
+
+func admitCommandStartTestEntry(t *testing.T, journal *wipdjournal.Journal, commandID string) {
+	t.Helper()
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.AdmitPending(context.Background(), installed.Expectation(), commandID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func equalCommandStartTrace(got, want []string) bool {

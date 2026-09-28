@@ -65,9 +65,8 @@ type CommandFold struct {
 	ResultCode       operation.ResultCode
 	Continue         bool
 	CanonicalReceipt []byte
-	AcceptedEventIDs []string
 	Manifest         wipdwire.BlobManifest
-	VerifiedTransfer any
+	VerifiedTransfer wipdjournal.VerifiedTransfer
 }
 
 // CommandPull is one complete, verified authority tail pinned to one snapshot.
@@ -77,7 +76,7 @@ type CommandPull struct {
 	Start            wipdwire.PrefixAnchor
 	End              wipdwire.PrefixAnchor
 	Manifest         wipdwire.BlobManifest
-	VerifiedTransfer any
+	VerifiedTransfer wipdjournal.VerifiedTransfer
 }
 
 // CommandStartAuthority performs the Step 6 authenticated return and pull
@@ -98,6 +97,7 @@ type CommandStartEnvironment interface {
 	InstallFold(context.Context, CommandStartSnapshot, wipdjournal.Entry, CommandFold) (CommandStartSnapshot, error)
 	InstallPull(context.Context, CommandStartSnapshot, CommandPull) (CommandStartSnapshot, error)
 	AdmitPending(context.Context, CommandStartSnapshot, wipdjournal.Entry) (CommandStartSnapshot, error)
+	commandStartJournal() *wipdjournal.Journal
 }
 
 // CommandStartCoordinator is the common D120/D128 path for a connected
@@ -116,7 +116,8 @@ type CommandStartCoordinator struct {
 // the Server's shared per-domain lane. It does not register or execute any
 // operation handlers itself.
 func (server *Server) NewCommandStartCoordinator(domainID string, journal *wipdjournal.Journal, authority CommandStartAuthority, environment CommandStartEnvironment) (*CommandStartCoordinator, error) {
-	if server == nil || server.executionLanes == nil || !commandStartULID.MatchString(domainID) || journal == nil || authority == nil || environment == nil {
+	if server == nil || server.executionLanes == nil || !commandStartULID.MatchString(domainID) || journal == nil || authority == nil ||
+		environment == nil || environment.commandStartJournal() != journal {
 		return nil, errors.New("wipd: command-start dependencies are required")
 	}
 	return &CommandStartCoordinator{
@@ -208,7 +209,7 @@ func (coordinator *CommandStartCoordinator) RunConnected(ctx context.Context, in
 		if receipt.RequestHash != entry.RequestHash || receipt.EnvironmentSeq != entry.EnvironmentSeq || receipt.JournalPosition != entry.JournalPosition {
 			return empty, ErrCommandStartIdentity
 		}
-		code, receiptErr := commandReceiptCode(entry, receipt.CanonicalReceipt, nil)
+		code, receiptErr := commandReceiptCode(entry, receipt.CanonicalReceipt)
 		if receiptErr != nil || code != receipt.ResultCode {
 			return empty, ErrCommandStartIdentity
 		}
@@ -231,9 +232,6 @@ func (coordinator *CommandStartCoordinator) RunConnected(ctx context.Context, in
 			return empty, foldErr
 		}
 		if err = validateCommandFold(pendingEntry, installed.Anchor, fold); err != nil {
-			return empty, err
-		}
-		if err = validateCommandReceipt(pendingEntry, fold.CanonicalReceipt, fold.ResultCode, fold.AcceptedEventIDs); err != nil {
 			return empty, err
 		}
 		if fold.Continue && (fold.ResultCode != operation.ResultSucceeded || index+1 == len(pending)) {
@@ -278,9 +276,12 @@ func (coordinator *CommandStartCoordinator) RunConnected(ctx context.Context, in
 		return empty, err
 	}
 	if pull.DomainID != entry.Command.AuthorityDomainID || pull.Epoch != entry.Command.ExpectedAuthorityEpoch ||
-		!sameCommandStartAnchor(pull.Start, installed.Anchor) || !validCommandStartAnchor(pull.End) || pull.VerifiedTransfer == nil ||
+		!sameCommandStartAnchor(pull.Start, installed.Anchor) || !validCommandStartAnchor(pull.End) || !pull.VerifiedTransfer.Valid() ||
+		pull.VerifiedTransfer.DomainID() != pull.DomainID || pull.VerifiedTransfer.Epoch() != pull.Epoch ||
+		!sameCommandStartAnchor(pull.VerifiedTransfer.Start(), pull.Start) || !sameCommandStartAnchor(pull.VerifiedTransfer.End(), pull.End) ||
 		pull.Manifest.Schema != "wipd.blob-manifest/1" || pull.Manifest.DomainID != pull.DomainID || pull.Manifest.Epoch != pull.Epoch ||
 		!sameCommandStartAnchor(pull.Manifest.AsOf, pull.End) || !commandStartHash.MatchString(pull.Manifest.Digest) ||
+		pull.VerifiedTransfer.Manifest().Digest != pull.Manifest.Digest ||
 		pull.End.EventCount < pull.Start.EventCount || pull.End.EventCount == pull.Start.EventCount && !sameCommandStartAnchor(pull.End, pull.Start) {
 		return empty, ErrCommandStartIdentity
 	}
@@ -299,10 +300,10 @@ func (coordinator *CommandStartCoordinator) RunConnected(ctx context.Context, in
 	if result.Returned {
 		return result, nil
 	}
-	if !entry.Created {
+	if !entry.Created && entry.State != wipdjournal.StatePreAdmission {
 		return empty, fmt.Errorf("%w: exact retry %s did not resolve through its installed receipt", ErrCommandStartBlocked, entry.Command.ID)
 	}
-	if entry.State == wipdjournal.StateJournaled {
+	if entry.State == wipdjournal.StatePreAdmission {
 		if err = validateReturnEligibility(entry, installed); err != nil {
 			return empty, err
 		}
@@ -341,7 +342,7 @@ func commandStartPending(entries []wipdjournal.Entry, installed CommandStartSnap
 			if receipt.RequestHash != entry.RequestHash || receipt.EnvironmentSeq != entry.EnvironmentSeq || receipt.JournalPosition != entry.JournalPosition {
 				return nil, ErrCommandStartIdentity
 			}
-			resultCode, receiptErr := commandReceiptCode(entry, receipt.CanonicalReceipt, nil)
+			resultCode, receiptErr := commandReceiptCode(entry, receipt.CanonicalReceipt)
 			if receiptErr != nil || resultCode != receipt.ResultCode {
 				return nil, ErrCommandStartIdentity
 			}
@@ -353,13 +354,16 @@ func commandStartPending(entries []wipdjournal.Entry, installed CommandStartSnap
 			}
 			continue
 		}
-		if entry.Command.ID == current.Command.ID && current.Created {
+		if entry.Command.ID == current.Command.ID && entry.State == wipdjournal.StatePreAdmission {
 			continue
 		}
 		if entry.State == wipdjournal.StateAttemptPrepared {
 			return nil, fmt.Errorf("%w: prior authority attempt %s is unresolved", ErrCommandStartBlocked, entry.Command.ID)
 		}
-		if entry.State != wipdjournal.StateJournaled {
+		if entry.State == wipdjournal.StatePreAdmission {
+			return nil, fmt.Errorf("%w: prior command %s has not committed recoverable overlay admission", ErrCommandStartBlocked, entry.Command.ID)
+		}
+		if entry.State != wipdjournal.StatePendingReturn {
 			return nil, ErrCommandStartBlocked
 		}
 		pending = append(pending, entry)
@@ -406,9 +410,12 @@ func validateCommandFold(entry wipdjournal.Entry, start wipdwire.PrefixAnchor, f
 		fold.CommandID != entry.Command.ID || fold.RequestHash != entry.RequestHash || fold.EnvironmentID != entry.Command.EnvironmentID ||
 		fold.EnvironmentSeq != entry.EnvironmentSeq || fold.JournalPosition != entry.JournalPosition ||
 		!sameCommandStartAnchor(fold.Start, start) || !validCommandStartAnchor(fold.End) ||
-		fold.End.EventCount < fold.Start.EventCount || len(fold.CanonicalReceipt) == 0 || fold.VerifiedTransfer == nil ||
+		fold.End.EventCount < fold.Start.EventCount || len(fold.CanonicalReceipt) == 0 || !fold.VerifiedTransfer.Valid() ||
+		fold.VerifiedTransfer.DomainID() != fold.DomainID || fold.VerifiedTransfer.Epoch() != fold.Epoch ||
+		!sameCommandStartAnchor(fold.VerifiedTransfer.Start(), fold.Start) || !sameCommandStartAnchor(fold.VerifiedTransfer.End(), fold.End) ||
 		fold.Manifest.Schema != "wipd.blob-manifest/1" || fold.Manifest.DomainID != fold.DomainID || fold.Manifest.Epoch != fold.Epoch ||
-		!sameCommandStartAnchor(fold.Manifest.AsOf, fold.End) || !commandStartHash.MatchString(fold.Manifest.Digest) {
+		!sameCommandStartAnchor(fold.Manifest.AsOf, fold.End) || !commandStartHash.MatchString(fold.Manifest.Digest) ||
+		fold.VerifiedTransfer.Manifest().Digest != fold.Manifest.Digest {
 		return ErrCommandStartIdentity
 	}
 	if fold.End.EventCount == fold.Start.EventCount && !sameCommandStartAnchor(fold.End, fold.Start) {
@@ -417,15 +424,7 @@ func validateCommandFold(entry wipdjournal.Entry, start wipdwire.PrefixAnchor, f
 	return nil
 }
 
-func validateCommandReceipt(entry wipdjournal.Entry, raw []byte, resultCode operation.ResultCode, acceptedEventIDs []string) error {
-	code, err := commandReceiptCode(entry, raw, acceptedEventIDs)
-	if err != nil || code != resultCode {
-		return ErrCommandStartIdentity
-	}
-	return nil
-}
-
-func commandReceiptCode(entry wipdjournal.Entry, raw []byte, acceptedEventIDs []string) (operation.ResultCode, error) {
+func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCode, error) {
 	fields, err := wipdwire.DecodeCanonicalMap(raw,
 		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
 	if err != nil || fields["schema"] != "wipd.terminal-receipt/1" || fields["domain_id"] != entry.Command.AuthorityDomainID ||
@@ -483,16 +482,6 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte, acceptedEventIDs []
 			count, countOK := accepted["event_count"].(uint64)
 			if !firstOK || !lastOK || !countOK || count == 0 || !commandStartULID.MatchString(first) || !commandStartULID.MatchString(last) || first > last {
 				return "", ErrCommandStartIdentity
-			}
-			if acceptedEventIDs != nil {
-				if uint64(len(acceptedEventIDs)) != count || len(acceptedEventIDs) == 0 || acceptedEventIDs[0] != first || acceptedEventIDs[len(acceptedEventIDs)-1] != last {
-					return "", ErrCommandStartIdentity
-				}
-				for index, eventID := range acceptedEventIDs {
-					if !commandStartULID.MatchString(eventID) || index > 0 && acceptedEventIDs[index-1] >= eventID {
-						return "", ErrCommandStartIdentity
-					}
-				}
 			}
 		}
 	} else if acceptedValue != nil || resultFields["output"] != nil {

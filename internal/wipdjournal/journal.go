@@ -1,5 +1,7 @@
-// Package wipdjournal owns the Environment-local durable command journal and
-// content-addressed staged blobs. It stores no authority state or receipts.
+// Package wipdjournal owns Environment-local command identities, staged blobs,
+// verified installed-prefix evidence, terminal receipts, and their overlay.
+// The authority remains the owner of canonical events and receipts; this
+// package keeps only the Environment's verified durable copy.
 package wipdjournal
 
 import (
@@ -31,7 +33,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 1
+	schemaVersion  = 2
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -82,9 +84,18 @@ type CommandInput struct {
 type State string
 
 const (
-	// StateJournaled means the immutable command is durable but has not yet
-	// crossed the pending-return boundary with a recoverable local overlay.
-	StateJournaled State = "journaled"
+	// StatePreAdmission preserves command identity before pull and overlay
+	// admission. It is never eligible for authority return.
+	StatePreAdmission State = "pre-admission"
+	// StateJournaled is retained as the Step 5 source-compatible name for the
+	// pre-admission state. New code should use StatePreAdmission.
+	StateJournaled State = StatePreAdmission
+	// StatePendingReturn means the recoverable overlay and admission marker
+	// committed atomically, making this command eligible for ordered return.
+	StatePendingReturn State = "pending-return"
+	// StateReturned means its terminal receipt, event range, and overlay rebuild
+	// have committed atomically.
+	StateReturned State = "returned"
 	// StateAttemptPrepared records identity evidence for an authority-class command.
 	// It is not permission to queue or execute that command later.
 	StateAttemptPrepared State = "attempt-prepared"
@@ -171,7 +182,12 @@ func Open(root string, identity Identity) (*Journal, error) {
 	if created {
 		err = installSchema(db, identity)
 	} else {
-		err = checkIdentity(db, identity)
+		var version int
+		if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err == nil && version == 1 {
+			err = upgradeSchemaV1(db, identity)
+		} else if err == nil {
+			err = checkIdentity(db, identity)
+		}
 	}
 	if err == nil {
 		err = checkDatabase(db, identity, blobDir)
@@ -201,6 +217,14 @@ func (j *Journal) Close() error {
 	lockErr := j.lock.Close()
 	j.lock = nil
 	return errors.Join(dbErr, lockErr)
+}
+
+// Identity returns the immutable Environment binding of this journal.
+func (j *Journal) Identity() Identity {
+	if j == nil {
+		return Identity{}
+	}
+	return j.identity
 }
 
 // PrepareCommand validates and durably commits one immutable command before
@@ -261,7 +285,7 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: request hash: %v", ErrInvalidCommand, err)
 	}
-	state := StateJournaled
+	state := StatePreAdmission
 	var position any = nextPosition
 	if delivery == operation.DeliveryAuthority {
 		state = StateAttemptPrepared
@@ -332,9 +356,9 @@ func (j *Journal) Entries() ([]Entry, error) {
 	return entries, nil
 }
 
-// JournaledCommands returns deferable entries in contiguous journal order.
-// The return coordinator must install/rebuild its overlay before exposing
-// protocol-level pending-return acceptance. Authority attempts are never a queue.
+// JournaledCommands returns only overlay-admitted deferable entries in
+// contiguous journal order. Pre-admission rows preserve retry identity but
+// are not a return queue. Authority attempts are never a queue.
 func (j *Journal) JournaledCommands() ([]Entry, error) {
 	if j == nil {
 		return nil, ErrClosed
@@ -344,7 +368,7 @@ func (j *Journal) JournaledCommands() ([]Entry, error) {
 	if j.db == nil {
 		return nil, ErrClosed
 	}
-	entries, err := listEntries(j.db, `SELECT `+commandColumns+` FROM commands WHERE state='journaled' ORDER BY journal_position`)
+	entries, err := listEntries(j.db, `SELECT `+commandColumns+` FROM commands WHERE state='pending-return' ORDER BY journal_position`)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +578,7 @@ func (j *Journal) verifyEntry(entry Entry) error {
 		if entry.JournalPosition != 0 || entry.State != StateAttemptPrepared {
 			return ErrInvalidJournal
 		}
-	} else if entry.JournalPosition == 0 || entry.State != StateJournaled {
+	} else if entry.JournalPosition == 0 || (entry.State != StatePreAdmission && entry.State != StatePendingReturn && entry.State != StateReturned) {
 		return ErrInvalidJournal
 	}
 	return j.verifyCommandBlobs(entry.Command.Request.Blobs)
@@ -567,7 +591,10 @@ func lookup(db *sql.DB, commandID string) (Entry, error) {
 	return scanEntry(db.QueryRow(`SELECT `+commandColumns+` FROM commands WHERE command_id=?`, commandID))
 }
 
-func listEntries(db *sql.DB, query string) ([]Entry, error) {
+func listEntries(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, query string,
+) ([]Entry, error) {
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
@@ -700,7 +727,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=1), name TEXT NOT NULL CHECK(name='durable-client-command-journal')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=2), name TEXT NOT NULL CHECK(name='environment-command-start-installation')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -721,15 +748,19 @@ func installSchema(db *sql.DB, identity Identity) error {
 			request_hash TEXT NOT NULL CHECK(length(request_hash)=71),
 			canonical_bytes BLOB NOT NULL,
 			delivery TEXT NOT NULL CHECK(delivery IN ('authority','claim','provisional','capture','environment')),
-			state TEXT NOT NULL CHECK(state IN ('attempt-prepared','journaled')),
+			state TEXT NOT NULL CHECK(state IN ('attempt-prepared','pre-admission','pending-return','returned')),
 			CHECK((delivery='authority' AND journal_position IS NULL AND state='attempt-prepared') OR
-				(delivery!='authority' AND journal_position IS NOT NULL AND state='journaled'))
+				(delivery!='authority' AND journal_position IS NOT NULL AND state IN ('pre-admission','pending-return','returned')))
 		) STRICT, WITHOUT ROWID`,
 		`CREATE INDEX commands_pending_order ON commands(state, journal_position)`,
 		`CREATE TRIGGER command_identity_immutable BEFORE UPDATE OF command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery ON commands
 		BEGIN SELECT RAISE(ABORT, 'immutable command identity'); END`,
 		`CREATE TRIGGER command_no_delete BEFORE DELETE ON commands
 		BEGIN SELECT RAISE(ABORT, 'immutable command journal'); END`,
+		`CREATE TRIGGER command_state_transition BEFORE UPDATE OF state ON commands
+		WHEN NOT ((OLD.state='pre-admission' AND NEW.state='pending-return') OR
+			(OLD.state='pending-return' AND NEW.state='returned'))
+		BEGIN SELECT RAISE(ABORT, 'invalid command disposition transition'); END`,
 		`CREATE TABLE staged_blobs(
 			digest TEXT PRIMARY KEY CHECK(length(digest)=71),
 			byte_length INTEGER NOT NULL CHECK(byte_length>=0 AND byte_length<=1099511627776)
@@ -738,15 +769,21 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(1, 'durable-client-command-journal')`,
-		`PRAGMA user_version=1`,
+		`INSERT INTO schema_migrations(version, name) VALUES(2, 'environment-command-start-installation')`,
+		`PRAGMA user_version=2`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
 		}
 	}
+	if err = createEnvironmentInstallSchema(tx); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
 		VALUES(1, ?, ?, ?, ?, 1, 1)`, identity.RepoID, identity.DomainID, identity.AuthorityEpoch, identity.EnvironmentID); err != nil {
+		return err
+	}
+	if err = initializeEnvironmentInstall(tx, identity); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -766,7 +803,7 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=1`).Scan(&migration); err != nil || migration != "durable-client-command-journal" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=2`).Scan(&migration); err != nil || migration != "environment-command-start-installation" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
@@ -776,8 +813,12 @@ func checkSchemaObjects(db *sql.DB) error {
 	expected := map[string]string{
 		"schema_migrations": "table", "environment_state": "table", "environment_identity_immutable": "trigger",
 		"environment_counters_increment": "trigger", "commands": "table", "commands_pending_order": "index",
-		"command_identity_immutable": "trigger", "command_no_delete": "trigger", "staged_blobs": "table",
-		"staged_blob_no_update": "trigger", "staged_blob_no_delete": "trigger",
+		"command_identity_immutable": "trigger", "command_no_delete": "trigger", "command_state_transition": "trigger",
+		"staged_blobs": "table", "staged_blob_no_update": "trigger", "staged_blob_no_delete": "trigger",
+		"environment_install": "table", "environment_install_revision": "trigger", "installed_events": "table",
+		"installed_event_no_update": "trigger", "installed_event_no_delete": "trigger", "installed_receipts": "table",
+		"installed_receipt_no_update": "trigger", "installed_receipt_no_delete": "trigger", "environment_overlay": "table",
+		"environment_overlay_order": "index",
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
@@ -834,7 +875,8 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 				return ErrInvalidJournal
 			}
 		} else {
-			if entry.JournalPosition != nextPosition || entry.State != StateJournaled {
+			if entry.JournalPosition != nextPosition ||
+				(entry.State != StatePreAdmission && entry.State != StatePendingReturn && entry.State != StateReturned) {
 				return ErrInvalidJournal
 			}
 			nextPosition++
@@ -850,7 +892,10 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 	if nextSequence != int64(len(entries))+1 || storedPosition != int64(nextPosition) {
 		return ErrInvalidJournal
 	}
-	return checkBlobFiles(db, blobDir)
+	if err = checkBlobFiles(db, blobDir); err != nil {
+		return err
+	}
+	return checkInstallationDatabase(db, identity)
 }
 
 func verifyBlobReferences(db *sql.DB, blobDir string, blobs []operation.BlobInput) error {
