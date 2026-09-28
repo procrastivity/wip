@@ -1,6 +1,7 @@
 package wipdauthority
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -244,12 +245,14 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
+	defer func() { _ = request.Body.Close() }()
+	body := bufio.NewReader(request.Body)
 	environment, err := app.authenticateEnvironment(request)
 	if err != nil {
 		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
 		return
 	}
-	frame, err := wipdwire.ReadFrame(request.Body)
+	frame, err := wipdwire.ReadFrame(body)
 	if err != nil {
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
@@ -308,31 +311,20 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 			writeLabProblem(writer, frame.RequestID, "operation.unknown")
 			return
 		}
-		app.serveCommandSubmit(writer, request, frame, environment)
+		app.serveCommandSubmit(writer, request, body, frame, environment)
 		return
 	case "receipt.query":
 		if app.registry == nil {
 			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 			return
 		}
-		app.serveReceiptQuery(writer, request, frame, environment)
+		app.serveReceiptQuery(writer, request, body, frame, environment)
 		return
 	default:
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 		return
 	}
-	product, err := app.transferProduct(request.Context(), kind, start, time.Now().UTC())
-	if err != nil {
-		code := "transfer.incomplete"
-		if errors.Is(err, authoritystore.ErrPrefixMismatch) {
-			code = "transfer.prefix-mismatch"
-		}
-		writeLabProblem(writer, frame.RequestID, code)
-		return
-	}
-	if err = writeLabFrames(writer, frame.RequestID, product); err != nil {
-		return
-	}
+	app.serveTransferExchange(writer, request, body, frame, kind, start)
 }
 
 func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *http.Request) {

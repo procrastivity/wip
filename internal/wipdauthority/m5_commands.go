@@ -1,6 +1,7 @@
 package wipdauthority
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -40,10 +41,10 @@ func artifactCertificatePublicKey(wrapper []byte) (ed25519.PublicKey, error) {
 
 var (
 	errLabControlCancel  = errors.New("wipdauthority: client canceled exchange")
-	errLabControlInvalid = errors.New("wipdauthority: invalid post-submit control frame")
+	errLabControlInvalid = errors.New("wipdauthority: invalid post-first-frame control frame")
 )
 
-func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request *http.Request, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
+func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request *http.Request, body io.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
 	var submit wipdwire.CommandSubmit
 	if err := wipdwire.DecodeCanonical(frame.Payload, &submit,
 		"schema", "canonical_command", "request_hash", "deadline"); err != nil || submit.Schema != "wipd.command-submit/1" || len(submit.CanonicalCommand) == 0 {
@@ -90,8 +91,7 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	}
 	admissionCtx, cancelAdmission := context.WithCancelCause(admissionParent)
 	defer cancelAdmission(context.Canceled)
-	defer func() { _ = request.Body.Close() }()
-	watchLabCommandControl(request.Context(), request.Body, frame.RequestID, cancelAdmission)
+	watchLabCommandControl(request.Context(), body, frame.RequestID, cancelAdmission)
 
 	status, err := app.store.SubmitCommandWithDeadline(admissionCtx, command, submit.RequestHash, *request.TLS, time.Now().UTC(), deadline)
 	if err != nil {
@@ -200,28 +200,81 @@ func (app *m5LabHandler) reconcileSubmissionError(ctx context.Context, command o
 
 func watchLabCommandControl(ctx context.Context, body io.Reader, requestID string, cancel context.CancelCauseFunc) {
 	go func() {
-		frame, err := wipdwire.ReadFrame(body)
-		if errors.Is(err, io.EOF) {
+		outcome := readLabControlFrame(body, requestID)
+		if outcome == io.EOF {
 			return
 		}
-		if err != nil {
-			if cause := context.Cause(ctx); cause != nil {
-				cancel(cause)
-			} else {
-				cancel(errLabControlInvalid)
-			}
-			return
+		if cause := context.Cause(ctx); cause != nil {
+			outcome = cause
 		}
-		if frame.RequestID != requestID || frame.Sequence != 1 || frame.Kind != "control.cancel" {
-			cancel(errLabControlInvalid)
-			return
-		}
-		if _, err = wipdwire.DecodeCanonicalMap(frame.Payload); err != nil {
-			cancel(errLabControlInvalid)
-			return
-		}
-		cancel(errLabControlCancel)
+		cancel(outcome)
 	}()
+}
+
+func readLabControlFrame(body io.Reader, requestID string) error {
+	frame, err := wipdwire.ReadFrame(body)
+	if errors.Is(err, io.EOF) {
+		return io.EOF
+	}
+	if err != nil || frame.RequestID != requestID || frame.Sequence != 1 || frame.Kind != "control.cancel" {
+		return errLabControlInvalid
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(frame.Payload)
+	if err != nil || len(fields) != 0 {
+		return errLabControlInvalid
+	}
+	return errLabControlCancel
+}
+
+func (app *m5LabHandler) beginReadOnlyExchange(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, requestID string) (context.Context, context.CancelCauseFunc, <-chan error, bool) {
+	if body.Buffered() > 0 {
+		outcome := readLabControlFrame(body, requestID)
+		if errors.Is(outcome, errLabControlCancel) {
+			return nil, nil, nil, false
+		}
+		if request.Context().Err() != nil {
+			return nil, nil, nil, false
+		}
+		writeLabProblem(writer, requestID, "protocol.out-of-order")
+		return nil, nil, nil, false
+	}
+	ctx, cancel := context.WithCancelCause(request.Context())
+	control := make(chan error, 1)
+	go func() {
+		outcome := readLabControlFrame(body, requestID)
+		if outcome != io.EOF {
+			if cause := context.Cause(ctx); cause != nil {
+				outcome = cause
+			}
+			cancel(outcome)
+		}
+		control <- outcome
+	}()
+	return ctx, cancel, control, true
+}
+
+func readOnlyExchangeStopped(ctx context.Context, writer http.ResponseWriter, requestID string, control <-chan error) bool {
+	select {
+	case outcome := <-control:
+		if outcome == nil || outcome == io.EOF {
+			if context.Cause(ctx) == nil {
+				return false
+			}
+			outcome = context.Cause(ctx)
+		}
+		if errors.Is(outcome, errLabControlInvalid) {
+			writeLabProblem(writer, requestID, "protocol.out-of-order")
+		}
+		return true
+	default:
+	}
+	if outcome := context.Cause(ctx); outcome != nil {
+		if errors.Is(outcome, errLabControlInvalid) {
+			writeLabProblem(writer, requestID, "protocol.out-of-order")
+		}
+		return true
+	}
+	return false
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
@@ -257,7 +310,7 @@ func (app *m5LabHandler) completeContinuation(owner *authoritystore.Execution, c
 	return status.Receipt, nil
 }
 
-func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *http.Request, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
+func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
 	var query wipdwire.ReceiptQuery
 	if err := wipdwire.DecodeCanonical(frame.Payload, &query,
 		"schema", "domain_id", "command_id", "request_hash"); err != nil || query.Schema != "wipd.receipt-query/1" ||
@@ -265,8 +318,16 @@ func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
 		return
 	}
-	status, err := app.store.QueryCommand(request.Context(), query.DomainID, query.CommandID, query.RequestHash,
+	ctx, cancel, control, ok := app.beginReadOnlyExchange(writer, request, body, frame.RequestID)
+	if !ok {
+		return
+	}
+	defer cancel(context.Canceled)
+	status, err := app.store.QueryCommand(ctx, query.DomainID, query.CommandID, query.RequestHash,
 		app.profile.epoch, *request.TLS, environment.EnvironmentID, time.Now().UTC())
+	if readOnlyExchangeStopped(ctx, writer, frame.RequestID, control) {
+		return
+	}
 	if errors.Is(err, authoritystore.ErrNotFound) {
 		payload, encodeErr := wipdwire.EncodeCanonical(wipdwire.ReceiptNotFound{
 			Schema: "wipd.receipt-not-found/1", DomainID: query.DomainID, CommandID: query.CommandID, RequestHash: query.RequestHash,

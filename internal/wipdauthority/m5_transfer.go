@@ -1,6 +1,7 @@
 package wipdauthority
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net/http"
@@ -9,6 +10,27 @@ import (
 	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
+
+func (app *m5LabHandler) serveTransferExchange(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, kind string, start authoritystore.PrefixAnchor) {
+	ctx, cancel, control, ok := app.beginReadOnlyExchange(writer, request, body, frame.RequestID)
+	if !ok {
+		return
+	}
+	defer cancel(context.Canceled)
+	product, err := app.transferProduct(ctx, kind, start, time.Now().UTC())
+	if readOnlyExchangeStopped(ctx, writer, frame.RequestID, control) {
+		return
+	}
+	if err != nil {
+		code := "transfer.incomplete"
+		if errors.Is(err, authoritystore.ErrPrefixMismatch) {
+			code = "transfer.prefix-mismatch"
+		}
+		writeLabProblem(writer, frame.RequestID, code)
+		return
+	}
+	_ = writeLabFrames(writer, frame.RequestID, product)
+}
 
 func (app *m5LabHandler) transferProduct(ctx context.Context, kind string, start authoritystore.PrefixAnchor, now time.Time) ([]labFrameRecord, error) {
 	current, err := app.store.CurrentPrefixAnchor(ctx, app.profile.domainID)
