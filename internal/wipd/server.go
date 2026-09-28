@@ -83,6 +83,13 @@ func NewServer() *Server {
 	return newServer(operation.NewRegistry(), defaultExchanges)
 }
 
+// NewServerWithRegistry creates a local frame server that advertises and can
+// dispatch the supplied operation definitions. Connected deployments must
+// configure their durable command-start coordinator before Serve.
+func NewServerWithRegistry(registry *operation.Registry) *Server {
+	return newServer(registry, defaultExchanges)
+}
+
 func newServer(registry *operation.Registry, maxExchanges uint64) *Server {
 	if registry == nil {
 		registry = operation.NewRegistry()

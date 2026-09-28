@@ -23,7 +23,9 @@ directory:
   --environment-ca-certificate ./environment-ca.der \
   --environment-ca-private-key ./environment-ca-key.pk8 \
   --environment-ca-delegation ./environment-ca-delegation.cbor \
-  --enrollment-grant ./enrollment-grant.cbor
+  --enrollment-grant ./enrollment-grant.cbor \
+  --authority-artifact-key-certificate ./authority-artifact-key.cbor \
+  --authority-artifact-key-private-key ./authority-artifact-key.pk8
 ./contrib/online-authority-proof/run down   # stop and remove containers, network, and volumes
 ```
 
@@ -34,7 +36,12 @@ Environment-CA delegation for that domain/epoch and a one-use enrollment grant
 bound to the CSR's SPKI. The operator supplies those signed artifacts plus the
 delegated CA certificate and its restricted signing key to `enroll`; this lab
 does not implement or replace the offline owner signer. The retained owner
-root private key is never supplied to the harness or either container.
+root private key is never supplied to the harness or either container. The
+operator also supplies the existing owner-certified, epoch-scoped
+`wipd.authority-artifact-key/1` wrapper and its matching restricted Ed25519
+signing key. That key must be distinct from the TLS, Environment-CA, and
+Environment keys; only its private half is handed to the authority worker,
+in-memory, for portable terminal receipts.
 
 `enroll` starts a temporary pinned TLS 1.3/HTTP/2 authority worker, installs
 the owner-signed CA delegation, and serves enrollment for only the supplied
@@ -47,6 +54,14 @@ non-empty). It atomically creates the client shadow only after the complete
 The authority verifies the configured Repo's persisted domain membership
 before enrollment and seed exchange. The result prints only the
 domain/epoch/Repo/Environment bindings and verified prefix/manifest digests.
+The client volume also receives an owner-only connected-authority profile
+containing the authority TLS pin and certificate plus the client-state path.
+When `wipd` starts with that profile root, it negotiates the supported
+`matter.create@v1` and `step.create@v1` operations, opens the identity-bound
+Environment journal, and configures the shared command-start coordinator.
+The authority worker registers those same birth semantics and uses the
+certified artifact signer; authority event/projection commits and terminal
+receipts remain authority-store owned.
 
 The bounded `wipdseed.PullAndInstall` client API negotiates on each new
 connection and installs a complete M2 pull delta only after `PullEnd`. The
@@ -114,8 +129,16 @@ Compose JSON directly. The tests also cover invalid/colliding project names
 and prove an invalid config is rejected before Docker resource inspection or
 teardown.
 Only the explicit `bootstrap` step initializes authority-env domain identity.
-This lab implements initial enrollment plus bounded seed/pull installation for
-the supported M1 event projection; it does not implement command exchange,
-journal, receipt, or production operation behavior. It makes no claim that
-the M4 synthetic fixture is canonical state and does not implement migration,
-disconnected claim commands, production cutover, or later acceptance work.
+The M5 birth subset adds authenticated command submission, receipt query,
+authority return/pull, durable Environment journal admission, and atomic
+receipt/tail/overlay installation for Matter and Step creation. A real daemon
+process acceptance test covers Matter birth, Step birth, and exact Step replay:
+
+```sh
+go test ./internal/wipdauthority -run TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess -count=1
+```
+
+The legacy CLI path is unchanged. This remains a bounded lab subset: it makes
+no claim that M4 synthetic fixture state is canonical authority state and does
+not implement migration, disconnected claim commands, other operation
+families, or later acceptance work.

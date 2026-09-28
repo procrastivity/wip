@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/procrastivity/wip/internal/wipd"
+	"github.com/procrastivity/wip/internal/wipdremote"
 )
 
 func main() {
@@ -31,7 +32,16 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "wipd: startup refused: %v\n", err)
 		return 1
 	}
-	if err := wipd.NewServer().Serve(ctx, daemon); err != nil {
+	server, runtime, err := wipdremote.NewServer(*profileRoot)
+	if err != nil {
+		_ = daemon.Close()
+		fmt.Fprintf(os.Stderr, "wipd: connected authority startup refused: %v\n", err)
+		return 1
+	}
+	if runtime != nil {
+		defer func() { _ = runtime.Close() }()
+	}
+	if err := server.Serve(ctx, daemon); err != nil {
 		fmt.Fprintf(os.Stderr, "wipd: serve local protocol: %v\n", err)
 		return 1
 	}

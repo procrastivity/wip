@@ -139,6 +139,46 @@ func (j *Journal) Overlay(ctx context.Context) ([]OverlayItem, error) {
 	return items, rows.Err()
 }
 
+// EventRecords returns the immutable installed event lineage in prefix order.
+// Connected pull verification uses it as the exact prior input to the next
+// complete authority tail; callers receive independent byte copies.
+func (j *Journal) EventRecords(ctx context.Context) ([]wipdwire.EventRecord, error) {
+	if j == nil || ctx == nil {
+		return nil, ErrClosed
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return nil, ErrClosed
+	}
+	tx, err := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT event_id,record FROM installed_events ORDER BY position`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	records := make([]wipdwire.EventRecord, 0)
+	for rows.Next() {
+		var record wipdwire.EventRecord
+		if err = rows.Scan(&record.EventID, &record.Record); err != nil {
+			return nil, err
+		}
+		record.Record = bytes.Clone(record.Record)
+		records = append(records, record)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
 // AdmitPending atomically materializes the provisional overlay and changes a
 // pre-admission command to pending-return. A repeated call for an already
 // admitted identity is read-only and never rebuilds or duplicates the row.

@@ -30,6 +30,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/wipdauthority"
+	"github.com/procrastivity/wip/internal/wipdremote"
 	"github.com/procrastivity/wip/internal/wipdseed"
 )
 
@@ -87,6 +88,8 @@ type labAuthorityInput struct {
 	EnvironmentCADelegation     []byte `json:"environment_ca_delegation"`
 	AuthorityCertificateDER     []byte `json:"authority_certificate_der"`
 	AuthorityPrivateKeyDER      []byte `json:"authority_private_key_pkcs8"`
+	ArtifactKeyCertificate      []byte `json:"artifact_key_certificate"`
+	ArtifactKeyPrivateKeyDER    []byte `json:"artifact_key_private_key_pkcs8"`
 	StopFile                    string `json:"stop_file"`
 }
 
@@ -179,10 +182,12 @@ func runHostEnroll(args []string) error {
 	caPrivateKeyPath := flags.String("environment-ca-private-key", "", "restricted issuer Ed25519 PKCS#8 private key DER or PEM")
 	caDelegationPath := flags.String("environment-ca-delegation", "", "offline owner-signed CA delegation artifact")
 	enrollmentGrantPath := flags.String("enrollment-grant", "", "offline owner-signed one-use enrollment grant")
+	artifactCertificatePath := flags.String("authority-artifact-key-certificate", "", "offline owner-certified authority-artifact key wrapper")
+	artifactPrivateKeyPath := flags.String("authority-artifact-key-private-key", "", "restricted authority-artifact Ed25519 PKCS#8 private key")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !labProjectPattern.MatchString(*project) || *authorityContainer == "" || *clientContainer == "" ||
 		!labULIDPattern.MatchString(*domainID) || !labULIDPattern.MatchString(*repoID) || *epoch == 0 || *ownerRootValue == "" || *caCertificatePath == "" ||
-		*caPrivateKeyPath == "" || *caDelegationPath == "" || *enrollmentGrantPath == "" {
-		return errors.New("usage: enroll --project <project> --authority-container-id <id> --client-container-id <id> --domain-id <ulid> --repo-id <ulid> --epoch <n> --owner-root-public-key <base64> --environment-ca-certificate <path> --environment-ca-private-key <path> --environment-ca-delegation <path> --enrollment-grant <path>")
+		*caPrivateKeyPath == "" || *caDelegationPath == "" || *enrollmentGrantPath == "" || *artifactCertificatePath == "" || *artifactPrivateKeyPath == "" {
+		return errors.New("usage: enroll --project <project> --authority-container-id <id> --client-container-id <id> --domain-id <ulid> --repo-id <ulid> --epoch <n> --owner-root-public-key <base64> --environment-ca-certificate <path> --environment-ca-private-key <path> --environment-ca-delegation <path> --enrollment-grant <path> --authority-artifact-key-certificate <path> --authority-artifact-key-private-key <path>")
 	}
 	if err := verifyOwnedContainer(*authorityContainer, *project, "authority-env"); err != nil {
 		return err
@@ -236,6 +241,24 @@ func runHostEnroll(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read owner-signed enrollment grant: %w", err)
 	}
+	artifactCertificate, err := readLimitedFile(*artifactCertificatePath, 1<<20)
+	if err != nil {
+		return fmt.Errorf("read owner-certified authority-artifact key: %w", err)
+	}
+	artifactPrivateKeyDER, err := readPrivateKeyFile(*artifactPrivateKeyPath)
+	if err != nil {
+		return fmt.Errorf("read restricted authority-artifact key: %w", err)
+	}
+	defer clear(artifactPrivateKeyDER)
+	artifactPrivateKey, err := parseEd25519PrivateKey(artifactPrivateKeyDER)
+	if err != nil {
+		return errors.New("authority-artifact signer must be PKCS#8 Ed25519")
+	}
+	defer clear(artifactPrivateKey)
+	artifactPublic, err := wipdauthority.ArtifactKeyPublicKey(artifactCertificate)
+	if err != nil || !bytes.Equal(artifactPublic, artifactPrivateKey.Public().(ed25519.PublicKey)) {
+		return errors.New("restricted authority-artifact key does not match its owner certificate")
+	}
 	ownerSPKI := domain.OwnerKeyID
 	clientCSR, err := fetchClientCSR(*clientContainer, *project)
 	if err != nil {
@@ -263,14 +286,16 @@ func runHostEnroll(args []string) error {
 	}
 	stopFile := authorityStateRoot + "/.m5-enroll-stop-" + hex.EncodeToString(stopSuffix)
 	serveConfig := labAuthorityInput{
-		Schema: "wipd.m5-lab-authority-worker/1", Origin: "https://authority-env:8443",
+		Schema: "wipd.m5-lab-authority-worker/2", Origin: "https://authority-env:8443",
 		DomainID: *domainID, Epoch: *epoch, RepoID: bootstrapRepoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
 		AuthoritySPKIPin: serverPin, EnrollmentGrant: grant, ExpectedCSRDER: clientCSR,
 		EnvironmentCACertificateDER: caDER, EnvironmentCAPrivateKeyDER: caKeyDER, EnvironmentCADelegation: delegation,
-		AuthorityCertificateDER: serverCertDER, AuthorityPrivateKeyDER: serverPrivateDER, StopFile: stopFile,
+		AuthorityCertificateDER: serverCertDER, AuthorityPrivateKeyDER: serverPrivateDER,
+		ArtifactKeyCertificate: artifactCertificate, ArtifactKeyPrivateKeyDER: artifactPrivateKeyDER, StopFile: stopFile,
 	}
 	defer clear(serveConfig.EnvironmentCAPrivateKeyDER)
 	defer clear(serveConfig.AuthorityPrivateKeyDER)
+	defer clear(serveConfig.ArtifactKeyPrivateKeyDER)
 	defer clear(serveConfig.EnrollmentGrant)
 	clientConfig := labClientInput{
 		Schema: "wipd.m5-lab-client-worker/1", Origin: "https://authority-env:8443", DomainID: *domainID,
@@ -447,6 +472,13 @@ func runClientEnrollWorker(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err = wipdremote.SaveConfig(filepath.Join(clientDataRoot, "wipd-profile"), wipdremote.Config{
+		Schema: "wipd.connected-authority-profile/1", Origin: input.Origin, DomainID: input.DomainID, Epoch: input.Epoch,
+		RepoID: input.RepoID, OwnerRootSPKI: input.OwnerRootSPKI, AuthoritySPKIPin: input.AuthoritySPKIPin,
+		AuthorityCertificateDER: append([]byte(nil), input.AuthorityCertificateDER...), ClientStateDirectory: clientDataRoot,
+	}); err != nil {
+		return fmt.Errorf("install connected wipd profile: %w", err)
+	}
 	identity, err := wipdseed.LoadPending(clientDataRoot)
 	if err != nil {
 		return err
@@ -475,8 +507,9 @@ func runAuthorityServeWorker(args []string) error {
 	}
 	defer clear(input.EnvironmentCAPrivateKeyDER)
 	defer clear(input.AuthorityPrivateKeyDER)
+	defer clear(input.ArtifactKeyPrivateKeyDER)
 	defer clear(input.EnrollmentGrant)
-	if input.Schema != "wipd.m5-lab-authority-worker/1" || !labULIDPattern.MatchString(input.DomainID) || !labULIDPattern.MatchString(input.RepoID) || input.Epoch == 0 || !stopFilePattern.MatchString(input.StopFile) {
+	if input.Schema != "wipd.m5-lab-authority-worker/2" || !labULIDPattern.MatchString(input.DomainID) || !labULIDPattern.MatchString(input.RepoID) || input.Epoch == 0 || !stopFilePattern.MatchString(input.StopFile) {
 		return errors.New("invalid authority enrollment worker input")
 	}
 	caPrivate, err := parseEd25519PrivateKey(input.EnvironmentCAPrivateKeyDER)
@@ -489,6 +522,15 @@ func runAuthorityServeWorker(args []string) error {
 		return errors.New("invalid authority TLS key")
 	}
 	defer clear(authorityPrivate)
+	artifactPrivate, err := parseEd25519PrivateKey(input.ArtifactKeyPrivateKeyDER)
+	if err != nil {
+		return errors.New("invalid authority-artifact signer key")
+	}
+	defer clear(artifactPrivate)
+	artifactPublic, err := wipdauthority.ArtifactKeyPublicKey(input.ArtifactKeyCertificate)
+	if err != nil || !bytes.Equal(artifactPublic, artifactPrivate.Public().(ed25519.PublicKey)) {
+		return errors.New("authority-artifact signer does not match its owner-certified key")
+	}
 	caCertificate, err := x509.ParseCertificate(input.EnvironmentCACertificateDER)
 	if err != nil {
 		return errors.New("invalid Environment CA certificate")
@@ -531,11 +573,19 @@ func runAuthorityServeWorker(args []string) error {
 	if err != nil {
 		return err
 	}
+	birthRegistry, err := wipdauthority.NewM5BirthRegistry()
+	if err != nil {
+		return err
+	}
 	server, err := wipdauthority.NewM5LabServer(profile, tlsCertificateDER(input.AuthorityCertificateDER, authorityPrivate), wipdauthority.M5LabConfig{
 		Store: store, RepoID: bootstrapRepoID, EnrollmentGrant: input.EnrollmentGrant,
 		ExpectedCSRDER: input.ExpectedCSRDER, EnvironmentCACertificateDER: input.EnvironmentCACertificateDER,
 		SignEnvironmentLeaf: func(_ context.Context, domain string, epoch uint64, environment string, csrDER []byte, at time.Time) ([]byte, error) {
 			return signEnvironmentLeaf(caPrivate, caCertificate, domain, epoch, environment, ownerKeyID, csrDER, at)
+		},
+		Registry: birthRegistry, ArtifactKeyCertificate: input.ArtifactKeyCertificate,
+		SignArtifact: func(_ context.Context, preimage []byte) ([]byte, error) {
+			return ed25519.Sign(artifactPrivate, preimage), nil
 		},
 	})
 	if err != nil {

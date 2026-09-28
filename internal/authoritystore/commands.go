@@ -405,9 +405,9 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			got := result.Output.(operation.MatterCreateOutput)
 			locator := input.Locator
 			if locator == "" {
-				locator = matterLocator(input.Title)
+				locator = MatterLocator(input.Title)
 			}
-			if locator == "" || matterLocator(locator) != locator || got.ID != subjectID || got.Locator != locator || got.Title != input.Title {
+			if locator == "" || MatterLocator(locator) != locator || got.ID != subjectID || got.Locator != locator || got.Title != input.Title {
 				return out, ErrInvalidProof
 			}
 			var n int
@@ -651,9 +651,9 @@ func digestRaw(value string) ([]byte, error) {
 }
 func digestRawBytes(value []byte) string { return fmt.Sprintf("sha256:%x", value) }
 
-// matterLocator preserves matter.create@v1's title-derived locator semantics
+// MatterLocator preserves matter.create@v1's title-derived locator semantics
 // without importing the M1 write surface or changing its CLI ownership.
-func matterLocator(value string) string {
+func MatterLocator(value string) string {
 	var b strings.Builder
 	prevDash := true
 	for _, r := range strings.ToLower(value) {

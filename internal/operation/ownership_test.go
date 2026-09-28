@@ -87,7 +87,7 @@ func call() {
 	}
 }
 
-func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
+func TestMatterCreateRegistrationsStayInsideLegacyAndM5Boundaries(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate ownership test")
@@ -148,8 +148,21 @@ func TestMatterCreateIsNotRegisteredOutsideLegacyCLIAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan production registrations: %v", err)
 	}
-	if len(registrations) != 1 || registrations[0] != "internal/verbs/matter/matter.go" {
-		t.Fatalf("matter.create production registrations = %v, want only legacy CLI adapter", registrations)
+	want := map[string]bool{
+		"internal/verbs/matter/matter.go":          true,
+		"internal/wipdauthority/birth_registry.go": true,
+	}
+	seen := make(map[string]bool, len(want))
+	for _, registration := range registrations {
+		if !want[registration] || seen[registration] {
+			t.Fatalf("matter.create registered outside its established boundaries: %v", registrations)
+		}
+		seen[registration] = true
+	}
+	for registration := range want {
+		if !seen[registration] {
+			t.Fatalf("matter.create production registrations = %v, missing %s", registrations, registration)
+		}
 	}
 }
 

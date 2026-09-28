@@ -40,6 +40,13 @@ func artifactCertificatePublicKey(wrapper []byte) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(bytes.Clone(public)), nil
 }
 
+// ArtifactKeyPublicKey extracts the owner-certified authority-artifact key
+// identity so an external restricted signer can be matched without exposing
+// the owner's private key to the online process.
+func ArtifactKeyPublicKey(wrapper []byte) (ed25519.PublicKey, error) {
+	return artifactCertificatePublicKey(wrapper)
+}
+
 var (
 	errLabControlCancel       = errors.New("wipdauthority: client canceled exchange")
 	errLabControlInvalid      = errors.New("wipdauthority: invalid post-first-frame control frame")

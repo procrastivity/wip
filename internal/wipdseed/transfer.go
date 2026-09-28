@@ -19,7 +19,9 @@ import (
 	"sort"
 	"time"
 
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdauthority"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 	"golang.org/x/sys/unix"
 )
@@ -167,12 +169,27 @@ func PullAndInstall(ctx context.Context, profile wipdauthority.Profile, roots *x
 }
 
 func negotiateRemote(ctx context.Context, client *http.Client, origin string) (sessionLimits, error) {
+	return negotiateRemoteOperations(ctx, client, origin, nil)
+}
+
+func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin string, operations []operation.ID) (sessionLimits, error) {
 	var limits sessionLimits
+	capabilities := make([]any, 0, len(operations))
+	previous := operation.ID{}
+	for index, id := range operations {
+		if id.Name == "" || id.Version == 0 || index > 0 && (id.Name < previous.Name || id.Name == previous.Name && id.Version <= previous.Version) {
+			return limits, ErrInvalidClientState
+		}
+		capabilities = append(capabilities, map[string]any{
+			"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{"wipd.command/1"},
+		})
+		previous = id
+	}
 	hello := map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
 		"protocol_max":     []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{"wipd.command/1"},
-		"operations":       []any{},
+		"operations":       capabilities,
 		"store_schemas":    []any{"wipd.store/1"},
 		"features":         []any{"wipd.frame/1"},
 	}
@@ -194,7 +211,7 @@ func negotiateRemote(ctx context.Context, client *http.Client, origin string) (s
 	selection, err := wipdwire.DecodeCanonicalMap(frames[0].Payload,
 		"selected_protocol", "identity_schemas", "operations", "store_schemas", "features")
 	if err != nil || !equalVersion(selection["selected_protocol"], 1, 0) ||
-		!equalStringsValue(selection["identity_schemas"], "wipd.command/1") || !emptyArray(selection["operations"]) ||
+		!equalStringsValue(selection["identity_schemas"], "wipd.command/1") || !equalNegotiatedOperations(selection["operations"], operations) ||
 		!equalStringsValue(selection["store_schemas"], "wipd.store/1") || !equalStringsValue(selection["features"], "wipd.frame/1") {
 		return limits, ErrInvalidClientState
 	}
@@ -220,6 +237,51 @@ func negotiateRemote(ctx context.Context, client *http.Client, origin string) (s
 	return limits, nil
 }
 
+func equalNegotiatedOperations(value any, expected []operation.ID) bool {
+	items, ok := value.([]any)
+	if !ok || len(items) != len(expected) {
+		return false
+	}
+	for index, item := range items {
+		fields, ok := item.(map[string]any)
+		if !ok || !wipdwire.ExactMapKeys(fields, "name", "versions", "identity_schemas") {
+			return false
+		}
+		name, nameOK := fields["name"].(string)
+		versions, versionsOK := fields["versions"].([]any)
+		schemas, schemaOK := fields["identity_schemas"].([]any)
+		if !nameOK || !versionsOK || len(versions) != 1 || versions[0] != uint64(expected[index].Version) ||
+			!schemaOK || len(schemas) != 1 || schemas[0] != "wipd.command/1" || name != expected[index].Name {
+			return false
+		}
+	}
+	return true
+}
+
+// VerifyPullTransfer verifies a complete M2 pull against the exact previously
+// installed event lineage and returns the concrete journal installation proof.
+func VerifyPullTransfer(profile wipdauthority.Profile, previous ClientState, installed wipdwire.PrefixAnchor, frames []wipdwire.Frame) (wipdjournal.VerifiedTransfer, wipdwire.BlobManifest, error) {
+	updated, err := verifyTransferFrames(frames, "pull", profile, previous.RepoID, previous.EnvironmentID,
+		previous.SPKIDigest, installed, previous.EventRecords)
+	if err != nil {
+		return wipdjournal.VerifiedTransfer{}, wipdwire.BlobManifest{}, err
+	}
+	if len(updated.EventRecords) < len(previous.EventRecords) {
+		return wipdjournal.VerifiedTransfer{}, wipdwire.BlobManifest{}, ErrInvalidClientState
+	}
+	manifest := wipdwire.BlobManifest{
+		Schema: "wipd.blob-manifest/1", DomainID: profile.DomainID(), Epoch: profile.Epoch(),
+		AsOf: updated.Prefix, Entries: append([]wipdwire.BlobManifestEntry(nil), updated.ManifestEntries...),
+		Digest: updated.ManifestDigest,
+	}
+	delta := cloneEventRecords(updated.EventRecords[len(previous.EventRecords):])
+	transfer, err := wipdjournal.VerifyTransfer(profile.DomainID(), profile.Epoch(), installed, updated.Prefix, delta, manifest)
+	if err != nil {
+		return wipdjournal.VerifiedTransfer{}, wipdwire.BlobManifest{}, err
+	}
+	return transfer, manifest, nil
+}
+
 func withinSessionFrame(frame []byte, limits sessionLimits) bool {
 	return len(frame) >= 4 && limits.frameBody > 0 && limits.streamBytes >= 4 &&
 		len(frame) <= limits.streamBytes && int(binary.BigEndian.Uint32(frame[:4])) == len(frame)-4 &&
@@ -234,11 +296,6 @@ func equalVersion(value any, major, minor uint64) bool {
 func equalStringsValue(value any, expected string) bool {
 	values, ok := value.([]any)
 	return ok && len(values) == 1 && values[0] == expected
-}
-
-func emptyArray(value any) bool {
-	values, ok := value.([]any)
-	return ok && len(values) == 0
 }
 
 func boundedUint(value any, minimum, maximum uint64) bool {

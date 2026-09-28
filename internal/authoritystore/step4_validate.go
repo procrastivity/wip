@@ -465,7 +465,7 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 			break
 		}
 		if locator == "" {
-			locator = matterLocator(title)
+			locator = MatterLocator(title)
 		}
 		if repo != event.Repo || title != event.Payload.Title || locator != event.Payload.Locator || acted != event.Acted {
 			err = ErrInvalidStore

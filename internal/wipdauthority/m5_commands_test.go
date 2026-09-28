@@ -40,19 +40,24 @@ const (
 )
 
 type m5CommandFixture struct {
-	store       *authoritystore.Store
-	root        string
-	handler     http.Handler
-	server      *Server
-	listener    net.Listener
-	serverRoots *x509.CertPool
-	clientCert  tls.Certificate
-	profile     Profile
-	serverCert  tls.Certificate
-	config      M5LabConfig
-	peer        tls.ConnectionState
-	calls       *atomic.Int32
-	now         time.Time
+	store        *authoritystore.Store
+	root         string
+	handler      http.Handler
+	server       *Server
+	listener     net.Listener
+	serverRoots  *x509.CertPool
+	clientCert   tls.Certificate
+	profile      Profile
+	serverCert   tls.Certificate
+	config       M5LabConfig
+	ownerRoot    ed25519.PublicKey
+	environment  ed25519.PrivateKey
+	csrDER       []byte
+	grant        []byte
+	caDelegation []byte
+	peer         tls.ConnectionState
+	calls        *atomic.Int32
+	now          time.Time
 }
 
 func newM5CommandFixture(t *testing.T) *m5CommandFixture {
@@ -186,7 +191,9 @@ func newM5CommandFixture(t *testing.T) *m5CommandFixture {
 	fixture := &m5CommandFixture{
 		store: store, root: root, profile: profile, serverCert: tlsFixture.cert,
 		config: config, peer: peer, calls: calls, now: now, listener: listener,
-		serverRoots: tlsFixture.roots, clientCert: clientCert,
+		serverRoots: tlsFixture.roots, clientCert: clientCert, ownerRoot: append(ed25519.PublicKey(nil), ownerPublic...),
+		environment: append(ed25519.PrivateKey(nil), environmentPrivate...), csrDER: bytes.Clone(csr),
+		grant: bytes.Clone(grant), caDelegation: bytes.Clone(delegation),
 	}
 	fixture.server = fixture.serverForStore(t, store)
 	fixture.handler = fixture.server.http.Handler

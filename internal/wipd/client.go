@@ -396,6 +396,10 @@ func (c *Client) negotiate(ctx context.Context) error {
 			"name":             "matter.create",
 			"versions":         []any{uint64(1)},
 			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name":             "step.create",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
 		}},
 		"store_schemas": []any{storeSchemaV1},
 		"features":      []any{frameSchema},
@@ -485,7 +489,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errInvalidCapabilities
 	}
 	for _, capability := range operations {
-		if capability.name != "matter.create" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
+		if capability.name != "matter.create" && capability.name != "step.create" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
 			!equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
 			return serverHello{}, errInvalidCapabilities
 		}
