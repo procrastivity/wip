@@ -298,71 +298,21 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 			return result, nil
 		}
 	}
-	for index, pendingEntry := range pending {
-		if err = coordinator.validateReturnEligibility(pendingEntry, installed); err != nil {
-			return empty, err
-		}
-		fold, foldErr := coordinator.authority.Return(ctx, pendingEntry, installed.Anchor)
-		if foldErr != nil {
-			return empty, foldErr
-		}
-		if err = validateCommandFold(pendingEntry, installed.Anchor, fold); err != nil {
-			return empty, err
-		}
-		if fold.Continue && (fold.ResultCode != operation.ResultSucceeded || index+1 == len(pending)) {
-			return empty, ErrCommandStartIdentity
-		}
-		previousRevision := installed.Revision
-		previousSnapshot := installed
-		installed, err = coordinator.environment.InstallFold(ctx, installed, pendingEntry, fold)
-		if err != nil {
-			return empty, err
-		}
-		installed = cloneCommandStartSnapshot(installed)
-		if installed.Revision <= previousRevision || !validCommandStartSnapshot(installed, entry.Command) ||
-			!sameCommandStartAnchor(installed.Anchor, fold.End) || !commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
-			return empty, ErrCommandStartIdentity
-		}
-		installedReceipt, ok := installed.Receipts[pendingEntry.Command.ID]
-		if !ok || installedReceipt.RequestHash != pendingEntry.RequestHash || installedReceipt.EnvironmentSeq != pendingEntry.EnvironmentSeq ||
-			installedReceipt.JournalPosition != pendingEntry.JournalPosition || installedReceipt.ResultCode != fold.ResultCode ||
-			!bytes.Equal(installedReceipt.CanonicalReceipt, fold.CanonicalReceipt) || installed.ManifestDigest != fold.Manifest.Digest {
-			return empty, ErrCommandStartIdentity
-		}
-		if pendingEntry.Command.ID == entry.Command.ID {
-			result.Returned = true
-			result.ResultCode = fold.ResultCode
-			result.Receipt = append([]byte(nil), fold.CanonicalReceipt...)
-			result.SemanticResult, err = commandReceiptResult(entry, result.Receipt)
-			if err != nil {
-				return empty, ErrCommandStartIdentity
-			}
-		}
-		if fold.ResultCode != operation.ResultSucceeded {
-			if pendingEntry.Command.ID == entry.Command.ID {
-				return result, nil
-			}
-			return empty, fmt.Errorf("%w: returned command %s completed with %s", ErrCommandStartBlocked,
-				pendingEntry.Command.ID, fold.ResultCode)
-		}
-		if index+1 < len(pending) && !fold.Continue {
-			return empty, fmt.Errorf("%w: authority stopped before the next pending head", ErrCommandStartBlocked)
-		}
+	var stopped bool
+	installed, stopped, err = coordinator.returnPending(ctx, entry.Command, entry, installed, pending, &result)
+	if err != nil {
+		return empty, err
+	}
+	if stopped {
+		return result, nil
 	}
 
 	pull, err := coordinator.authority.Pull(ctx, installed.Anchor)
 	if err != nil {
 		return empty, err
 	}
-	if pull.DomainID != entry.Command.AuthorityDomainID || pull.Epoch != entry.Command.ExpectedAuthorityEpoch ||
-		!sameCommandStartAnchor(pull.Start, installed.Anchor) || !validCommandStartAnchor(pull.End) || !pull.VerifiedTransfer.Valid() ||
-		pull.VerifiedTransfer.DomainID() != pull.DomainID || pull.VerifiedTransfer.Epoch() != pull.Epoch ||
-		!sameCommandStartAnchor(pull.VerifiedTransfer.Start(), pull.Start) || !sameCommandStartAnchor(pull.VerifiedTransfer.End(), pull.End) ||
-		pull.Manifest.Schema != "wipd.blob-manifest/1" || pull.Manifest.DomainID != pull.DomainID || pull.Manifest.Epoch != pull.Epoch ||
-		!sameCommandStartAnchor(pull.Manifest.AsOf, pull.End) || !commandStartHash.MatchString(pull.Manifest.Digest) ||
-		pull.VerifiedTransfer.Manifest().Digest != pull.Manifest.Digest ||
-		pull.End.EventCount < pull.Start.EventCount || pull.End.EventCount == pull.Start.EventCount && !sameCommandStartAnchor(pull.End, pull.Start) {
-		return empty, ErrCommandStartIdentity
+	if err = validateCommandPull(entry.Command.AuthorityDomainID, entry.Command.ExpectedAuthorityEpoch, installed.Anchor, pull); err != nil {
+		return empty, err
 	}
 	previousSnapshot := installed
 	installed, err = coordinator.environment.InstallPull(ctx, installed, pull)
@@ -441,6 +391,83 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 		}
 	}
 	return result, nil
+}
+
+func (coordinator *CommandStartCoordinator) returnPending(
+	ctx context.Context,
+	validationCommand operation.Command,
+	current wipdjournal.Entry,
+	installed CommandStartSnapshot,
+	pending []wipdjournal.Entry,
+	result *CommandStartResult,
+) (CommandStartSnapshot, bool, error) {
+	for index, pendingEntry := range pending {
+		if err := coordinator.validateReturnEligibility(pendingEntry, installed); err != nil {
+			return installed, false, err
+		}
+		fold, foldErr := coordinator.authority.Return(ctx, pendingEntry, installed.Anchor)
+		if foldErr != nil {
+			return installed, false, foldErr
+		}
+		if err := validateCommandFold(pendingEntry, installed.Anchor, fold); err != nil {
+			return installed, false, err
+		}
+		if fold.Continue && (fold.ResultCode != operation.ResultSucceeded || index+1 == len(pending)) {
+			return installed, false, ErrCommandStartIdentity
+		}
+		previousRevision := installed.Revision
+		previousSnapshot := installed
+		next, err := coordinator.environment.InstallFold(ctx, installed, pendingEntry, fold)
+		if err != nil {
+			return installed, false, err
+		}
+		installed = next
+		installed = cloneCommandStartSnapshot(installed)
+		if installed.Revision <= previousRevision || !validCommandStartSnapshot(installed, validationCommand) ||
+			!sameCommandStartAnchor(installed.Anchor, fold.End) || !commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
+			return installed, false, ErrCommandStartIdentity
+		}
+		installedReceipt, ok := installed.Receipts[pendingEntry.Command.ID]
+		if !ok || installedReceipt.RequestHash != pendingEntry.RequestHash || installedReceipt.EnvironmentSeq != pendingEntry.EnvironmentSeq ||
+			installedReceipt.JournalPosition != pendingEntry.JournalPosition || installedReceipt.ResultCode != fold.ResultCode ||
+			!bytes.Equal(installedReceipt.CanonicalReceipt, fold.CanonicalReceipt) || installed.ManifestDigest != fold.Manifest.Digest {
+			return installed, false, ErrCommandStartIdentity
+		}
+		if pendingEntry.Command.ID == current.Command.ID && result != nil {
+			result.Returned = true
+			result.ResultCode = fold.ResultCode
+			result.Receipt = append([]byte(nil), fold.CanonicalReceipt...)
+			semanticResult, err := commandReceiptResult(current, result.Receipt)
+			if err != nil {
+				return installed, false, ErrCommandStartIdentity
+			}
+			result.SemanticResult = semanticResult
+		}
+		if fold.ResultCode != operation.ResultSucceeded {
+			if pendingEntry.Command.ID == current.Command.ID && result != nil {
+				return installed, true, nil
+			}
+			return installed, false, fmt.Errorf("%w: returned command %s completed with %s", ErrCommandStartBlocked,
+				pendingEntry.Command.ID, fold.ResultCode)
+		}
+		if index+1 < len(pending) && !fold.Continue {
+			return installed, false, fmt.Errorf("%w: authority stopped before the next pending head", ErrCommandStartBlocked)
+		}
+	}
+	return installed, false, nil
+}
+
+func validateCommandPull(domainID string, epoch uint64, start wipdwire.PrefixAnchor, pull CommandPull) error {
+	if pull.DomainID != domainID || pull.Epoch != epoch || !sameCommandStartAnchor(pull.Start, start) || !validCommandStartAnchor(pull.End) ||
+		!pull.VerifiedTransfer.Valid() || pull.VerifiedTransfer.DomainID() != pull.DomainID || pull.VerifiedTransfer.Epoch() != pull.Epoch ||
+		!sameCommandStartAnchor(pull.VerifiedTransfer.Start(), pull.Start) || !sameCommandStartAnchor(pull.VerifiedTransfer.End(), pull.End) ||
+		pull.Manifest.Schema != "wipd.blob-manifest/1" || pull.Manifest.DomainID != pull.DomainID || pull.Manifest.Epoch != pull.Epoch ||
+		!sameCommandStartAnchor(pull.Manifest.AsOf, pull.End) || !commandStartHash.MatchString(pull.Manifest.Digest) ||
+		pull.VerifiedTransfer.Manifest().Digest != pull.Manifest.Digest || pull.End.EventCount < pull.Start.EventCount ||
+		pull.End.EventCount == pull.Start.EventCount && !sameCommandStartAnchor(pull.End, pull.Start) {
+		return ErrCommandStartIdentity
+	}
+	return nil
 }
 
 func asCommandStartString(value any) string {

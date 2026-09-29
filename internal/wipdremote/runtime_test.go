@@ -70,4 +70,20 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(loaded, config) {
 		t.Fatalf("conflict changed saved profile = %+v, %v", loaded, err)
 	}
+
+	legacyRoot := filepath.Join(t.TempDir(), "legacy-profile")
+	legacy := config
+	legacy.Schema = "wipd.connected-authority-profile/1"
+	legacy.OwnerRootPublicKey = nil
+	legacy.ArtifactKeyCertificate = nil
+	if err = SaveConfig(legacyRoot, legacy); err != nil {
+		t.Fatalf("save legacy connected profile: %v", err)
+	}
+	loadedLegacy, err := LoadConfig(legacyRoot)
+	if err != nil || !reflect.DeepEqual(loadedLegacy, legacy) {
+		t.Fatalf("reopen legacy connected profile = %+v, %v; want %+v", loadedLegacy, err, legacy)
+	}
+	if (&Runtime{config: loadedLegacy}).SupportsClaimAcquisition() {
+		t.Fatal("legacy connected profile enabled acquisition without grant-verification trust")
+	}
 }

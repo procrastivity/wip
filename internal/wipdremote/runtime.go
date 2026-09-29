@@ -152,6 +152,13 @@ type Runtime struct {
 	journal *wipdjournal.Journal
 }
 
+// SupportsClaimAcquisition reports whether this profile has the additional
+// owner and artifact-signing trust required to verify and install grants.
+func (runtime *Runtime) SupportsClaimAcquisition() bool {
+	return runtime != nil && runtime.config.Schema == "wipd.connected-authority-profile/2" &&
+		len(runtime.config.OwnerRootPublicKey) == ed25519.PublicKeySize && len(runtime.config.ArtifactKeyCertificate) != 0
+}
+
 // NewServer creates a normal empty server when no connected profile is
 // installed, and otherwise composes the authenticated command runtime before
 // returning a daemon server ready to Serve.
@@ -409,9 +416,18 @@ func (runtime *Runtime) Close() error {
 }
 
 func validateConfig(config Config) error {
-	if config.Schema != "wipd.connected-authority-profile/2" || config.RepoID == "" || config.ClientStateDirectory == "" ||
-		!filepath.IsAbs(config.ClientStateDirectory) || len(config.OwnerRootPublicKey) != ed25519.PublicKeySize ||
-		len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 {
+	if config.Schema != "wipd.connected-authority-profile/1" && config.Schema != "wipd.connected-authority-profile/2" ||
+		config.RepoID == "" || config.ClientStateDirectory == "" || !filepath.IsAbs(config.ClientStateDirectory) {
+		return errors.New("wipdremote: invalid connected authority profile")
+	}
+	if config.Schema == "wipd.connected-authority-profile/1" {
+		if len(config.OwnerRootPublicKey) != 0 || len(config.ArtifactKeyCertificate) != 0 {
+			return errors.New("wipdremote: legacy connected profile cannot contain acquisition trust fields")
+		}
+		_, _, err := authorityProfile(config)
+		return err
+	}
+	if len(config.OwnerRootPublicKey) != ed25519.PublicKeySize || len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
 	ownerDER, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(config.OwnerRootPublicKey))

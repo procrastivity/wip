@@ -35,7 +35,13 @@ func (s *Server) supportsClaimAcquire() bool {
 		return false
 	}
 	_, ok := coordinator.authority.(ClaimAcquireAuthority)
-	return ok
+	if !ok {
+		return false
+	}
+	if capability, ok := coordinator.authority.(interface{ SupportsClaimAcquisition() bool }); ok {
+		return capability.SupportsClaimAcquisition()
+	}
+	return true
 }
 
 func (s *Server) serveClaimAcquire(writer http.ResponseWriter, request *http.Request, hello serverHello, parameters sessionParameters, frame frameRecord) {

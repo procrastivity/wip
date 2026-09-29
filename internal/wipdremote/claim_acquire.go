@@ -19,7 +19,7 @@ import (
 // a validated terminal receipt and, on success, its verified signed grant.
 func (runtime *Runtime) AcquireClaim(ctx context.Context, attempt wipdjournal.ClaimAcquireAttempt, installed wipdwire.PrefixAnchor) (wipd.ClaimAcquireAuthorityResult, error) {
 	var empty wipd.ClaimAcquireAuthorityResult
-	if runtime == nil || runtime.client == nil || ctx == nil || attempt.ID == "" || attempt.RequestHash == "" ||
+	if runtime == nil || !runtime.SupportsClaimAcquisition() || runtime.client == nil || ctx == nil || attempt.ID == "" || attempt.RequestHash == "" ||
 		!sameAnchor(attempt.Installed, installed) || len(attempt.CanonicalBytes) == 0 {
 		return empty, wipdseed.ErrInvalidClientState
 	}

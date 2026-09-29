@@ -217,6 +217,25 @@ func (j *Journal) ClaimAcquireAttempt(commandID string) (ClaimAcquireAttempt, er
 	return readClaimAcquireAttempt(j.db, commandID)
 }
 
+// HasUnresolvedClaimAcquire reports whether another acquisition submission may
+// have crossed the authority boundary without its terminal receipt installed.
+func (j *Journal) HasUnresolvedClaimAcquire(exceptCommandID string) (bool, error) {
+	if j == nil {
+		return false, ErrClosed
+	}
+	if exceptCommandID != "" && !identityPattern.MatchString(exceptCommandID) {
+		return false, ErrInvalidCommand
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return false, ErrClosed
+	}
+	var count int
+	err := j.db.QueryRow(`SELECT count(*) FROM claim_acquire_attempts WHERE state='attempt-prepared' AND command_id!=?`, exceptCommandID).Scan(&count)
+	return count != 0, err
+}
+
 func readClaimAcquireAttempt(queryer interface {
 	QueryRow(string, ...any) *sql.Row
 }, commandID string,

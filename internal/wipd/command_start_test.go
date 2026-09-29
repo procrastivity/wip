@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,18 +149,20 @@ func (environment *commandStartTracedEnvironment) setCurrentID(commandID string)
 }
 
 type commandStartFakeAuthority struct {
-	trace           *commandStartTrace
-	returnResults   []operation.ResultCode
-	returnContinue  []bool
-	returnIndex     int
-	pullEventID     string
-	pullFailure     error
-	acks            []wipdwire.BirthJournalAck
-	releaseCalls    int
-	releaseFailure  error
-	releaseAttempts []wipdjournal.BirthReleaseCommand
-	releaseStarted  chan struct{}
-	releaseContinue <-chan struct{}
+	trace                *commandStartTrace
+	returnResults        []operation.ResultCode
+	returnContinue       []bool
+	returnIndex          int
+	pullEventID          string
+	pullFailure          error
+	acks                 []wipdwire.BirthJournalAck
+	releaseCalls         int
+	releaseFailure       error
+	releaseAttempts      []wipdjournal.BirthReleaseCommand
+	releaseStarted       chan struct{}
+	releaseContinue      <-chan struct{}
+	claimAcquireCalls    int
+	claimAcquireAttempts []wipdjournal.ClaimAcquireAttempt
 }
 
 func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipdjournal.Entry, start wipdwire.PrefixAnchor) (CommandFold, error) {
@@ -219,6 +222,13 @@ func (authority *commandStartFakeAuthority) Pull(_ context.Context, start wipdwi
 		DomainID: commandStartDomainID, Epoch: 7, Start: start, End: end,
 		Manifest: transfer.Manifest(), VerifiedTransfer: transfer,
 	}, nil
+}
+
+func (authority *commandStartFakeAuthority) AcquireClaim(_ context.Context, attempt wipdjournal.ClaimAcquireAttempt, _ wipdwire.PrefixAnchor) (ClaimAcquireAuthorityResult, error) {
+	authority.claimAcquireCalls++
+	authority.claimAcquireAttempts = append(authority.claimAcquireAttempts, attempt)
+	authority.trace.add("acquire:" + attempt.ID)
+	return ClaimAcquireAuthorityResult{}, errors.New("test stops after acquisition submission boundary")
 }
 
 func (authority *commandStartFakeAuthority) AcknowledgeBirthJournalEntry(_ context.Context, ack wipdwire.BirthJournalAck) error {
@@ -414,6 +424,114 @@ func TestConnectedCommandStartWithoutPendingPullsBeforeGuard(t *testing.T) {
 	}
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
 		t.Fatalf("empty-prefix command-start trace = %v, want %v", got, want)
+	}
+}
+
+func TestClaimAcquireReturnsPendingHeadsBeforePullAndSubmission(t *testing.T) {
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
+	pendingIDs := []string{commandStartCommandPrefix + "31", commandStartCommandPrefix + "32"}
+	for index, pendingID := range pendingIDs {
+		if _, err := journal.PrepareCommand(commandStartInput(pendingID, fmt.Sprintf("pending-before-acquire-%d", index))); err != nil {
+			t.Fatal(err)
+		}
+		admitCommandStartTestEntry(t, journal, pendingID)
+	}
+	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
+	authority.returnContinue = []bool{true, false}
+	environment.setCurrentID("")
+
+	acquireID := commandStartCommandPrefix + "33"
+	_, err := coordinator.AcquireClaim(context.Background(), acquireID, commandStartCommandPrefix+"3A",
+		commandStartCommandPrefix+"34", commandStartCommandPrefix+"35", commandStartCommandPrefix+"36", operation.Actor("human"))
+	if err == nil || len(authority.claimAcquireAttempts) != 1 || authority.claimAcquireCalls != 1 {
+		t.Fatalf("acquisition submission result err=%v calls=%d attempts=%+v; want test boundary reached after synchronization", err, authority.claimAcquireCalls, authority.claimAcquireAttempts)
+	}
+	var protocolTrace []string
+	for _, event := range trace.all() {
+		if event != "stable-snapshot" && !strings.HasPrefix(event, "snapshot:") {
+			protocolTrace = append(protocolTrace, event)
+		}
+	}
+	wantProtocolTrace := []string{
+		"return:" + pendingIDs[0],
+		"install-fold+receipt+tail+overlay:" + pendingIDs[0],
+		"return:" + pendingIDs[1],
+		"install-fold+receipt+tail+overlay:" + pendingIDs[1],
+		"pull:2", "install-pull+overlay", "acquire:" + acquireID,
+	}
+	if !equalCommandStartTrace(protocolTrace, wantProtocolTrace) {
+		t.Fatalf("claim acquisition protocol trace=%v, want %v (all trace: %v)", protocolTrace, wantProtocolTrace, trace.all())
+	}
+	attempt, err := journal.ClaimAcquireAttempt(acquireID)
+	if err != nil || attempt.Installed.EventCount != 3 || attempt.Installed.EventID == nil ||
+		*attempt.Installed.EventID != authority.pullEventID {
+		t.Fatalf("durable acquisition attempt=%+v err=%v; want Prepare after returned head and pull installation", attempt, err)
+	}
+	if got := authority.claimAcquireAttempts[0].Installed; !sameCommandStartAnchor(got, attempt.Installed) {
+		t.Fatalf("authority acquisition start=%+v differs from durable post-barrier anchor %+v", got, attempt.Installed)
+	}
+}
+
+func TestClaimAcquireBlocksOnRejectedReceiptBeforePullOrSubmission(t *testing.T) {
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
+	priorID := commandStartCommandPrefix + "41"
+	environment.setCurrentID(priorID)
+	authority.returnResults = []operation.ResultCode{operation.ResultRejected}
+	authority.returnContinue = []bool{false}
+	prior, err := coordinator.RunConnectedTerminal(context.Background(), commandStartInput(priorID, "rejected-before-acquire"),
+		func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+	if err != nil || !prior.Returned || prior.ResultCode != operation.ResultRejected {
+		t.Fatalf("setup terminal rejection=%+v err=%v", prior, err)
+	}
+	returnsBefore := authority.returnIndex
+	trace.mu.Lock()
+	trace.steps = nil
+	trace.mu.Unlock()
+
+	acquireID := commandStartCommandPrefix + "42"
+	if _, err = coordinator.AcquireClaim(context.Background(), acquireID, commandStartCommandPrefix+"43",
+		commandStartCommandPrefix+"44", commandStartCommandPrefix+"45", commandStartCommandPrefix+"46", operation.Actor("human")); !errors.Is(err, ErrCommandStartBlocked) {
+		t.Fatalf("acquisition after rejected predecessor err=%v; want blocked", err)
+	}
+	for _, event := range trace.all() {
+		if event != "stable-snapshot" && !strings.HasPrefix(event, "snapshot:") {
+			t.Fatalf("rejected predecessor allowed protocol side effect %q in trace %v", event, trace.all())
+		}
+	}
+	if authority.returnIndex != returnsBefore || authority.claimAcquireCalls != 0 {
+		t.Fatalf("rejected predecessor allowed Return/Submit: returns before=%d after=%d acquisition calls=%d", returnsBefore, authority.returnIndex, authority.claimAcquireCalls)
+	}
+	if _, err = journal.ClaimAcquireAttempt(acquireID); !errors.Is(err, wipdjournal.ErrNotFound) {
+		t.Fatalf("rejected predecessor left a prepared acquisition attempt: %v", err)
+	}
+}
+
+func TestClaimAcquireBlocksOnOtherUnresolvedAttemptBeforePullOrSubmit(t *testing.T) {
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
+	snapshot, err := environment.durable.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.PrepareClaimAcquire(commandStartCommandPrefix+"51", commandStartCommandPrefix+"52",
+		commandStartCommandPrefix+"53", commandStartCommandPrefix+"54", commandStartCommandPrefix+"55", "human", snapshot.Anchor); err != nil {
+		t.Fatal(err)
+	}
+
+	acquireID := commandStartCommandPrefix + "56"
+	if _, err = coordinator.AcquireClaim(context.Background(), acquireID, commandStartCommandPrefix+"57",
+		commandStartCommandPrefix+"58", commandStartCommandPrefix+"59", commandStartCommandPrefix+"5A", operation.Actor("human")); !errors.Is(err, ErrCommandStartBlocked) {
+		t.Fatalf("acquisition past unresolved predecessor err=%v; want blocked", err)
+	}
+	for _, event := range trace.all() {
+		if event != "stable-snapshot" && !strings.HasPrefix(event, "snapshot:") {
+			t.Fatalf("unresolved attempt allowed protocol side effect %q in trace %v", event, trace.all())
+		}
+	}
+	if authority.claimAcquireCalls != 0 || authority.returnIndex != 0 {
+		t.Fatalf("unresolved acquisition attempt caused Return/Submit: trace=%v returns=%d submits=%d", trace.all(), authority.returnIndex, authority.claimAcquireCalls)
+	}
+	if _, err = journal.ClaimAcquireAttempt(acquireID); !errors.Is(err, wipdjournal.ErrNotFound) {
+		t.Fatalf("unresolved predecessor left a second acquisition attempt: %v", err)
 	}
 }
 

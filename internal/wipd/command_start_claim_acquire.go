@@ -7,7 +7,6 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
-	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 // AcquireClaim synchronizes and installs the authority prefix, durably retains
@@ -29,29 +28,74 @@ func (coordinator *CommandStartCoordinator) AcquireClaim(ctx context.Context, co
 		return empty, ctx.Err()
 	}
 	defer release()
+	pendingRelease, err := coordinator.journal.HasPendingBirthRelease()
+	if err != nil {
+		return empty, err
+	}
+	if pendingRelease {
+		return empty, ErrCommandStartBlocked
+	}
 
-	attempt, err := coordinator.journal.ClaimAcquireAttempt(commandID)
-	if errors.Is(err, wipdjournal.ErrNotFound) {
+	attempt, attemptErr := coordinator.journal.ClaimAcquireAttempt(commandID)
+	if attemptErr != nil && !errors.Is(attemptErr, wipdjournal.ErrNotFound) {
+		return empty, attemptErr
+	}
+	otherAttemptPending, pendingErr := coordinator.journal.HasUnresolvedClaimAcquire(commandID)
+	if pendingErr != nil {
+		return empty, pendingErr
+	}
+	if otherAttemptPending {
+		return empty, ErrCommandStartBlocked
+	}
+	if errors.Is(attemptErr, wipdjournal.ErrNotFound) {
 		before, snapshotErr := coordinator.environment.Snapshot(ctx)
 		if snapshotErr != nil {
 			return empty, snapshotErr
 		}
-		pull, pullErr := coordinator.authority.Pull(ctx, before.Anchor)
+		identity := coordinator.journal.Identity()
+		barrierCommand := operation.Command{
+			AuthorityDomainID: identity.DomainID, ExpectedAuthorityEpoch: identity.AuthorityEpoch, EnvironmentID: identity.EnvironmentID,
+		}
+		if !validCommandStartSnapshot(before, barrierCommand) {
+			return empty, ErrCommandStartIdentity
+		}
+		entries, entriesErr := coordinator.journal.Entries()
+		if entriesErr != nil {
+			return empty, entriesErr
+		}
+		barrierEntry := wipdjournal.Entry{Command: barrierCommand, EnvironmentSeq: ^uint64(0)}
+		pending, pendingErr := commandStartPending(entries, before, barrierEntry)
+		if pendingErr != nil {
+			return empty, pendingErr
+		}
+		installed, stopped, returnErr := coordinator.returnPending(ctx, barrierCommand, wipdjournal.Entry{}, before, pending, nil)
+		if returnErr != nil {
+			return empty, returnErr
+		}
+		if stopped {
+			return empty, ErrCommandStartBlocked
+		}
+		pull, pullErr := coordinator.authority.Pull(ctx, installed.Anchor)
 		if pullErr != nil {
 			return empty, pullErr
 		}
-		if err = validateClaimAcquirePull(coordinator.domainID, before.Epoch, before.Anchor, pull); err != nil {
+		if err = validateCommandPull(coordinator.domainID, before.Epoch, installed.Anchor, pull); err != nil {
 			return empty, err
 		}
-		installed, installErr := coordinator.environment.InstallPull(ctx, before, pull)
+		previousSnapshot := installed
+		installed, installErr := coordinator.environment.InstallPull(ctx, installed, pull)
 		if installErr != nil {
 			return empty, installErr
+		}
+		installed = cloneCommandStartSnapshot(installed)
+		if installed.Revision <= previousSnapshot.Revision || !validCommandStartSnapshot(installed, barrierCommand) ||
+			!sameCommandStartAnchor(installed.Anchor, pull.End) || installed.ManifestDigest != pull.Manifest.Digest ||
+			!commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
+			return empty, ErrCommandStartIdentity
 		}
 		if attempt, err = coordinator.journal.PrepareClaimAcquire(commandID, matterID, cloneID, worktreeID, dispatchID, string(actor), installed.Anchor); err != nil {
 			return empty, err
 		}
-	} else if err != nil {
-		return empty, err
 	} else if attempt.MatterID != matterID || attempt.CloneID != cloneID || attempt.WorktreeID != worktreeID ||
 		attempt.DispatchID != dispatchID || attempt.Actor != string(actor) {
 		return empty, wipdjournal.ErrCommandIDConflict
@@ -120,15 +164,4 @@ func (coordinator *CommandStartCoordinator) AcquireClaim(ctx context.Context, co
 
 func snapshotInstallExpectation(snapshot CommandStartSnapshot) wipdjournal.InstallExpectation {
 	return wipdjournal.InstallExpectation{Revision: snapshot.Revision, Anchor: snapshot.Anchor, ManifestDigest: snapshot.ManifestDigest}
-}
-
-func validateClaimAcquirePull(domainID string, epoch uint64, start wipdwire.PrefixAnchor, pull CommandPull) error {
-	if pull.DomainID != domainID || pull.Epoch != epoch || !sameCommandStartAnchor(pull.Start, start) ||
-		!pull.VerifiedTransfer.Valid() || pull.VerifiedTransfer.DomainID() != domainID || pull.VerifiedTransfer.Epoch() != epoch ||
-		!sameCommandStartAnchor(pull.VerifiedTransfer.Start(), start) || !sameCommandStartAnchor(pull.VerifiedTransfer.End(), pull.End) ||
-		pull.Manifest.DomainID != domainID || pull.Manifest.Epoch != epoch || !sameCommandStartAnchor(pull.Manifest.AsOf, pull.End) ||
-		pull.Manifest.Digest == "" || pull.Manifest.Digest != pull.VerifiedTransfer.Manifest().Digest {
-		return ErrCommandStartIdentity
-	}
-	return nil
 }

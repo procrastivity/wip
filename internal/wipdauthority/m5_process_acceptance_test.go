@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -446,6 +447,42 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	if err != nil || refused.Code != operation.ResultRefused || refused.Grant != nil || len(refused.Receipt) == 0 ||
 		!sameAuthorityAnchor(refused.Installed, acquired.Installed) {
 		t.Fatalf("second acquisition refusal and authenticated pull after reopen = %+v, %v; daemon=%s", refused, err, assertOutput.String())
+	}
+	if err = assertClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopAssertDaemon()
+	legacyConfig := map[string]any{
+		"schema": "wipd.connected-authority-profile/1", "origin": config.Origin, "domain_id": config.DomainID,
+		"authority_epoch": config.Epoch, "repo_id": config.RepoID, "owner_root_spki": config.OwnerRootSPKI,
+		"authority_spki_pin": config.AuthoritySPKIPin, "authority_certificate_der": config.AuthorityCertificateDER,
+		"client_state_directory": config.ClientStateDirectory,
+	}
+	legacyConfigBytes, err := json.Marshal(legacyConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(profileRoot, "connected-authority.json"), legacyConfigBytes, 0o600); err != nil {
+		t.Fatalf("restore legacy v1 connected profile: %v", err)
+	}
+	legacyClient, stopLegacyDaemon, legacyOutput := startWipdForBirthReleaseRecovery(t, binary, profileRoot)
+	defer stopLegacyDaemon()
+	defer func() { _ = legacyClient.Close() }()
+	legacyReplay, err := legacyClient.ExecuteCommand(context.Background(), step)
+	if err != nil || legacyReplay.Code != operation.ResultSucceeded || legacyReplay.Output != stepResult.Output {
+		t.Fatalf("existing connected Step replay through reopened v1 profile = %+v, %v; daemon=%s", legacyReplay, err, legacyOutput.String())
+	}
+	legacyReleaseReplay, err := legacyClient.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human"))
+	if err != nil || legacyReleaseReplay.Code != operation.ResultSucceeded || !bytes.Equal(legacyReleaseReplay.Receipt, release.Receipt) {
+		t.Fatalf("existing birth-release replay through reopened v1 profile = %+v, %v; daemon=%s", legacyReleaseReplay, err, legacyOutput.String())
+	}
+	if _, err = legacyClient.AcquireClaim(context.Background(), acquireID, matterOutput.ID, cloneID, worktreeID, dispatchID, operation.Actor("human")); err == nil {
+		t.Fatal("legacy v1 profile accepted claim acquisition without negotiated trust")
+	} else {
+		var exchangeErr *wipd.ExchangeError
+		if !errors.As(err, &exchangeErr) || exchangeErr.Code != "protocol.unsupported-extension" {
+			t.Fatalf("legacy acquisition refusal = %v; want feature-not-negotiated", err)
+		}
 	}
 }
 
