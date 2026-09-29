@@ -211,7 +211,10 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 		_ = client.Close()
 		return nil, wipdseed.ErrInvalidClientState
 	}
-	identity := wipdjournal.Identity{RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch, EnvironmentID: state.EnvironmentID}
+	identity := wipdjournal.Identity{
+		RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID,
+	}
 	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), identity)
 	if err != nil {
 		_ = client.Close()

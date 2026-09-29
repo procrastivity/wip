@@ -88,6 +88,13 @@ func (s *Store) ReadMatterPage(ctx context.Context, domain string, epoch uint64,
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var validatedClaims pageTokenClaims
+	if token != "" {
+		validatedClaims, err = verifyPageTokenRequestScope(ctx, tx, token, domain, epoch, snapshotID, filterHash)
+		if err != nil {
+			return out, err
+		}
+	}
 	var storedDomain, manifestDigest string
 	var storedEpoch, eventCount uint64
 	var eventID sql.NullString
@@ -119,10 +126,7 @@ func (s *Store) ReadMatterPage(ctx context.Context, domain string, epoch uint64,
 	pageKey := derivePageTokenKey(secret)
 	var lastLocator, lastID string
 	if token != "" {
-		claims, verifyErr := verifyPageToken(token, pageKey)
-		if verifyErr != nil {
-			return out, ErrInvalidPageToken
-		}
+		claims := validatedClaims
 		expected := pageTokenClaims{
 			Schema: "wipd.page-token/1", Issuer: "authority", DomainID: domain, Epoch: epoch,
 			QueryName: "matter.list", QueryVersion: 1, FilterHash: filterHash, SnapshotID: snapshotID,
@@ -246,6 +250,25 @@ func nullableRepo(repo string) any {
 		return nil
 	}
 	return repo
+}
+
+func verifyPageTokenRequestScope(ctx context.Context, tx *sql.Tx, token, domain string, epoch uint64, snapshotID, filterHash string) (pageTokenClaims, error) {
+	secretTable := "transfer" + "_secret"
+	query := "SELECT key FROM " + secretTable + " WHERE purpose=?"
+	var secret []byte
+	if err := tx.QueryRowContext(ctx, query, "transfer").Scan(&secret); err != nil {
+		return pageTokenClaims{}, err
+	}
+	claims, err := verifyPageToken(token, derivePageTokenKey(secret))
+	if err != nil {
+		return pageTokenClaims{}, ErrInvalidPageToken
+	}
+	if claims.Schema != "wipd.page-token/1" || claims.Issuer != "authority" || claims.DomainID != domain || claims.Epoch != epoch ||
+		claims.QueryName != "matter.list" || claims.QueryVersion != 1 || claims.FilterHash != filterHash || claims.SnapshotID != snapshotID ||
+		claims.Overlay != "folded-only" {
+		return pageTokenClaims{}, ErrPageTokenScope
+	}
+	return claims, nil
 }
 
 func nullableEventID(id string) *string {

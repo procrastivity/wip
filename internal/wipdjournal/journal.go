@@ -35,7 +35,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 4
+	schemaVersion  = 5
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -74,6 +74,9 @@ type Identity struct {
 	DomainID       string
 	AuthorityEpoch uint64
 	EnvironmentID  string
+	// OwnerRootSPKI pins signed claim-grant evidence when configured by the
+	// installed client profile. Empty preserves journals without claim grants.
+	OwnerRootSPKI string
 }
 
 // CommandInput is the caller-allocated command identity and semantic intent.
@@ -212,13 +215,24 @@ func Open(root string, identity Identity) (*Journal, error) {
 			if err == nil {
 				err = upgradeSchemaV3(db, identity)
 			}
+			if err == nil {
+				err = upgradeSchemaV4(db, identity)
+			}
 		} else if err == nil && version == 2 {
 			err = upgradeSchemaV2(db, identity)
 			if err == nil {
 				err = upgradeSchemaV3(db, identity)
 			}
+			if err == nil {
+				err = upgradeSchemaV4(db, identity)
+			}
 		} else if err == nil && version == 3 {
 			err = upgradeSchemaV3(db, identity)
+			if err == nil {
+				err = upgradeSchemaV4(db, identity)
+			}
+		} else if err == nil && version == 4 {
+			err = upgradeSchemaV4(db, identity)
 		} else if err == nil {
 			err = checkIdentity(db, identity)
 		}
@@ -806,7 +820,8 @@ func cloneRequest(request operation.Request) operation.Request {
 
 func validIdentity(identity Identity) bool {
 	return identityPattern.MatchString(identity.RepoID) && identityPattern.MatchString(identity.DomainID) &&
-		identity.AuthorityEpoch > 0 && identity.AuthorityEpoch <= uint64(^uint64(0)>>1) && identityPattern.MatchString(identity.EnvironmentID)
+		identity.AuthorityEpoch > 0 && identity.AuthorityEpoch <= uint64(^uint64(0)>>1) && identityPattern.MatchString(identity.EnvironmentID) &&
+		(identity.OwnerRootSPKI == "" || transferHash.MatchString(identity.OwnerRootSPKI))
 }
 
 func validDigest(digest string) bool {
@@ -862,7 +877,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=4), name TEXT NOT NULL CHECK(name='environment-claim-hydration-pins')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=5), name TEXT NOT NULL CHECK(name='environment-verified-claim-grants')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -904,8 +919,8 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(4, 'environment-claim-hydration-pins')`,
-		`PRAGMA user_version=4`,
+		`INSERT INTO schema_migrations(version, name) VALUES(5, 'environment-verified-claim-grants')`,
+		`PRAGMA user_version=5`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
@@ -918,6 +933,9 @@ func installSchema(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if err = createClaimHydrationSchema(tx); err != nil {
+		return err
+	}
+	if err = createInstalledClaimGrantSchema(tx); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
@@ -944,17 +962,19 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=4`).Scan(&migration); err != nil || migration != "environment-claim-hydration-pins" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=5`).Scan(&migration); err != nil || migration != "environment-verified-claim-grants" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
 }
 
-func checkSchemaObjects(db *sql.DB) error { return checkSchemaObjectsVersion(db, true) }
+func checkSchemaObjects(db *sql.DB) error { return checkSchemaObjectsVersion(db, true, true) }
 
-func checkSchemaObjectsV3(db *sql.DB) error { return checkSchemaObjectsVersion(db, false) }
+func checkSchemaObjectsV3(db *sql.DB) error { return checkSchemaObjectsVersion(db, false, false) }
 
-func checkSchemaObjectsVersion(db *sql.DB, includeHydration bool) error {
+func checkSchemaObjectsV4(db *sql.DB) error { return checkSchemaObjectsVersion(db, true, false) }
+
+func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants bool) error {
 	expected := map[string]string{
 		"schema_migrations": "table", "environment_state": "table", "environment_identity_immutable": "trigger",
 		"environment_counters_increment": "trigger", "commands": "table", "commands_pending_order": "index",
@@ -978,6 +998,12 @@ func checkSchemaObjectsVersion(db *sql.DB, includeHydration bool) error {
 		expected["hydration_pins"] = "table"
 		expected["hydration_pin_no_update"] = "trigger"
 		expected["hydration_pin_no_delete"] = "trigger"
+	}
+	if includeClaimGrants {
+		expected["installed_claim_grants"] = "table"
+		expected["installed_claim_grant_no_update"] = "trigger"
+		expected["installed_claim_grant_no_delete"] = "trigger"
+		expected["hydration_grant_requires_installed"] = "trigger"
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {

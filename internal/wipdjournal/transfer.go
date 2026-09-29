@@ -178,7 +178,9 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released") || !transferULID.MatchString(asString(fields["command_id"])) ||
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
+			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened") ||
+		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
 	}
@@ -195,6 +197,25 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return false
 	}
 	switch fields["kind"] {
+	case "batch.anonymous-created":
+		batchID := asString(payload["batch_id"])
+		matterID := asString(payload["matter_id"])
+		return wipdwire.ExactMapKeys(payload, "batch_id", "matter_id") &&
+			transferULID.MatchString(batchID) && transferULID.MatchString(matterID) && fields["subject_id"] == batchID
+	case "claim.acquired":
+		claimID := asString(payload["claim_id"])
+		_, epochOK := payload["claim_epoch"].(uint64)
+		return wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "matter_id", "batch_id", "dispatch_id", "owner_environment_id", "worktree_id") &&
+			transferULID.MatchString(claimID) && fields["subject_id"] == claimID && epochOK && positiveUint(payload["claim_epoch"]) &&
+			transferULID.MatchString(asString(payload["matter_id"])) && transferULID.MatchString(asString(payload["batch_id"])) &&
+			transferULID.MatchString(asString(payload["dispatch_id"])) && transferULID.MatchString(asString(payload["owner_environment_id"])) &&
+			transferULID.MatchString(asString(payload["worktree_id"]))
+	case "dispatch.opened":
+		dispatchID := asString(payload["dispatch_id"])
+		return wipdwire.ExactMapKeys(payload, "dispatch_id", "matter_id", "batch_id", "claim_id", "worktree_id") &&
+			transferULID.MatchString(dispatchID) && fields["subject_id"] == dispatchID &&
+			transferULID.MatchString(asString(payload["matter_id"])) && transferULID.MatchString(asString(payload["batch_id"])) &&
+			transferULID.MatchString(asString(payload["claim_id"])) && transferULID.MatchString(asString(payload["worktree_id"]))
 	case "matter.created":
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&

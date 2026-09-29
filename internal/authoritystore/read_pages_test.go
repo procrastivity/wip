@@ -31,8 +31,21 @@ func TestAuthorityMatterPagesRemainPinnedAndTokensRemainScopedAcrossReopen(t *te
 		t.Fatalf("first page item/token = %+v %q %v; want alpha and continuation", item, first.NextPageToken, err)
 	}
 	currentToken := first.NextPageToken
+	otherSnapshot, err := store.PinSnapshot(ctx, domainA, 7, emptyAnchor(), repoC, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("pin a second snapshot for scope test: %v", err)
+	}
 	if _, err = store.ReadMatterPage(ctx, domainA, 7, pinned.ID, repoB, 1, currentToken, now); !errors.Is(err, ErrPageTokenScope) {
 		t.Fatalf("token accepted a different filter: %v", err)
+	}
+	if _, err = store.ReadMatterPage(ctx, domainB, 7, pinned.ID, repoA, 1, currentToken, now); !errors.Is(err, ErrPageTokenScope) {
+		t.Fatalf("valid token with wrong request domain was fenced before scope validation: %v", err)
+	}
+	if _, err = store.ReadMatterPage(ctx, domainA, 8, pinned.ID, repoA, 1, currentToken, now); !errors.Is(err, ErrPageTokenScope) {
+		t.Fatalf("valid token with wrong request epoch was fenced before scope validation: %v", err)
+	}
+	if _, err = store.ReadMatterPage(ctx, domainA, 7, otherSnapshot.ID, repoA, 1, currentToken, now); !errors.Is(err, ErrPageTokenScope) {
+		t.Fatalf("valid token with wrong snapshot scope was not rejected as scope: %v", err)
 	}
 	separator := strings.LastIndexByte(currentToken, '.')
 	if separator < 0 || separator == len(currentToken)-1 {
@@ -45,7 +58,7 @@ func TestAuthorityMatterPagesRemainPinnedAndTokensRemainScopedAcrossReopen(t *te
 		tamperedMAC = "A" + tamperedMAC[1:]
 	}
 	tampered := currentToken[:separator+1] + tamperedMAC
-	if _, err = store.ReadMatterPage(ctx, domainA, 7, pinned.ID, repoA, 1, tampered, now); !errors.Is(err, ErrInvalidPageToken) {
+	if _, err = store.ReadMatterPage(ctx, domainB, 7, pinned.ID, repoA, 1, tampered, now); !errors.Is(err, ErrInvalidPageToken) {
 		t.Fatalf("tampered token accepted: %v", err)
 	}
 	completedMatter(t, store, now, 3, grantA, grantA, "zulu", peer)

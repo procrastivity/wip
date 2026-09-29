@@ -3,6 +3,7 @@ package wipdjournal
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -68,6 +70,53 @@ func createClaimHydrationSchema(executor sqlExecutor) error {
 	return nil
 }
 
+func createInstalledClaimGrantSchema(executor sqlExecutor) error {
+	for _, statement := range []string{
+		`CREATE TABLE installed_claim_grants(
+			grant_id TEXT PRIMARY KEY,
+			acquire_command_id TEXT NOT NULL UNIQUE,
+			acquire_request_hash TEXT NOT NULL CHECK(length(acquire_request_hash)=71),
+			claim_id TEXT NOT NULL,
+			claim_epoch INTEGER NOT NULL CHECK(claim_epoch>0),
+			matter_id TEXT NOT NULL,
+			batch_id TEXT NOT NULL,
+			dispatch_id TEXT NOT NULL,
+			owner_root_spki TEXT NOT NULL CHECK(length(owner_root_spki)=71),
+			owner_root_public_key BLOB NOT NULL CHECK(length(owner_root_public_key)=32),
+			artifact_key_certificate BLOB NOT NULL,
+			verified_at TEXT NOT NULL,
+			start_count INTEGER NOT NULL CHECK(start_count>=0),
+			start_event_id TEXT,
+			start_digest TEXT NOT NULL CHECK(length(start_digest)=71),
+			end_count INTEGER NOT NULL CHECK(end_count>=start_count),
+			end_event_id TEXT,
+			end_digest TEXT NOT NULL CHECK(length(end_digest)=71),
+			manifest_digest TEXT NOT NULL CHECK(length(manifest_digest)=71),
+			grant_wrapper BLOB NOT NULL,
+			grant_start BLOB NOT NULL,
+			grant_end BLOB NOT NULL,
+			acquire_receipt BLOB NOT NULL,
+			manifest BLOB NOT NULL,
+			CHECK((start_count=0 AND start_event_id IS NULL) OR (start_count>0 AND start_event_id IS NOT NULL)),
+			CHECK((end_count=0 AND end_event_id IS NULL) OR (end_count>0 AND end_event_id IS NOT NULL))
+		) STRICT, WITHOUT ROWID`,
+		`CREATE TRIGGER installed_claim_grant_no_update BEFORE UPDATE ON installed_claim_grants
+			BEGIN SELECT RAISE(ABORT,'immutable installed claim grant'); END`,
+		`CREATE TRIGGER installed_claim_grant_no_delete BEFORE DELETE ON installed_claim_grants
+			BEGIN SELECT RAISE(ABORT,'retained installed claim grant'); END`,
+		`CREATE TRIGGER hydration_grant_requires_installed BEFORE INSERT ON hydration_grants
+			WHEN NOT EXISTS(SELECT 1 FROM installed_claim_grants g WHERE g.grant_id=NEW.grant_id AND g.claim_id=NEW.claim_id AND
+				g.claim_epoch=NEW.claim_epoch AND g.end_count=NEW.as_of_count AND g.end_event_id IS NEW.as_of_event_id AND
+				g.end_digest=NEW.as_of_digest AND g.manifest_digest=NEW.manifest_digest AND g.manifest=NEW.manifest)
+			BEGIN SELECT RAISE(ABORT,'hydration requires an atomically installed claim grant'); END`,
+	} {
+		if _, err := executor.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // upgradeSchemaV3 adds only the durable grant-bound hydration index. Blob
 // bytes and command/receipt evidence remain untouched.
 func upgradeSchemaV3(db *sql.DB, identity Identity) error {
@@ -110,51 +159,86 @@ func upgradeSchemaV3(db *sql.DB, identity Identity) error {
 	return tx.Commit()
 }
 
-// BeginClaimHydration binds the complete, previously installed authority
-// manifest to one grant. It does not trust an uninstalled caller manifest.
-func (j *Journal) BeginClaimHydration(ctx context.Context, grantID, claimID string, claimEpoch uint64, manifest wipdwire.BlobManifest) (ClaimHydration, error) {
-	if j == nil || ctx == nil || !transferULID.MatchString(grantID) || !transferULID.MatchString(claimID) || claimEpoch == 0 ||
-		manifest.DomainID != j.identity.DomainID || manifest.Epoch != j.identity.AuthorityEpoch || verifyManifest(manifest) != nil {
-		return ClaimHydration{}, ErrInvalidTransfer
+// upgradeSchemaV4 adds the acquisition proof table. v4 readiness rows were
+// created from caller-supplied claim IDs and cannot be promoted to verified
+// acquisition evidence; fail closed rather than recovering them as ready.
+func upgradeSchemaV4(db *sql.DB, identity Identity) error {
+	var version int
+	var repoID, domainID, environmentID, marker string
+	var epoch int64
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
+		return fmt.Errorf("%w: Environment claim-grant upgrade requires v4, got %d (%v)", ErrInvalidJournal, version, err)
 	}
-	encoded, err := encodeManifest(manifest)
+	if err := db.QueryRow(`SELECT repo_id,domain_id,authority_epoch,environment_id FROM environment_state WHERE singleton=1`).Scan(&repoID, &domainID, &epoch, &environmentID); err != nil ||
+		repoID != identity.RepoID || domainID != identity.DomainID || epoch != int64(identity.AuthorityEpoch) || environmentID != identity.EnvironmentID {
+		return ErrInvalidIdentity
+	}
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=4`).Scan(&marker); err != nil || marker != "environment-claim-hydration-pins" {
+		return fmt.Errorf("%w: v4 claim-grant-upgrade marker %q: %v", ErrInvalidJournal, marker, err)
+	}
+	if err := checkSchemaObjectsV4(db); err != nil {
+		return fmt.Errorf("%w: v4 claim-grant-upgrade schema: %v", ErrInvalidJournal, err)
+	}
+	var oldReadiness int
+	if err := db.QueryRow(`SELECT count(*) FROM hydration_grants`).Scan(&oldReadiness); err != nil {
+		return err
+	}
+	if oldReadiness != 0 {
+		return fmt.Errorf("%w: v4 contains hydration readiness without acquisition proof", ErrInvalidJournal)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
-		return ClaimHydration{}, err
+		return err
 	}
-	required := requiredManifestEntries(manifest)
-	state := "hydrating"
-	if required == 0 {
-		state = "offline-ready"
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`DROP TABLE schema_migrations`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=5),name TEXT NOT NULL CHECK(name='environment-verified-claim-grants')) STRICT`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version,name) VALUES(5,'environment-verified-claim-grants')`); err != nil {
+		return err
+	}
+	if err = createInstalledClaimGrantSchema(tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=5`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BeginClaimHydration returns readiness created atomically with an installed,
+// signature-verified acquisition grant. It accepts no caller claim IDs or
+// manifest that could create an unbound empty-closure success.
+func (j *Journal) BeginClaimHydration(ctx context.Context, grantID string) (ClaimHydration, error) {
+	if j == nil || ctx == nil || !transferULID.MatchString(grantID) {
+		return ClaimHydration{}, ErrInvalidTransfer
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.db == nil {
 		return ClaimHydration{}, ErrClosed
 	}
-	tx, err := j.db.BeginTx(ctx, nil)
+	tx, err := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return ClaimHydration{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	installed, err := readInstallState(tx)
-	if err != nil {
+	var installed bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM installed_claim_grants WHERE grant_id=?)`, grantID).Scan(&installed); err != nil {
 		return ClaimHydration{}, err
 	}
-	if installed.manifestDigest != manifest.Digest || !bytes.Equal(installed.manifest, encoded) || !sameTransferAnchor(installed.anchor, manifest.AsOf) {
-		return ClaimHydration{}, ErrInvalidTransfer
-	}
-	var eventID any
-	if manifest.AsOf.EventID != nil {
-		eventID = *manifest.AsOf.EventID
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO hydration_grants(grant_id,claim_id,claim_epoch,as_of_count,as_of_event_id,as_of_digest,manifest_digest,manifest,required_entry_count,state)
-		VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(grant_id) DO NOTHING`, grantID, claimID, claimEpoch, manifest.AsOf.EventCount, eventID,
-		manifest.AsOf.Digest, manifest.Digest, encoded, required, state); err != nil {
-		return ClaimHydration{}, err
+	if !installed {
+		return ClaimHydration{}, ErrNotFound
 	}
 	actual, err := readClaimHydration(tx, grantID)
-	if err != nil || actual.ClaimID != claimID || actual.ClaimEpoch != claimEpoch || actual.ManifestDigest != manifest.Digest || !sameTransferAnchor(actual.AsOf, manifest.AsOf) {
-		return ClaimHydration{}, ErrInvalidTransfer
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClaimHydration{}, ErrInvalidJournal
+	}
+	if err != nil {
+		return ClaimHydration{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return ClaimHydration{}, err
@@ -350,6 +434,13 @@ func requiredManifestEntries(manifest wipdwire.BlobManifest) uint64 {
 }
 
 func checkClaimHydrationState(db *sql.DB, identity Identity, blobDir string) error {
+	var installedCount, hydrationCount int
+	if err := db.QueryRow(`SELECT count(*) FROM installed_claim_grants`).Scan(&installedCount); err != nil {
+		return err
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM hydration_grants`).Scan(&hydrationCount); err != nil || installedCount != hydrationCount {
+		return ErrInvalidJournal
+	}
 	rows, err := db.Query(`SELECT grant_id,claim_id,claim_epoch,as_of_count,as_of_event_id,as_of_digest,manifest_digest,manifest,required_entry_count,state FROM hydration_grants ORDER BY grant_id`)
 	if err != nil {
 		return err
@@ -390,6 +481,12 @@ func checkClaimHydrationState(db *sql.DB, identity Identity, blobDir string) err
 		return err
 	}
 	for _, item := range grants {
+		installed, grantErr := verifyInstalledClaimGrant(db, identity, item.id)
+		if grantErr != nil || installed.claimID != item.claimID || installed.claimEpoch != item.claimEpoch ||
+			!sameTransferAnchor(installed.end, wipdwire.PrefixAnchor{EventCount: item.asOfCount, EventID: optionalString(item.eventID), Digest: item.asOfDigest}) ||
+			installed.manifest.Digest != item.manifestDigest {
+			return ErrInvalidJournal
+		}
 		pinned, pinErr := verifyClaimPins(db, item.id, item.manifest, blobDir)
 		if pinErr != nil {
 			return pinErr
@@ -401,6 +498,99 @@ func checkClaimHydrationState(db *sql.DB, identity Identity, blobDir string) err
 	return nil
 }
 
+func verifyInstalledClaimGrant(db *sql.DB, identity Identity, grantID string) (VerifiedClaimGrant, error) {
+	var grant VerifiedClaimGrant
+	var acquireID, requestHash, claimID, matterID, batchID, dispatchID, ownerSPKI, verifiedAt string
+	var ownerPublic, certificate, wrapper, startBytes, endBytes, receiptBytes, manifestBytes []byte
+	var startCount, endCount, claimEpoch int64
+	var startEventID, endEventID sql.NullString
+	var startDigest, endDigest, manifestDigest string
+	err := db.QueryRow(`SELECT acquire_command_id,acquire_request_hash,claim_id,claim_epoch,matter_id,batch_id,dispatch_id,
+		owner_root_spki,owner_root_public_key,artifact_key_certificate,verified_at,start_count,start_event_id,start_digest,
+		end_count,end_event_id,end_digest,manifest_digest,grant_wrapper,grant_start,grant_end,acquire_receipt,manifest
+		FROM installed_claim_grants WHERE grant_id=?`, grantID).Scan(
+		&acquireID, &requestHash, &claimID, &claimEpoch, &matterID, &batchID, &dispatchID,
+		&ownerSPKI, &ownerPublic, &certificate, &verifiedAt, &startCount, &startEventID, &startDigest,
+		&endCount, &endEventID, &endDigest, &manifestDigest, &wrapper, &startBytes, &endBytes, &receiptBytes, &manifestBytes)
+	if err != nil {
+		return grant, err
+	}
+	if identity.OwnerRootSPKI == "" || ownerSPKI != identity.OwnerRootSPKI || startCount < 0 || endCount < startCount || claimEpoch <= 0 ||
+		uint64(endCount-startCount) > maxVerifiedEvents || startEventID.Valid != (startCount > 0) || endEventID.Valid != (endCount > 0) {
+		return grant, ErrInvalidJournal
+	}
+	var currentCount int64
+	if err = db.QueryRow(`SELECT event_count FROM environment_install WHERE singleton=1`).Scan(&currentCount); err != nil || currentCount < endCount {
+		return grant, ErrInvalidJournal
+	}
+	start, startOK := storedGrantAnchor(uint64(startCount), startEventID, startDigest)
+	end, endOK := storedGrantAnchor(uint64(endCount), endEventID, endDigest)
+	if !startOK || !endOK {
+		return grant, ErrInvalidJournal
+	}
+	var manifest wipdwire.BlobManifest
+	if wipdwire.DecodeCanonical(manifestBytes, &manifest, "schema", "domain_id", "authority_epoch", "as_of", "entries", "manifest_digest") != nil ||
+		manifest.Digest != manifestDigest || !sameTransferAnchor(manifest.AsOf, end) || manifest.DomainID != identity.DomainID ||
+		manifest.Epoch != identity.AuthorityEpoch || verifyManifest(manifest) != nil {
+		return grant, ErrInvalidJournal
+	}
+	rows, err := db.Query(`SELECT event_id,record FROM installed_events WHERE position>? AND position<=? ORDER BY position`, startCount, endCount)
+	if err != nil {
+		return grant, err
+	}
+	records := make([]wipdwire.EventRecord, 0, endCount-startCount)
+	for rows.Next() {
+		var record wipdwire.EventRecord
+		if err = rows.Scan(&record.EventID, &record.Record); err != nil {
+			break
+		}
+		records = append(records, record)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	if err != nil || uint64(len(records)) != uint64(endCount-startCount) {
+		return grant, ErrInvalidJournal
+	}
+	transfer, err := VerifyTransfer(identity.DomainID, identity.AuthorityEpoch, start, end, records, manifest)
+	if err != nil {
+		return grant, ErrInvalidJournal
+	}
+	verifiedAtTime, parseErr := time.Parse(time.RFC3339Nano, verifiedAt)
+	if parseErr != nil || verifiedAtTime.UTC().Format(time.RFC3339Nano) != verifiedAt {
+		return grant, ErrInvalidJournal
+	}
+	grant, err = VerifyClaimGrant(identity, ClaimGrantTrust{
+		OwnerRootPublicKey: ed25519.PublicKey(ownerPublic), OwnerRootSPKI: ownerSPKI, VerifiedAt: verifiedAtTime,
+	}, ClaimGrantEvidence{
+		ArtifactKeyCertificate: certificate, Wrapper: wrapper, Start: startBytes, End: endBytes, Transfer: transfer,
+	})
+	encodedManifest, encodeErr := encodeManifest(grant.manifest)
+	if err != nil || encodeErr != nil || grant.acquireCommandID != acquireID || grant.acquireRequestHash != requestHash || grant.claimID != claimID ||
+		grant.claimEpoch != uint64(claimEpoch) || grant.matterID != matterID || grant.batchID != batchID || grant.dispatchID != dispatchID ||
+		!bytes.Equal(grant.receipt, receiptBytes) || !bytes.Equal(encodedManifest, manifestBytes) {
+		return VerifiedClaimGrant{}, ErrInvalidJournal
+	}
+	return grant, nil
+}
+
+func storedGrantAnchor(count uint64, eventID sql.NullString, digest string) (wipdwire.PrefixAnchor, bool) {
+	anchor := wipdwire.PrefixAnchor{EventCount: count, Digest: digest}
+	if eventID.Valid {
+		anchor.EventID = &eventID.String
+	}
+	return anchor, validTransferAnchor(anchor) && eventID.Valid == (count > 0)
+}
+
+func optionalString(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	text := value.String
+	return &text
+}
+
 func claimHydrationReady(db *sql.DB, claim *operation.ClaimContext, blobDir string) error {
 	if claim == nil || claim.ID == "" || claim.Epoch == "" {
 		return ErrClaimNotReady
@@ -410,7 +600,10 @@ func claimHydrationReady(db *sql.DB, claim *operation.ClaimContext, blobDir stri
 		return ErrClaimNotReady
 	}
 	var grantID string
-	if err = db.QueryRow(`SELECT grant_id FROM hydration_grants WHERE claim_id=? AND claim_epoch=? AND state='offline-ready'`, claim.ID, epoch).Scan(&grantID); err != nil {
+	if err = db.QueryRow(`SELECT h.grant_id FROM hydration_grants h JOIN installed_claim_grants g ON g.grant_id=h.grant_id
+		WHERE h.claim_id=? AND h.claim_epoch=? AND h.state='offline-ready' AND g.claim_id=h.claim_id AND g.claim_epoch=h.claim_epoch AND
+		g.end_count=h.as_of_count AND g.end_event_id IS h.as_of_event_id AND g.end_digest=h.as_of_digest AND g.manifest_digest=h.manifest_digest AND g.manifest=h.manifest`,
+		claim.ID, epoch).Scan(&grantID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrClaimNotReady
 		}
@@ -426,7 +619,10 @@ func checkOneClaimHydration(db *sql.DB, grantID, blobDir string) error {
 	var manifestBytes []byte
 	var required uint64
 	var state string
-	if err := db.QueryRow(`SELECT manifest,required_entry_count,state FROM hydration_grants WHERE grant_id=?`, grantID).Scan(&manifestBytes, &required, &state); err != nil {
+	if err := db.QueryRow(`SELECT h.manifest,h.required_entry_count,h.state FROM hydration_grants h JOIN installed_claim_grants g ON g.grant_id=h.grant_id
+		WHERE h.grant_id=? AND g.claim_id=h.claim_id AND g.claim_epoch=h.claim_epoch AND g.end_count=h.as_of_count AND
+		g.end_event_id IS h.as_of_event_id AND g.end_digest=h.as_of_digest AND g.manifest_digest=h.manifest_digest AND g.manifest=h.manifest`,
+		grantID).Scan(&manifestBytes, &required, &state); err != nil {
 		return err
 	}
 	var manifest wipdwire.BlobManifest

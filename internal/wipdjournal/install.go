@@ -3,6 +3,7 @@ package wipdjournal
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -268,6 +270,156 @@ func (j *Journal) InstallPull(ctx context.Context, expected InstallExpectation, 
 		}
 		return updateInstallState(ctx, tx, state, transfer.end, transfer.manifest.Digest, manifest)
 	})
+}
+
+// InstallClaimGrant atomically installs the acquisition receipt, verified
+// complete prefix/manifest, immutable grant identity and initial hydration
+// state. The grant proof is signature-verified against the owner's pinned root
+// before this method can be called.
+func (j *Journal) InstallClaimGrant(ctx context.Context, expected InstallExpectation, grant VerifiedClaimGrant) (InstallSnapshot, error) {
+	if j == nil || ctx == nil || j.identity.OwnerRootSPKI == "" || !grant.verified || grant.ownerRootSPKI != j.identity.OwnerRootSPKI ||
+		!transferULID.MatchString(grant.grantID) || !transferULID.MatchString(grant.claimID) || grant.claimEpoch == 0 {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	trust := ClaimGrantTrust{
+		OwnerRootPublicKey: ed25519.PublicKey(bytes.Clone(grant.ownerRootPublicKey)),
+		OwnerRootSPKI:      grant.ownerRootSPKI,
+		VerifiedAt:         mustCanonicalTime(grant.verifiedAt),
+	}
+	verified, err := VerifyClaimGrant(j.identity, trust, ClaimGrantEvidence{
+		ArtifactKeyCertificate: grant.artifactKeyCertificate, Wrapper: grant.wrapper, Start: grant.startBytes,
+		End: grant.endBytes, Transfer: grant.transfer,
+	})
+	if err != nil || !sameVerifiedClaimGrant(grant, verified) {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return InstallSnapshot{}, ErrClosed
+	}
+	tx, err := j.db.BeginTx(ctx, nil)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	state, err := readInstallState(tx)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
+	existing, err := claimGrantExists(tx, grant)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
+	if existing {
+		if err = tx.Commit(); err != nil {
+			return InstallSnapshot{}, err
+		}
+		return j.installSnapshotLocked(ctx)
+	}
+	if state.revision != expected.Revision || !sameTransferAnchor(state.anchor, expected.Anchor) || state.manifestDigest != expected.ManifestDigest ||
+		!sameTransferAnchor(state.anchor, grant.start) || !grant.transfer.Valid() || grant.transfer.domainID != j.identity.DomainID ||
+		grant.transfer.epoch != j.identity.AuthorityEpoch || !sameTransferAnchor(grant.transfer.end, grant.end) ||
+		grant.manifest.Digest != grant.transfer.manifest.Digest || grant.manifest.DomainID != j.identity.DomainID ||
+		grant.manifest.Epoch != j.identity.AuthorityEpoch {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	if err = appendVerifiedEvents(ctx, tx, state.anchor.EventCount, grant.transfer.records); err != nil {
+		return InstallSnapshot{}, err
+	}
+	manifestBytes, err := encodeManifest(grant.manifest)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
+	var startEventID, endEventID any
+	if grant.start.EventID != nil {
+		startEventID = *grant.start.EventID
+	}
+	if grant.end.EventID != nil {
+		endEventID = *grant.end.EventID
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO installed_claim_grants(
+		grant_id,acquire_command_id,acquire_request_hash,claim_id,claim_epoch,matter_id,batch_id,dispatch_id,
+		owner_root_spki,owner_root_public_key,artifact_key_certificate,verified_at,
+		start_count,start_event_id,start_digest,end_count,end_event_id,end_digest,manifest_digest,
+		grant_wrapper,grant_start,grant_end,acquire_receipt,manifest)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		grant.grantID, grant.acquireCommandID, grant.acquireRequestHash, grant.claimID, grant.claimEpoch, grant.matterID, grant.batchID, grant.dispatchID,
+		grant.ownerRootSPKI, grant.ownerRootPublicKey, grant.artifactKeyCertificate, grant.verifiedAt,
+		grant.start.EventCount, startEventID, grant.start.Digest, grant.end.EventCount, endEventID, grant.end.Digest, grant.manifest.Digest,
+		grant.wrapper, grant.startBytes, grant.endBytes, grant.receipt, manifestBytes); err != nil {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	stateName := "hydrating"
+	required := requiredManifestEntries(grant.manifest)
+	if required == 0 {
+		stateName = "offline-ready"
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO hydration_grants(
+		grant_id,claim_id,claim_epoch,as_of_count,as_of_event_id,as_of_digest,manifest_digest,manifest,required_entry_count,state)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`, grant.grantID, grant.claimID, grant.claimEpoch, grant.end.EventCount, endEventID,
+		grant.end.Digest, grant.manifest.Digest, manifestBytes, required, stateName); err != nil {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	if err = rebuildOverlay(ctx, tx); err != nil {
+		return InstallSnapshot{}, err
+	}
+	if err = updateInstallState(ctx, tx, state, grant.end, grant.manifest.Digest, manifestBytes); err != nil {
+		return InstallSnapshot{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return InstallSnapshot{}, err
+	}
+	return j.installSnapshotLocked(ctx)
+}
+
+func claimGrantExists(tx *sql.Tx, grant VerifiedClaimGrant) (bool, error) {
+	var acquireID, requestHash, claimID, matterID, batchID, dispatchID, ownerSPKI, verifiedAt string
+	var ownerPublic, certificate, wrapper, start, end, receipt, manifest []byte
+	var claimEpoch, startCount, endCount int64
+	var startEventID, endEventID sql.NullString
+	var startDigest, endDigest, manifestDigest string
+	err := tx.QueryRow(`SELECT acquire_command_id,acquire_request_hash,claim_id,claim_epoch,matter_id,batch_id,dispatch_id,
+		owner_root_spki,owner_root_public_key,artifact_key_certificate,verified_at,start_count,start_event_id,start_digest,
+		end_count,end_event_id,end_digest,manifest_digest,grant_wrapper,grant_start,grant_end,acquire_receipt,manifest
+		FROM installed_claim_grants WHERE grant_id=?`, grant.grantID).Scan(
+		&acquireID, &requestHash, &claimID, &claimEpoch, &matterID, &batchID, &dispatchID,
+		&ownerSPKI, &ownerPublic, &certificate, &verifiedAt, &startCount, &startEventID, &startDigest,
+		&endCount, &endEventID, &endDigest, &manifestDigest, &wrapper, &start, &end, &receipt, &manifest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	encodedManifest, err := encodeManifest(grant.manifest)
+	startIDMatches := startEventID.Valid == (grant.start.EventID != nil) && (!startEventID.Valid || startEventID.String == *grant.start.EventID)
+	endIDMatches := endEventID.Valid == (grant.end.EventID != nil) && (!endEventID.Valid || endEventID.String == *grant.end.EventID)
+	if err != nil || acquireID != grant.acquireCommandID || requestHash != grant.acquireRequestHash || claimID != grant.claimID ||
+		claimEpoch != int64(grant.claimEpoch) || matterID != grant.matterID || batchID != grant.batchID || dispatchID != grant.dispatchID ||
+		ownerSPKI != grant.ownerRootSPKI || !bytes.Equal(ownerPublic, grant.ownerRootPublicKey) || !bytes.Equal(certificate, grant.artifactKeyCertificate) ||
+		verifiedAt != grant.verifiedAt || startCount != int64(grant.start.EventCount) || !startIDMatches || startDigest != grant.start.Digest ||
+		endCount != int64(grant.end.EventCount) || !endIDMatches || endDigest != grant.end.Digest || manifestDigest != grant.manifest.Digest ||
+		!bytes.Equal(wrapper, grant.wrapper) || !bytes.Equal(start, grant.startBytes) || !bytes.Equal(end, grant.endBytes) ||
+		!bytes.Equal(receipt, grant.receipt) || !bytes.Equal(manifest, encodedManifest) {
+		return false, ErrInvalidTransfer
+	}
+	return true, nil
+}
+
+func sameVerifiedClaimGrant(left, right VerifiedClaimGrant) bool {
+	return left.grantID == right.grantID && left.acquireCommandID == right.acquireCommandID && left.acquireRequestHash == right.acquireRequestHash &&
+		left.claimID == right.claimID && left.claimEpoch == right.claimEpoch && left.matterID == right.matterID && left.batchID == right.batchID &&
+		left.dispatchID == right.dispatchID && left.ownerRootSPKI == right.ownerRootSPKI && left.verifiedAt == right.verifiedAt &&
+		sameTransferAnchor(left.start, right.start) && sameTransferAnchor(left.end, right.end) &&
+		bytes.Equal(left.wrapper, right.wrapper) && bytes.Equal(left.startBytes, right.startBytes) && bytes.Equal(left.endBytes, right.endBytes) &&
+		bytes.Equal(left.receipt, right.receipt) && bytes.Equal(left.ownerRootPublicKey, right.ownerRootPublicKey) &&
+		bytes.Equal(left.artifactKeyCertificate, right.artifactKeyCertificate)
+}
+
+func mustCanonicalTime(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
 }
 
 // InstallFold atomically installs the command's exact receipt and verified
