@@ -306,6 +306,130 @@ func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
 	}
 }
 
+func claimTestConnectedStepCommand(f *claimTestFixture, id int, sequence uint64, op operation.ID, claimID, stepID string) operation.Command {
+	return operation.Command{
+		ID: claimTestID(id), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
+		EnvironmentID: envA, EnvironmentSequence: sequence, ActedAt: "2026-09-23T11:59:00Z",
+		CorrelationCommandID: claimTestID(id),
+		Request: operation.Request{
+			Operation: op, Actor: "human",
+			Context: operation.Context{Repo: repoA, Clone: f.clone, Worktree: f.worktree},
+			Claim:   &operation.ClaimContext{ID: claimID, Epoch: "1"},
+			Input:   operation.StepLifecycleInput{StepID: stepID},
+		},
+	}
+}
+
+func TestConnectedStepStartRecoversAfterStoreReopen(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	_, _, _ = claimTestBirthStep(t, f, 31, 101)
+	installed := f.anchor(t)
+	allocation := claimTestAllocation(1, installed, 104, 105, 106)
+	f.acquire(t, 11, 3, installed, allocation)
+	stepID := claimTestID(131)
+	command := claimTestConnectedStepCommand(f, 12, 4, operation.StepStartV1.Metadata().Operation, allocation.ClaimID, stepID)
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.s.SubmitCommand(ctx, command, hash, f.peer, f.now)
+	if err != nil || pending.Owner == nil || !pending.Pending {
+		t.Fatalf("accept Step start before authority restart: status=%+v err=%v", pending, err)
+	}
+	if err = f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.s, err = OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen accepted Step start: %v", err)
+	}
+	t.Cleanup(func() { _ = f.s.Close() })
+	owner, err := f.s.RecoverCommand(ctx, command, hash)
+	if err != nil {
+		t.Fatalf("recover exact Step start: %v", err)
+	}
+	completed, err := f.s.CompleteConnectedLifecycle(ctx, owner,
+		[]string{claimTestID(107), claimTestID(108)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete recovered Step start: %v", err)
+	}
+	claimTestReceipt(t, completed, "result.succeeded", map[string]any{
+		"step_id": stepID, "matter_id": f.matter, "state": "in-progress",
+	}, 107, 108)
+	queried, err := f.s.QueryCommand(ctx, domainA, command.ID, hash, 7, f.peer, envA, f.now)
+	if err != nil || queried.Pending || !bytes.Equal(queried.Receipt, completed.Receipt) {
+		t.Fatalf("recovered Step-start receipt replay: status=%+v err=%v", queried, err)
+	}
+	claimTestEvent(t, f, 6, 107, 12, hash, "matter.started", f.matter, 4,
+		map[string]any{"from": "planned", "to": "in-progress", "cascade": true})
+	claimTestEvent(t, f, 7, 108, 12, hash, "step.started", stepID, 4,
+		map[string]any{"from": "planned", "to": "in-progress"})
+}
+
+func TestConnectedStepFinishRecoversAfterStoreReopen(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	_, _, _ = claimTestBirthStep(t, f, 31, 101)
+	installed := f.anchor(t)
+	allocation := claimTestAllocation(1, installed, 104, 105, 106)
+	f.acquire(t, 11, 3, installed, allocation)
+	stepID := claimTestID(131)
+	start := claimTestConnectedStepCommand(f, 12, 4, operation.StepStartV1.Metadata().Operation, allocation.ClaimID, stepID)
+	startHash, err := start.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startPending, err := f.s.SubmitCommand(ctx, start, startHash, f.peer, f.now)
+	if err != nil || startPending.Owner == nil {
+		t.Fatalf("submit prerequisite Step start: status=%+v err=%v", startPending, err)
+	}
+	started, err := f.s.CompleteConnectedLifecycle(ctx, startPending.Owner,
+		[]string{claimTestID(107), claimTestID(108)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete prerequisite Step start: %v", err)
+	}
+	claimTestReceipt(t, started, "result.succeeded", map[string]any{
+		"step_id": stepID, "matter_id": f.matter, "state": "in-progress",
+	}, 107, 108)
+
+	command := claimTestConnectedStepCommand(f, 13, 5, operation.StepFinishV1.Metadata().Operation, allocation.ClaimID, stepID)
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.s.SubmitCommand(ctx, command, hash, f.peer, f.now)
+	if err != nil || pending.Owner == nil || !pending.Pending {
+		t.Fatalf("accept Step finish before authority restart: status=%+v err=%v", pending, err)
+	}
+	if err = f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.s, err = OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen accepted Step finish: %v", err)
+	}
+	t.Cleanup(func() { _ = f.s.Close() })
+	owner, err := f.s.RecoverCommand(ctx, command, hash)
+	if err != nil {
+		t.Fatalf("recover exact Step finish: %v", err)
+	}
+	completed, err := f.s.CompleteConnectedLifecycle(ctx, owner,
+		[]string{claimTestID(109), claimTestID(110)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete recovered Step finish: %v", err)
+	}
+	claimTestReceipt(t, completed, "result.succeeded", map[string]any{
+		"step_id": stepID, "matter_id": f.matter, "state": "done",
+	}, 109)
+	queried, err := f.s.QueryCommand(ctx, domainA, command.ID, hash, 7, f.peer, envA, f.now)
+	if err != nil || queried.Pending || !bytes.Equal(queried.Receipt, completed.Receipt) {
+		t.Fatalf("recovered Step-finish receipt replay: status=%+v err=%v", queried, err)
+	}
+	claimTestEvent(t, f, 8, 109, 13, hash, "step.finished", stepID, 5,
+		map[string]any{"from": "in-progress", "to": "done"})
+}
+
 func claimTestBirthRelease(t *testing.T, f *claimTestFixture, id int, sequence uint64, barrier map[string]any) ([]byte, string) {
 	t.Helper()
 	raw, err := wipdwire.EncodeCanonical(map[string]any{

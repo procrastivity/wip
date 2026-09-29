@@ -44,15 +44,8 @@ func (s *Store) submitConnectedLifecycle(ctx context.Context, command operation.
 	identity.m1 = &command
 	identity.lifecycle = c
 	before := func(tx *sql.Tx) error {
-		if c.name == "step.start" || c.name == "step.finish" {
-			var repo string
-			if err := tx.QueryRowContext(ctx, `SELECT matter_id,repo_id FROM steps WHERE domain_id=? AND step_id=?`, c.domain, c.stepID).Scan(&c.matter, &repo); err != nil || repo != c.repo {
-				return ErrFenced
-			}
-		}
-		var matterRepo string
-		if err := tx.QueryRowContext(ctx, `SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&matterRepo); err != nil || matterRepo != c.repo {
-			return ErrFenced
+		if err := resolveConnectedLifecycleMatter(ctx, tx, c); err != nil {
+			return err
 		}
 		claim, err := loadClaim(ctx, tx, c, c.claimID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -80,6 +73,29 @@ func (s *Store) submitConnectedLifecycle(ctx context.Context, command operation.
 		}
 	}
 	return s.submitIdentity(ctx, identity, peer, at, before, beforeCommit, nil)
+}
+
+func resolveConnectedLifecycleMatter(ctx context.Context, tx *sql.Tx, command *lifecycleCommand) error {
+	if command == nil {
+		return ErrInvalidProof
+	}
+	switch command.name {
+	case "step.start", "step.finish":
+		var matter, repo string
+		if err := tx.QueryRowContext(ctx, `SELECT matter_id,repo_id FROM steps WHERE domain_id=? AND step_id=?`, command.domain, command.stepID).Scan(&matter, &repo); err != nil ||
+			repo != command.repo || command.matter != "" && command.matter != matter {
+			return ErrFenced
+		}
+		command.matter = matter
+	case "matter.finish":
+	default:
+		return ErrInvalidProof
+	}
+	var repo string
+	if err := tx.QueryRowContext(ctx, `SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, command.domain, command.matter).Scan(&repo); err != nil || repo != command.repo {
+		return ErrFenced
+	}
+	return nil
 }
 
 func connectedLifecycleDefinition(id operation.ID) (operation.Definition, bool) {
@@ -122,6 +138,9 @@ func (s *Store) CompleteConnectedLifecycle(ctx context.Context, owner *Execution
 	defer func() { _ = tx.Rollback() }()
 	head, err := checkLifecycleOwner(ctx, tx, c, owner.hash)
 	if err != nil {
+		return empty, err
+	}
+	if err = resolveConnectedLifecycleMatter(ctx, tx, c); err != nil {
 		return empty, err
 	}
 	claim, claimErr := loadClaim(ctx, tx, c, c.claimID)
