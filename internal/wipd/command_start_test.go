@@ -155,6 +155,8 @@ type commandStartFakeAuthority struct {
 	returnIndex          int
 	pullEventID          string
 	pullFailure          error
+	pullStarted          chan wipdwire.PrefixAnchor
+	pullContinue         <-chan struct{}
 	acks                 []wipdwire.BirthJournalAck
 	releaseCalls         int
 	releaseFailure       error
@@ -203,7 +205,24 @@ func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipd
 	}, nil
 }
 
-func (authority *commandStartFakeAuthority) Pull(_ context.Context, start wipdwire.PrefixAnchor) (CommandPull, error) {
+func (authority *commandStartFakeAuthority) Pull(ctx context.Context, start wipdwire.PrefixAnchor) (CommandPull, error) {
+	if authority.pullStarted != nil || authority.pullContinue != nil {
+		authority.trace.add("pull-start:" + fmt.Sprint(start.EventCount))
+	}
+	if authority.pullStarted != nil {
+		select {
+		case authority.pullStarted <- start:
+		case <-ctx.Done():
+			return CommandPull{}, ctx.Err()
+		}
+	}
+	if authority.pullContinue != nil {
+		select {
+		case <-authority.pullContinue:
+		case <-ctx.Done():
+			return CommandPull{}, ctx.Err()
+		}
+	}
 	if authority.pullFailure != nil {
 		return CommandPull{}, authority.pullFailure
 	}
@@ -352,10 +371,11 @@ func commandStartInput(id, locator string) wipdjournal.CommandInput {
 
 func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.T) {
 	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
-	for _, command := range []struct{ id, locator string }{
+	pendingCommands := []struct{ id, locator string }{
 		{commandStartCommandPrefix + "11", "older-one"},
 		{commandStartCommandPrefix + "12", "older-two"},
-	} {
+	}
+	for _, command := range pendingCommands {
 		if _, err := journal.PrepareCommand(commandStartInput(command.id, command.locator)); err != nil {
 			t.Fatal(err)
 		}
@@ -363,16 +383,65 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 	}
 	authority.returnResults = []operation.ResultCode{operation.ResultSucceeded, operation.ResultSucceeded}
 	authority.returnContinue = []bool{true, false}
+	pullStarted := make(chan wipdwire.PrefixAnchor, 1)
+	pullContinue := make(chan struct{})
+	var releasePullOnce sync.Once
+	releasePull := func() { releasePullOnce.Do(func() { close(pullContinue) }) }
+	t.Cleanup(releasePull)
+	authority.pullStarted = pullStarted
+	authority.pullContinue = pullContinue
 	environment.currentID = commandStartCommandPrefix + "13"
+	advancedTailID := commandStartCommandPrefix + "45"
 	var guardRan bool
-	result, err := coordinator.RunConnected(context.Background(), commandStartInput(environment.currentID, "current"), func(_ context.Context, snapshot CommandStartSnapshot, command operation.Command) error {
-		guardRan = true
-		if snapshot.Revision != 7 || snapshot.Anchor.EventCount != 3 || snapshot.ManifestDigest == "" {
-			return fmt.Errorf("guard received unstable post-install snapshot: %+v", snapshot)
-		}
-		trace.add("guard+write:" + command.ID)
-		return nil
-	})
+	type commandStartRun struct {
+		result CommandStartResult
+		err    error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan commandStartRun, 1)
+	go func() {
+		result, err := coordinator.RunConnected(ctx, commandStartInput(environment.currentID, "current"), func(_ context.Context, snapshot CommandStartSnapshot, command operation.Command) error {
+			guardRan = true
+			if snapshot.Revision != 7 || snapshot.Anchor.EventCount != 3 || snapshot.Anchor.EventID == nil ||
+				*snapshot.Anchor.EventID != advancedTailID || snapshot.ManifestDigest == "" || len(snapshot.Receipts) != len(pendingCommands) {
+				return fmt.Errorf("guard received unexpected post-install snapshot: %+v", snapshot)
+			}
+			for _, pending := range pendingCommands {
+				entry, err := journal.Get(pending.id)
+				if err != nil {
+					return err
+				}
+				receipt, ok := snapshot.Receipts[pending.id]
+				if !ok || receipt.RequestHash != entry.RequestHash || receipt.EnvironmentSeq != entry.EnvironmentSeq ||
+					receipt.JournalPosition != entry.JournalPosition || receipt.ResultCode != operation.ResultSucceeded {
+					return fmt.Errorf("guard did not observe the installed success receipt for %s: %+v", pending.id, receipt)
+				}
+			}
+			trace.add("guard+write:" + command.ID)
+			return nil
+		})
+		done <- commandStartRun{result: result, err: err}
+	}()
+	var pullStart wipdwire.PrefixAnchor
+	select {
+	case pullStart = <-pullStarted:
+	case <-ctx.Done():
+		t.Fatalf("command-start did not reach pull barrier: %v", ctx.Err())
+	}
+	if pullStart.EventCount != 2 || pullStart.EventID == nil || *pullStart.EventID != commandStartCommandPrefix+"42" {
+		t.Fatalf("pull began at %+v, want both returned pending entries installed first", pullStart)
+	}
+	authority.pullEventID = advancedTailID
+	trace.add("authority-advanced:" + advancedTailID)
+	releasePull()
+	var run commandStartRun
+	select {
+	case run = <-done:
+	case <-ctx.Done():
+		t.Fatalf("command-start did not finish after releasing pull: %v", ctx.Err())
+	}
+	result, err := run.result, run.err
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +454,7 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 		"install-fold+receipt+tail+overlay:" + commandStartCommandPrefix + "11",
 		"return:" + commandStartCommandPrefix + "12",
 		"install-fold+receipt+tail+overlay:" + commandStartCommandPrefix + "12",
-		"pull:2", "install-pull+overlay",
+		"pull-start:2", "authority-advanced:" + advancedTailID, "pull:2", "install-pull+overlay",
 		"admit+overlay:" + environment.currentID,
 		"guard+write:" + environment.currentID,
 	}
@@ -399,31 +468,105 @@ func TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite(t *testing.
 	if anchor := installed.Anchor; anchor.EventCount != 3 || anchor.EventID == nil || *anchor.EventID != authority.pullEventID {
 		t.Fatalf("installed authority prefix = %+v, want both folds then pull tail", anchor)
 	}
+	events, err := journal.EventRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("installed event count = %d, want two returned events and one advanced tail", len(events))
+	}
+	for index, pending := range pendingCommands {
+		entry, err := journal.Get(pending.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantID := commandStartCommandPrefix + fmt.Sprintf("%02d", 41+index)
+		if events[index].EventID != wantID || !bytes.Equal(events[index].Record, commandStartEventRecordForEntry(wantID, entry)) {
+			t.Fatalf("installed returned event %d = %+v, want exact event %s for %s", index, events[index], wantID, pending.id)
+		}
+	}
+	if events[2].EventID != advancedTailID || !bytes.Equal(events[2].Record,
+		commandStartEventRecord(advancedTailID, commandStartCommandPrefix+"99", commandStartHashForTest(), commandStartEnvironmentID, 99)) {
+		t.Fatalf("installed tail event = %+v, want authority-advanced event %s", events[2], advancedTailID)
+	}
 }
 
 func TestConnectedCommandStartWithoutPendingPullsBeforeGuard(t *testing.T) {
-	coordinator, _, environment, _, trace, _ := newCommandStartFixture(t)
+	coordinator, journal, environment, authority, trace, _ := newCommandStartFixture(t)
 	currentID := commandStartCommandPrefix + "21"
 	environment.currentID = currentID
+	pullStarted := make(chan wipdwire.PrefixAnchor, 1)
+	pullContinue := make(chan struct{})
+	var releasePullOnce sync.Once
+	releasePull := func() { releasePullOnce.Do(func() { close(pullContinue) }) }
+	t.Cleanup(releasePull)
+	authority.pullStarted = pullStarted
+	authority.pullContinue = pullContinue
+	advancedTailID := commandStartCommandPrefix + "45"
 	guardRan := false
-	result, err := coordinator.RunConnected(context.Background(), commandStartInput(currentID, "only"), func(_ context.Context, snapshot CommandStartSnapshot, command operation.Command) error {
-		guardRan = true
-		if snapshot.Revision != 3 || snapshot.Anchor.EventCount != 1 || snapshot.ManifestDigest == "" {
-			return fmt.Errorf("guard received unstable post-install snapshot: %+v", snapshot)
-		}
-		trace.add("guard+write:" + command.ID)
-		return nil
-	})
+	type commandStartRun struct {
+		result CommandStartResult
+		err    error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan commandStartRun, 1)
+	go func() {
+		result, err := coordinator.RunConnected(ctx, commandStartInput(currentID, "only"), func(_ context.Context, snapshot CommandStartSnapshot, command operation.Command) error {
+			guardRan = true
+			if snapshot.Revision != 3 || snapshot.Anchor.EventCount != 1 || snapshot.Anchor.EventID == nil ||
+				*snapshot.Anchor.EventID != advancedTailID || snapshot.ManifestDigest == "" || len(snapshot.Receipts) != 0 {
+				return fmt.Errorf("guard received unexpected post-install snapshot: %+v", snapshot)
+			}
+			trace.add("guard+write:" + command.ID)
+			return nil
+		})
+		done <- commandStartRun{result: result, err: err}
+	}()
+	var pullStart wipdwire.PrefixAnchor
+	select {
+	case pullStart = <-pullStarted:
+	case <-ctx.Done():
+		t.Fatalf("command-start did not reach pull barrier: %v", ctx.Err())
+	}
+	if pullStart.EventCount != 0 || pullStart.EventID != nil {
+		t.Fatalf("pull began at %+v, want the empty installed prefix", pullStart)
+	}
+	authority.pullEventID = advancedTailID
+	trace.add("authority-advanced:" + advancedTailID)
+	releasePull()
+	var run commandStartRun
+	select {
+	case run = <-done:
+	case <-ctx.Done():
+		t.Fatalf("command-start did not finish after releasing pull: %v", ctx.Err())
+	}
+	result, err := run.result, run.err
 	if err != nil || result.Returned || !guardRan {
 		t.Fatalf("command-start result=%+v guardRan=%v err=%v", result, guardRan, err)
 	}
 	want := []string{
 		"snapshot:" + currentID,
-		"pull:0", "install-pull+overlay", "admit+overlay:" + currentID,
+		"pull-start:0", "authority-advanced:" + advancedTailID, "pull:0", "install-pull+overlay", "admit+overlay:" + currentID,
 		"guard+write:" + currentID,
 	}
 	if got := trace.all(); !equalCommandStartTrace(got, want) {
 		t.Fatalf("empty-prefix command-start trace = %v, want %v", got, want)
+	}
+	installed, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Anchor.EventCount != 1 || installed.Anchor.EventID == nil || *installed.Anchor.EventID != advancedTailID {
+		t.Fatalf("installed authority prefix = %+v, want advanced tail %s", installed.Anchor, advancedTailID)
+	}
+	events, err := journal.EventRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventID != advancedTailID || !bytes.Equal(events[0].Record,
+		commandStartEventRecord(advancedTailID, commandStartCommandPrefix+"99", commandStartHashForTest(), commandStartEnvironmentID, 99)) {
+		t.Fatalf("installed tail events = %+v, want exact advanced authority event %s", events, advancedTailID)
 	}
 }
 
