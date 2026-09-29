@@ -828,12 +828,21 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 	} else if err != nil {
 		return CommandStatus{}, grant, err
 	}
-	want := 2
-	if created {
-		want++
-	}
-	if len(a.EventIDs) != want {
+	eventIDs := a.EventIDs
+	if created && len(eventIDs) != 3 || !created && len(eventIDs) != 2 && len(eventIDs) != 3 {
 		return CommandStatus{}, grant, ErrInvalidProof
+	}
+	for index, eventID := range eventIDs {
+		if !ulid.MatchString(eventID) || index > 0 && eventIDs[index-1] >= eventID {
+			return CommandStatus{}, grant, ErrInvalidProof
+		}
+	}
+	// Connected callers can always allocate three fresh IDs without first
+	// reading whether the anonymous Batch exists. This transaction decides the
+	// optional event and selects the matching contiguous two- or three-event
+	// range, so a concurrent Batch creation cannot invalidate the allocation.
+	if !created && len(eventIDs) == 3 {
+		eventIDs = eventIDs[1:]
 	}
 	if created {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO anonymous_batches VALUES(?,?,?)`, c.domain, c.matter, batch); err != nil {
@@ -850,7 +859,7 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 	idx := 0
 	var first, last uint64
 	add := func(kind, subject string, payload map[string]any) error {
-		p, e := appendCommandEvent(ctx, tx, identity, occurred, a.EventIDs[idx], kind, subject, payload)
+		p, e := appendCommandEvent(ctx, tx, identity, occurred, eventIDs[idx], kind, subject, payload)
 		if e != nil {
 			return e
 		}
@@ -876,7 +885,7 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 	if err != nil {
 		return CommandStatus{}, grant, err
 	}
-	rangeValue := map[string]any{"first_event_id": a.EventIDs[0], "last_event_id": a.EventIDs[len(a.EventIDs)-1], "event_count": uint64(len(a.EventIDs))}
+	rangeValue := map[string]any{"first_event_id": eventIDs[0], "last_event_id": eventIDs[len(eventIDs)-1], "event_count": uint64(len(eventIDs))}
 	requiredDigests, err := subtreeRequiredBlobClosureTx(ctx, tx, c.domain, c.matter, last)
 	if err != nil {
 		return CommandStatus{}, grant, err

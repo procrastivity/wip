@@ -11,12 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipd"
 	"github.com/procrastivity/wip/internal/wipdjournal"
@@ -119,12 +117,15 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		OwnerRootSPKI           string `json:"owner_root_spki"`
 		AuthoritySPKIPin        string `json:"authority_spki_pin"`
 		AuthorityCertificateDER []byte `json:"authority_certificate_der"`
+		OwnerRootPublicKey      []byte `json:"owner_root_public_key"`
+		ArtifactKeyCertificate  []byte `json:"artifact_key_certificate"`
 		ClientStateDirectory    string `json:"client_state_directory"`
 	}{
-		Schema: "wipd.connected-authority-profile/1", Origin: fixture.profile.Origin(),
+		Schema: "wipd.connected-authority-profile/2", Origin: fixture.profile.Origin(),
 		DomainID: m5TestDomain, Epoch: 1, RepoID: m5TestRepo,
 		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(), AuthoritySPKIPin: "sha256:" + hex.EncodeToString(authoritySPKI[:]),
-		AuthorityCertificateDER: fixture.serverCert.Certificate[1], ClientStateDirectory: clientStateRoot,
+		AuthorityCertificateDER: fixture.serverCert.Certificate[1], OwnerRootPublicKey: fixture.ownerRoot,
+		ArtifactKeyCertificate: fixture.config.ArtifactKeyCertificate, ClientStateDirectory: clientStateRoot,
 	}
 	configBytes, err := json.Marshal(config)
 	if err != nil {
@@ -285,26 +286,114 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	_ = client.Close()
 	stopDaemon()
-	recoveredClient, stopRecoveredDaemon := startWipdForBirthReleaseRecovery(t, binary, profileRoot)
+	recoveredClient, stopRecoveredDaemon, recoveredOutput := startWipdForBirthReleaseRecovery(t, binary, profileRoot)
 	recoveredRelease, err := recoveredClient.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human"))
 	if err != nil || recoveredRelease.Code != operation.ResultSucceeded || !bytes.Equal(recoveredRelease.Receipt, release.Receipt) {
 		t.Fatalf("same-ID birth-release recovery through restarted wipd = %+v, %v", recoveredRelease, err)
 	}
+	acquireID := "01KZ7XHAQT1S46NYPN1PW1DX4D"
+	cloneID := "01KZ7XHAQT1S46NYPN1PW1DX4E"
+	worktreeID := "01KZ7XHAQT1S46NYPN1PW1DX4F"
+	dispatchID := "01KZ7XHAQT1S46NYPN1PW1DX4J"
+	acquireStart, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || acquireStart.EventCount != 3 {
+		t.Fatalf("authority prefix before acquisition = %+v, %v", acquireStart, err)
+	}
+	acquired, err := recoveredClient.AcquireClaim(context.Background(), acquireID, matterOutput.ID, cloneID, worktreeID, dispatchID, operation.Actor("human"))
+	if err != nil || acquired.Code != operation.ResultSucceeded || acquired.Grant == nil || len(acquired.Receipt) == 0 ||
+		acquired.Hydration.State != "offline-ready" || acquired.Hydration.RequiredEntryCount != 0 || acquired.Hydration.VerifiedPinnedEntryCount != 0 {
+		t.Fatalf("existing Matter claim acquisition through restarted wipd = %+v, %v; daemon=%s", acquired, err, recoveredOutput.String())
+	}
+	if acquired.Grant.ClaimID == matterOutput.ID || acquired.Grant.ClaimEpoch != 1 || acquired.Grant.DispatchID != dispatchID ||
+		acquired.Grant.MatterID != matterOutput.ID || acquired.Grant.BatchID == "" ||
+		acquired.Installed.EventCount != 6 || acquired.Grant.AsOf.EventCount != 6 || !sameAuthorityAnchor(acquired.Installed, acquired.Grant.AsOf) {
+		t.Fatalf("installed acquisition identity/as-of prefix = %+v, installed=%+v", acquired.Grant, acquired.Installed)
+	}
+	acquireReceiptFields, err := wipdwire.DecodeCanonicalMap(acquired.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	acquireRequestHash, requestHashOK := acquireReceiptFields["request_hash"].(string)
+	if err != nil || !requestHashOK {
+		t.Fatalf("acquisition receipt request hash: %#v, %v", acquireReceiptFields, err)
+	}
+	authorityStatus, authorityGrant, err := fixture.store.QueryClaimGrant(context.Background(), m5TestDomain, acquireID,
+		acquireRequestHash, 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	if err != nil || !bytes.Equal(authorityStatus.Receipt, acquired.Receipt) || authorityGrant.ID != acquired.Grant.GrantID ||
+		len(authorityGrant.Start) == 0 || len(authorityGrant.Delta) == 0 || len(authorityGrant.End) == 0 {
+		t.Fatalf("authority retained grant differs from installed acquisition: %+v, %v", authorityGrant, err)
+	}
+	var authorityStart struct {
+		Claim struct {
+			ID    string `cbor:"id"`
+			Epoch uint64 `cbor:"epoch"`
+		} `cbor:"claim"`
+		MatterID           string `cbor:"matter_id"`
+		BatchID            string `cbor:"batch_id"`
+		DispatchID         string `cbor:"dispatch_id"`
+		BlobManifestDigest string `cbor:"blob_manifest_digest"`
+		Prefix             struct {
+			Start wipdwire.PrefixAnchor `cbor:"start"`
+			End   wipdwire.PrefixAnchor `cbor:"end"`
+		} `cbor:"prefix"`
+	}
+	if err = wipdwire.DecodeCanonical(authorityGrant.Start, &authorityStart,
+		"schema", "grant_id", "acquire_command_id", "acquire_request_hash", "domain_id", "authority_epoch", "owner_environment_id",
+		"claim", "matter_id", "batch_id", "dispatch_id", "receipt", "prefix", "blob_manifest_digest"); err != nil ||
+		authorityStart.Claim.ID != acquired.Grant.ClaimID || authorityStart.Claim.Epoch != acquired.Grant.ClaimEpoch ||
+		authorityStart.MatterID != matterOutput.ID || authorityStart.BatchID != acquired.Grant.BatchID || authorityStart.DispatchID != dispatchID ||
+		!sameAuthorityAnchor(authorityStart.Prefix.Start, wireAnchor(acquireStart)) || !sameAuthorityAnchor(authorityStart.Prefix.End, acquired.Grant.AsOf) ||
+		authorityStart.BlobManifestDigest != acquired.Grant.Manifest {
+		t.Fatalf("authority grant identity/as-of differs from daemon-installed grant: %+v, %v", authorityStart, err)
+	}
+	var authorityManifest wipdwire.BlobManifest
+	if err = wipdwire.DecodeCanonical(authorityGrant.Manifest, &authorityManifest,
+		"schema", "domain_id", "authority_epoch", "as_of", "entries", "manifest_digest"); err != nil ||
+		authorityManifest.Schema != "wipd.blob-manifest/1" || authorityManifest.DomainID != m5TestDomain || authorityManifest.Epoch != 1 ||
+		!sameAuthorityAnchor(authorityManifest.AsOf, acquired.Grant.AsOf) || authorityManifest.Digest != acquired.Grant.Manifest || len(authorityManifest.Entries) != 0 {
+		t.Fatalf("authority complete manifest is not pinned to the installed grant prefix: %+v, %v", authorityManifest, err)
+	}
+	var authorityDelta struct {
+		Start  wipdwire.PrefixAnchor  `cbor:"start"`
+		End    wipdwire.PrefixAnchor  `cbor:"end"`
+		Events []wipdwire.EventRecord `cbor:"events"`
+	}
+	if err = wipdwire.DecodeCanonical(authorityGrant.Delta, &authorityDelta, "start", "end", "events"); err != nil ||
+		!sameAuthorityAnchor(authorityDelta.Start, wireAnchor(acquireStart)) || !sameAuthorityAnchor(authorityDelta.End, acquired.Grant.AsOf) ||
+		len(authorityDelta.Events) != 3 {
+		t.Fatalf("authority grant delta does not contain the complete acquisition range: %+v, %v", authorityDelta, err)
+	}
+	var authorityEnd struct {
+		GrantID        string                `cbor:"grant_id"`
+		VerifiedPrefix wipdwire.PrefixAnchor `cbor:"verified_prefix"`
+		ManifestDigest string                `cbor:"verified_blob_manifest_digest"`
+		Complete       bool                  `cbor:"complete"`
+	}
+	if err = wipdwire.DecodeCanonical(authorityGrant.End, &authorityEnd,
+		"schema", "grant_id", "verified_prefix", "verified_blob_manifest_digest", "complete"); err != nil ||
+		authorityEnd.GrantID != acquired.Grant.GrantID || !authorityEnd.Complete ||
+		!sameAuthorityAnchor(authorityEnd.VerifiedPrefix, acquired.Grant.AsOf) || authorityEnd.ManifestDigest != acquired.Grant.Manifest {
+		t.Fatalf("authority grant end does not close the exact installed prefix/manifest: %+v, %v", authorityEnd, err)
+	}
+	acquireReplay, err := recoveredClient.AcquireClaim(context.Background(), acquireID, matterOutput.ID, cloneID, worktreeID, dispatchID, operation.Actor("human"))
+	if err != nil || acquireReplay.Code != operation.ResultSucceeded || !bytes.Equal(acquireReplay.Receipt, acquired.Receipt) ||
+		acquireReplay.Grant == nil || !sameClaimGrantSummary(*acquireReplay.Grant, *acquired.Grant) || !sameAuthorityAnchor(acquireReplay.Installed, acquired.Installed) {
+		t.Fatalf("same-ID claim-acquire replay changed its pinned product = %+v, %v; original=%+v", acquireReplay, err, acquired)
+	}
 	_ = recoveredClient.Close()
 	stopRecoveredDaemon()
 	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || anchor.EventCount != 3 {
-		t.Fatalf("authority event range after release recovery = %+v, %v; want three events", anchor, err)
+	if err != nil || anchor.EventCount != 6 || !sameAuthorityAnchor(acquired.Installed, wireAnchor(anchor)) {
+		t.Fatalf("authority event range after claim acquisition = %+v, %v; want the six-event installed grant tail", anchor, err)
 	}
 	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
 		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
+		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = journal.Close() }()
 	snapshot, err := journal.InstallSnapshot(context.Background())
-	if err != nil || snapshot.Anchor.EventCount != 3 || len(snapshot.Receipts) != 2 {
+	if err != nil || snapshot.Anchor.EventCount != 6 || len(snapshot.Receipts) != 2 {
 		t.Fatalf("durable Environment authority fold/replay state = %+v, %v", snapshot, err)
 	}
 	releaseAttempt, err := journal.BirthReleaseAttempt(releaseID)
@@ -317,8 +406,19 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	if err != nil || len(entries) != 2 || entries[0].State != wipdjournal.StateReturned || entries[1].State != wipdjournal.StateReturned {
 		t.Fatalf("durable journal dispositions = %+v, %v", entries, err)
 	}
+	acquireAttempt, err := journal.ClaimAcquireAttempt(acquireID)
+	if err != nil || !acquireAttempt.Returned || acquireAttempt.ResultCode != operation.ResultSucceeded ||
+		!bytes.Equal(acquireAttempt.Receipt, acquired.Receipt) || acquireAttempt.GrantID != acquired.Grant.GrantID {
+		t.Fatalf("durable acquisition receipt/grant identity = %+v, %v", acquireAttempt, err)
+	}
+	installedGrant, err := journal.InstalledClaimGrantByCommand(acquireID)
+	if err != nil || installedGrant.GrantID != acquired.Grant.GrantID || installedGrant.ClaimID != acquired.Grant.ClaimID ||
+		installedGrant.ClaimEpoch != acquired.Grant.ClaimEpoch || installedGrant.DispatchID != dispatchID ||
+		!sameAuthorityAnchor(installedGrant.AsOf, acquired.Grant.AsOf) {
+		t.Fatalf("durable installed grant identity/as-of = %+v, %v", installedGrant, err)
+	}
 	records, err := journal.EventRecords(context.Background())
-	if err != nil || len(records) != 3 {
+	if err != nil || len(records) != 6 {
 		t.Fatalf("durable installed event records = %d, %v", len(records), err)
 	}
 	if records[0].EventID == records[1].EventID {
@@ -330,63 +430,33 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		releaseEvent["kind"] != "claim.released" || releaseEvent["subject_id"] != matterOutput.ID {
 		t.Fatalf("reopened release tail event = %#v, %v", releaseEvent, err)
 	}
-	assertBirthMatterCanBeAcquiredAgain(t, fixture, matterOutput.ID)
-}
-
-func assertBirthMatterCanBeAcquiredAgain(t *testing.T, fixture *m5CommandFixture, matterID string) {
-	t.Helper()
-	ctx := context.Background()
-	anchor, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
-	if err != nil || anchor.EventCount != 3 {
-		t.Fatalf("birth-release prefix before later acquisition = %+v, %v", anchor, err)
-	}
-	commandID := "01KZ7XHAQT1S46NYPN1PW1DX4D"
-	cloneID := "01KZ7XHAQT1S46NYPN1PW1DX4E"
-	worktreeID := "01KZ7XHAQT1S46NYPN1PW1DX4F"
-	dispatchID := "01KZ7XHAQT1S46NYPN1PW1DX4J"
-	canonical, err := wipdwire.EncodeCanonical(map[string]any{
-		"schema": "wipd.command/1", "command_id": commandID,
-		"authority":   map[string]any{"domain_id": m5TestDomain, "expected_epoch": uint64(1)},
-		"environment": map[string]any{"id": m5TestEnv, "sequence": uint64(4)},
-		"acted_at":    fixture.now.Format(time.RFC3339Nano), "actor": "human",
-		"causation_command_id": nil, "correlation_command_id": commandID,
-		"operation": map[string]any{"name": "claim.acquire", "version": uint64(1)},
-		"context":   map[string]any{"repo_id": m5TestRepo, "clone_id": cloneID, "worktree_id": worktreeID},
-		"claim":     nil,
-		"input": map[string]any{
-			"matter_id": matterID, "worktree_id": worktreeID,
-			"dispatch_mode": "anonymous-matter", "requested_dispatch_id": dispatchID,
-		},
-		"blobs": []any{},
-	})
-	if err != nil {
+	if err = journal.Close(); err != nil {
 		t.Fatal(err)
 	}
-	hash := sha256.Sum256(append([]byte("wipd/request-hash/v1\x00"), canonical...))
-	requestHash := "sha256:" + hex.EncodeToString(hash[:])
-	pending, err := fixture.store.SubmitClaimAcquire(ctx, canonical, requestHash, anchor, fixture.peer, fixture.now)
-	if err != nil || !pending.Pending || pending.Owner == nil {
-		t.Fatalf("claim.acquire after birth-claim release = %+v, %v", pending, err)
+	assertClient, stopAssertDaemon, assertOutput := startWipdForBirthReleaseRecovery(t, binary, profileRoot)
+	defer stopAssertDaemon()
+	defer func() { _ = assertClient.Close() }()
+	replayAfterReopen, err := assertClient.AcquireClaim(context.Background(), acquireID, matterOutput.ID, cloneID, worktreeID, dispatchID, operation.Actor("human"))
+	if err != nil || replayAfterReopen.Code != operation.ResultSucceeded || !bytes.Equal(replayAfterReopen.Receipt, acquired.Receipt) ||
+		replayAfterReopen.Grant == nil || !sameClaimGrantSummary(*replayAfterReopen.Grant, *acquired.Grant) {
+		t.Fatalf("same-ID acquisition replay after daemon/journal reopen = %+v, %v", replayAfterReopen, err)
 	}
-	allocation := authoritystore.AcquireAllocation{
-		ClaimID: "01KZ7XHAQT1S46NYPN1PW1DX4K", BatchID: "01KZ7XHAQT1S46NYPN1PW1DX4M",
-		GrantID: "01KZ7XHAQT1S46NYPN1PW1DX4N", SnapshotID: "01KZ7XHAQT1S46NYPN1PW1DX4P",
-		JournalID: "01KZ7XHAQT1S46NYPN1PW1DX4R", Installed: anchor,
-		EventIDs: []string{"7" + strings.Repeat("Z", 24) + "X", "7" + strings.Repeat("Z", 24) + "Y", "7" + strings.Repeat("Z", 24) + "Z"},
-	}
-	completed, grant, err := fixture.store.CompleteClaimAcquire(ctx, pending.Owner, allocation, fixture.now, fixture.config.SignArtifact)
-	if err != nil || completed.Pending || len(completed.Receipt) == 0 || grant.ID != allocation.GrantID {
-		t.Fatalf("complete later acquisition after birth release = %+v grant=%+v err=%v", completed, grant, err)
-	}
-	receipt, err := wipdwire.DecodeCanonicalMap(completed.Receipt,
-		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
-	result, ok := receipt["result"].(map[string]any)
-	if err != nil || !ok || result["code"] != "result.succeeded" {
-		t.Fatalf("later claim acquisition terminal receipt = %#v, %v", receipt, err)
+	refused, err := assertClient.AcquireClaim(context.Background(), "01KZ7XHAQT1S46NYPN1PW1DX4G", matterOutput.ID,
+		"01KZ7XHAQT1S46NYPN1PW1DX4H", "01KZ7XHAQT1S46NYPN1PW1DX4J", "01KZ7XHAQT1S46NYPN1PW1DX4K", operation.Actor("human"))
+	if err != nil || refused.Code != operation.ResultRefused || refused.Grant != nil || len(refused.Receipt) == 0 ||
+		!sameAuthorityAnchor(refused.Installed, acquired.Installed) {
+		t.Fatalf("second acquisition refusal and authenticated pull after reopen = %+v, %v; daemon=%s", refused, err, assertOutput.String())
 	}
 }
 
-func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) (*wipd.Client, func()) {
+func sameClaimGrantSummary(left, right wipdjournal.ClaimGrantSummary) bool {
+	return left.GrantID == right.GrantID && left.CommandID == right.CommandID && left.RequestHash == right.RequestHash &&
+		left.ClaimID == right.ClaimID && left.ClaimEpoch == right.ClaimEpoch && left.MatterID == right.MatterID &&
+		left.BatchID == right.BatchID && left.DispatchID == right.DispatchID && left.Manifest == right.Manifest &&
+		sameAuthorityAnchor(left.AsOf, right.AsOf)
+}
+
+func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) (*wipd.Client, func(), *bytes.Buffer) {
 	t.Helper()
 	processCtx, cancelProcess := context.WithCancel(context.Background())
 	process := exec.CommandContext(processCtx, binary, "--profile-root", profileRoot)
@@ -424,7 +494,7 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 		client, err := wipd.Connect(ctx, profileRoot)
 		cancel()
 		if err == nil {
-			return client, stop
+			return client, stop, &output
 		}
 		select {
 		case <-done:
@@ -434,7 +504,7 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("connect to restarted wipd for birth-release recovery: %s", output.String())
-	return nil, stop
+	return nil, stop, &output
 }
 
 func emptyPrefixDigest() string {

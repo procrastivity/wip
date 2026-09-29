@@ -97,6 +97,29 @@ type BirthReleaseAuthority interface {
 	SubmitBirthClaimRelease(context.Context, wipdjournal.BirthReleaseCommand, wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error)
 }
 
+// ClaimAcquireAuthority submits one exact lifecycle identity and returns only
+// a terminal refusal or a signature-verified pinned grant product.
+type ClaimAcquireAuthority interface {
+	AcquireClaim(context.Context, wipdjournal.ClaimAcquireAttempt, wipdwire.PrefixAnchor) (ClaimAcquireAuthorityResult, error)
+}
+
+// ClaimAcquireAuthorityResult is one terminal authority disposition. Grant is
+// present only for a successful acquisition and has already been verified.
+type ClaimAcquireAuthorityResult struct {
+	Code    operation.ResultCode
+	Receipt []byte
+	Grant   *wipdjournal.VerifiedClaimGrant
+}
+
+// ClaimAcquireResult is the installed Environment product of claim.acquire.
+type ClaimAcquireResult struct {
+	Attempt  wipdjournal.ClaimAcquireAttempt
+	Code     operation.ResultCode
+	Receipt  []byte
+	Grant    *wipdjournal.ClaimGrantSummary
+	Snapshot CommandStartSnapshot
+}
+
 // CommandStartEnvironment owns the local atomic commit boundaries. InstallFold
 // commits the exact receipt, returned prefix delta, complete manifest, return
 // status, and rebuilt overlay in one transaction. InstallPull commits the

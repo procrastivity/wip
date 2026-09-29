@@ -547,9 +547,10 @@ func TestClaimReleaseEmptySealedJournalReopenAndEpochFence(t *testing.T) {
 	if _, err = f.s.QueryCommand(ctx, domainA, claimTestID(12), badHash, 7, f.peer, envA, f.now); err != nil {
 		t.Fatalf("mismatched barrier receipt lost: %v", err)
 	}
-	// A new claim epoch reuses the existing anonymous Batch, so only two
-	// acquisition events are permitted and the old claim cannot become active.
-	next := claimTestAllocation(15, f.anchor(t), 106, 107)
+	// A caller may allocate the three-ID upper bound without pre-reading the
+	// anonymous Batch. The completion transaction omits the unused first ID
+	// and retains exactly the two accepted events when reusing the Batch.
+	next := claimTestAllocation(15, f.anchor(t), 105, 106, 107)
 	next.BatchID = "" // must not be consulted on reuse
 	_, nextHash, acquired, _ := f.acquire(t, 15, 5, next.Installed, next)
 	claimTestReceipt(t, acquired, "result.succeeded", map[string]any{

@@ -372,6 +372,16 @@ type ClaimRelease struct {
 	Deadline         *string        `cbor:"deadline"`
 }
 
+// ClaimAcquire carries the existing claim.acquire@v1 lifecycle command and
+// the exact installed prefix from which its signed grant must begin.
+type ClaimAcquire struct {
+	Schema           string       `cbor:"schema"`
+	CanonicalCommand []byte       `cbor:"canonical_command"`
+	RequestHash      string       `cbor:"request_hash"`
+	Installed        PrefixAnchor `cbor:"installed"`
+	Deadline         *string      `cbor:"deadline"`
+}
+
 // SeedRequest asks for the initial authority seed for a bound domain epoch.
 type SeedRequest struct {
 	Schema      string  `cbor:"schema"`

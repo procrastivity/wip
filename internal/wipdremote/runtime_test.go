@@ -40,10 +40,11 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 	}
 	pin := sha256.Sum256(spki)
 	config := Config{
-		Schema: "wipd.connected-authority-profile/1", Origin: "https://authority.example:8443",
+		Schema: "wipd.connected-authority-profile/2", Origin: "https://authority.example:8443",
 		DomainID: "01KZ7XHAQT1S46NYPN1PW1DX3A", Epoch: 1, RepoID: "01KZ7XHAQT1S46NYPN1PW1DX3B",
 		OwnerRootSPKI: "sha256:" + hex.EncodeToString(pin[:]), AuthoritySPKIPin: "sha256:" + hex.EncodeToString(pin[:]),
-		AuthorityCertificateDER: certificateDER, ClientStateDirectory: filepath.Join(t.TempDir(), "client-state"),
+		AuthorityCertificateDER: certificateDER, OwnerRootPublicKey: private.Public().(ed25519.PublicKey),
+		ArtifactKeyCertificate: []byte{1}, ClientStateDirectory: filepath.Join(t.TempDir(), "client-state"),
 	}
 	if err = SaveConfig(profileRoot, config); err != nil {
 		t.Fatalf("save connected authority profile: %v", err)

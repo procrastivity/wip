@@ -48,6 +48,12 @@ type VerifiedClaimGrant struct {
 	verified                                      bool
 }
 
+// TerminalReceipt returns the canonical authority receipt authenticated by
+// the verified grant's signed start record.
+func (grant VerifiedClaimGrant) TerminalReceipt() []byte {
+	return bytes.Clone(grant.receipt)
+}
+
 // VerifyClaimGrant verifies the signed authority grant and binds it to the
 // authenticated client's pinned owner root and exact complete transfer.
 func VerifyClaimGrant(identity Identity, trust ClaimGrantTrust, evidence ClaimGrantEvidence) (VerifiedClaimGrant, error) {

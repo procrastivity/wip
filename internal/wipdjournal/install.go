@@ -277,6 +277,19 @@ func (j *Journal) InstallPull(ctx context.Context, expected InstallExpectation, 
 // state. The grant proof is signature-verified against the owner's pinned root
 // before this method can be called.
 func (j *Journal) InstallClaimGrant(ctx context.Context, expected InstallExpectation, grant VerifiedClaimGrant) (InstallSnapshot, error) {
+	return j.installClaimGrant(ctx, expected, "", grant)
+}
+
+// InstallClaimAcquireGrant atomically binds a verified authority grant to the
+// exact durable local claim.acquire attempt that requested it.
+func (j *Journal) InstallClaimAcquireGrant(ctx context.Context, expected InstallExpectation, commandID string, grant VerifiedClaimGrant) (InstallSnapshot, error) {
+	if !identityPattern.MatchString(commandID) || grant.acquireCommandID != commandID {
+		return InstallSnapshot{}, ErrInvalidTransfer
+	}
+	return j.installClaimGrant(ctx, expected, commandID, grant)
+}
+
+func (j *Journal) installClaimGrant(ctx context.Context, expected InstallExpectation, commandID string, grant VerifiedClaimGrant) (InstallSnapshot, error) {
 	if j == nil || ctx == nil || j.identity.OwnerRootSPKI == "" || !grant.verified || grant.ownerRootSPKI != j.identity.OwnerRootSPKI ||
 		!transferULID.MatchString(grant.grantID) || !transferULID.MatchString(grant.claimID) || grant.claimEpoch == 0 {
 		return InstallSnapshot{}, ErrInvalidTransfer
@@ -312,10 +325,24 @@ func (j *Journal) InstallClaimGrant(ctx context.Context, expected InstallExpecta
 		return InstallSnapshot{}, err
 	}
 	if existing {
+		if commandID != "" {
+			persisted, lookupErr := readClaimAcquireAttempt(tx, grant.acquireCommandID)
+			if lookupErr != nil || !persisted.Returned || persisted.GrantID != grant.grantID ||
+				persisted.RequestHash != grant.acquireRequestHash || !bytes.Equal(persisted.Receipt, grant.receipt) {
+				return InstallSnapshot{}, ErrInvalidTransfer
+			}
+		}
 		if err = tx.Commit(); err != nil {
 			return InstallSnapshot{}, err
 		}
 		return j.installSnapshotLocked(ctx)
+	}
+	var attempt ClaimAcquireAttempt
+	if commandID != "" {
+		attempt, err = verifyClaimAcquireGrantAttempt(tx, j.identity, grant)
+		if err != nil {
+			return InstallSnapshot{}, err
+		}
 	}
 	if state.revision != expected.Revision || !sameTransferAnchor(state.anchor, expected.Anchor) || state.manifestDigest != expected.ManifestDigest ||
 		!sameTransferAnchor(state.anchor, grant.start) || !grant.transfer.Valid() || grant.transfer.domainID != j.identity.DomainID ||
@@ -366,6 +393,11 @@ func (j *Journal) InstallClaimGrant(ctx context.Context, expected InstallExpecta
 	}
 	if err = updateInstallState(ctx, tx, state, grant.end, grant.manifest.Digest, manifestBytes); err != nil {
 		return InstallSnapshot{}, err
+	}
+	if commandID != "" {
+		if err = completeClaimAcquireGrantAttempt(tx, attempt, grant); err != nil {
+			return InstallSnapshot{}, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return InstallSnapshot{}, err

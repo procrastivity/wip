@@ -104,6 +104,7 @@ type labClientInput struct {
 	OwnerRootSPKI           string `json:"owner_root_spki"`
 	AuthoritySPKIPin        string `json:"authority_spki_pin"`
 	AuthorityCertificateDER []byte `json:"authority_certificate_der"`
+	ArtifactKeyCertificate  []byte `json:"artifact_key_certificate"`
 	EnvironmentCADelegation []byte `json:"environment_ca_delegation"`
 	EnrollmentGrant         []byte `json:"enrollment_grant"`
 }
@@ -301,10 +302,12 @@ func runHostEnroll(args []string) error {
 		Schema: "wipd.m5-lab-client-worker/1", Origin: "https://authority-env:8443", DomainID: *domainID,
 		Epoch: *epoch, RepoID: *repoID, BootstrapRepoID: bootstrapRepoID, OwnerRootPublicKey: append([]byte(nil), ownerPublic...),
 		OwnerRootSPKI: ownerSPKI, AuthoritySPKIPin: serverPin, AuthorityCertificateDER: serverCertDER,
+		ArtifactKeyCertificate:  artifactCertificate,
 		EnvironmentCADelegation: delegation, EnrollmentGrant: grant,
 	}
 	defer clear(clientConfig.EnrollmentGrant)
 	defer clear(clientConfig.OwnerRootPublicKey)
+	defer clear(clientConfig.ArtifactKeyCertificate)
 	serveWorker, err := buildWorkerForContainer(*authorityContainer)
 	if err != nil {
 		return err
@@ -454,6 +457,7 @@ func runClientEnrollWorker(args []string) error {
 	defer clear(input.EnrollmentGrant)
 	defer clear(input.EnvironmentCADelegation)
 	defer clear(input.OwnerRootPublicKey)
+	defer clear(input.ArtifactKeyCertificate)
 	if input.Schema != "wipd.m5-lab-client-worker/1" || !labULIDPattern.MatchString(input.DomainID) ||
 		!labULIDPattern.MatchString(input.RepoID) || !labULIDPattern.MatchString(input.BootstrapRepoID) || input.Epoch == 0 {
 		return errors.New("invalid client enrollment worker input")
@@ -473,9 +477,11 @@ func runClientEnrollWorker(args []string) error {
 		return err
 	}
 	if err = wipdremote.SaveConfig(filepath.Join(clientDataRoot, "wipd-profile"), wipdremote.Config{
-		Schema: "wipd.connected-authority-profile/1", Origin: input.Origin, DomainID: input.DomainID, Epoch: input.Epoch,
+		Schema: "wipd.connected-authority-profile/2", Origin: input.Origin, DomainID: input.DomainID, Epoch: input.Epoch,
 		RepoID: input.RepoID, OwnerRootSPKI: input.OwnerRootSPKI, AuthoritySPKIPin: input.AuthoritySPKIPin,
-		AuthorityCertificateDER: append([]byte(nil), input.AuthorityCertificateDER...), ClientStateDirectory: clientDataRoot,
+		AuthorityCertificateDER: append([]byte(nil), input.AuthorityCertificateDER...),
+		OwnerRootPublicKey:      append([]byte(nil), input.OwnerRootPublicKey...), ArtifactKeyCertificate: append([]byte(nil), input.ArtifactKeyCertificate...),
+		ClientStateDirectory: clientDataRoot,
 	}); err != nil {
 		return fmt.Errorf("install connected wipd profile: %w", err)
 	}

@@ -402,7 +402,7 @@ func (c *Client) negotiate(ctx context.Context) error {
 			"identity_schemas": []any{identitySchemaV1},
 		}},
 		"store_schemas": []any{storeSchemaV1},
-		"features":      []any{birthReleaseFeature, frameSchema},
+		"features":      []any{birthReleaseFeature, claimAcquireFeature, frameSchema},
 	})
 	if err != nil {
 		return err
@@ -481,8 +481,8 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !containsString(features, frameSchema) || len(features) > 2 ||
-		(len(features) == 2 && features[0] != birthReleaseFeature) {
+	if err != nil || !containsString(features, frameSchema) || len(features) > 3 ||
+		!onlyKnownFeatures(features) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	operations, err := parseOperationCapabilities(fields["operations"])
@@ -502,6 +502,15 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		storeSchemas:     storeSchemas,
 		features:         features,
 	}, nil
+}
+
+func onlyKnownFeatures(features []string) bool {
+	for _, feature := range features {
+		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeSessionParameters(payload []byte) (sessionParameters, error) {

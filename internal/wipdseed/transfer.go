@@ -317,6 +317,29 @@ func VerifyPullTransfer(profile wipdauthority.Profile, previous ClientState, ins
 	return transfer, manifest, nil
 }
 
+// VerifyClaimGrantTransfer verifies the complete acquisition delta against the
+// Environment's installed prefix and reruns the strict semantic fold over the
+// full prefix before the signed grant may be installed.
+func VerifyClaimGrantTransfer(profile wipdauthority.Profile, previous ClientState, start, end wipdwire.PrefixAnchor,
+	records []wipdwire.EventRecord, manifest wipdwire.BlobManifest,
+) (wipdjournal.VerifiedTransfer, error) {
+	if profile.DomainID() == "" || profile.Epoch() == 0 || previous.DomainID != profile.DomainID() ||
+		previous.Epoch != profile.Epoch() || !anchorEqual(previous.Prefix, start) ||
+		len(previous.EventRecords) != int(start.EventCount) {
+		return wipdjournal.VerifiedTransfer{}, ErrInvalidClientState
+	}
+	transfer, err := wipdjournal.VerifyTransfer(profile.DomainID(), profile.Epoch(), start, end, records, manifest)
+	if err != nil {
+		return wipdjournal.VerifiedTransfer{}, err
+	}
+	allRecords := append(cloneEventRecords(previous.EventRecords), cloneEventRecords(records)...)
+	anchor, _, _, err := foldEventRecords(allRecords, profile.DomainID())
+	if err != nil || !anchorEqual(anchor, end) {
+		return wipdjournal.VerifiedTransfer{}, ErrInvalidClientState
+	}
+	return transfer, nil
+}
+
 func withinSessionFrame(frame []byte, limits sessionLimits) bool {
 	return len(frame) >= 4 && limits.frameBody > 0 && limits.streamBytes >= 4 &&
 		len(frame) <= limits.streamBytes && int(binary.BigEndian.Uint32(frame[:4])) == len(frame)-4 &&

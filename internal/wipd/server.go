@@ -258,7 +258,7 @@ func (s *Server) serveNegotiate(writer http.ResponseWriter, request *http.Reques
 		}
 		abortHTTP2Stream()
 	}
-	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease())
+	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease(), s.supportsClaimAcquire())
 	if err != nil {
 		if errors.Is(err, errInvalidCapabilities) || errors.Is(err, errIncompatibleVersion) || errors.Is(err, errUnsupportedExtension) {
 			s.writeProblem(writer, frame.requestID, 0, err.Error(), bootstrapFrameBodyLimit)
@@ -338,6 +338,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		<-s.preflightSlots
 		preflightOwned = false
 		s.serveBirthClaimRelease(writer, request, state, hello, parameters, frame)
+		return
+	}
+	if frame.kind == claimAcquireFrameKind {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveClaimAcquire(writer, request, hello, parameters, frame)
 		return
 	}
 	if frame.kind != "command.submit" {

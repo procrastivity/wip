@@ -106,6 +106,8 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 1
 	case "claim.release":
 		maxFrames = 2
+	case "claim.acquire":
+		maxFrames = maxClientTransferEvents + 5
 	default:
 		return nil, ErrInvalidClientState
 	}

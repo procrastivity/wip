@@ -5,6 +5,7 @@ package wipdremote
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -44,6 +45,8 @@ type Config struct {
 	OwnerRootSPKI           string `json:"owner_root_spki"`
 	AuthoritySPKIPin        string `json:"authority_spki_pin"`
 	AuthorityCertificateDER []byte `json:"authority_certificate_der"`
+	OwnerRootPublicKey      []byte `json:"owner_root_public_key"`
+	ArtifactKeyCertificate  []byte `json:"artifact_key_certificate"`
 	ClientStateDirectory    string `json:"client_state_directory"`
 }
 
@@ -335,6 +338,7 @@ func (runtime *Runtime) pull(ctx context.Context, installed wipdwire.PrefixAncho
 		return empty, err
 	}
 	prior := runtime.state
+	prior.Prefix = installed
 	prior.EventRecords, err = runtime.journal.EventRecords(ctx)
 	if err != nil || len(prior.EventRecords) != int(installed.EventCount) {
 		return empty, wipd.ErrCommandStartIdentity
@@ -405,11 +409,17 @@ func (runtime *Runtime) Close() error {
 }
 
 func validateConfig(config Config) error {
-	if config.Schema != "wipd.connected-authority-profile/1" || config.RepoID == "" || config.ClientStateDirectory == "" ||
-		!filepath.IsAbs(config.ClientStateDirectory) {
+	if config.Schema != "wipd.connected-authority-profile/2" || config.RepoID == "" || config.ClientStateDirectory == "" ||
+		!filepath.IsAbs(config.ClientStateDirectory) || len(config.OwnerRootPublicKey) != ed25519.PublicKeySize ||
+		len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
-	_, _, err := authorityProfile(config)
+	ownerDER, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(config.OwnerRootPublicKey))
+	ownerDigest := sha256.Sum256(ownerDER)
+	if err != nil || "sha256:"+hex.EncodeToString(ownerDigest[:]) != config.OwnerRootSPKI {
+		return errors.New("wipdremote: connected authority owner key does not match its pin")
+	}
+	_, _, err = authorityProfile(config)
 	return err
 }
 

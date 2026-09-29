@@ -29,7 +29,7 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 		features:     []string{frameSchema},
 	}
 
-	selected, parameters, err := negotiateCapabilities(client, registry, false)
+	selected, parameters, err := negotiateCapabilities(client, registry, false, false)
 	if err != nil {
 		t.Fatalf("negotiateCapabilities() error = %v", err)
 	}
@@ -47,43 +47,51 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 
 	withoutFrame := client
 	withoutFrame.features = nil
-	if _, _, err := negotiateCapabilities(withoutFrame, registry, false); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutFrame, registry, false, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.frame/1 error = %v, want unsupported extension", err)
 	}
 
 	withoutIdentity := client
 	withoutIdentity.identitySchemas = nil
-	if _, _, err := negotiateCapabilities(withoutIdentity, registry, false); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutIdentity, registry, false, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.command/1 error = %v, want unsupported extension", err)
 	}
 
 	noCommonMinor := client
 	noCommonMinor.protocolMin = protocolVersion{major: 1, minor: 1}
-	if _, _, err := negotiateCapabilities(noCommonMinor, registry, false); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(noCommonMinor, registry, false, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("no common protocol minor error = %v, want incompatible version", err)
 	}
 
 	wrongMajor := client
 	wrongMajor.protocolMin = protocolVersion{major: 2, minor: 0}
 	wrongMajor.protocolMax = protocolVersion{major: 2, minor: 2}
-	if _, _, err := negotiateCapabilities(wrongMajor, registry, false); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(wrongMajor, registry, false, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("incompatible protocol major error = %v, want incompatible version", err)
 	}
 }
 
-func TestBirthClaimReleaseFeatureIsAdvertisedOnlyWhenConfigured(t *testing.T) {
+func TestLifecycleFeaturesAreAdvertisedOnlyWhenConfigured(t *testing.T) {
 	client := capabilityHello{
 		protocolMin: protocolVersion{major: 1, minor: 0}, protocolMax: protocolVersion{major: 1, minor: 0},
 		identitySchemas: []string{identitySchemaV1}, storeSchemas: []string{storeSchemaV1},
-		features: []string{birthReleaseFeature, frameSchema},
+		features: []string{birthReleaseFeature, claimAcquireFeature, frameSchema},
 	}
-	withoutRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), false)
-	if err != nil || !equalStrings(withoutRelease.features, []string{frameSchema}) {
-		t.Fatalf("unconfigured release feature = %v, %v; want frame-only", withoutRelease.features, err)
+	withoutLifecycle, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, false)
+	if err != nil || !equalStrings(withoutLifecycle.features, []string{frameSchema}) {
+		t.Fatalf("unconfigured lifecycle features = %v, %v; want frame-only", withoutLifecycle.features, err)
 	}
-	withRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), true)
+	withRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, false)
 	if err != nil || !equalStrings(withRelease.features, []string{birthReleaseFeature, frameSchema}) {
-		t.Fatalf("configured release feature = %v, %v; want negotiated release feature", withRelease.features, err)
+		t.Fatalf("configured release feature = %v, %v; want release only", withRelease.features, err)
+	}
+	withAcquire, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, true)
+	if err != nil || !equalStrings(withAcquire.features, []string{claimAcquireFeature, frameSchema}) {
+		t.Fatalf("configured acquisition feature = %v, %v; want acquisition only", withAcquire.features, err)
+	}
+	withBoth, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, true)
+	if err != nil || !equalStrings(withBoth.features, []string{birthReleaseFeature, claimAcquireFeature, frameSchema}) {
+		t.Fatalf("configured lifecycle features = %v, %v; want both advertised", withBoth.features, err)
 	}
 }
 

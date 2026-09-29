@@ -343,6 +343,13 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		app.serveBirthClaimRelease(writer, request, body, frame, environment)
 		return
+	case "claim.acquire":
+		if app.registry == nil || app.sign == nil || app.operations == nil {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveClaimAcquire(writer, request, body, frame, environment)
+		return
 	default:
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 		return
