@@ -80,6 +80,9 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if err != nil {
 		return out, err
 	}
+	if connectedLifecycleOperation(command.Request.Operation) {
+		return s.submitConnectedLifecycle(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
 	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation) ||
 		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
@@ -294,7 +297,16 @@ func (s *Store) RecoverCommand(ctx context.Context, command operation.Command, h
 	if state != "submitted" {
 		return nil, ErrNotOwner
 	}
-	owner := &Execution{store: s, command: command, hash: hash}
+	var lifecycle *lifecycleCommand
+	if connectedLifecycleOperation(command.Request.Operation) {
+		lifecycle, err = parseLifecycle(b, hash)
+		if err != nil || lifecycle.domain != command.AuthorityDomainID || lifecycle.epoch != command.ExpectedAuthorityEpoch ||
+			lifecycle.environment != command.EnvironmentID || lifecycle.sequence != command.EnvironmentSequence || lifecycle.id != command.ID {
+			return nil, ErrInvalidProof
+		}
+		lifecycle.lifecycle = lifecycle
+	}
+	owner := &Execution{store: s, command: command, lifecycle: lifecycle, hash: hash}
 	s.owners[key] = true
 	s.executions[key] = owner
 	return owner, nil

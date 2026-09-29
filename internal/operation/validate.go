@@ -45,6 +45,16 @@ func (d Definition) ValidateRequest(request Request) error {
 			return fmt.Errorf("step.create@v1 requires the parent Matter's implicit birth claim at epoch 1")
 		}
 	}
+	switch input := request.Input.(type) {
+	case StepLifecycleInput:
+		if err := validateULID("Step ID", input.StepID); err != nil {
+			return err
+		}
+	case MatterFinishInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+	}
 	return d.validateBlobs(request.Blobs)
 }
 
@@ -87,6 +97,17 @@ func (d Definition) ValidateResult(result Result) error {
 		}
 		if result.Output == nil || reflect.TypeOf(result.Output) != d.outputType {
 			return fmt.Errorf("output type is %T, want %s", result.Output, d.outputType)
+		}
+		switch output := result.Output.(type) {
+		case StepLifecycleOutput:
+			if validateULID("Step output ID", output.StepID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
+				(output.State != "in-progress" && output.State != "done") {
+				return fmt.Errorf("step lifecycle output has invalid identity or state")
+			}
+		case MatterFinishOutput:
+			if validateULID("Matter output ID", output.MatterID) != nil || output.State != "done" {
+				return fmt.Errorf("matter finish output has invalid identity or state")
+			}
 		}
 		return nil
 	case ResultRejected, ResultRefused, ResultFailed:

@@ -395,6 +395,131 @@ func (j *Journal) ClaimHydrationStatus(ctx context.Context, grantID string) (Cla
 	return status, nil
 }
 
+// ValidateInstalledClaimContext binds a claim-delivery command to the exact
+// locally installed acquisition grant, its Worktree, its Matter, and a
+// currently offline-ready pin set. It also rejects a grant closed or replaced
+// by an already installed authority tail.
+func (j *Journal) ValidateInstalledClaimContext(ctx context.Context, claim *operation.ClaimContext, matterID, worktreeID string) error {
+	if j == nil || ctx == nil || claim == nil || !transferULID.MatchString(claim.ID) ||
+		!transferULID.MatchString(matterID) || !transferULID.MatchString(worktreeID) {
+		return ErrClaimNotReady
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return ErrClosed
+	}
+	return j.validateInstalledClaimContextLocked(ctx, claim, matterID, worktreeID)
+}
+
+// ValidateCommandClaimReadiness resolves a Step's parent from the installed
+// immutable birth event, then validates the exact grant and hydration product.
+func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request operation.Request) error {
+	if j == nil || ctx == nil {
+		return ErrClaimNotReady
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return ErrClosed
+	}
+	matterID := ""
+	switch input := request.Input.(type) {
+	case operation.MatterFinishInput:
+		matterID = input.MatterID
+	case operation.StepLifecycleInput:
+		rows, err := j.db.QueryContext(ctx, `SELECT record FROM installed_events ORDER BY position`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var record []byte
+			if err = rows.Scan(&record); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				_ = rows.Close()
+				return ErrInvalidJournal
+			}
+			if fields["kind"] != "step.created" || fields["subject_id"] != input.StepID {
+				continue
+			}
+			payload, _ := fields["payload"].(map[string]any)
+			matterID, _ = payload["parent"].(string)
+			break
+		}
+		if err = rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+	default:
+		return ErrClaimNotReady
+	}
+	if matterID == "" {
+		return ErrClaimNotReady
+	}
+	return j.validateInstalledClaimContextLocked(ctx, request.Claim, matterID, request.Context.Worktree)
+}
+
+func (j *Journal) validateInstalledClaimContextLocked(ctx context.Context, claim *operation.ClaimContext, matterID, worktreeID string) error {
+	if claim == nil || !transferULID.MatchString(claim.ID) {
+		return ErrClaimNotReady
+	}
+	epoch, err := strconv.ParseUint(claim.Epoch, 10, 64)
+	if err != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != claim.Epoch {
+		return ErrClaimNotReady
+	}
+	var grantID string
+	if err = j.db.QueryRowContext(ctx, `SELECT grant_id FROM installed_claim_grants WHERE claim_id=? AND claim_epoch=?`, claim.ID, epoch).Scan(&grantID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrClaimNotReady
+		}
+		return err
+	}
+	grant, err := verifyInstalledClaimGrant(j.db, j.identity, grantID)
+	if err != nil || grant.claimID != claim.ID || grant.claimEpoch != epoch || grant.matterID != matterID || grant.WorktreeID() != worktreeID {
+		return ErrClaimNotReady
+	}
+	if err = claimHydrationReady(j.db, claim, j.blobsDir); err != nil {
+		return err
+	}
+	rows, err := j.db.QueryContext(ctx, `SELECT record FROM installed_events WHERE position>? ORDER BY position`, grant.end.EventCount)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var record []byte
+		if err = rows.Scan(&record); err != nil {
+			return err
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			return ErrInvalidJournal
+		}
+		payload, _ := fields["payload"].(map[string]any)
+		switch fields["kind"] {
+		case "claim.released", "claim.stood-down":
+			if payload["claim_id"] == claim.ID {
+				return ErrClaimNotReady
+			}
+		case "claim.acquired":
+			if payload["matter_id"] == matterID && payload["claim_id"] != claim.ID {
+				return ErrClaimNotReady
+			}
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func readClaimHydration(tx *sql.Tx, grantID string) (ClaimHydration, error) {
 	var result ClaimHydration
 	var epoch, count int64

@@ -35,7 +35,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 6
+	schemaVersion  = 7
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -222,6 +222,8 @@ func Open(root string, identity Identity) (*Journal, error) {
 				err = upgradeSchemaV4(db, identity)
 			case 5:
 				err = upgradeSchemaV5(db, identity)
+			case 6:
+				err = upgradeSchemaV6(db, identity)
 			case schemaVersion:
 				err = checkIdentity(db, identity)
 			default:
@@ -872,7 +874,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=6), name TEXT NOT NULL CHECK(name='environment-claim-acquire-attempts')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=7), name TEXT NOT NULL CHECK(name='environment-authority-command-outcomes')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -914,8 +916,8 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(6, 'environment-claim-acquire-attempts')`,
-		`PRAGMA user_version=6`,
+		`INSERT INTO schema_migrations(version, name) VALUES(7, 'environment-authority-command-outcomes')`,
+		`PRAGMA user_version=7`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
@@ -934,6 +936,9 @@ func installSchema(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if err = createClaimAcquireSchema(tx); err != nil {
+		return err
+	}
+	if err = createAuthorityOutcomeSchema(tx); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
@@ -960,21 +965,29 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=6`).Scan(&migration); err != nil || migration != "environment-claim-acquire-attempts" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=7`).Scan(&migration); err != nil || migration != "environment-authority-command-outcomes" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
 }
 
-func checkSchemaObjects(db *sql.DB) error { return checkSchemaObjectsVersion(db, true, true, true) }
-
-func checkSchemaObjectsV3(db *sql.DB) error {
-	return checkSchemaObjectsVersion(db, false, false, false)
+func checkSchemaObjects(db *sql.DB) error {
+	return checkSchemaObjectsVersion(db, true, true, true, true)
 }
 
-func checkSchemaObjectsV4(db *sql.DB) error { return checkSchemaObjectsVersion(db, true, false, false) }
+func checkSchemaObjectsV3(db *sql.DB) error {
+	return checkSchemaObjectsVersion(db, false, false, false, false)
+}
 
-func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants, includeClaimAcquire bool) error {
+func checkSchemaObjectsV4(db *sql.DB) error {
+	return checkSchemaObjectsVersion(db, true, false, false, false)
+}
+
+func checkSchemaObjectsV6(db *sql.DB) error {
+	return checkSchemaObjectsVersion(db, true, true, true, false)
+}
+
+func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants, includeClaimAcquire, includeAuthorityOutcomes bool) error {
 	expected := map[string]string{
 		"schema_migrations": "table", "environment_state": "table", "environment_identity_immutable": "trigger",
 		"environment_counters_increment": "trigger", "commands": "table", "commands_pending_order": "index",
@@ -1015,6 +1028,11 @@ func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants,
 		expected["command_after_pending_claim_acquire"] = "trigger"
 		expected["command_claim_acquire_id_conflict"] = "trigger"
 		expected["birth_release_after_pending_claim_acquire"] = "trigger"
+	}
+	if includeAuthorityOutcomes {
+		expected["authority_command_outcomes"] = "table"
+		expected["authority_command_outcome_immutable"] = "trigger"
+		expected["authority_command_outcome_no_delete"] = "trigger"
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {

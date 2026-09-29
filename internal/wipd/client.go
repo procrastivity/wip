@@ -397,7 +397,19 @@ func (c *Client) negotiate(ctx context.Context) error {
 			"versions":         []any{uint64(1)},
 			"identity_schemas": []any{identitySchemaV1},
 		}, map[string]any{
+			"name":             "matter.finish",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
 			"name":             "step.create",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name":             "step.finish",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name":             "step.start",
 			"versions":         []any{uint64(1)},
 			"identity_schemas": []any{identitySchemaV1},
 		}},
@@ -490,7 +502,8 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errInvalidCapabilities
 	}
 	for _, capability := range operations {
-		if capability.name != "matter.create" && capability.name != "step.create" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
+		if capability.name != "matter.create" && capability.name != "matter.finish" && capability.name != "step.create" &&
+			capability.name != "step.finish" && capability.name != "step.start" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
 			!equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
 			return serverHello{}, errInvalidCapabilities
 		}

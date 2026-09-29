@@ -59,13 +59,17 @@ type Footprint string
 
 // Birth footprints and the Step 8 guards name the narrow Matter/Step subset.
 const (
-	FootprintRepoMatterLocators Footprint = "repo.matter-locators"
-	FootprintNewbornMatter      Footprint = "newborn-matter-subtree"
-	FootprintNewbornStep        Footprint = "newborn-step"
-	FootprintImplicitBirthClaim Footprint = "matter.implicit-birth-claim"
-	FootprintStepParent         Footprint = "step.parent"
-	FootprintStepLocator        Footprint = "matter.step-locators"
-	FootprintStepSortKey        Footprint = "step.sibling-sort-key"
+	FootprintRepoMatterLocators      Footprint = "repo.matter-locators"
+	FootprintNewbornMatter           Footprint = "newborn-matter-subtree"
+	FootprintNewbornStep             Footprint = "newborn-step"
+	FootprintImplicitBirthClaim      Footprint = "matter.implicit-birth-claim"
+	FootprintMatterActiveClaim       Footprint = "matter.active-claim"
+	FootprintMatterLifecycle         Footprint = "matter.lifecycle"
+	FootprintStepLifecycle           Footprint = "step.lifecycle"
+	FootprintAnonymousBatchLifecycle Footprint = "anonymous-batch.lifecycle"
+	FootprintStepParent              Footprint = "step.parent"
+	FootprintStepLocator             Footprint = "matter.step-locators"
+	FootprintStepSortKey             Footprint = "step.sibling-sort-key"
 )
 
 // BlobSpec statically names one accepted staged blob input.

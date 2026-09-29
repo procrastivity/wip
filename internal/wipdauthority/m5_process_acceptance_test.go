@@ -379,11 +379,87 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		acquireReplay.Grant == nil || !sameClaimGrantSummary(*acquireReplay.Grant, *acquired.Grant) || !sameAuthorityAnchor(acquireReplay.Installed, acquired.Installed) {
 		t.Fatalf("same-ID claim-acquire replay changed its pinned product = %+v, %v; original=%+v", acquireReplay, err, acquired)
 	}
+	claimContext := &operation.ClaimContext{ID: acquired.Grant.ClaimID, Epoch: "1"}
+	commandContext := operation.Context{Repo: m5TestRepo, Clone: cloneID, Worktree: worktreeID}
+	wrongClaim := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX4P", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 5, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4P",
+		Request: operation.Request{
+			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
+			Context: commandContext, Claim: &operation.ClaimContext{ID: "01KZ7XHAQT1S46NYPN1PW1DX4Q", Epoch: "1"},
+			Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
+		},
+	}
+	if _, err = recoveredClient.ExecuteCommand(context.Background(), wrongClaim); err == nil {
+		t.Fatal("wrong claim identity was admitted")
+	}
+	anchorAfterWrongClaim, anchorErr := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if anchorErr != nil || !sameAuthorityAnchor(acquired.Installed, wireAnchor(anchorAfterWrongClaim)) {
+		t.Fatalf("wrong claim context mutated authority events: anchor=%+v err=%v", anchorAfterWrongClaim, anchorErr)
+	}
+	stepStart := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX4V", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 5, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4V",
+		Request: operation.Request{
+			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
+			Context: commandContext, Claim: claimContext, Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
+		},
+	}
+	started, err := recoveredClient.ExecuteCommand(context.Background(), stepStart)
+	if err != nil || started.Code != operation.ResultSucceeded || started.Output != (operation.StepLifecycleOutput{
+		StepID: stepOutput.ID, MatterID: matterOutput.ID, State: "in-progress",
+	}) {
+		stopRecoveredDaemon()
+		t.Fatalf("claim-scoped Step start through authenticated wipd = %+v, %v; daemon=%s", started, err, recoveredOutput.String())
+	}
+	stepFinish := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX4M", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 6, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4M",
+		Request: operation.Request{
+			Operation: operation.StepFinishV1.Metadata().Operation, Actor: "human",
+			Context: commandContext, Claim: claimContext, Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
+		},
+	}
+	finishedStep, err := recoveredClient.ExecuteCommand(context.Background(), stepFinish)
+	if err != nil || finishedStep.Code != operation.ResultSucceeded || finishedStep.Output != (operation.StepLifecycleOutput{
+		StepID: stepOutput.ID, MatterID: matterOutput.ID, State: "done",
+	}) {
+		t.Fatalf("claim-scoped Step finish through authenticated wipd = %+v, %v", finishedStep, err)
+	}
+	matterFinish := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX4N", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 7, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4N",
+		Request: operation.Request{
+			Operation: operation.MatterFinishV1.Metadata().Operation, Actor: "human",
+			Context: commandContext, Claim: claimContext, Input: operation.MatterFinishInput{MatterID: matterOutput.ID},
+		},
+	}
+	finishedMatter, err := recoveredClient.ExecuteCommand(context.Background(), matterFinish)
+	if err != nil || finishedMatter.Code != operation.ResultSucceeded || finishedMatter.Output != (operation.MatterFinishOutput{
+		MatterID: matterOutput.ID, State: "done", BecameSealed: true,
+	}) {
+		t.Fatalf("authority-class Matter finish through authenticated wipd = %+v, %v", finishedMatter, err)
+	}
+	for label, command := range map[string]operation.Command{"Step start": stepStart, "Step finish": stepFinish, "Matter finish": matterFinish} {
+		status, queryErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, m5CommandHash(t, command), 1,
+			fixture.peer, m5TestEnv, time.Now().UTC())
+		if queryErr != nil || status.Pending || len(status.Receipt) == 0 {
+			t.Fatalf("%s durable authority receipt = %+v, %v", label, status, queryErr)
+		}
+	}
+	matterFinishReplay, err := recoveredClient.ExecuteCommand(context.Background(), matterFinish)
+	if err != nil || matterFinishReplay.Code != operation.ResultSucceeded || matterFinishReplay.Output != finishedMatter.Output {
+		t.Fatalf("same-ID Matter finish replay changed its typed result = %+v, %v", matterFinishReplay, err)
+	}
 	_ = recoveredClient.Close()
 	stopRecoveredDaemon()
 	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || anchor.EventCount != 6 || !sameAuthorityAnchor(acquired.Installed, wireAnchor(anchor)) {
-		t.Fatalf("authority event range after claim acquisition = %+v, %v; want the six-event installed grant tail", anchor, err)
+	if err != nil || anchor.EventCount != 11 {
+		t.Fatalf("authority event range after lifecycle completion = %+v, %v; want eleven events", anchor, err)
 	}
 	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
 		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
@@ -394,7 +470,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	defer func() { _ = journal.Close() }()
 	snapshot, err := journal.InstallSnapshot(context.Background())
-	if err != nil || snapshot.Anchor.EventCount != 6 || len(snapshot.Receipts) != 2 {
+	if err != nil || snapshot.Anchor.EventCount != 11 || len(snapshot.Receipts) != 5 {
 		t.Fatalf("durable Environment authority fold/replay state = %+v, %v", snapshot, err)
 	}
 	releaseAttempt, err := journal.BirthReleaseAttempt(releaseID)
@@ -404,8 +480,16 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable birth-release receipt/barrier = %+v, %v", releaseAttempt, err)
 	}
 	entries, err := journal.Entries()
-	if err != nil || len(entries) != 2 || entries[0].State != wipdjournal.StateReturned || entries[1].State != wipdjournal.StateReturned {
+	if err != nil || len(entries) != 5 || entries[0].State != wipdjournal.StateReturned || entries[1].State != wipdjournal.StateReturned ||
+		entries[2].State != wipdjournal.StateReturned || entries[3].State != wipdjournal.StateReturned ||
+		entries[4].Delivery != operation.DeliveryAuthority || entries[4].JournalPosition != 0 || entries[4].State != wipdjournal.StateAttemptPrepared {
 		t.Fatalf("durable journal dispositions = %+v, %v", entries, err)
+	}
+	finishStatus, finishStatusErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, matterFinish.ID,
+		m5CommandHash(t, matterFinish), 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	if outcome, ok := snapshot.Receipts[matterFinish.ID]; finishStatusErr != nil || !ok || outcome.ResultCode != operation.ResultSucceeded ||
+		!bytes.Equal(outcome.CanonicalReceipt, finishStatus.Receipt) {
+		t.Fatalf("authority-class Matter-finish outcome was not durably retained for replay: %+v, present=%v", outcome, ok)
 	}
 	acquireAttempt, err := journal.ClaimAcquireAttempt(acquireID)
 	if err != nil || !acquireAttempt.Returned || acquireAttempt.ResultCode != operation.ResultSucceeded ||
@@ -419,7 +503,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable installed grant identity/as-of = %+v, %v", installedGrant, err)
 	}
 	records, err := journal.EventRecords(context.Background())
-	if err != nil || len(records) != 6 {
+	if err != nil || len(records) != 11 {
 		t.Fatalf("durable installed event records = %d, %v", len(records), err)
 	}
 	if records[0].EventID == records[1].EventID {
@@ -442,11 +526,31 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		replayAfterReopen.Grant == nil || !sameClaimGrantSummary(*replayAfterReopen.Grant, *acquired.Grant) {
 		t.Fatalf("same-ID acquisition replay after daemon/journal reopen = %+v, %v", replayAfterReopen, err)
 	}
-	refused, err := assertClient.AcquireClaim(context.Background(), "01KZ7XHAQT1S46NYPN1PW1DX4G", matterOutput.ID,
-		"01KZ7XHAQT1S46NYPN1PW1DX4H", "01KZ7XHAQT1S46NYPN1PW1DX4J", "01KZ7XHAQT1S46NYPN1PW1DX4K", operation.Actor("human"))
-	if err != nil || refused.Code != operation.ResultRefused || refused.Grant != nil || len(refused.Receipt) == 0 ||
-		!sameAuthorityAnchor(refused.Installed, acquired.Installed) {
-		t.Fatalf("second acquisition refusal and authenticated pull after reopen = %+v, %v; daemon=%s", refused, err, assertOutput.String())
+	if sameAuthorityAnchor(replayAfterReopen.Installed, replayAfterReopen.Grant.AsOf) ||
+		!sameAuthorityAnchor(replayAfterReopen.Installed, wireAnchor(anchor)) {
+		t.Fatalf("reopened acquisition replay did not preserve its older grant as-of while reporting the newer installed prefix: installed=%+v grant-as-of=%+v current=%+v",
+			replayAfterReopen.Installed, replayAfterReopen.Grant.AsOf, anchor)
+	}
+	finishAfterReopen, err := assertClient.ExecuteCommand(context.Background(), matterFinish)
+	if err != nil || finishAfterReopen.Code != operation.ResultSucceeded || finishAfterReopen.Output != finishedMatter.Output {
+		t.Fatalf("same-ID lifecycle receipt replay after daemon/journal reopen = %+v, %v", finishAfterReopen, err)
+	}
+	postReopenStart := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX4R", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 8, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4R",
+		Request: operation.Request{
+			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
+			Context: commandContext, Claim: claimContext, Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
+		},
+	}
+	postReopenResult, err := assertClient.ExecuteCommand(context.Background(), postReopenStart)
+	if err != nil || postReopenResult.Code != operation.ResultRefused || postReopenResult.Output != nil {
+		t.Fatalf("subsequent authenticated post-reopen lifecycle behavior = %+v, %v; daemon=%s", postReopenResult, err, assertOutput.String())
+	}
+	postLifecycleAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || postLifecycleAnchor.EventCount != 11 {
+		t.Fatalf("subsequent authenticated pull changed lifecycle event tail = %+v, %v", postLifecycleAnchor, err)
 	}
 	if err = assertClient.Close(); err != nil {
 		t.Fatal(err)

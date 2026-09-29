@@ -24,6 +24,7 @@ type lifecycleCommand struct {
 	actedAt, worktree, clone, matter, dispatch, mode string
 	claimID                                          string
 	claimEpoch                                       uint64
+	stepID                                           string
 	repair                                           *repairInput
 	barrier                                          *journalBarrier
 	stand                                            *standDownInput
@@ -185,6 +186,34 @@ func parseLifecycle(raw []byte, hash string) (*lifecycleCommand, error) {
 			return nil, ErrInvalidProof
 		}
 		c.matter, c.dispatch, c.mode = in.Matter, in.Dispatch, in.Mode
+	case "step.start", "step.finish":
+		if w.Claim == nil || c.worktree == "" || c.clone == "" {
+			return nil, ErrInvalidProof
+		}
+		if _, err = closedMap(fields["input"], "step_id"); err != nil {
+			return nil, err
+		}
+		var in struct {
+			StepID string `cbor:"step_id"`
+		}
+		if artifactDecoder.Unmarshal(fields["input"], &in) != nil || !ulid.MatchString(in.StepID) {
+			return nil, ErrInvalidProof
+		}
+		c.stepID = in.StepID
+	case "matter.finish":
+		if w.Claim == nil || c.worktree == "" || c.clone == "" {
+			return nil, ErrInvalidProof
+		}
+		if _, err = closedMap(fields["input"], "matter_id"); err != nil {
+			return nil, err
+		}
+		var in struct {
+			MatterID string `cbor:"matter_id"`
+		}
+		if artifactDecoder.Unmarshal(fields["input"], &in) != nil || !ulid.MatchString(in.MatterID) {
+			return nil, ErrInvalidProof
+		}
+		c.matter = in.MatterID
 	case "claim.journal-repair", "claim.release":
 		if w.Claim == nil || c.name == "claim.journal-repair" && (c.worktree == "" || c.clone == "") ||
 			c.name == "claim.release" && ((c.worktree == "") != (c.clone == "")) {

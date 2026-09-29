@@ -49,5 +49,16 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 	}); err != nil {
 		return nil, err
 	}
+	for _, definition := range []operation.Definition{
+		operation.StepStartV1, operation.StepFinishV1, operation.MatterFinishV1,
+	} {
+		if err := registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "lifecycle operation requires an authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return registry, nil
 }

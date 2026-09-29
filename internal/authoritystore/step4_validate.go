@@ -237,7 +237,8 @@ func validResultProblem(code, problem string) bool {
 
 func lifecycleOperation(name string) bool {
 	switch name {
-	case "claim.acquire", "claim.journal-repair", "claim.release", "claim.stand-down":
+	case "claim.acquire", "claim.journal-repair", "claim.release", "claim.stand-down",
+		"step.start", "step.finish", "matter.finish":
 		return true
 	}
 	return false
@@ -598,6 +599,55 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 		want = append(want, expectedEvent{kind, subject, payload})
 	}
 	switch c.name {
+	case "step.start", "step.finish":
+		var stepMatter, stepRepo string
+		if db.QueryRow(`SELECT matter_id,repo_id FROM steps WHERE domain_id=? AND step_id=?`, c.domain, c.stepID).Scan(&stepMatter, &stepRepo) != nil ||
+			stepMatter != matter || stepRepo != c.repo {
+			return ErrInvalidStore
+		}
+		matterState, stateErr := lifecycleStateBefore(db, c.domain, matter, "matter", events[0].position)
+		if stateErr != nil {
+			return stateErr
+		}
+		stepState, stateErr := lifecycleStateBefore(db, c.domain, c.stepID, "step", events[0].position)
+		if stateErr != nil {
+			return stateErr
+		}
+		if c.name == "step.start" {
+			if stepState != "planned" {
+				return ErrInvalidStore
+			}
+			if matterState == "planned" {
+				add("matter.started", matter, map[string]any{"from": "planned", "to": "in-progress", "cascade": true})
+			}
+			add("step.started", c.stepID, map[string]any{"from": "planned", "to": "in-progress"})
+			output = map[string]any{"step_id": c.stepID, "matter_id": matter, "state": "in-progress"}
+		} else {
+			if stepState != "in-progress" {
+				return ErrInvalidStore
+			}
+			add("step.finished", c.stepID, map[string]any{"from": "in-progress", "to": "done"})
+			output = map[string]any{"step_id": c.stepID, "matter_id": matter, "state": "done"}
+		}
+	case "matter.finish":
+		matterState, stateErr := lifecycleStateBefore(db, c.domain, matter, "matter", events[0].position)
+		if stateErr != nil || matterState != "in-progress" {
+			return ErrInvalidStore
+		}
+		add("matter.finished", matter, map[string]any{"from": "in-progress", "to": "done"})
+		var anonymousBatch string
+		batchErr := db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, matter).Scan(&anonymousBatch)
+		if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
+			return batchErr
+		}
+		sealed, sealErr := matterSubtreeCompleteBefore(db, c.domain, matter, events[0].position)
+		if sealErr != nil {
+			return sealErr
+		}
+		if sealed && !errors.Is(batchErr, sql.ErrNoRows) {
+			add("batch.swept", anonymousBatch, map[string]any{})
+		}
+		output = map[string]any{"matter_id": matter, "state": "done", "became_sealed": sealed}
 	case "claim.acquire":
 		var prior int
 		if db.QueryRow(`SELECT count(*) FROM claims p JOIN terminal_receipts t ON t.domain_id=p.domain_id AND t.command_id=p.acquire_command_id WHERE p.domain_id=? AND p.matter_id=? AND t.first_position<?`, c.domain, matter, events[0].position).Scan(&prior) != nil || (prior == 0) != (len(events) == 3) {
@@ -672,6 +722,74 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 		}
 	}
 	return nil
+}
+
+func matterSubtreeCompleteBefore(db *sql.DB, domain, matter string, before uint64) (bool, error) {
+	rows, err := db.Query(`SELECT step_id FROM steps WHERE domain_id=? AND matter_id=? ORDER BY step_id`, domain, matter)
+	if err != nil {
+		return false, err
+	}
+	var steps []string
+	for rows.Next() {
+		var step string
+		if err = rows.Scan(&step); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		steps = append(steps, step)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err = rows.Close(); err != nil {
+		return false, err
+	}
+	for _, step := range steps {
+		state, stateErr := lifecycleStateBefore(db, domain, step, "step", before)
+		if stateErr != nil {
+			return false, stateErr
+		}
+		if state != "done" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func lifecycleStateBefore(db *sql.DB, domain, subject, scale string, before uint64) (string, error) {
+	state := "planned"
+	rows, err := db.Query(`SELECT record FROM authority_events WHERE domain_id=? AND position<? ORDER BY position`, domain, before)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			return "", err
+		}
+		var event struct {
+			Kind    string         `cbor:"kind"`
+			Subject string         `cbor:"subject_id"`
+			Payload map[string]any `cbor:"payload"`
+		}
+		if artifactDecoder.Unmarshal(raw, &event) != nil {
+			return "", ErrInvalidStore
+		}
+		if event.Subject != subject {
+			continue
+		}
+		if scale == "matter" && (event.Kind == "matter.started" || event.Kind == "matter.finished") ||
+			scale == "step" && (event.Kind == "step.started" || event.Kind == "step.finished") {
+			to, ok := event.Payload["to"].(string)
+			if !ok {
+				return "", ErrInvalidStore
+			}
+			state = to
+		}
+	}
+	return state, rows.Err()
 }
 
 func checkBirthReleaseEvents(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent) error {

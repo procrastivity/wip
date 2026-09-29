@@ -652,6 +652,68 @@ func TestPullInstallsBirthClaimReleaseAndReopensForLaterPull(t *testing.T) {
 	}
 }
 
+func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testing.T) {
+	domainID, repoID, environmentID := testDomainID, testRepoID, "01KZ7XHAQT1S46NYPN1PW1DX3A"
+	matterID, stepID := "01KZ7XHAQT1S46NYPN1PW1DX90", "01KZ7XHAQT1S46NYPN1PW1DX91"
+	batchID, claimID := "01KZ7XHAQT1S46NYPN1PW1DX92", "01KZ7XHAQT1S46NYPN1PW1DX93"
+	dispatchID, worktreeID := "01KZ7XHAQT1S46NYPN1PW1DX94", "01KZ7XHAQT1S46NYPN1PW1DX95"
+	const actedAt = "2026-09-23T11:59:00Z"
+	event := func(eventNumber, commandNumber int, sequence uint64, kind, subject string, payload any) wipdwire.EventRecord {
+		t.Helper()
+		eventID := fmt.Sprintf("%026d", eventNumber)
+		commandID := fmt.Sprintf("%026d", commandNumber)
+		hash := testDigest([]byte("lifecycle-fold-command:" + commandID))
+		record, err := wipdwire.EncodeCanonical(map[string]any{
+			"schema": "wipd.event/1", "event_id": eventID, "domain_id": domainID,
+			"command_id": commandID, "request_hash": hash,
+			"environment": map[string]any{"id": environmentID, "sequence": sequence},
+			"acted_at":    actedAt, "occurred_at": actedAt, "kind": kind,
+			"subject_id": subject, "repo_id": repoID, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wipdwire.EventRecord{EventID: eventID, Record: record}
+	}
+	records := []wipdwire.EventRecord{
+		event(500, 400, 1, "matter.created", matterID, map[string]any{"id": matterID, "locator": "incomplete", "title": "Incomplete matter"}),
+		event(501, 401, 2, "step.created", stepID, map[string]any{"title": "Unfinished child", "locator": "step-01", "parent": matterID, "sort_key": int64(1000)}),
+		event(502, 402, 3, "batch.anonymous-created", batchID, map[string]any{"batch_id": batchID, "matter_id": matterID}),
+		event(503, 402, 3, "claim.acquired", claimID, map[string]any{
+			"claim_id": claimID, "claim_epoch": uint64(1), "matter_id": matterID,
+			"batch_id": batchID, "dispatch_id": dispatchID, "owner_environment_id": environmentID, "worktree_id": worktreeID,
+		}),
+		event(504, 402, 3, "dispatch.opened", dispatchID, map[string]any{
+			"dispatch_id": dispatchID, "matter_id": matterID, "batch_id": batchID,
+			"claim_id": claimID, "worktree_id": worktreeID,
+		}),
+		event(505, 403, 4, "matter.started", matterID, map[string]any{"from": "planned", "to": "in-progress", "cascade": true}),
+		event(506, 403, 4, "step.started", stepID, map[string]any{"from": "planned", "to": "in-progress"}),
+		event(507, 404, 5, "matter.finished", matterID, map[string]any{"from": "in-progress", "to": "done"}),
+	}
+	_, projections, steps, err := foldEventRecords(records, domainID)
+	if err != nil || len(projections) != 1 || len(steps) != 1 {
+		t.Fatalf("fold incomplete Matter finish: matters=%d steps=%d err=%v", len(projections), len(steps), err)
+	}
+	var matter eventProjection
+	var step stepProjection
+	if json.Unmarshal(projections[0], &matter) != nil || json.Unmarshal(steps[0], &step) != nil ||
+		matter.ID != matterID || matter.State != "done" || step.ID != stepID || step.State != "in-progress" {
+		t.Fatalf("incomplete finish projections = matter %+v, Step %+v", matter, step)
+	}
+
+	records = append(records, event(508, 405, 6, "step.finished", stepID, map[string]any{"from": "in-progress", "to": "done"}))
+	_, projections, steps, err = foldEventRecords(records, domainID)
+	if err != nil || json.Unmarshal(projections[0], &matter) != nil || json.Unmarshal(steps[0], &step) != nil ||
+		matter.State != "done" || step.State != "done" {
+		t.Fatalf("fold Step completion after incomplete Matter finish: matter=%+v step=%+v err=%v", matter, step, err)
+	}
+	if _, _, _, err := foldEventRecords(append(append([]wipdwire.EventRecord(nil), records...),
+		event(509, 404, 5, "batch.swept", batchID, map[string]any{})), domainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("sweep after a Matter finish with an incomplete child folded: %v", err)
+	}
+}
+
 func TestAuthenticatedAcquisitionGrantInstallAllowsLaterPullAndReopen(t *testing.T) {
 	fixture := newClientFixture(t)
 	artifactSigner, artifactCertificate := registerClientFixtureArtifactKeyWithCertificate(t, fixture)

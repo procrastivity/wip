@@ -48,6 +48,20 @@ func (environment *JournalCommandStartEnvironment) InstallFold(ctx context.Conte
 	return commandStartSnapshot(installed), nil
 }
 
+// InstallAuthorityOutcome atomically retains an authority-class command's
+// terminal receipt and verified tail without assigning a journal position or
+// making the attempt eligible for deferred execution.
+func (environment *JournalCommandStartEnvironment) InstallAuthorityOutcome(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry, fold CommandFold) (CommandStartSnapshot, error) {
+	if err := environment.checkExpected(expected); err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	installed, err := environment.journal.InstallAuthorityOutcome(ctx, installExpectation(expected), entry, fold.ResultCode, fold.CanonicalReceipt, fold.VerifiedTransfer)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	return commandStartSnapshot(installed), nil
+}
+
 // InstallPull atomically commits a verified authority tail through the Environment journal.
 func (environment *JournalCommandStartEnvironment) InstallPull(ctx context.Context, expected CommandStartSnapshot, pull CommandPull) (CommandStartSnapshot, error) {
 	if err := environment.checkExpected(expected); err != nil {

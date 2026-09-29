@@ -41,6 +41,39 @@ type StepCreateOutput struct {
 
 func (StepCreateOutput) operationOutput() {}
 
+// StepLifecycleInput identifies the exact Step changed by a claim-scoped
+// lifecycle command. Its containing Matter is resolved from authority state.
+type StepLifecycleInput struct {
+	StepID string
+}
+
+func (StepLifecycleInput) operationInput() {}
+
+// StepLifecycleOutput reports the authority's typed state for the exact Step.
+type StepLifecycleOutput struct {
+	StepID   string
+	MatterID string
+	State    string
+}
+
+func (StepLifecycleOutput) operationOutput() {}
+
+// MatterFinishInput identifies the Matter completed under its active claim.
+type MatterFinishInput struct {
+	MatterID string
+}
+
+func (MatterFinishInput) operationInput() {}
+
+// MatterFinishOutput reports whether completion crossed the seal boundary.
+type MatterFinishOutput struct {
+	MatterID     string
+	State        string
+	BecameSealed bool
+}
+
+func (MatterFinishOutput) operationOutput() {}
+
 // MatterCreateV1 is the canonical M1 definition and the first Step 3 adoption
 // candidate. Its future delivery class is provisional per D120/D127, while its
 // current implementation and storage ownership remain unchanged.
@@ -71,7 +104,50 @@ var StepCreateV1 = mustDefine[StepCreateInput, StepCreateOutput](Metadata{
 	ExternalEffects: []ExternalEffect{},
 })
 
-var catalogue = []Definition{MatterCreateV1, StepCreateV1}
+// StepStartV1 and StepFinishV1 are claim-delivered lifecycle operations. A
+// Step start may atomically cascade the Matter ancestor from Planned to
+// InProgress before starting the exact Step.
+var StepStartV1 = mustDefine[StepLifecycleInput, StepLifecycleOutput](Metadata{
+	Operation:       ID{Name: "step.start", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryClaim,
+	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintStepLifecycle},
+	Writes:          []Footprint{FootprintMatterLifecycle, FootprintStepLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// StepFinishV1 finishes one exact Step under its active Matter claim.
+var StepFinishV1 = mustDefine[StepLifecycleInput, StepLifecycleOutput](Metadata{
+	Operation:       ID{Name: "step.finish", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryClaim,
+	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle},
+	Writes:          []Footprint{FootprintStepLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// MatterFinishV1 is statically authority-delivered even though its exact
+// active Matter claim is required as fencing and context proof. Sealing and
+// an anonymous Batch sweep are one authority transaction.
+var MatterFinishV1 = mustDefine[MatterFinishInput, MatterFinishOutput](Metadata{
+	Operation:       ID{Name: "matter.finish", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
+	Writes:          []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+var catalogue = []Definition{MatterCreateV1, StepCreateV1, StepStartV1, StepFinishV1, MatterFinishV1}
 
 // Catalogue returns the currently defined semantic operations. It is not the
 // Cobra manifest: operations enter this list only as their semantic contracts

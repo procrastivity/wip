@@ -36,8 +36,8 @@ type EnvironmentLeafSigner func(context.Context, string, uint64, string, []byte,
 
 // M5LabConfig binds the lab-only enrollment, transfer, and optional command
 // endpoints to the persisted authority store and one exact initial Repo. A
-// non-nil Registry enables matter.create@v1 and optionally step.create@v1; it requires the offline
-// owner-certified authority-artifact key plus its restricted signer.
+// non-nil Registry enables the negotiated M5 operations; it requires the
+// offline owner-certified authority-artifact key plus its restricted signer.
 type M5LabConfig struct {
 	Store                       *authoritystore.Store
 	RepoID                      string
@@ -94,7 +94,7 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	var operations []operation.Definition
 	if config.Registry != nil {
 		operations = config.Registry.Definitions()
-		if len(operations) == 0 || len(operations) > 2 ||
+		if len(operations) == 0 || len(operations) > 5 ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
 			return nil, ErrInvalidLabConfig
 		}
@@ -104,7 +104,10 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 			switch id {
 			case operation.MatterCreateV1.Metadata().Operation:
 				matterRegistered = true
-			case operation.StepCreateV1.Metadata().Operation:
+			case operation.StepCreateV1.Metadata().Operation,
+				operation.StepStartV1.Metadata().Operation,
+				operation.StepFinishV1.Metadata().Operation,
+				operation.MatterFinishV1.Metadata().Operation:
 			default:
 				return nil, ErrInvalidLabConfig
 			}

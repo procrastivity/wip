@@ -38,8 +38,11 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 2 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation {
-		t.Fatalf("catalogue = %+v, want Matter and Step 8 birth operations", Catalogue())
+	if len(Catalogue()) != 5 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
+		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
+		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation {
+		t.Fatalf("catalogue = %+v, want the Matter/Step birth and Step 14 lifecycle operations", Catalogue())
 	}
 }
 

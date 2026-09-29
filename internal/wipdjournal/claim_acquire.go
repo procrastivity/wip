@@ -115,7 +115,7 @@ func upgradeSchemaV5(db *sql.DB, identity Identity) error {
 	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=5`).Scan(&marker); err != nil || marker != "environment-verified-claim-grants" {
 		return fmt.Errorf("%w: v5 claim-acquire-upgrade marker %q: %v", ErrInvalidJournal, marker, err)
 	}
-	if err := checkSchemaObjectsVersion(db, true, true, false); err != nil {
+	if err := checkSchemaObjectsVersion(db, true, true, false, false); err != nil {
 		return fmt.Errorf("%w: v5 claim-acquire-upgrade schema: %v", ErrInvalidJournal, err)
 	}
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -136,6 +136,52 @@ func upgradeSchemaV5(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if _, err = tx.Exec(`PRAGMA user_version=6`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upgradeSchemaV6 adds a distinct durable outcome table for authority-delivery
+// commands. They remain attempt-prepared at journal position zero; the outcome
+// resolves exact replay without entering the pending-return overlay.
+func upgradeSchemaV6(db *sql.DB, identity Identity) error {
+	var version int
+	var repoID, domainID, environmentID, marker string
+	var epoch int64
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
+		return ErrInvalidJournal
+	}
+	if err := db.QueryRow(`SELECT repo_id,domain_id,authority_epoch,environment_id FROM environment_state WHERE singleton=1`).Scan(&repoID, &domainID, &epoch, &environmentID); err != nil ||
+		repoID != identity.RepoID || domainID != identity.DomainID || epoch != int64(identity.AuthorityEpoch) || environmentID != identity.EnvironmentID {
+		return ErrInvalidIdentity
+	}
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=6`).Scan(&marker); err != nil || marker != "environment-claim-acquire-attempts" {
+		return ErrInvalidJournal
+	}
+	if err := checkSchemaObjectsV6(db); err != nil {
+		return ErrInvalidJournal
+	}
+	if err := checkInstallationDatabase(db, identity); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = createAuthorityOutcomeSchema(tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE schema_migrations`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=7),name TEXT NOT NULL CHECK(name='environment-authority-command-outcomes')) STRICT`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version,name) VALUES(7,'environment-authority-command-outcomes')`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=7`); err != nil {
 		return err
 	}
 	return tx.Commit()

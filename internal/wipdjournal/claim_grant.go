@@ -38,6 +38,7 @@ type ClaimGrantEvidence struct {
 type VerifiedClaimGrant struct {
 	grantID, acquireCommandID, acquireRequestHash string
 	claimID, matterID, batchID, dispatchID        string
+	worktreeID                                    string
 	ownerRootSPKI, verifiedAt                     string
 	claimEpoch                                    uint64
 	start, end                                    wipdwire.PrefixAnchor
@@ -53,6 +54,9 @@ type VerifiedClaimGrant struct {
 func (grant VerifiedClaimGrant) TerminalReceipt() []byte {
 	return bytes.Clone(grant.receipt)
 }
+
+// WorktreeID returns the Worktree bound by the verified acquisition range.
+func (grant VerifiedClaimGrant) WorktreeID() string { return grant.worktreeID }
 
 // VerifyClaimGrant verifies the signed authority grant and binds it to the
 // authenticated client's pinned owner root and exact complete transfer.
@@ -137,9 +141,13 @@ func VerifyClaimGrant(identity Identity, trust ClaimGrantTrust, evidence ClaimGr
 		receiptMap, evidence.Transfer) != nil {
 		return result, errInvalidClaimGrant
 	}
+	worktreeID := claimGrantWorktree(receiptMap, evidence.Transfer)
+	if !transferULID.MatchString(worktreeID) {
+		return result, errInvalidClaimGrant
+	}
 	result = VerifiedClaimGrant{
 		grantID: grantID, acquireCommandID: acquireID, acquireRequestHash: requestHash,
-		claimID: claimID, claimEpoch: claimEpoch, matterID: matterID, batchID: batchID, dispatchID: dispatchID,
+		claimID: claimID, claimEpoch: claimEpoch, matterID: matterID, batchID: batchID, dispatchID: dispatchID, worktreeID: worktreeID,
 		ownerRootSPKI: trust.OwnerRootSPKI, verifiedAt: trust.VerifiedAt.UTC().Format(time.RFC3339Nano),
 		start: cloneTransferAnchor(startAnchor), end: cloneTransferAnchor(endAnchor), manifest: cloneTransferManifest(evidence.Transfer.manifest),
 		ownerRootPublicKey: bytes.Clone(trust.OwnerRootPublicKey), artifactKeyCertificate: bytes.Clone(evidence.ArtifactKeyCertificate),
@@ -316,6 +324,43 @@ func verifyAcquireReceipt(identity Identity, commandID, requestHash, claimID str
 		}
 	}
 	return nil
+}
+
+func claimGrantWorktree(receipt map[string]any, transfer VerifiedTransfer) string {
+	accepted, ok := receipt["accepted_events"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	first, firstOK := accepted["first_event_id"].(string)
+	last, lastOK := accepted["last_event_id"].(string)
+	if !firstOK || !lastOK {
+		return ""
+	}
+	insideRange := false
+	for _, record := range transfer.records {
+		if record.EventID == first {
+			insideRange = true
+		}
+		if !insideRange {
+			continue
+		}
+		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil {
+			return ""
+		}
+		if fields["kind"] == "claim.acquired" {
+			payload, ok := fields["payload"].(map[string]any)
+			if !ok {
+				return ""
+			}
+			return asString(payload["worktree_id"])
+		}
+		if record.EventID == last {
+			break
+		}
+	}
+	return ""
 }
 
 func verifyClaimGrantEnd(raw []byte, grantID string, end wipdwire.PrefixAnchor, manifestDigest string) error {

@@ -207,6 +207,105 @@ func claimTestBirthStep(t *testing.T, f *claimTestFixture, id, event int) ([]byt
 	return raw, hash, status
 }
 
+func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	_, _, birthStep := claimTestBirthStep(t, f, 31, 101)
+	if birthStep.Pending || birthStep.Owner != nil {
+		t.Fatalf("birth Step did not complete: %+v", birthStep)
+	}
+	installed := f.anchor(t)
+	allocation := claimTestAllocation(1, installed, 104, 105, 106)
+	_, _, acquired, grant := f.acquire(t, 11, 3, installed, allocation)
+	if acquired.Pending || acquired.Owner != nil || grant.ID != allocation.GrantID || allocation.ClaimID == "" || allocation.BatchID == "" {
+		t.Fatalf("claim acquisition did not complete: status=%+v grant=%+v", acquired, grant)
+	}
+	stepID := claimTestID(131)
+	claim := &operation.ClaimContext{ID: allocation.ClaimID, Epoch: "1"}
+	submitLifecycle := func(id int, sequence uint64, op operation.ID, input operation.Input, eventIDs ...int) CommandStatus {
+		t.Helper()
+		command := operation.Command{
+			ID: claimTestID(id), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
+			EnvironmentID: envA, EnvironmentSequence: sequence, ActedAt: "2026-09-23T11:59:00Z",
+			CorrelationCommandID: claimTestID(id),
+			Request: operation.Request{
+				Operation: op, Actor: "human",
+				Context: operation.Context{Repo: repoA, Clone: f.clone, Worktree: f.worktree},
+				Claim:   claim, Input: input,
+			},
+		}
+		hash, err := command.RequestHash()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending, err := f.s.SubmitCommand(ctx, command, hash, f.peer, f.now)
+		if err != nil || pending.Owner == nil || !pending.Pending {
+			t.Fatalf("submit %s: status=%+v err=%v", op.Name, pending, err)
+		}
+		ids := []string{claimTestID(eventIDs[0]), claimTestID(eventIDs[1])}
+		completed, err := f.s.CompleteConnectedLifecycle(ctx, pending.Owner, ids, f.now, signWith(f.key))
+		if err != nil || completed.Pending || completed.Owner != nil || len(completed.Receipt) == 0 {
+			t.Fatalf("complete %s: status=%+v err=%v", op.Name, completed, err)
+		}
+		return completed
+	}
+	started := submitLifecycle(12, 4, operation.StepStartV1.Metadata().Operation,
+		operation.StepLifecycleInput{StepID: stepID}, 107, 108)
+	claimTestReceipt(t, started, "result.succeeded", map[string]any{
+		"step_id": stepID, "matter_id": f.matter, "state": "in-progress",
+	}, 107, 108)
+
+	finishedMatter := submitLifecycle(13, 5, operation.MatterFinishV1.Metadata().Operation,
+		operation.MatterFinishInput{MatterID: f.matter}, 109, 110)
+	claimTestReceipt(t, finishedMatter, "result.succeeded", map[string]any{
+		"matter_id": f.matter, "state": "done", "became_sealed": false,
+	}, 109)
+	matterReceipt, err := readReceipt(finishedMatter.Receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := wipdwire.DecodeCanonicalMap(matterReceipt.Result.Output, "matter_id", "state", "became_sealed")
+	if err != nil || output["became_sealed"] != false {
+		t.Fatalf("incomplete subtree Matter-finish result = %+v, %v; want became_sealed=false", output, err)
+	}
+
+	finishedStep := submitLifecycle(14, 6, operation.StepFinishV1.Metadata().Operation,
+		operation.StepLifecycleInput{StepID: stepID}, 111, 112)
+	claimTestReceipt(t, finishedStep, "result.succeeded", map[string]any{
+		"step_id": stepID, "matter_id": f.matter, "state": "done",
+	}, 111)
+	anchor, err := f.s.CurrentPrefixAnchor(ctx, domainA)
+	if err != nil || anchor.EventCount != 9 || anchor.EventID != claimTestID(111) {
+		t.Fatalf("authority prefix after incomplete-then-complete lifecycle = %+v, %v", anchor, err)
+	}
+	rows, err := f.s.db.QueryContext(ctx, `SELECT record FROM authority_events WHERE domain_id=? ORDER BY position`, domainA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var sweeps int
+	for rows.Next() {
+		var record []byte
+		if err = rows.Scan(&record); err != nil {
+			t.Fatal(err)
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if fields["kind"] == "batch.swept" {
+			sweeps++
+		}
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if sweeps != 0 {
+		t.Fatalf("incomplete Matter finish emitted %d batch.swept events, err=%v", sweeps, err)
+	}
+}
+
 func claimTestBirthRelease(t *testing.T, f *claimTestFixture, id int, sequence uint64, barrier map[string]any) ([]byte, string) {
 	t.Helper()
 	raw, err := wipdwire.EncodeCanonical(map[string]any{

@@ -365,6 +365,27 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
+	switch command.Request.Operation {
+	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
+		operation.MatterFinishV1.Metadata().Operation:
+		now := time.Now().UTC()
+		first, err := randomULID(now)
+		if err != nil {
+			return nil, err
+		}
+		second, err := randomULID(now.Add(time.Millisecond))
+		if err != nil {
+			return nil, err
+		}
+		status, err := app.store.CompleteConnectedLifecycle(context.Background(), owner, []string{first, second}, now, app.sign)
+		if err != nil {
+			return nil, err
+		}
+		if len(status.Receipt) == 0 {
+			return nil, errors.New("authoritystore: terminal lifecycle completion returned no receipt")
+		}
+		return status.Receipt, nil
+	}
 	result := app.registry.Dispatch(context.Background(), command.Request)
 	var subjectID, eventID string
 	if result.Code == operation.ResultSucceeded {

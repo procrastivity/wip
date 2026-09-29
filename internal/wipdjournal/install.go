@@ -86,6 +86,19 @@ func createEnvironmentInstallSchema(executor sqlExecutor) error {
 	return nil
 }
 
+func createAuthorityOutcomeSchema(executor sqlExecutor) error {
+	for _, statement := range []string{
+		`CREATE TABLE authority_command_outcomes(command_id TEXT PRIMARY KEY REFERENCES commands(command_id),request_hash TEXT NOT NULL CHECK(length(request_hash)=71),environment_sequence INTEGER NOT NULL UNIQUE CHECK(environment_sequence>0),result_code TEXT NOT NULL CHECK(result_code IN ('result.succeeded','result.rejected','result.refused','result.failed')),canonical_receipt BLOB NOT NULL) STRICT, WITHOUT ROWID`,
+		`CREATE TRIGGER authority_command_outcome_immutable BEFORE UPDATE ON authority_command_outcomes BEGIN SELECT RAISE(ABORT,'immutable authority command outcome'); END`,
+		`CREATE TRIGGER authority_command_outcome_no_delete BEFORE DELETE ON authority_command_outcomes BEGIN SELECT RAISE(ABORT,'retained authority command outcome'); END`,
+	} {
+		if _, err := executor.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func createBirthReleaseSchema(executor sqlExecutor) error {
 	for _, statement := range []string{
 		`CREATE TABLE birth_release_attempts(
@@ -501,6 +514,53 @@ func (j *Journal) InstallFold(ctx context.Context, expected InstallExpectation, 
 	})
 }
 
+// InstallAuthorityOutcome atomically retains a terminal receipt and its
+// verified tail for an authority-class attempt. The command remains in
+// attempt-prepared with journal position zero; the separate immutable outcome
+// resolves exact replay without making it eligible for deferred execution.
+func (j *Journal) InstallAuthorityOutcome(ctx context.Context, expected InstallExpectation, entry Entry, result operation.ResultCode, receipt []byte, transfer VerifiedTransfer) (InstallSnapshot, error) {
+	return j.installTransaction(ctx, expected, func(tx *sql.Tx, state storedInstallState) error {
+		persisted, err := lookupTx(tx, entry.Command.ID)
+		if err != nil || !sameInstalledCommand(persisted, entry) || persisted.Delivery != operation.DeliveryAuthority ||
+			persisted.JournalPosition != 0 || persisted.State != StateAttemptPrepared || !transfer.Valid() ||
+			transfer.domainID != j.identity.DomainID || transfer.epoch != j.identity.AuthorityEpoch ||
+			!sameTransferAnchor(transfer.start, state.anchor) {
+			return ErrInvalidTransfer
+		}
+		var existing []byte
+		if err = tx.QueryRowContext(ctx, `SELECT canonical_receipt FROM authority_command_outcomes WHERE command_id=?`, entry.Command.ID).Scan(&existing); err == nil {
+			if bytes.Equal(existing, receipt) {
+				return nil
+			}
+			return ErrInvalidTransfer
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		eventIDs, _, _, err := receiptEventRange(ctx, tx, state.anchor, transfer, persisted, result, receipt)
+		if err != nil || !validFoldEvents(transfer, persisted, eventIDs) {
+			return ErrInvalidTransfer
+		}
+		if err = validateTerminalReceipt(persisted, result, receipt, eventIDs); err != nil {
+			return err
+		}
+		if err = appendVerifiedEvents(ctx, tx, state.anchor.EventCount, transfer.records); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO authority_command_outcomes(command_id,request_hash,environment_sequence,result_code,canonical_receipt) VALUES(?,?,?,?,?)`,
+			persisted.Command.ID, persisted.RequestHash, persisted.EnvironmentSeq, string(result), receipt); err != nil {
+			return err
+		}
+		manifest, err := encodeManifest(transfer.manifest)
+		if err != nil {
+			return err
+		}
+		if err = rebuildOverlay(ctx, tx); err != nil {
+			return err
+		}
+		return updateInstallState(ctx, tx, state, transfer.end, transfer.manifest.Digest, manifest)
+	})
+}
+
 // InstallBirthRelease atomically commits the existing lifecycle receipt, its
 // verified authority tail, and the rebuilt overlay. A replay already committed
 // locally must match the exact retained receipt bytes.
@@ -762,6 +822,38 @@ func loadInstallSnapshot(tx *sql.Tx, identity Identity) (InstallSnapshot, error)
 		}
 	}
 	if err = rows.Err(); err != nil {
+		return InstallSnapshot{}, err
+	}
+	outcomes, err := tx.Query(`SELECT command_id,request_hash,environment_sequence,result_code,canonical_receipt FROM authority_command_outcomes ORDER BY environment_sequence`)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
+	for outcomes.Next() {
+		var id, hash, result string
+		var sequence int64
+		var receipt []byte
+		if err = outcomes.Scan(&id, &hash, &sequence, &result, &receipt); err != nil {
+			_ = outcomes.Close()
+			return InstallSnapshot{}, err
+		}
+		if sequence <= 0 {
+			_ = outcomes.Close()
+			return InstallSnapshot{}, ErrInvalidJournal
+		}
+		if _, duplicate := snapshot.Receipts[id]; duplicate {
+			_ = outcomes.Close()
+			return InstallSnapshot{}, ErrInvalidJournal
+		}
+		snapshot.Receipts[id] = InstalledReceipt{
+			RequestHash: hash, EnvironmentSeq: uint64(sequence), JournalPosition: 0,
+			ResultCode: operation.ResultCode(result), CanonicalReceipt: bytes.Clone(receipt),
+		}
+	}
+	if err = outcomes.Err(); err != nil {
+		_ = outcomes.Close()
+		return InstallSnapshot{}, err
+	}
+	if err = outcomes.Close(); err != nil {
 		return InstallSnapshot{}, err
 	}
 	return snapshot, nil
@@ -1060,10 +1152,85 @@ func checkInstallationDatabase(db *sql.DB, identity Identity) error {
 	if err = checkInstalledReceipts(tx, identity); err != nil {
 		return err
 	}
+	var outcomeTable int
+	if err = tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='authority_command_outcomes'`).Scan(&outcomeTable); err != nil {
+		return err
+	}
+	if outcomeTable == 1 {
+		if err = checkInstalledAuthorityOutcomes(tx, identity, state.anchor); err != nil {
+			return err
+		}
+	}
 	if err = checkOverlay(tx); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func checkInstalledAuthorityOutcomes(tx *sql.Tx, identity Identity, anchor wipdwire.PrefixAnchor) error {
+	rows, err := tx.Query(`SELECT command_id,request_hash,environment_sequence,result_code,canonical_receipt FROM authority_command_outcomes ORDER BY environment_sequence`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, hash, code string
+		var sequence int64
+		var receipt []byte
+		if err = rows.Scan(&id, &hash, &sequence, &code, &receipt); err != nil {
+			return err
+		}
+		entry, lookupErr := lookupTx(tx, id)
+		if lookupErr != nil || entry.Delivery != operation.DeliveryAuthority || entry.JournalPosition != 0 ||
+			entry.State != StateAttemptPrepared || entry.RequestHash != hash || int64(entry.EnvironmentSeq) != sequence ||
+			entry.Command.AuthorityDomainID != identity.DomainID || entry.Command.ExpectedAuthorityEpoch != identity.AuthorityEpoch {
+			return ErrInvalidJournal
+		}
+		transfer, verifyErr := VerifyTransfer(identity.DomainID, identity.AuthorityEpoch, anchor, anchor, nil,
+			emptyTransferManifest(identity.DomainID, identity.AuthorityEpoch, anchor))
+		if verifyErr != nil {
+			return ErrInvalidJournal
+		}
+		ids, _, _, rangeErr := receiptEventRange(context.Background(), tx, anchor, transfer, entry, operation.ResultCode(code), receipt)
+		if rangeErr != nil || validateTerminalReceipt(entry, operation.ResultCode(code), receipt, ids) != nil {
+			return ErrInvalidJournal
+		}
+		var commandEvents int
+		eventRows, queryErr := tx.Query(`SELECT record FROM installed_events`)
+		if queryErr != nil {
+			return queryErr
+		}
+		for eventRows.Next() {
+			var raw []byte
+			if queryErr = eventRows.Scan(&raw); queryErr != nil {
+				break
+			}
+			fields, decodeErr := wipdwire.DecodeCanonicalMap(raw,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				queryErr = ErrInvalidJournal
+				break
+			}
+			if fields["command_id"] == id {
+				if !eventMatchesCommand(raw, entry) {
+					queryErr = ErrInvalidJournal
+					break
+				}
+				commandEvents++
+			}
+		}
+		if queryErr == nil {
+			queryErr = eventRows.Err()
+		}
+		_ = eventRows.Close()
+		if queryErr != nil || commandEvents != len(ids) {
+			return ErrInvalidJournal
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func checkInstalledReceipts(tx *sql.Tx, identity Identity) error {

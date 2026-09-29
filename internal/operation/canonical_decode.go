@@ -229,6 +229,26 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return StepCreateInput{ParentID: parent, Title: title}, nil
+	case StepStartV1.Metadata().Operation, StepFinishV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "step_id")
+		if err != nil {
+			return nil, err
+		}
+		stepID, err := commandString(fields, "step_id")
+		if err != nil {
+			return nil, err
+		}
+		return StepLifecycleInput{StepID: stepID}, nil
+	case MatterFinishV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		matterID, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		return MatterFinishInput{MatterID: matterID}, nil
 	default:
 		return nil, fmt.Errorf("operation: no canonical identity schema for %s", id)
 	}

@@ -128,6 +128,7 @@ type ClaimAcquireResult struct {
 type CommandStartEnvironment interface {
 	Snapshot(context.Context) (CommandStartSnapshot, error)
 	InstallFold(context.Context, CommandStartSnapshot, wipdjournal.Entry, CommandFold) (CommandStartSnapshot, error)
+	InstallAuthorityOutcome(context.Context, CommandStartSnapshot, wipdjournal.Entry, CommandFold) (CommandStartSnapshot, error)
 	InstallPull(context.Context, CommandStartSnapshot, CommandPull) (CommandStartSnapshot, error)
 	InstallBirthRelease(context.Context, CommandStartSnapshot, wipdjournal.BirthReleaseCommand, []byte, CommandPull) (CommandStartSnapshot, error)
 	AdmitPending(context.Context, CommandStartSnapshot, wipdjournal.Entry) (CommandStartSnapshot, error)
@@ -220,6 +221,11 @@ func (coordinator *CommandStartCoordinator) RunConnectedTerminal(ctx context.Con
 // exact next sequence for its bound Environment.
 func (coordinator *CommandStartCoordinator) RunConnectedCanonicalTerminal(ctx context.Context, command operation.Command, guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error) (CommandStartResult, error) {
 	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
+		if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
+			if err := coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request); err != nil {
+				return wipdjournal.Entry{}, err
+			}
+		}
 		return coordinator.journal.PrepareCanonicalCommand(command)
 	}, guardAndWrite, true)
 }
@@ -253,7 +259,7 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 		return empty, err
 	}
 	if entry.Command.AuthorityDomainID != coordinator.domainID {
-		return empty, ErrCommandStartIdentity
+		return empty, fmt.Errorf("%w: prepared command domain mismatch", ErrCommandStartIdentity)
 	}
 	if err = validateConnectedCommand(entry); err != nil {
 		return empty, err
@@ -266,7 +272,7 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 	}
 	installed = cloneCommandStartSnapshot(installed)
 	if !validCommandStartSnapshot(installed, entry.Command) {
-		return empty, ErrCommandStartIdentity
+		return empty, fmt.Errorf("%w: installed command-start snapshot mismatch", ErrCommandStartIdentity)
 	}
 	entries, err := coordinator.journal.Entries()
 	if err != nil {
@@ -274,25 +280,25 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 	}
 	pending, err := commandStartPending(entries, installed, entry)
 	if err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: inspect pending command heads: %w", err)
 	}
 	if receipt, ok := installed.Receipts[entry.Command.ID]; ok {
 		if receipt.RequestHash != entry.RequestHash || receipt.EnvironmentSeq != entry.EnvironmentSeq || receipt.JournalPosition != entry.JournalPosition {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: installed replay receipt identity mismatch", ErrCommandStartIdentity)
 		}
 		code, receiptErr := commandReceiptCode(entry, receipt.CanonicalReceipt)
 		if receiptErr != nil || code != receipt.ResultCode {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: installed replay receipt validation failed", ErrCommandStartIdentity)
 		}
 		if len(pending) != 0 {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: installed replay has unresolved predecessors", ErrCommandStartIdentity)
 		}
 		result.Returned = true
 		result.ResultCode = code
 		result.Receipt = append([]byte(nil), receipt.CanonicalReceipt...)
 		result.SemanticResult, err = commandReceiptResult(entry, result.Receipt)
 		if err != nil {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: decode installed replay receipt: %v", ErrCommandStartIdentity, err)
 		}
 		if code != operation.ResultSucceeded {
 			return result, nil
@@ -301,7 +307,7 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 	var stopped bool
 	installed, stopped, err = coordinator.returnPending(ctx, entry.Command, entry, installed, pending, &result)
 	if err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: return pending command heads: %w", err)
 	}
 	if stopped {
 		return result, nil
@@ -309,27 +315,28 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 
 	pull, err := coordinator.authority.Pull(ctx, installed.Anchor)
 	if err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: pull authority tail: %w", err)
 	}
 	if err = validateCommandPull(entry.Command.AuthorityDomainID, entry.Command.ExpectedAuthorityEpoch, installed.Anchor, pull); err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: validate authority tail: %w", err)
 	}
 	previousSnapshot := installed
 	installed, err = coordinator.environment.InstallPull(ctx, installed, pull)
 	if err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: install authority tail: %w", err)
 	}
 	installed = cloneCommandStartSnapshot(installed)
 	if installed.Revision <= previousSnapshot.Revision || !validCommandStartSnapshot(installed, entry.Command) ||
 		!sameCommandStartAnchor(installed.Anchor, pull.End) || installed.ManifestDigest != pull.Manifest.Digest ||
 		!commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
-		return empty, ErrCommandStartIdentity
+		return empty, fmt.Errorf("%w: installed authority pull does not match its verified product", ErrCommandStartIdentity)
 	}
 
 	if result.Returned {
 		return result, nil
 	}
-	if !entry.Created && entry.State != wipdjournal.StatePreAdmission {
+	if !entry.Created && entry.State != wipdjournal.StatePreAdmission &&
+		(entry.Delivery != operation.DeliveryAuthority || entry.State != wipdjournal.StateAttemptPrepared) {
 		return empty, fmt.Errorf("%w: exact retry %s did not resolve through its installed receipt", ErrCommandStartBlocked, entry.Command.ID)
 	}
 	if entry.State == wipdjournal.StatePreAdmission {
@@ -348,46 +355,55 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 		if installed.Revision <= previousRevision || !validCommandStartSnapshot(installed, entry.Command) ||
 			!sameCommandStartAnchor(installed.Anchor, previousAnchor) || installed.ManifestDigest != previousManifest ||
 			!commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: pending admission changed installed authority state", ErrCommandStartIdentity)
 		}
 	}
 	if err = ctx.Err(); err != nil {
 		return empty, err
 	}
+	if definition, ok := operationDefinition(entry.Command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
+		if err = coordinator.journal.ValidateCommandClaimReadiness(ctx, entry.Command.Request); err != nil {
+			return empty, err
+		}
+	}
 	if err = guardAndWrite(ctx, installed, entry.Command); err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipd: run connected command guard: %w", err)
 	}
 	if terminal {
 		fold, foldErr := coordinator.authority.Return(ctx, entry, installed.Anchor)
 		if foldErr != nil {
-			return empty, foldErr
+			return empty, fmt.Errorf("wipd: return connected command: %w", foldErr)
 		}
 		if err = validateCommandFold(entry, installed.Anchor, fold); err != nil {
-			return empty, err
+			return empty, fmt.Errorf("wipd: validate connected command fold: %w", err)
 		}
 		previousSnapshot := installed
-		installed, err = coordinator.environment.InstallFold(ctx, installed, entry, fold)
+		if entry.Delivery == operation.DeliveryAuthority {
+			installed, err = coordinator.environment.InstallAuthorityOutcome(ctx, installed, entry, fold)
+		} else {
+			installed, err = coordinator.environment.InstallFold(ctx, installed, entry, fold)
+		}
 		if err != nil {
-			return empty, err
+			return empty, fmt.Errorf("wipd: install connected command fold: %w", err)
 		}
 		installed = cloneCommandStartSnapshot(installed)
 		if installed.Revision <= previousSnapshot.Revision || !validCommandStartSnapshot(installed, entry.Command) ||
 			!sameCommandStartAnchor(installed.Anchor, fold.End) || !commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) ||
 			installed.ManifestDigest != fold.Manifest.Digest {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: installed command fold does not match its verified product", ErrCommandStartIdentity)
 		}
 		receipt, ok := installed.Receipts[entry.Command.ID]
 		if !ok || receipt.RequestHash != entry.RequestHash || receipt.EnvironmentSeq != entry.EnvironmentSeq ||
 			receipt.JournalPosition != entry.JournalPosition || receipt.ResultCode != fold.ResultCode ||
 			!bytes.Equal(receipt.CanonicalReceipt, fold.CanonicalReceipt) {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: installed command receipt differs from returned fold", ErrCommandStartIdentity)
 		}
 		result.Returned = true
 		result.ResultCode = fold.ResultCode
 		result.Receipt = append([]byte(nil), fold.CanonicalReceipt...)
 		result.SemanticResult, err = commandReceiptResult(entry, result.Receipt)
 		if err != nil {
-			return empty, ErrCommandStartIdentity
+			return empty, fmt.Errorf("%w: decode returned command receipt: %v", ErrCommandStartIdentity, err)
 		}
 	}
 	return result, nil
@@ -501,6 +517,9 @@ func commandStartPending(entries []wipdjournal.Entry, installed CommandStartSnap
 		if entry.Command.ID == current.Command.ID && entry.State == wipdjournal.StatePreAdmission {
 			continue
 		}
+		if entry.Command.ID == current.Command.ID && entry.State == wipdjournal.StateAttemptPrepared && entry.Delivery == operation.DeliveryAuthority {
+			continue
+		}
 		if entry.State == wipdjournal.StateAttemptPrepared {
 			return nil, fmt.Errorf("%w: prior authority attempt %s is unresolved", ErrCommandStartBlocked, entry.Command.ID)
 		}
@@ -571,7 +590,8 @@ func (coordinator *CommandStartCoordinator) validateImplicitBirthDependency(entr
 }
 
 func validateConnectedCommand(entry wipdjournal.Entry) error {
-	if entry.Delivery != operation.DeliveryProvisional && entry.Delivery != operation.DeliveryEnvironment {
+	if entry.Delivery != operation.DeliveryProvisional && entry.Delivery != operation.DeliveryEnvironment &&
+		entry.Delivery != operation.DeliveryClaim && entry.Delivery != operation.DeliveryAuthority {
 		return fmt.Errorf("%w: delivery %s is not eligible for connected command start", ErrCommandStartBlocked, entry.Delivery)
 	}
 	var metadata *operation.Metadata
@@ -599,7 +619,10 @@ func validateConnectedCommand(entry wipdjournal.Entry) error {
 			return fmt.Errorf("%w: Step birth lacks its exact provisional Matter claim", ErrCommandStartBlocked)
 		}
 	default:
-		return fmt.Errorf("%w: claim lifecycle is not part of the provisional birth subset", ErrCommandStartBlocked)
+		if metadata.Claim != operation.ClaimExact || entry.Command.Request.Claim == nil ||
+			(entry.Delivery != operation.DeliveryClaim && entry.Delivery != operation.DeliveryAuthority) {
+			return fmt.Errorf("%w: operation does not carry an exact connected claim", ErrCommandStartBlocked)
+		}
 	}
 	return nil
 }
@@ -620,7 +643,26 @@ func validateCommandFold(entry wipdjournal.Entry, start wipdwire.PrefixAnchor, f
 	if fold.End.EventCount == fold.Start.EventCount && !sameCommandStartAnchor(fold.End, fold.Start) {
 		return ErrCommandStartIdentity
 	}
+	if entry.Delivery == operation.DeliveryAuthority {
+		if entry.JournalPosition != 0 || entry.State != wipdjournal.StateAttemptPrepared {
+			return ErrCommandStartIdentity
+		}
+	} else if entry.JournalPosition == 0 {
+		return ErrCommandStartIdentity
+	}
+	if resultCode, err := commandReceiptCode(entry, fold.CanonicalReceipt); err != nil || resultCode != fold.ResultCode {
+		return fmt.Errorf("%w: terminal receipt does not match the connected operation", ErrCommandStartIdentity)
+	}
 	return nil
+}
+
+func operationDefinition(id operation.ID) (operation.Definition, bool) {
+	for _, definition := range operation.Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
+	return operation.Definition{}, false
 }
 
 func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCode, error) {
@@ -679,6 +721,25 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			if outputErr != nil || !inputOK || !sortOK || sortKey == 0 || sortKey > math.MaxInt64 || !commandStartULID.MatchString(asCommandStartString(output["id"])) ||
 				output["parent_id"] != input.ParentID || output["matter_id"] != input.ParentID || output["title"] != input.Title || output["state"] != "planned" ||
 				!commandStartStepLocator.MatchString(asCommandStartString(output["locator"])) {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "step_id", "matter_id", "state")
+			input, inputOK := entry.Command.Request.Input.(operation.StepLifecycleInput)
+			wantState := "in-progress"
+			if entry.Command.Request.Operation == operation.StepFinishV1.Metadata().Operation {
+				wantState = "done"
+			}
+			if outputErr != nil || !inputOK || output["step_id"] != input.StepID ||
+				!commandStartULID.MatchString(asCommandStartString(output["matter_id"])) || output["state"] != wantState {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.MatterFinishV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "matter_id", "state", "became_sealed")
+			input, inputOK := entry.Command.Request.Input.(operation.MatterFinishInput)
+			_, sealedOK := output["became_sealed"].(bool)
+			if outputErr != nil || !inputOK || output["matter_id"] != input.MatterID ||
+				output["state"] != "done" || !sealedOK {
 				return "", ErrCommandStartIdentity
 			}
 		default:
@@ -762,6 +823,27 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			MatterID: asCommandStartString(output["matter_id"]), Locator: asCommandStartString(output["locator"]),
 			Title: asCommandStartString(output["title"]), SortKey: int64(sortKey), State: asCommandStartString(output["state"]),
 		}
+	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "step_id", "matter_id", "state")
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.StepLifecycleOutput{
+			StepID: asCommandStartString(output["step_id"]), MatterID: asCommandStartString(output["matter_id"]),
+			State: asCommandStartString(output["state"]),
+		}
+	case operation.MatterFinishV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "matter_id", "state", "became_sealed")
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		sealed, ok := output["became_sealed"].(bool)
+		if !ok {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.MatterFinishOutput{
+			MatterID: asCommandStartString(output["matter_id"]), State: asCommandStartString(output["state"]), BecameSealed: sealed,
+		}
 	default:
 		return operation.Result{}, ErrCommandStartIdentity
 	}
@@ -805,6 +887,13 @@ func sameCommandStartAnchor(left, right wipdwire.PrefixAnchor) bool {
 		return false
 	}
 	return left.EventID == nil || *left.EventID == *right.EventID
+}
+
+func commandStartAnchorNotAfter(anchor, installed wipdwire.PrefixAnchor) bool {
+	if !validCommandStartAnchor(anchor) || !validCommandStartAnchor(installed) || anchor.EventCount > installed.EventCount {
+		return false
+	}
+	return anchor.EventCount < installed.EventCount || sameCommandStartAnchor(anchor, installed)
 }
 
 func commandStartReceiptsPreserved(before, after map[string]InstalledCommandReceipt) bool {

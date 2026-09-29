@@ -187,7 +187,7 @@ func (c *Client) AcquireClaim(ctx context.Context, commandID, matterID, cloneID,
 		return empty, uncertainExchange(err)
 	}
 	if result.Grant != nil && (result.Grant.MatterID != matterID || result.Grant.DispatchID != dispatchID ||
-		!sameCommandStartAnchor(result.Installed, result.Grant.AsOf)) {
+		!commandStartAnchorNotAfter(result.Grant.AsOf, result.Installed)) {
 		return empty, uncertainExchange(errWrongCorrelation)
 	}
 	if _, err = readFrame(response.Body, uint32(c.parameters.maxFrameBody)); !errors.Is(err, io.EOF) {

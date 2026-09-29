@@ -34,6 +34,18 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				"id": step.ID, "parent_id": step.ParentID, "matter_id": step.MatterID,
 				"locator": step.Locator, "title": step.Title, "sort_key": step.SortKey, "state": step.State,
 			}
+		case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
+			step, ok := result.Output.(operation.StepLifecycleOutput)
+			if !ok || !validRequestID(step.StepID) || !validRequestID(step.MatterID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"step_id": step.StepID, "matter_id": step.MatterID, "state": step.State}
+		case operation.MatterFinishV1.Metadata().Operation:
+			matter, ok := result.Output.(operation.MatterFinishOutput)
+			if !ok || !validRequestID(matter.MatterID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"matter_id": matter.MatterID, "state": matter.State, "became_sealed": matter.BecameSealed}
 		default:
 			return nil, errMalformedMessage
 		}
@@ -121,6 +133,28 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				ID: stepID, ParentID: parentID, MatterID: matterID, Locator: locator, Title: title,
 				SortKey: int64(sortKey), State: state,
 			}
+		case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
+			if !exactFields(outputFields, "step_id", "matter_id", "state") {
+				return operation.Result{}, errMalformedMessage
+			}
+			stepID, stepOK := outputFields["step_id"].(string)
+			matterID, matterOK := outputFields["matter_id"].(string)
+			state, stateOK := outputFields["state"].(string)
+			if !stepOK || !validRequestID(stepID) || !matterOK || !validRequestID(matterID) || !stateOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.StepLifecycleOutput{StepID: stepID, MatterID: matterID, State: state}
+		case operation.MatterFinishV1.Metadata().Operation:
+			if !exactFields(outputFields, "matter_id", "state", "became_sealed") {
+				return operation.Result{}, errMalformedMessage
+			}
+			matterID, matterOK := outputFields["matter_id"].(string)
+			state, stateOK := outputFields["state"].(string)
+			sealed, sealedOK := outputFields["became_sealed"].(bool)
+			if !matterOK || !validRequestID(matterID) || !stateOK || !sealedOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.MatterFinishOutput{MatterID: matterID, State: state, BecameSealed: sealed}
 		default:
 			return operation.Result{}, errMalformedMessage
 		}
@@ -141,13 +175,4 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 		return operation.Result{}, fmt.Errorf("%w: invalid M1 result: %v", errMalformedMessage, err)
 	}
 	return result, nil
-}
-
-func operationDefinition(id operation.ID) (operation.Definition, bool) {
-	for _, definition := range operation.Catalogue() {
-		if definition.Metadata().Operation == id {
-			return definition, true
-		}
-	}
-	return operation.Definition{}, false
 }

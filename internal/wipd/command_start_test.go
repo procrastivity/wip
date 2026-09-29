@@ -26,6 +26,40 @@ const (
 	commandStartCommandPrefix = "01KZ7XHAQT1S46NYPN1PW1DX"
 )
 
+func TestCommandStartAnchorNotAfter(t *testing.T) {
+	olderID := commandStartCommandPrefix + "01"
+	installedID := commandStartCommandPrefix + "02"
+	newerID := commandStartCommandPrefix + "03"
+	older := wipdwire.PrefixAnchor{EventCount: 6, EventID: &olderID, Digest: commandStartHashForTest()}
+	installed := wipdwire.PrefixAnchor{EventCount: 11, EventID: &installedID, Digest: commandStartHashForTest()}
+	newer := wipdwire.PrefixAnchor{EventCount: 12, EventID: &newerID, Digest: commandStartHashForTest()}
+	sameCountDifferentPrefix := installed
+	sameCountDifferentPrefix.Digest = "sha256:" + strings.Repeat("0", 64)
+	invalidEmpty := wipdwire.PrefixAnchor{Digest: commandStartHashForTest()}
+	emptyDigest := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
+	validEmpty := wipdwire.PrefixAnchor{Digest: "sha256:" + hex.EncodeToString(emptyDigest[:])}
+
+	for _, test := range []struct {
+		name   string
+		anchor wipdwire.PrefixAnchor
+		upper  wipdwire.PrefixAnchor
+		want   bool
+	}{
+		{name: "earlier as-of anchor", anchor: older, upper: installed, want: true},
+		{name: "exact installed anchor", anchor: installed, upper: installed, want: true},
+		{name: "future anchor", anchor: newer, upper: installed},
+		{name: "different prefix at same count", anchor: sameCountDifferentPrefix, upper: installed},
+		{name: "invalid empty anchor", anchor: invalidEmpty, upper: installed},
+		{name: "valid empty anchor", anchor: validEmpty, upper: installed, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := commandStartAnchorNotAfter(test.anchor, test.upper); got != test.want {
+				t.Fatalf("commandStartAnchorNotAfter(%+v, %+v) = %v, want %v", test.anchor, test.upper, got, test.want)
+			}
+		})
+	}
+}
+
 type commandStartTrace struct {
 	mu    sync.Mutex
 	steps []string
@@ -84,6 +118,23 @@ func (environment *commandStartTracedEnvironment) InstallFold(ctx context.Contex
 		return CommandStartSnapshot{}, err
 	}
 	environment.trace.add("install-fold+receipt+tail+overlay:" + entry.Command.ID)
+	return installed, nil
+}
+
+func (environment *commandStartTracedEnvironment) InstallAuthorityOutcome(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry, fold CommandFold) (CommandStartSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	environment.mu.Lock()
+	defer environment.mu.Unlock()
+	if environment.failInstall != nil {
+		return CommandStartSnapshot{}, environment.failInstall
+	}
+	installed, err := environment.durable.InstallAuthorityOutcome(ctx, expected, entry, fold)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	environment.trace.add("install-authority-outcome+tail:" + entry.Command.ID)
 	return installed, nil
 }
 
@@ -1287,6 +1338,20 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 				"id": eventIDs[0], "parent_id": input.ParentID, "matter_id": input.ParentID,
 				"locator": "step-01", "title": input.Title, "sort_key": int64(1000), "state": "planned",
 			})
+		case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
+			input := entry.Command.Request.Input.(operation.StepLifecycleInput)
+			state := "in-progress"
+			if entry.Command.Request.Operation == operation.StepFinishV1.Metadata().Operation {
+				state = "done"
+			}
+			output, _ = wipdwire.EncodeCanonical(map[string]any{
+				"step_id": input.StepID, "matter_id": commandStartCommandPrefix + "43", "state": state,
+			})
+		case operation.MatterFinishV1.Metadata().Operation:
+			input := entry.Command.Request.Input.(operation.MatterFinishInput)
+			output, _ = wipdwire.EncodeCanonical(map[string]any{
+				"matter_id": input.MatterID, "state": "done", "became_sealed": true,
+			})
 		default:
 			return nil, ErrCommandStartIdentity
 		}
@@ -1302,6 +1367,112 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 		"result":          map[string]any{"code": string(code), "output": output, "problem_code": problem},
 		"accepted_events": accepted,
 	})
+}
+
+func TestConnectedLifecycleReceiptsValidateTypedOutputs(t *testing.T) {
+	claim := &operation.ClaimContext{ID: commandStartCommandPrefix + "3E", Epoch: "1"}
+	stepID := commandStartCommandPrefix + "45"
+	matterID := commandStartCommandPrefix + "44"
+	lifecycleCommand := func(id string, sequence uint64, operationID operation.ID, input operation.Input) operation.Command {
+		command := commandStartCanonicalCommand(id, sequence, "", id, operationID, input, claim)
+		command.Request.Context.Clone = commandStartCommandPrefix + "47"
+		command.Request.Context.Worktree = commandStartCommandPrefix + "48"
+		return command
+	}
+	cases := []struct {
+		name      string
+		command   operation.Command
+		delivery  operation.DeliveryClass
+		position  uint64
+		state     wipdjournal.State
+		want      operation.Output
+		outputKey []string
+		bad       []struct {
+			field string
+			value any
+		}
+	}{
+		{
+			name: "step start",
+			command: lifecycleCommand(commandStartCommandPrefix+"73", 5, operation.StepStartV1.Metadata().Operation,
+				operation.StepLifecycleInput{StepID: stepID}),
+			delivery: operation.DeliveryClaim, position: 3, state: wipdjournal.StatePendingReturn,
+			want:      operation.StepLifecycleOutput{StepID: stepID, MatterID: commandStartCommandPrefix + "43", State: "in-progress"},
+			outputKey: []string{"step_id", "matter_id", "state"},
+			bad: []struct {
+				field string
+				value any
+			}{{"step_id", commandStartCommandPrefix + "46"}, {"matter_id", "not-a-ulid"}, {"state", "done"}},
+		},
+		{
+			name: "step finish",
+			command: lifecycleCommand(commandStartCommandPrefix+"74", 6, operation.StepFinishV1.Metadata().Operation,
+				operation.StepLifecycleInput{StepID: stepID}),
+			delivery: operation.DeliveryClaim, position: 4, state: wipdjournal.StatePendingReturn,
+			want:      operation.StepLifecycleOutput{StepID: stepID, MatterID: commandStartCommandPrefix + "43", State: "done"},
+			outputKey: []string{"step_id", "matter_id", "state"},
+			bad: []struct {
+				field string
+				value any
+			}{{"step_id", commandStartCommandPrefix + "46"}, {"matter_id", "not-a-ulid"}, {"state", "in-progress"}},
+		},
+		{
+			name: "Matter finish",
+			command: lifecycleCommand(commandStartCommandPrefix+"75", 7, operation.MatterFinishV1.Metadata().Operation,
+				operation.MatterFinishInput{MatterID: matterID}),
+			delivery: operation.DeliveryAuthority, state: wipdjournal.StateAttemptPrepared,
+			want:      operation.MatterFinishOutput{MatterID: matterID, State: "done", BecameSealed: true},
+			outputKey: []string{"matter_id", "state", "became_sealed"},
+			bad: []struct {
+				field string
+				value any
+			}{{"matter_id", commandStartCommandPrefix + "45"}, {"state", "in-progress"}, {"became_sealed", "true"}},
+		},
+	}
+	eventIDs := []string{commandStartCommandPrefix + "80", commandStartCommandPrefix + "81"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash := mustCommandStartHash(t, tc.command)
+			entry := wipdjournal.Entry{
+				Command: tc.command, RequestHash: hash, EnvironmentSeq: tc.command.EnvironmentSequence,
+				JournalPosition: tc.position, Delivery: tc.delivery, State: tc.state,
+			}
+			receipt, err := commandStartReceipt(entry, operation.ResultSucceeded, eventIDs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, err := commandReceiptCode(entry, receipt)
+			result, resultErr := commandReceiptResult(entry, receipt)
+			if err != nil || resultErr != nil || code != operation.ResultSucceeded || result.Output != tc.want {
+				t.Fatalf("valid lifecycle receipt code=%s result=%+v err=%v resultErr=%v", code, result, err, resultErr)
+			}
+			for _, bad := range tc.bad {
+				fields, decodeErr := wipdwire.DecodeCanonicalMap(receipt,
+					"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+				if decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				resultFields := fields["result"].(map[string]any)
+				outputFields, decodeErr := wipdwire.DecodeCanonicalMap(resultFields["output"].([]byte), tc.outputKey...)
+				if decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				outputFields[bad.field] = bad.value
+				resultFields["output"], err = wipdwire.EncodeCanonical(outputFields)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields["result"] = resultFields
+				mutated, encodeErr := wipdwire.EncodeCanonical(fields)
+				if encodeErr != nil {
+					t.Fatal(encodeErr)
+				}
+				if _, err = commandReceiptCode(entry, mutated); err == nil {
+					t.Errorf("accepted mismatched lifecycle output field %q=%v", bad.field, bad.value)
+				}
+			}
+		})
+	}
 }
 
 func commandStartManifest(domain string, epoch uint64, anchor wipdwire.PrefixAnchor) wipdwire.BlobManifest {

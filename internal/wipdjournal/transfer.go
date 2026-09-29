@@ -179,7 +179,9 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
 		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
-			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened") ||
+			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
+			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
+			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept") ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
@@ -197,6 +199,20 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return false
 	}
 	switch fields["kind"] {
+	case "matter.started", "step.started", "step.finished", "matter.finished":
+		from, to := "planned", "in-progress"
+		if fields["kind"] == "step.finished" || fields["kind"] == "matter.finished" {
+			from, to = "in-progress", "done"
+		}
+		if fields["kind"] == "matter.started" {
+			return wipdwire.ExactMapKeys(payload, "from", "to", "cascade") &&
+				payload["from"] == from && payload["to"] == to && payload["cascade"] == true &&
+				transferULID.MatchString(asString(fields["subject_id"]))
+		}
+		return wipdwire.ExactMapKeys(payload, "from", "to") && payload["from"] == from && payload["to"] == to &&
+			transferULID.MatchString(asString(fields["subject_id"]))
+	case "batch.swept":
+		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
 	case "batch.anonymous-created":
 		batchID := asString(payload["batch_id"])
 		matterID := asString(payload["matter_id"])
