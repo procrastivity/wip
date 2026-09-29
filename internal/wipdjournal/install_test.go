@@ -397,6 +397,9 @@ func installTestReceipt(t *testing.T, entry Entry, result operation.ResultCode, 
 
 func downgradeInstallTestDBToV1(db *sql.DB) error {
 	for _, statement := range []string{
+		`DROP TRIGGER hydration_pin_no_update`, `DROP TRIGGER hydration_pin_no_delete`, `DROP TABLE hydration_pins`,
+		`DROP INDEX hydration_grant_claim_unique`, `DROP TRIGGER hydration_grant_no_delete`,
+		`DROP TRIGGER hydration_grant_state_transition`, `DROP TRIGGER hydration_grant_identity_immutable`, `DROP TABLE hydration_grants`,
 		`DROP TRIGGER command_birth_release_id_conflict`, `DROP TRIGGER command_after_pending_birth_release`,
 		`DROP TRIGGER birth_release_command_id_conflict`, `DROP TRIGGER birth_release_before_insert`,
 		`DROP TRIGGER birth_release_state_transition`, `DROP TRIGGER birth_release_no_delete`,

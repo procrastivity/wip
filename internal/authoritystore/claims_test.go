@@ -115,6 +115,29 @@ func claimTestAllocation(id int, anchor PrefixAnchor, events ...int) AcquireAllo
 	return a
 }
 
+func TestClaimAcquireChecksAnExplicitEmptyBlobClosureAssertion(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	installed := f.anchor(t)
+	raw, hash := f.command(t, 11, 2, "claim.acquire", nil, map[string]any{
+		"matter_id": f.matter, "worktree_id": f.worktree, "dispatch_mode": "anonymous-matter", "requested_dispatch_id": claimTestID(51),
+	})
+	status, err := f.s.SubmitClaimAcquire(ctx, raw, hash, installed, f.peer, f.now)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("submit claim acquisition: %+v, %v", status, err)
+	}
+	allocation := claimTestAllocation(1, installed, 101, 102, 103)
+	allocation.RequiredDigests = []string{digest('f')}
+	if _, _, err = f.s.CompleteClaimAcquire(ctx, status.Owner, allocation, f.now, signWith(f.key)); !errors.Is(err, ErrManifestMismatch) {
+		t.Fatalf("incorrect explicit closure assertion = %v, want manifest mismatch", err)
+	}
+	allocation.RequiredDigests = []string{}
+	completed, grant, err := f.s.CompleteClaimAcquire(ctx, status.Owner, allocation, f.now, signWith(f.key))
+	if err != nil || completed.Receipt == nil || len(grant.Manifest) == 0 || len(grant.Snapshot.Manifest.Entries) != 0 {
+		t.Fatalf("exact empty closure assertion: status=%+v manifest=%+v err=%v", completed, grant.Snapshot.Manifest, err)
+	}
+}
+
 func restoreClaimTrigger(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
 	for _, object := range step5Schema {

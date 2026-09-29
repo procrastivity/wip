@@ -35,7 +35,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 3
+	schemaVersion  = 4
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -61,6 +61,10 @@ var (
 	ErrNotFound = errors.New("wipdjournal: item not found")
 	// ErrBlobLength means the staged reader did not contain exactly its declared length.
 	ErrBlobLength = errors.New("wipdjournal: staged blob length mismatch")
+	// ErrBlobDigest means staged bytes do not match the verified manifest entry.
+	ErrBlobDigest = errors.New("wipdjournal: staged blob digest mismatch")
+	// ErrClaimNotReady means the exact claim's pin-before-use closure is incomplete.
+	ErrClaimNotReady = errors.New("wipdjournal: claim is not offline-ready")
 )
 
 // Identity binds the journal to one installed client Environment and Repo.
@@ -205,8 +209,16 @@ func Open(root string, identity Identity) (*Journal, error) {
 			if err == nil {
 				err = upgradeSchemaV2(db, identity)
 			}
+			if err == nil {
+				err = upgradeSchemaV3(db, identity)
+			}
 		} else if err == nil && version == 2 {
 			err = upgradeSchemaV2(db, identity)
+			if err == nil {
+				err = upgradeSchemaV3(db, identity)
+			}
+		} else if err == nil && version == 3 {
+			err = upgradeSchemaV3(db, identity)
 		} else if err == nil {
 			err = checkIdentity(db, identity)
 		}
@@ -264,6 +276,11 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 	delivery, correlation, err := validateInput(j.identity, input)
 	if err != nil {
 		return Entry{}, err
+	}
+	if delivery == operation.DeliveryClaim {
+		if err = claimHydrationReady(j.db, input.Request.Claim, j.blobsDir); err != nil {
+			return Entry{}, err
+		}
 	}
 	if entry, err := lookup(j.db, input.ID); err == nil {
 		if err = j.verifyEntry(entry); err != nil {
@@ -845,7 +862,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=3), name TEXT NOT NULL CHECK(name='environment-birth-release-receipt-barrier')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=4), name TEXT NOT NULL CHECK(name='environment-claim-hydration-pins')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -887,8 +904,8 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(3, 'environment-birth-release-receipt-barrier')`,
-		`PRAGMA user_version=3`,
+		`INSERT INTO schema_migrations(version, name) VALUES(4, 'environment-claim-hydration-pins')`,
+		`PRAGMA user_version=4`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
@@ -898,6 +915,9 @@ func installSchema(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if err = createBirthReleaseSchema(tx); err != nil {
+		return err
+	}
+	if err = createClaimHydrationSchema(tx); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
@@ -924,13 +944,17 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=3`).Scan(&migration); err != nil || migration != "environment-birth-release-receipt-barrier" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=4`).Scan(&migration); err != nil || migration != "environment-claim-hydration-pins" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
 }
 
-func checkSchemaObjects(db *sql.DB) error {
+func checkSchemaObjects(db *sql.DB) error { return checkSchemaObjectsVersion(db, true) }
+
+func checkSchemaObjectsV3(db *sql.DB) error { return checkSchemaObjectsVersion(db, false) }
+
+func checkSchemaObjectsVersion(db *sql.DB, includeHydration bool) error {
 	expected := map[string]string{
 		"schema_migrations": "table", "environment_state": "table", "environment_identity_immutable": "trigger",
 		"environment_counters_increment": "trigger", "commands": "table", "commands_pending_order": "index",
@@ -944,6 +968,16 @@ func checkSchemaObjects(db *sql.DB) error {
 		"birth_release_state_transition": "trigger", "birth_release_before_insert": "trigger",
 		"birth_release_command_id_conflict": "trigger", "command_after_pending_birth_release": "trigger",
 		"command_birth_release_id_conflict": "trigger",
+	}
+	if includeHydration {
+		expected["hydration_grants"] = "table"
+		expected["hydration_grant_identity_immutable"] = "trigger"
+		expected["hydration_grant_state_transition"] = "trigger"
+		expected["hydration_grant_no_delete"] = "trigger"
+		expected["hydration_grant_claim_unique"] = "index"
+		expected["hydration_pins"] = "table"
+		expected["hydration_pin_no_update"] = "trigger"
+		expected["hydration_pin_no_delete"] = "trigger"
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
@@ -1025,6 +1059,9 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 		return err
 	}
 	if err = checkInstallationDatabase(db, identity); err != nil {
+		return err
+	}
+	if err = checkClaimHydrationState(db, identity, blobDir); err != nil {
 		return err
 	}
 	releaseSequences, releaseIDs, err := checkBirthReleaseAttempts(db, identity)

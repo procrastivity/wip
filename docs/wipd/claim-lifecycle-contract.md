@@ -192,6 +192,18 @@ is `pin-before-use`; unrelated snapshot-visible entries remain `lazy`. A
 prefix mismatch refuses before acquisition submission. After submission, a
 transfer failure cannot undo the claim.
 
+For the M5 dispatch-less implicit birth claim, the authority derives the
+required blob closure from the granted prefix rather than trusting a client
+list. It includes the provisional Matter's accepted `matter.created` command
+and accepted `step.created` commands whose parent is that Matter, through the
+grant's exact `as_of` anchor. Sibling Matters and their Steps are excluded.
+Declared digests are deduplicated only when their byte lengths agree; every
+required digest must have a verified, prefix-visible authority blob product
+and reference. The complete grant manifest still describes all snapshot-
+visible blobs, but only this subtree closure is `pin-before-use`; unrelated
+entries remain `lazy`. An empty closure is valid when these birth commands
+declare no blobs and is not evidence of missing projection state.
+
 The authority durably binds the grant ID, start/end anchors, manifest digest,
 claim, acquisition identity, and receipt. A response-lost caller uses:
 

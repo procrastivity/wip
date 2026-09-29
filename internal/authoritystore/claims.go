@@ -736,14 +736,12 @@ func checkLifecycleOwner(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, h
 }
 
 // AcquireAllocation supplies fresh authority IDs in event order. The Batch ID
-// is used only if the Matter does not already have an anonymous Batch. The
-// trusted authority caller supplies the required blob closure; the current
-// operation catalogue has no claim-delivery operation or blob inputs.
+// is used only if the Matter does not already have an anonymous Batch.
 type AcquireAllocation struct {
 	ClaimID, BatchID, GrantID, SnapshotID, JournalID string
 	EventIDs                                         []string     // batch-created (if needed), acquired, dispatch-opened
 	Installed                                        PrefixAnchor // exact pre-submission anchor, also required on recovery
-	RequiredDigests                                  []string
+	RequiredDigests                                  []string     // optional assertion; authority independently derives and checks the closure
 }
 
 // ClaimGrant holds the retained acquisition receipt's pinned transfer product.
@@ -879,8 +877,15 @@ func (s *Store) CompleteClaimAcquire(ctx context.Context, owner *Execution, a Ac
 		return CommandStatus{}, grant, err
 	}
 	rangeValue := map[string]any{"first_event_id": a.EventIDs[0], "last_event_id": a.EventIDs[len(a.EventIDs)-1], "event_count": uint64(len(a.EventIDs))}
+	requiredDigests, err := subtreeRequiredBlobClosureTx(ctx, tx, c.domain, c.matter, last)
+	if err != nil {
+		return CommandStatus{}, grant, err
+	}
+	if a.RequiredDigests != nil && !sameDigestSet(a.RequiredDigests, requiredDigests) {
+		return CommandStatus{}, grant, ErrManifestMismatch
+	}
 	status, err := s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", output, nil, rangeValue, first, last, occurred, sign, func(receipt, _ []byte, generation, sequence uint64) error {
-		snapshot, e := pinSnapshotTx(ctx, tx, c.domain, c.epoch, a.Installed, a.SnapshotID, occurred, maxSnapshotLife, a.RequiredDigests)
+		snapshot, e := pinSnapshotTx(ctx, tx, c.domain, c.epoch, a.Installed, a.SnapshotID, occurred, maxSnapshotLife, requiredDigests)
 		if e != nil {
 			return e
 		}
