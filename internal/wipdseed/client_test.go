@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -790,6 +791,45 @@ func TestAuthenticatedAcquisitionGrantInstallAllowsLaterPullAndReopen(t *testing
 	}
 	if _, _, _, err = foldEventRecords(mislinked, state.DomainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("dispatch.opened with a mismatched acquisition claim folded: %v", err)
+	}
+	differentActedAt := cloneEventRecords(grantTransfer.Records())
+	dispatchFields, err = wipdwire.DecodeCanonicalMap(differentActedAt[2].Record,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchFields["acted_at"] = "2025-01-02T03:04:06Z"
+	differentActedAt[2].Record, err = wipdwire.EncodeCanonical(dispatchFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := hex.DecodeString(strings.TrimPrefix(state.Prefix.Digest, "sha256:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range differentActedAt {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(event.Record)))
+		hash := sha256.New()
+		_, _ = hash.Write([]byte("wipd/event-prefix-step/v1\x00"))
+		_, _ = hash.Write(chain)
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(event.Record)
+		chain = hash.Sum(nil)
+	}
+	lastEventID := differentActedAt[len(differentActedAt)-1].EventID
+	differentEnd := wipdwire.PrefixAnchor{
+		EventCount: state.Prefix.EventCount + uint64(len(differentActedAt)), EventID: &lastEventID,
+		Digest: "sha256:" + hex.EncodeToString(chain),
+	}
+	differentManifest := grantManifest
+	differentManifest.AsOf = differentEnd
+	if _, err = wipdjournal.VerifyTransfer(state.DomainID, state.Epoch, state.Prefix, differentEnd, differentActedAt, differentManifest); err != nil {
+		t.Fatalf("mutated acted_at transfer should remain valid before semantic fold: %v", err)
+	}
+	differentActedAtPrefix := append(cloneEventRecords(state.EventRecords), differentActedAt...)
+	if _, _, _, err = foldEventRecords(differentActedAtPrefix, state.DomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("acquisition range with a different dispatch.opened acted_at folded: %v", err)
 	}
 	openPayload := map[string]any{"unexpected": true}
 	closedPayload, err := wipdwire.DecodeCanonicalMap(fullAcquisitionPrefix[3].Record,

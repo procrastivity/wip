@@ -245,6 +245,7 @@ func verifyAcquireReceipt(identity Identity, commandID, requestHash, claimID str
 		return errInvalidClaimGrant
 	}
 	commonRepo := ""
+	commonActedAt := ""
 	worktreeID := ""
 	for index, event := range commandEvents {
 		fields, decodeErr := wipdwire.DecodeCanonicalMap(event.Record,
@@ -255,6 +256,13 @@ func verifyAcquireReceipt(identity Identity, commandID, requestHash, claimID str
 		env, ok := fields["environment"].(map[string]any)
 		if !ok || env["id"] != identity.EnvironmentID || env["sequence"] != sequence {
 			return errInvalidClaimGrant
+		}
+		actedAt, actedAtOK := fields["acted_at"].(string)
+		if !actedAtOK || index > 0 && actedAt != commonActedAt {
+			return errInvalidClaimGrant
+		}
+		if index == 0 {
+			commonActedAt = actedAt
 		}
 		repo := asString(fields["repo_id"])
 		if commonRepo == "" {

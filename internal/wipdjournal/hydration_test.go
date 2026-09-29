@@ -398,7 +398,7 @@ func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntr
 	}
 }
 
-func hydrationGrantEvidenceForRepo(t *testing.T, fixture hydrationGrantFixture, repoID string) ClaimGrantEvidence {
+func hydrationGrantEvidenceMutatingEvents(t *testing.T, fixture hydrationGrantFixture, mutate func(int, map[string]any)) ClaimGrantEvidence {
 	t.Helper()
 	records := fixture.grant.transfer.Records()
 	for index := range records {
@@ -407,7 +407,7 @@ func hydrationGrantEvidenceForRepo(t *testing.T, fixture hydrationGrantFixture, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		fields["repo_id"] = repoID
+		mutate(index, fields)
 		records[index].Record, err = wipdwire.EncodeCanonical(fields)
 		if err != nil {
 			t.Fatal(err)
@@ -418,7 +418,7 @@ func hydrationGrantEvidenceForRepo(t *testing.T, fixture hydrationGrantFixture, 
 	transfer, err := VerifyTransfer(fixture.identity.DomainID, fixture.identity.AuthorityEpoch,
 		fixture.grant.start, end, records, manifest)
 	if err != nil {
-		t.Fatalf("verify signed wrong-Repo transfer: %v", err)
+		t.Fatalf("verify re-anchored mutated transfer: %v", err)
 	}
 	startFields, err := wipdwire.DecodeCanonicalMap(fixture.grant.startBytes,
 		"schema", "grant_id", "acquire_command_id", "acquire_request_hash", "domain_id", "authority_epoch", "owner_environment_id",
@@ -461,7 +461,9 @@ func hydrationGrantEvidenceForRepo(t *testing.T, fixture hydrationGrantFixture, 
 func TestClaimGrantRepoIsBoundToJournalIdentity(t *testing.T) {
 	fixture := makeHydrationGrantFixture(t, nil, 50)
 	const otherRepoID = "01KZ7XHAQT1S46NYPN1PW1DX3E"
-	evidence := hydrationGrantEvidenceForRepo(t, fixture, otherRepoID)
+	evidence := hydrationGrantEvidenceMutatingEvents(t, fixture, func(_ int, fields map[string]any) {
+		fields["repo_id"] = otherRepoID
+	})
 	if _, err := VerifyClaimGrant(fixture.identity, fixture.trust, evidence); !errors.Is(err, errInvalidClaimGrant) {
 		t.Fatalf("validly signed grant for Repo B verified for Repo A: %v", err)
 	}
@@ -478,6 +480,18 @@ func TestClaimGrantRepoIsBoundToJournalIdentity(t *testing.T) {
 	defer func() { _ = journal.Close() }()
 	if _, err = journal.InstallClaimGrant(context.Background(), mustInstallSnapshot(t, journal).Expectation(), verifiedForOtherRepo); !errors.Is(err, ErrInvalidTransfer) {
 		t.Fatalf("Repo B grant installed into Repo A journal: %v", err)
+	}
+}
+
+func TestClaimGrantRejectsAcquisitionRangeWithDifferentActedAt(t *testing.T) {
+	fixture := makeHydrationGrantFixture(t, nil, 60)
+	evidence := hydrationGrantEvidenceMutatingEvents(t, fixture, func(index int, fields map[string]any) {
+		if index == 2 {
+			fields["acted_at"] = "2025-01-02T03:04:06Z"
+		}
+	})
+	if _, err := VerifyClaimGrant(fixture.identity, fixture.trust, evidence); !errors.Is(err, errInvalidClaimGrant) {
+		t.Fatalf("validly re-anchored and re-signed acquisition range with different acted_at verified: %v", err)
 	}
 }
 

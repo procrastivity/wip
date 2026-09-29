@@ -126,8 +126,8 @@ type claimReleasedEvent struct {
 }
 
 type foldedLifecycleEvent struct {
-	commandID, requestHash, environmentID, repoID string
-	sequence                                      uint64
+	commandID, requestHash, environmentID, repoID, actedAt string
+	sequence                                               uint64
 }
 
 type acquisitionFoldState struct {
@@ -789,12 +789,13 @@ func decodeFoldedLifecycleEvent(fields map[string]any, record wipdwire.EventReco
 		!actedOK || !validUTC(actedAt) || !occurredOK || !validUTC(occurredAt) || !subjectOK || !clientULIDPattern.MatchString(subjectID) {
 		return foldedLifecycleEvent{}, false
 	}
+	event.actedAt = actedAt
 	return event, true
 }
 
 func sameFoldedLifecycleCommand(left, right foldedLifecycleEvent) bool {
 	return left.commandID == right.commandID && left.requestHash == right.requestHash &&
-		left.environmentID == right.environmentID && left.sequence == right.sequence && left.repoID == right.repoID
+		left.environmentID == right.environmentID && left.sequence == right.sequence && left.repoID == right.repoID && left.actedAt == right.actedAt
 }
 
 func decodeM1Event(data []byte, event *matterCreatedEvent) error {
