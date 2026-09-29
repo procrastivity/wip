@@ -83,6 +83,9 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if connectedLifecycleOperation(command.Request.Operation) {
 		return s.submitConnectedLifecycle(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
 	}
+	if contentOperation(command.Request.Operation) {
+		return s.submitConnectedContent(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
 	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation) ||
 		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
@@ -359,7 +362,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	cmd := owner.command
 	definition, ok := birthDefinition(cmd.Request.Operation)
 	if !ok {
-		return out, ErrInvalidProof
+		definition, ok = contentDefinition(cmd.Request.Operation)
+		if !ok {
+			return out, ErrInvalidProof
+		}
 	}
 	if err := definition.ValidateResult(result); err != nil {
 		return out, err
@@ -413,6 +419,30 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	}
 	if d.ActiveEpoch != cmd.ExpectedAuthorityEpoch {
 		return out, ErrFenced
+	}
+	if result.Code == operation.ResultSucceeded && contentOperation(cmd.Request.Operation) {
+		kind, subject := contentInput(cmd.Request)
+		_, guardErr := validateContentClaimTx(ctx, tx, cmd, kind, subject)
+		if errors.Is(guardErr, ErrFenced) {
+			result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+				Code: operation.ProblemCode("refusal.claim-fenced"), Message: "the content claim or subject is no longer active",
+			}}
+			subjectID, eventID = "", ""
+		} else if guardErr != nil {
+			return out, guardErr
+		} else if kind != "findings" {
+			var count int
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM content_segments WHERE domain_id=? AND subject_id=? AND kind=?`,
+				cmd.AuthorityDomainID, subject, kind).Scan(&count); err != nil {
+				return out, err
+			}
+			if count != 0 {
+				result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+					Code: operation.ProblemCode("refusal.content-exists"), Message: "create-once content already exists",
+				}}
+				subjectID, eventID = "", ""
+			}
+		}
 	}
 	var first, last any
 	var rangeValue any
@@ -503,6 +533,61 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 			first, last = position, position
 			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
+		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+			kind, subject := contentInput(cmd.Request)
+			got, ok := result.Output.(operation.ContentSegmentOutput)
+			if !ok || got.ID != subjectID || got.SubjectID != subject || got.Kind != kind || len(cmd.Request.Blobs) != 1 ||
+				got.BlobDigest != cmd.Request.Blobs[0].Digest || got.ByteLength != cmd.Request.Blobs[0].Size || !validDigest(got.BlobDigest) {
+				return out, ErrInvalidProof
+			}
+			matter, guardErr := validateContentClaimTx(ctx, tx, cmd, kind, subject)
+			if errors.Is(guardErr, ErrFenced) {
+				return out, ErrInvalidProof
+			}
+			if guardErr != nil {
+				return out, guardErr
+			}
+			var byteLength uint64
+			var verified int
+			if err = tx.QueryRowContext(ctx, `SELECT byte_length,verified FROM blob_products WHERE domain_id=? AND digest=?`, d.ID, got.BlobDigest).Scan(&byteLength, &verified); err != nil || verified != 1 || byteLength != uint64(got.ByteLength) {
+				return out, ErrBlobAbsent
+			}
+			if kind != "findings" {
+				var count int
+				if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM content_segments WHERE domain_id=? AND subject_id=? AND kind=?`, d.ID, subject, kind).Scan(&count); err != nil {
+					return out, err
+				}
+				if count != 0 {
+					return out, ErrFenced
+				}
+			}
+			sha := strings.TrimPrefix(got.BlobDigest, "sha256:")
+			eventKind := "content.created"
+			if kind == "findings" {
+				eventKind = "content.appended"
+			}
+			payload := map[string]any{
+				"kind": kind, "content": got.ID, "bytes": nil, "blob_ref": got.BlobDigest,
+				"byte_len": uint64(got.ByteLength), "sha256": sha,
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{
+				"id": got.ID, "subject_id": got.SubjectID, "kind": got.Kind,
+				"blob_digest": got.BlobDigest, "byte_length": uint64(got.ByteLength),
+			})
+			if err != nil {
+				return out, err
+			}
+			position, err = appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}, occurred,
+				eventID, eventKind, subject, payload)
+			if err != nil {
+				return out, err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO content_segments(domain_id,content_id,subject_id,matter_id,repo_id,kind,blob_digest,byte_length,command_id,event_id)
+				VALUES(?,?,?,?,?,?,?,?,?,?)`, d.ID, got.ID, subject, matter, cmd.Request.Context.Repo, kind, got.BlobDigest, got.ByteLength, cmd.ID, eventID); err != nil {
+				return out, writeError(err)
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
 		}
 	} else {
 		problem = string(result.Problem.Code)
@@ -541,6 +626,13 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 				return ErrInvalidStore
 			}
 			return nil
+		}
+	case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+		if result.Code == operation.ResultSucceeded {
+			outputValue := result.Output.(operation.ContentSegmentOutput)
+			beforeCommit = func(_ []byte, _ []byte, _, _ uint64) error {
+				return promoteBlobsTx(ctx, tx, d.ID, position, []string{outputValue.BlobDigest})
+			}
 		}
 	}
 	return s.finishCommandTx(ctx, tx, commandIdentity{domain: d.ID, epoch: d.ActiveEpoch, environment: cmd.EnvironmentID, sequence: cmd.EnvironmentSequence, id: cmd.ID, name: cmd.Request.Operation.Name, version: uint64(cmd.Request.Operation.Version), hash: owner.hash}, head, string(result.Code), output, problem, rangeValue, first, last, occurred, sign, beforeCommit)

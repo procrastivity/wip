@@ -249,6 +249,30 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return MatterFinishInput{MatterID: matterID}, nil
+	case ContentWriteOnceV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "subject_id", "kind")
+		if err != nil {
+			return nil, err
+		}
+		subject, err := commandString(fields, "subject_id")
+		if err != nil {
+			return nil, err
+		}
+		kind, err := commandString(fields, "kind")
+		if err != nil {
+			return nil, err
+		}
+		return ContentWriteInput{SubjectID: subject, Kind: kind}, nil
+	case FindingAppendV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "subject_id")
+		if err != nil {
+			return nil, err
+		}
+		subject, err := commandString(fields, "subject_id")
+		if err != nil {
+			return nil, err
+		}
+		return FindingAppendInput{SubjectID: subject}, nil
 	default:
 		return nil, fmt.Errorf("operation: no canonical identity schema for %s", id)
 	}

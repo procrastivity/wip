@@ -393,6 +393,14 @@ func (c *Client) negotiate(ctx context.Context) error {
 		"protocol_max":     []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{identitySchemaV1},
 		"operations": []any{map[string]any{
+			"name":             "content.write-once",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name":             "finding.append",
+			"versions":         []any{uint64(1)},
+			"identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
 			"name":             "matter.create",
 			"versions":         []any{uint64(1)},
 			"identity_schemas": []any{identitySchemaV1},
@@ -502,7 +510,8 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errInvalidCapabilities
 	}
 	for _, capability := range operations {
-		if capability.name != "matter.create" && capability.name != "matter.finish" && capability.name != "step.create" &&
+		if capability.name != "content.write-once" && capability.name != "finding.append" && capability.name != "matter.create" &&
+			capability.name != "matter.finish" && capability.name != "step.create" &&
 			capability.name != "step.finish" && capability.name != "step.start" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
 			!equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
 			return serverHello{}, errInvalidCapabilities

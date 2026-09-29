@@ -46,6 +46,15 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				return nil, errMalformedMessage
 			}
 			output = map[string]any{"matter_id": matter.MatterID, "state": matter.State, "became_sealed": matter.BecameSealed}
+		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+			content, ok := result.Output.(operation.ContentSegmentOutput)
+			if !ok || !validRequestID(content.ID) || !validRequestID(content.SubjectID) || content.ByteLength < 0 {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{
+				"id": content.ID, "subject_id": content.SubjectID, "kind": content.Kind,
+				"blob_digest": content.BlobDigest, "byte_length": uint64(content.ByteLength),
+			}
 		default:
 			return nil, errMalformedMessage
 		}
@@ -155,6 +164,22 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.MatterFinishOutput{MatterID: matterID, State: state, BecameSealed: sealed}
+		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+			if !exactFields(outputFields, "id", "subject_id", "kind", "blob_digest", "byte_length") {
+				return operation.Result{}, errMalformedMessage
+			}
+			idValue, idOK := outputFields["id"].(string)
+			subjectID, subjectOK := outputFields["subject_id"].(string)
+			kind, kindOK := outputFields["kind"].(string)
+			digest, digestOK := outputFields["blob_digest"].(string)
+			byteLength, lengthOK := outputFields["byte_length"].(uint64)
+			if !idOK || !validRequestID(idValue) || !subjectOK || !validRequestID(subjectID) || !kindOK || !digestOK ||
+				!lengthOK || byteLength > uint64(^uint64(0)>>1) {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.ContentSegmentOutput{
+				ID: idValue, SubjectID: subjectID, Kind: kind, BlobDigest: digest, ByteLength: int64(byteLength),
+			}
 		default:
 			return operation.Result{}, errMalformedMessage
 		}

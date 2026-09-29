@@ -74,6 +74,34 @@ type MatterFinishOutput struct {
 
 func (MatterFinishOutput) operationOutput() {}
 
+// ContentWriteInput writes one create-once prose kind to an existing Matter
+// or Step. The bytes are supplied only through the declared staged blob.
+type ContentWriteInput struct {
+	SubjectID string
+	Kind      string
+}
+
+func (ContentWriteInput) operationInput() {}
+
+// FindingAppendInput appends one findings segment to an existing Matter or
+// Step using the declared staged blob.
+type FindingAppendInput struct {
+	SubjectID string
+}
+
+func (FindingAppendInput) operationInput() {}
+
+// ContentSegmentOutput identifies the exact authority-folded content segment.
+type ContentSegmentOutput struct {
+	ID         string
+	SubjectID  string
+	Kind       string
+	BlobDigest string
+	ByteLength int64
+}
+
+func (ContentSegmentOutput) operationOutput() {}
+
 // MatterCreateV1 is the canonical M1 definition and the first Step 3 adoption
 // candidate. Its future delivery class is provisional per D120/D127, while its
 // current implementation and storage ownership remain unchanged.
@@ -147,7 +175,38 @@ var MatterFinishV1 = mustDefine[MatterFinishInput, MatterFinishOutput](Metadata{
 	ExternalEffects: []ExternalEffect{},
 })
 
-var catalogue = []Definition{MatterCreateV1, StepCreateV1, StepStartV1, StepFinishV1, MatterFinishV1}
+// ContentWriteOnceV1 and FindingAppendV1 are the claim-scoped content subset
+// used by the online Matter workflow. Their bytes are always staged blobs.
+var ContentWriteOnceV1 = mustDefine[ContentWriteInput, ContentSegmentOutput](Metadata{
+	Operation:       ID{Name: "content.write-once", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryClaim,
+	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintNodeContent},
+	Writes:          []Footprint{FootprintNodeContent},
+	BlobInputs:      []BlobSpec{{Name: "content", Required: true}},
+	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// FindingAppendV1 records one append-only findings segment under its exact
+// active Matter claim.
+var FindingAppendV1 = mustDefine[FindingAppendInput, ContentSegmentOutput](Metadata{
+	Operation:       ID{Name: "finding.append", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryClaim,
+	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintNodeContent},
+	Writes:          []Footprint{FootprintFindingSegments},
+	BlobInputs:      []BlobSpec{{Name: "content", Required: true}},
+	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+var catalogue = []Definition{
+	MatterCreateV1, StepCreateV1, StepStartV1, StepFinishV1, MatterFinishV1,
+	ContentWriteOnceV1, FindingAppendV1,
+}
 
 // Catalogue returns the currently defined semantic operations. It is not the
 // Cobra manifest: operations enter this list only as their semantic contracts

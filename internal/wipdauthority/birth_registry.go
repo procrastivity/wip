@@ -60,5 +60,32 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 			return nil, err
 		}
 	}
+	for _, definition := range []operation.Definition{operation.ContentWriteOnceV1, operation.FindingAppendV1} {
+		if err := registry.Register(definition, func(_ context.Context, request operation.Request) operation.Result {
+			var subject, kind string
+			switch input := request.Input.(type) {
+			case operation.ContentWriteInput:
+				subject, kind = input.SubjectID, input.Kind
+			case operation.FindingAppendInput:
+				subject, kind = input.SubjectID, "findings"
+			default:
+				return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+					Code: operation.ProblemExecutionFailed, Message: "invalid content operation input",
+				}}
+			}
+			id, err := randomULID(time.Now().UTC())
+			if err != nil {
+				return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+					Code: operation.ProblemExecutionFailed, Message: "could not allocate content identity",
+				}}
+			}
+			blob := request.Blobs[0]
+			return operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
+				ID: id, SubjectID: subject, Kind: kind, BlobDigest: blob.Digest, ByteLength: blob.Size,
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return registry, nil
 }

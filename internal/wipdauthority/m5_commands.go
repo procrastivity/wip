@@ -406,6 +406,12 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 			if err != nil {
 				return nil, err
 			}
+		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+			output, ok := result.Output.(operation.ContentSegmentOutput)
+			if !ok {
+				return nil, authoritystore.ErrInvalidProof
+			}
+			subjectID = output.ID
 		default:
 			return nil, authoritystore.ErrInvalidProof
 		}

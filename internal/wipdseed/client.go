@@ -52,21 +52,22 @@ type PreparedIdentity struct {
 
 // ClientState is the locally installed identity and verified shadow anchor.
 type ClientState struct {
-	Schema          string                       `json:"schema"`
-	RepoID          string                       `json:"repo_id"`
-	DomainID        string                       `json:"domain_id"`
-	Epoch           uint64                       `json:"authority_epoch"`
-	EnvironmentID   string                       `json:"environment_id"`
-	OwnerKeyID      string                       `json:"owner_key_id"`
-	SPKIDigest      string                       `json:"spki_digest"`
-	PrivateKeyPKCS8 []byte                       `json:"private_key_pkcs8"`
-	CertificateDER  [][]byte                     `json:"certificate_chain_der"`
-	Prefix          wipdwire.PrefixAnchor        `json:"prefix"`
-	EventRecords    []wipdwire.EventRecord       `json:"event_records"`
-	ManifestDigest  string                       `json:"manifest_digest"`
-	ManifestEntries []wipdwire.BlobManifestEntry `json:"manifest_entries"`
-	Projections     []json.RawMessage            `json:"projections"`
-	StepProjections []json.RawMessage            `json:"step_projections"`
+	Schema             string                       `json:"schema"`
+	RepoID             string                       `json:"repo_id"`
+	DomainID           string                       `json:"domain_id"`
+	Epoch              uint64                       `json:"authority_epoch"`
+	EnvironmentID      string                       `json:"environment_id"`
+	OwnerKeyID         string                       `json:"owner_key_id"`
+	SPKIDigest         string                       `json:"spki_digest"`
+	PrivateKeyPKCS8    []byte                       `json:"private_key_pkcs8"`
+	CertificateDER     [][]byte                     `json:"certificate_chain_der"`
+	Prefix             wipdwire.PrefixAnchor        `json:"prefix"`
+	EventRecords       []wipdwire.EventRecord       `json:"event_records"`
+	ManifestDigest     string                       `json:"manifest_digest"`
+	ManifestEntries    []wipdwire.BlobManifestEntry `json:"manifest_entries"`
+	Projections        []json.RawMessage            `json:"projections"`
+	StepProjections    []json.RawMessage            `json:"step_projections"`
+	ContentProjections []json.RawMessage            `json:"content_projections,omitempty"`
 }
 
 // PrepareIdentity creates a private Environment key and CSR. The caller keeps

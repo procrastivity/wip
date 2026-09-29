@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/procrastivity/wip/internal/operation"
 )
 
 type receiptRecord struct {
@@ -103,7 +104,7 @@ func checkStep4State(db *sql.DB) error {
 	var terminals int
 	for _, s := range all {
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation)) || s.version != 1 {
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)})) || s.version != 1 {
 			return ErrInvalidStore
 		}
 		if lifecycleOperation(s.operation) {
@@ -166,7 +167,7 @@ func checkStep4State(db *sql.DB) error {
 			if !first.Valid || !last.Valid || ((s.operation == "matter.create" || s.operation == "step.create") && first.Int64 != last.Int64) || r.Range == nil || ((s.operation == "matter.create" || s.operation == "step.create") && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) {
+			if lifecycleOperation(s.operation) || contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -193,7 +194,7 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		var eventCount int
-		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && (s.operation == "matter.create" || s.operation == "step.create") && eventCount != 1) || (code == "result.succeeded" && lifecycleOperation(s.operation) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
+		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && (s.operation == "matter.create" || s.operation == "step.create") && eventCount != 1) || (code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)})) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -218,7 +219,12 @@ func checkStep4State(db *sql.DB) error {
 		return err
 	}
 	if version >= 7 {
-		return checkStep8State(db, all)
+		if err = checkStep8State(db, all); err != nil {
+			return err
+		}
+	}
+	if version >= 9 {
+		return checkStep10State(db, all)
 	}
 	return nil
 }
@@ -315,6 +321,26 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 				break
 			}
 			lifecycleEvents[ownerKey(d, cmd)] = append(lifecycleEvents[ownerKey(d, cmd)], lifecycleEvent{pos, id, raw})
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
+			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {
+				err = eventErr
+				break
+			}
 			var length [8]byte
 			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
 			h := sha256.New()

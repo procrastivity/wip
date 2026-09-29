@@ -424,10 +424,20 @@ func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request ope
 		return ErrClosed
 	}
 	matterID := ""
+	subjectID := ""
 	switch input := request.Input.(type) {
 	case operation.MatterFinishInput:
 		matterID = input.MatterID
 	case operation.StepLifecycleInput:
+		subjectID = input.StepID
+	case operation.ContentWriteInput:
+		subjectID = input.SubjectID
+	case operation.FindingAppendInput:
+		subjectID = input.SubjectID
+	default:
+		return ErrClaimNotReady
+	}
+	if subjectID != "" {
 		rows, err := j.db.QueryContext(ctx, `SELECT record FROM installed_events ORDER BY position`)
 		if err != nil {
 			return err
@@ -444,20 +454,25 @@ func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request ope
 				_ = rows.Close()
 				return ErrInvalidJournal
 			}
-			if fields["kind"] != "step.created" || fields["subject_id"] != input.StepID {
+			if fields["subject_id"] != subjectID {
 				continue
 			}
-			payload, _ := fields["payload"].(map[string]any)
-			matterID, _ = payload["parent"].(string)
-			break
+			switch fields["kind"] {
+			case "matter.created":
+				matterID = subjectID
+			case "step.created":
+				payload, _ := fields["payload"].(map[string]any)
+				matterID, _ = payload["parent"].(string)
+			}
+			if matterID != "" {
+				break
+			}
 		}
 		if err = rows.Err(); err != nil {
 			_ = rows.Close()
 			return err
 		}
 		_ = rows.Close()
-	default:
-		return ErrClaimNotReady
 	}
 	if matterID == "" {
 		return ErrClaimNotReady

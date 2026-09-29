@@ -77,6 +77,7 @@ func (client *CommandExchangeClient) State() ClientState {
 	state.ManifestEntries = append([]wipdwire.BlobManifestEntry(nil), state.ManifestEntries...)
 	state.Projections = cloneRawMessages(state.Projections)
 	state.StepProjections = cloneRawMessages(state.StepProjections)
+	state.ContentProjections = cloneRawMessages(state.ContentProjections)
 	return state
 }
 
@@ -108,6 +109,8 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 2
 	case "claim.acquire":
 		maxFrames = maxClientTransferEvents + 5
+	case "blob.upload-start", "blob.upload-chunk", "blob.upload-finish":
+		maxFrames = 1
 	default:
 		return nil, ErrInvalidClientState
 	}
@@ -129,6 +132,101 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		}
 	}
 	return frames, nil
+}
+
+// UploadBlob resumes one locally verified staged blob at the authority's
+// durable contiguous offset. It only creates a verified temporary product;
+// terminal command completion owns promotion into referenced domain state.
+func (client *CommandExchangeClient) UploadBlob(ctx context.Context, digest string, size uint64, reader io.Reader) error {
+	if client == nil || client.client == nil || ctx == nil || reader == nil || !validDigest(digest) ||
+		size > uint64(client.limits.streamBytes) || client.state.DomainID == "" || client.state.Epoch == 0 {
+		return ErrInvalidClientState
+	}
+	startFrames, err := client.Exchange(ctx, "blob.upload-start", wipdwire.BlobUploadStart{
+		Schema: "wipd.blob-upload/1", DomainID: client.state.DomainID,
+		Digest: digest, ByteLength: size, ResumeOffset: 0,
+	})
+	if err != nil {
+		return err
+	}
+	if len(startFrames) != 1 {
+		return ErrInvalidClientState
+	}
+	var offset uint64
+	switch startFrames[0].Kind {
+	case "blob.available":
+		var available wipdwire.BlobAvailable
+		if wipdwire.DecodeCanonical(startFrames[0].Payload, &available, "schema", "digest", "byte_length") != nil ||
+			available.Schema != "wipd.blob-available/1" || available.Digest != digest || available.ByteLength != size {
+			return ErrInvalidClientState
+		}
+		return nil
+	case "blob.upload-ready":
+		var ready wipdwire.BlobUploadReady
+		if wipdwire.DecodeCanonical(startFrames[0].Payload, &ready, "schema", "digest", "byte_length", "offset") != nil ||
+			ready.Schema != "wipd.blob-upload-ready/1" || ready.Digest != digest || ready.ByteLength != size || ready.Offset > size {
+			return ErrInvalidClientState
+		}
+		offset = ready.Offset
+	default:
+		return ErrInvalidClientState
+	}
+	if offset != 0 {
+		if _, err = io.CopyN(io.Discard, reader, int64(offset)); err != nil {
+			return ErrInvalidClientState
+		}
+	}
+	chunkLimit := client.limits.chunkData
+	if frameLimit := client.limits.frameBody - 512; chunkLimit > frameLimit {
+		chunkLimit = frameLimit
+	}
+	if chunkLimit <= 0 {
+		return ErrInvalidClientState
+	}
+	for offset < size {
+		length := uint64(chunkLimit)
+		if remaining := size - offset; length > remaining {
+			length = remaining
+		}
+		chunk := make([]byte, int(length))
+		if _, err = io.ReadFull(reader, chunk); err != nil {
+			clear(chunk)
+			return ErrInvalidClientState
+		}
+		frames, exchangeErr := client.Exchange(ctx, "blob.upload-chunk", wipdwire.BlobUploadChunk{
+			Schema: "wipd.blob-upload-chunk/1", DomainID: client.state.DomainID,
+			Digest: digest, Offset: offset, Data: chunk,
+		})
+		clear(chunk)
+		if exchangeErr != nil {
+			return exchangeErr
+		}
+		if len(frames) != 1 || frames[0].Kind != "blob.upload-offset" {
+			return ErrInvalidClientState
+		}
+		var acknowledged wipdwire.BlobUploadOffset
+		if wipdwire.DecodeCanonical(frames[0].Payload, &acknowledged, "schema", "digest", "offset") != nil ||
+			acknowledged.Schema != "wipd.blob-upload-offset/1" || acknowledged.Digest != digest || acknowledged.Offset != offset+length {
+			return ErrInvalidClientState
+		}
+		offset = acknowledged.Offset
+	}
+	frames, err := client.Exchange(ctx, "blob.upload-finish", wipdwire.BlobUploadFinish{
+		Schema: "wipd.blob-upload-finish/1", DomainID: client.state.DomainID,
+		Digest: digest, ByteLength: size,
+	})
+	if err != nil {
+		return err
+	}
+	if len(frames) != 1 || frames[0].Kind != "blob.staged" {
+		return ErrInvalidClientState
+	}
+	var staged wipdwire.BlobStaged
+	if wipdwire.DecodeCanonical(frames[0].Payload, &staged, "schema", "digest", "byte_length") != nil ||
+		staged.Schema != "wipd.blob-staged/1" || staged.Digest != digest || staged.ByteLength != size {
+		return ErrInvalidClientState
+	}
+	return nil
 }
 
 // Close clears the in-memory Environment key and releases the HTTP/2 client.

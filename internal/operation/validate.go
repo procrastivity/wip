@@ -54,6 +54,17 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
+	case ContentWriteInput:
+		if err := validateULID("content subject ID", input.SubjectID); err != nil {
+			return err
+		}
+		if input.Kind != "brief" && input.Kind != "workplan" && input.Kind != "body" {
+			return fmt.Errorf("content.write-once@v1 requires brief, workplan, or body kind")
+		}
+	case FindingAppendInput:
+		if err := validateULID("finding subject ID", input.SubjectID); err != nil {
+			return err
+		}
 	}
 	return d.validateBlobs(request.Blobs)
 }
@@ -107,6 +118,14 @@ func (d Definition) ValidateResult(result Result) error {
 		case MatterFinishOutput:
 			if validateULID("Matter output ID", output.MatterID) != nil || output.State != "done" {
 				return fmt.Errorf("matter finish output has invalid identity or state")
+			}
+		case ContentSegmentOutput:
+			if validateULID("content output ID", output.ID) != nil || validateULID("content subject ID", output.SubjectID) != nil ||
+				(output.Kind != "brief" && output.Kind != "workplan" && output.Kind != "body" && output.Kind != "findings") ||
+				!digestPattern.MatchString(output.BlobDigest) || output.ByteLength < 0 ||
+				d.metadata.Operation == ContentWriteOnceV1.Metadata().Operation && output.Kind == "findings" ||
+				d.metadata.Operation == FindingAppendV1.Metadata().Operation && output.Kind != "findings" {
+				return fmt.Errorf("content output has invalid identity, kind, or staged-blob metadata")
 			}
 		}
 		return nil

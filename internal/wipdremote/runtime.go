@@ -246,6 +246,20 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 	if len(canonical) == 0 {
 		return empty, wipd.ErrCommandStartIdentity
 	}
+	for _, blob := range entry.Command.Request.Blobs {
+		reader, size, openErr := runtime.journal.OpenBlob(blob.Digest)
+		if openErr != nil || size < 0 || size != blob.Size {
+			if reader != nil {
+				_ = reader.Close()
+			}
+			return empty, wipd.ErrCommandStartIdentity
+		}
+		uploadErr := runtime.client.UploadBlob(ctx, blob.Digest, uint64(size), reader)
+		closeErr := reader.Close()
+		if uploadErr = errors.Join(uploadErr, closeErr); uploadErr != nil {
+			return empty, uploadErr
+		}
+	}
 	submit := wipdwire.CommandSubmit{Schema: "wipd.command-submit/1", CanonicalCommand: canonical, RequestHash: entry.RequestHash}
 	frames, err := runtime.client.Exchange(ctx, "command.submit", submit)
 	if err != nil {

@@ -457,6 +457,61 @@ type BlobManifest struct {
 	Digest   string              `cbor:"manifest_digest"`
 }
 
+// BlobUploadStart asks the authority for its exact resumable contiguous offset.
+type BlobUploadStart struct {
+	Schema       string `cbor:"schema"`
+	DomainID     string `cbor:"domain_id"`
+	Digest       string `cbor:"digest"`
+	ByteLength   uint64 `cbor:"byte_length"`
+	ResumeOffset uint64 `cbor:"resume_offset"`
+}
+
+// BlobUploadReady returns the exact offset from which another chunk is needed.
+type BlobUploadReady struct {
+	Schema     string `cbor:"schema"`
+	Digest     string `cbor:"digest"`
+	ByteLength uint64 `cbor:"byte_length"`
+	Offset     uint64 `cbor:"offset"`
+}
+
+// BlobAvailable confirms previously verified bytes at the requested length.
+type BlobAvailable struct {
+	Schema     string `cbor:"schema"`
+	Digest     string `cbor:"digest"`
+	ByteLength uint64 `cbor:"byte_length"`
+}
+
+// BlobUploadChunk carries one authenticated contiguous chunk.
+type BlobUploadChunk struct {
+	Schema   string `cbor:"schema"`
+	DomainID string `cbor:"domain_id"`
+	Digest   string `cbor:"digest"`
+	Offset   uint64 `cbor:"offset"`
+	Data     []byte `cbor:"data"`
+}
+
+// BlobUploadOffset acknowledges the authority's new durable contiguous offset.
+type BlobUploadOffset struct {
+	Schema string `cbor:"schema"`
+	Digest string `cbor:"digest"`
+	Offset uint64 `cbor:"offset"`
+}
+
+// BlobUploadFinish asks the authority to verify the complete length and digest.
+type BlobUploadFinish struct {
+	Schema     string `cbor:"schema"`
+	DomainID   string `cbor:"domain_id"`
+	Digest     string `cbor:"digest"`
+	ByteLength uint64 `cbor:"byte_length"`
+}
+
+// BlobStaged confirms verified bytes are available but not yet referenced.
+type BlobStaged struct {
+	Schema     string `cbor:"schema"`
+	Digest     string `cbor:"digest"`
+	ByteLength uint64 `cbor:"byte_length"`
+}
+
 // SeedEnd closes a seed transfer with the verified prefix and manifest digest.
 type SeedEnd struct {
 	Schema         string       `cbor:"schema"`

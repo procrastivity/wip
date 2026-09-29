@@ -70,6 +70,8 @@ const (
 	FootprintStepParent              Footprint = "step.parent"
 	FootprintStepLocator             Footprint = "matter.step-locators"
 	FootprintStepSortKey             Footprint = "step.sibling-sort-key"
+	FootprintNodeContent             Footprint = "node.content"
+	FootprintFindingSegments         Footprint = "node.finding-segments"
 )
 
 // BlobSpec statically names one accepted staged blob input.

@@ -94,7 +94,7 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	var operations []operation.Definition
 	if config.Registry != nil {
 		operations = config.Registry.Definitions()
-		if len(operations) == 0 || len(operations) > 5 ||
+		if len(operations) == 0 || len(operations) > 7 ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
 			return nil, ErrInvalidLabConfig
 		}
@@ -107,7 +107,9 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 			case operation.StepCreateV1.Metadata().Operation,
 				operation.StepStartV1.Metadata().Operation,
 				operation.StepFinishV1.Metadata().Operation,
-				operation.MatterFinishV1.Metadata().Operation:
+				operation.MatterFinishV1.Metadata().Operation,
+				operation.ContentWriteOnceV1.Metadata().Operation,
+				operation.FindingAppendV1.Metadata().Operation:
 			default:
 				return nil, ErrInvalidLabConfig
 			}
@@ -352,6 +354,13 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 			return
 		}
 		app.serveClaimAcquire(writer, request, body, frame, environment)
+		return
+	case "blob.upload-start", "blob.upload-chunk", "blob.upload-finish":
+		if app.registry == nil || !contentUploadNegotiated(request) {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveBlobUpload(writer, request, body, frame)
 		return
 	default:
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")

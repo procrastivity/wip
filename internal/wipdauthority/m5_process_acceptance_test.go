@@ -8,14 +8,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipd"
 	"github.com/procrastivity/wip/internal/wipdjournal"
@@ -429,9 +432,95 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}) {
 		t.Fatalf("claim-scoped Step finish through authenticated wipd = %+v, %v", finishedStep, err)
 	}
+	briefBytes := []byte("acceptance brief staged before use\n")
+	findingBytes := []byte("verified finding segment\n")
+	stagedBlobs := make(map[string]wipdjournal.StagedBlob, 2)
+	_ = recoveredClient.Close()
+	stopRecoveredDaemon()
+	stagingJournal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
+		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"brief": briefBytes, "finding": findingBytes} {
+		staged, stageErr := stagingJournal.StageBlob(bytes.NewReader(content), int64(len(content)))
+		if stageErr != nil {
+			_ = stagingJournal.Close()
+			t.Fatalf("durably stage %s content: %v", name, stageErr)
+		}
+		stagedBlobs[name] = staged
+	}
+	if err = stagingJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stagingJournal, err = wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
+		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	})
+	if err != nil {
+		t.Fatalf("reopen Environment journal with staged content: %v", err)
+	}
+	for name, content := range map[string][]byte{"brief": briefBytes, "finding": findingBytes} {
+		reader, size, openErr := stagingJournal.OpenBlob(stagedBlobs[name].Digest)
+		if openErr != nil || size != int64(len(content)) {
+			_ = stagingJournal.Close()
+			t.Fatalf("reopen staged %s content: size=%d err=%v", name, size, openErr)
+		}
+		got, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil || !bytes.Equal(got, content) {
+			_ = stagingJournal.Close()
+			t.Fatalf("reopened staged %s bytes differ: read=%v close=%v", name, readErr, closeErr)
+		}
+	}
+	if err = stagingJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Leave a durable authority-side prefix so the authenticated upload must
+	// resume at the exact returned offset rather than retransmitting the blob.
+	resume, err := fixture.store.StartBlob(context.Background(), m5TestDomain, 1, stagedBlobs["brief"].Digest,
+		uint64(len(briefBytes)), time.Now().UTC())
+	if err != nil || resume.Available || resume.Offset != 0 {
+		t.Fatalf("prepare interrupted authority upload = %+v, %v", resume, err)
+	}
+	resumeAt := len(briefBytes) / 2
+	if offset, stageErr := fixture.store.StageBlobChunk(context.Background(), m5TestDomain, 1, stagedBlobs["brief"].Digest,
+		0, briefBytes[:resumeAt]); stageErr != nil || offset != uint64(resumeAt) {
+		t.Fatalf("retain resumable authority blob prefix = %d, %v", offset, stageErr)
+	}
+	recoveredClient, stopRecoveredDaemon, recoveredOutput = startWipdForBirthReleaseRecovery(t, binary, profileRoot)
+	contentCommand := func(id string, sequence uint64, operationID operation.ID, input operation.Input, blob wipdjournal.StagedBlob) operation.Command {
+		return operation.Command{
+			ID: id, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+			EnvironmentID: m5TestEnv, EnvironmentSequence: sequence, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			CorrelationCommandID: id,
+			Request: operation.Request{
+				Operation: operationID, Actor: "human", Context: commandContext, Claim: claimContext,
+				Input: input, Blobs: []operation.BlobInput{{Name: "content", Digest: blob.Digest, Size: blob.Size}},
+			},
+		}
+	}
+	briefCommand := contentCommand("01KZ7XHAQT1S46NYPN1PW1DX4W", 7, operation.ContentWriteOnceV1.Metadata().Operation,
+		operation.ContentWriteInput{SubjectID: matterOutput.ID, Kind: "brief"}, stagedBlobs["brief"])
+	briefResult, err := recoveredClient.ExecuteCommand(context.Background(), briefCommand)
+	briefOutput, briefOutputOK := briefResult.Output.(operation.ContentSegmentOutput)
+	if err != nil || briefResult.Code != operation.ResultSucceeded || !briefOutputOK || briefOutput.SubjectID != matterOutput.ID ||
+		briefOutput.Kind != "brief" || briefOutput.BlobDigest != stagedBlobs["brief"].Digest || briefOutput.ByteLength != stagedBlobs["brief"].Size {
+		t.Fatalf("resumed authenticated content write = %+v, %v; daemon=%s", briefResult, err, recoveredOutput.String())
+	}
+	findingCommand := contentCommand("01KZ7XHAQT1S46NYPN1PW1DX4X", 8, operation.FindingAppendV1.Metadata().Operation,
+		operation.FindingAppendInput{SubjectID: stepOutput.ID}, stagedBlobs["finding"])
+	findingResult, err := recoveredClient.ExecuteCommand(context.Background(), findingCommand)
+	findingOutput, findingOutputOK := findingResult.Output.(operation.ContentSegmentOutput)
+	if err != nil || findingResult.Code != operation.ResultSucceeded || !findingOutputOK || findingOutput.SubjectID != stepOutput.ID ||
+		findingOutput.Kind != "findings" || findingOutput.BlobDigest != stagedBlobs["finding"].Digest || findingOutput.ByteLength != stagedBlobs["finding"].Size {
+		t.Fatalf("claim-scoped finding append = %+v, %v; daemon=%s", findingResult, err, recoveredOutput.String())
+	}
 	matterFinish := operation.Command{
 		ID: "01KZ7XHAQT1S46NYPN1PW1DX4N", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
-		EnvironmentID: m5TestEnv, EnvironmentSequence: 7, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 9, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4N",
 		Request: operation.Request{
 			Operation: operation.MatterFinishV1.Metadata().Operation, Actor: "human",
@@ -444,7 +533,10 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}) {
 		t.Fatalf("authority-class Matter finish through authenticated wipd = %+v, %v", finishedMatter, err)
 	}
-	for label, command := range map[string]operation.Command{"Step start": stepStart, "Step finish": stepFinish, "Matter finish": matterFinish} {
+	for label, command := range map[string]operation.Command{
+		"Step start": stepStart, "Step finish": stepFinish, "content write": briefCommand,
+		"finding append": findingCommand, "Matter finish": matterFinish,
+	} {
 		status, queryErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, m5CommandHash(t, command), 1,
 			fixture.peer, m5TestEnv, time.Now().UTC())
 		if queryErr != nil || status.Pending || len(status.Receipt) == 0 {
@@ -458,8 +550,8 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	_ = recoveredClient.Close()
 	stopRecoveredDaemon()
 	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || anchor.EventCount != 11 {
-		t.Fatalf("authority event range after lifecycle completion = %+v, %v; want eleven events", anchor, err)
+	if err != nil || anchor.EventCount != 13 {
+		t.Fatalf("authority event range after content/lifecycle completion = %+v, %v; want thirteen events", anchor, err)
 	}
 	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
 		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
@@ -470,8 +562,86 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	defer func() { _ = journal.Close() }()
 	snapshot, err := journal.InstallSnapshot(context.Background())
-	if err != nil || snapshot.Anchor.EventCount != 11 || len(snapshot.Receipts) != 5 {
+	if err != nil || snapshot.Anchor.EventCount != 13 || len(snapshot.Receipts) != 7 {
 		t.Fatalf("durable Environment authority fold/replay state = %+v, %v", snapshot, err)
+	}
+	for _, command := range []operation.Command{briefCommand, findingCommand} {
+		status, queryErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, m5CommandHash(t, command), 1,
+			fixture.peer, m5TestEnv, time.Now().UTC())
+		outcome, ok := snapshot.Receipts[command.ID]
+		if queryErr != nil || status.Pending || !ok || outcome.ResultCode != operation.ResultSucceeded ||
+			!bytes.Equal(outcome.CanonicalReceipt, status.Receipt) {
+			t.Fatalf("Environment/authority receipt mismatch for %s: %+v query=%+v err=%v", command.ID, outcome, status, queryErr)
+		}
+	}
+	installedEvents, err := journal.EventRecords(context.Background())
+	if err != nil || len(installedEvents) != 13 {
+		t.Fatalf("installed event lineage after content fold = %d records, %v", len(installedEvents), err)
+	}
+	wantContentEvents := map[string]struct {
+		kind, subject, contentID, digest, sha string
+		length                                uint64
+	}{
+		briefCommand.ID: {
+			kind: "content.created", subject: matterOutput.ID, contentID: briefOutput.ID,
+			digest: stagedBlobs["brief"].Digest, sha: strings.TrimPrefix(stagedBlobs["brief"].Digest, "sha256:"),
+			length: uint64(stagedBlobs["brief"].Size),
+		},
+		findingCommand.ID: {
+			kind: "content.appended", subject: stepOutput.ID, contentID: findingOutput.ID,
+			digest: stagedBlobs["finding"].Digest, sha: strings.TrimPrefix(stagedBlobs["finding"].Digest, "sha256:"),
+			length: uint64(stagedBlobs["finding"].Size),
+		},
+	}
+	for index, event := range installedEvents {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(event.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil || fields["event_id"] != event.EventID {
+			t.Fatalf("installed event %d is not canonical: %v", index, decodeErr)
+		}
+		commandID, _ := fields["command_id"].(string)
+		want, contentEvent := wantContentEvents[commandID]
+		if !contentEvent {
+			continue
+		}
+		payload, payloadOK := fields["payload"].(map[string]any)
+		if !payloadOK || fields["kind"] != want.kind || fields["subject_id"] != want.subject ||
+			payload["content"] != want.contentID || payload["kind"] != "brief" && commandID == briefCommand.ID ||
+			payload["kind"] != "findings" && commandID == findingCommand.ID || payload["blob_ref"] != want.digest ||
+			payload["byte_len"] != want.length || payload["sha256"] != want.sha || payload["bytes"] != nil {
+			t.Fatalf("installed content event for %s differs from accepted command: %#v", commandID, fields)
+		}
+		delete(wantContentEvents, commandID)
+	}
+	if len(wantContentEvents) != 0 {
+		t.Fatalf("accepted content commands missing installed events: %v", wantContentEvents)
+	}
+	remoteSnapshotID, err := randomULID(time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(),
+		remoteSnapshotID, time.Now().UTC(), time.Minute)
+	if err != nil || len(remoteSnapshot.Delta.Events) != len(installedEvents) {
+		t.Fatalf("authority snapshot for content fold = %d events, %v", len(remoteSnapshot.Delta.Events), err)
+	}
+	for index, event := range remoteSnapshot.Delta.Events {
+		if event.EventID != installedEvents[index].EventID || !bytes.Equal(event.Record, installedEvents[index].Record) {
+			t.Fatalf("Environment event %d differs from exact authority bytes", index)
+		}
+	}
+	wantManifest := map[string]uint64{
+		stagedBlobs["brief"].Digest:   uint64(stagedBlobs["brief"].Size),
+		stagedBlobs["finding"].Digest: uint64(stagedBlobs["finding"].Size),
+	}
+	for _, entry := range remoteSnapshot.Manifest.Entries {
+		if length, exists := wantManifest[entry.Digest]; !exists || length != entry.ByteLength {
+			t.Fatalf("manifest promoted unexpected blob: %+v", entry)
+		}
+		delete(wantManifest, entry.Digest)
+	}
+	if len(wantManifest) != 0 || len(remoteSnapshot.Manifest.Entries) != 2 {
+		t.Fatalf("successful content/finding promotions = %+v; missing=%v", remoteSnapshot.Manifest.Entries, wantManifest)
 	}
 	releaseAttempt, err := journal.BirthReleaseAttempt(releaseID)
 	if err != nil || !releaseAttempt.Returned || releaseAttempt.ResultCode != operation.ResultSucceeded ||
@@ -480,9 +650,11 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable birth-release receipt/barrier = %+v, %v", releaseAttempt, err)
 	}
 	entries, err := journal.Entries()
-	if err != nil || len(entries) != 5 || entries[0].State != wipdjournal.StateReturned || entries[1].State != wipdjournal.StateReturned ||
+	if err != nil || len(entries) != 7 || entries[0].State != wipdjournal.StateReturned || entries[1].State != wipdjournal.StateReturned ||
 		entries[2].State != wipdjournal.StateReturned || entries[3].State != wipdjournal.StateReturned ||
-		entries[4].Delivery != operation.DeliveryAuthority || entries[4].JournalPosition != 0 || entries[4].State != wipdjournal.StateAttemptPrepared {
+		entries[4].State != wipdjournal.StateReturned || entries[5].State != wipdjournal.StateReturned ||
+		entries[6].Delivery != operation.DeliveryAuthority || entries[6].JournalPosition != 0 ||
+		entries[6].State != wipdjournal.StateAttemptPrepared {
 		t.Fatalf("durable journal dispositions = %+v, %v", entries, err)
 	}
 	finishStatus, finishStatusErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, matterFinish.ID,
@@ -503,7 +675,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable installed grant identity/as-of = %+v, %v", installedGrant, err)
 	}
 	records, err := journal.EventRecords(context.Background())
-	if err != nil || len(records) != 11 {
+	if err != nil || len(records) != 13 {
 		t.Fatalf("durable installed event records = %d, %v", len(records), err)
 	}
 	if records[0].EventID == records[1].EventID {
@@ -537,7 +709,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	postReopenStart := operation.Command{
 		ID: "01KZ7XHAQT1S46NYPN1PW1DX4R", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
-		EnvironmentID: m5TestEnv, EnvironmentSequence: 8, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 10, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4R",
 		Request: operation.Request{
 			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
@@ -549,7 +721,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("subsequent authenticated post-reopen lifecycle behavior = %+v, %v; daemon=%s", postReopenResult, err, assertOutput.String())
 	}
 	postLifecycleAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || postLifecycleAnchor.EventCount != 11 {
+	if err != nil || postLifecycleAnchor.EventCount != 13 {
 		t.Fatalf("subsequent authenticated pull changed lifecycle event tail = %+v, %v", postLifecycleAnchor, err)
 	}
 	if err = assertClient.Close(); err != nil {

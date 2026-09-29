@@ -35,6 +35,7 @@ const (
 
 type sessionLimits struct {
 	frameBody   int
+	chunkData   int
 	streamBytes int
 }
 
@@ -56,6 +57,17 @@ type stepProjection struct {
 	SortKey      int64  `json:"sort_key"`
 	State        string `json:"state"`
 	BirthEventID string `json:"birth_event_id"`
+}
+
+type contentProjection struct {
+	ID         string `json:"id"`
+	SubjectID  string `json:"subject_id"`
+	MatterID   string `json:"matter_id"`
+	RepoID     string `json:"repo_id"`
+	Kind       string `json:"kind"`
+	BlobDigest string `json:"blob_digest"`
+	ByteLength uint64 `json:"byte_length"`
+	EventID    string `json:"event_id"`
 }
 
 type matterCreatedEvent struct {
@@ -273,6 +285,7 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 		return limits, ErrInvalidClientState
 	}
 	frameBody, _ := parameters["max_frame_body"].(uint64)
+	chunkData, _ := parameters["max_chunk_data"].(uint64)
 	streamBytes, _ := parameters["max_stream_bytes"].(uint64)
 	if frameBody > wipdwire.FrameLimit {
 		frameBody = wipdwire.FrameLimit
@@ -280,7 +293,10 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	if streamBytes > maxClientTransferBytes {
 		streamBytes = maxClientTransferBytes
 	}
-	limits = sessionLimits{frameBody: int(frameBody), streamBytes: int(streamBytes)}
+	if chunkData > wipdwire.FrameLimit {
+		chunkData = wipdwire.FrameLimit
+	}
+	limits = sessionLimits{frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes)}
 	return limits, nil
 }
 
@@ -346,7 +362,8 @@ func VerifyClaimGrantTransfer(profile wipdauthority.Profile, previous ClientStat
 	}
 	allRecords := append(cloneEventRecords(previous.EventRecords), cloneEventRecords(records)...)
 	anchor, _, _, err := foldEventRecords(allRecords, profile.DomainID())
-	if err != nil || !anchorEqual(anchor, end) {
+	content, contentErr := foldContentEvents(allRecords, profile.DomainID())
+	if err != nil || contentErr != nil || !anchorEqual(anchor, end) || validateClaimContentManifest(content, records, manifest.Entries) != nil {
 		return wipdjournal.VerifiedTransfer{}, ErrInvalidClientState
 	}
 	return transfer, nil
@@ -478,12 +495,16 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 	if err != nil || !anchorEqual(anchor, endAnchor) {
 		return zero, ErrInvalidClientState
 	}
+	contentProjections, err := foldContentEvents(records, domainID)
+	if err != nil || validateContentManifest(contentProjections, manifest.Entries) != nil {
+		return zero, ErrInvalidClientState
+	}
 	return ClientState{
 		Schema: "wipd.m5-client-state/1", RepoID: repoID, DomainID: domainID, Epoch: epoch,
 		EnvironmentID: environmentID, OwnerKeyID: profile.OwnerRootSPKI(), SPKIDigest: spkiDigest,
 		Prefix: endAnchor, EventRecords: records, ManifestDigest: manifest.Digest,
 		ManifestEntries: append([]wipdwire.BlobManifestEntry{}, manifest.Entries...), Projections: projections,
-		StepProjections: stepProjections,
+		StepProjections: stepProjections, ContentProjections: contentProjections,
 	}, nil
 }
 
@@ -818,6 +839,10 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			sweptBatches[batchID] = true
 			pendingLifecycle = nil
+		case "content.created", "content.appended":
+			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
 		case "claim.released":
 			var event claimReleasedEvent
 			if decodeClaimReleasedEvent(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
@@ -953,6 +978,149 @@ func decodeFoldedLifecycleEvent(fields map[string]any, record wipdwire.EventReco
 	return event, true
 }
 
+func foldContentEvents(records []wipdwire.EventRecord, domainID string) ([]json.RawMessage, error) {
+	type subject struct {
+		matter string
+		repo   string
+	}
+	subjects := make(map[string]subject)
+	contentIDs := make(map[string]struct{})
+	writeOnce := make(map[string]struct{})
+	projections := make([]contentProjection, 0)
+	for _, record := range records {
+		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil {
+			return nil, ErrInvalidClientState
+		}
+		kind, _ := fields["kind"].(string)
+		payload, _ := fields["payload"].(map[string]any)
+		switch kind {
+		case "matter.created":
+			id, _ := payload["id"].(string)
+			repo, _ := fields["repo_id"].(string)
+			if id == "" || repo == "" || fields["subject_id"] != id {
+				return nil, ErrInvalidClientState
+			}
+			subjects[id] = subject{matter: id, repo: repo}
+		case "step.created":
+			id, _ := fields["subject_id"].(string)
+			parent, _ := payload["parent"].(string)
+			repo, _ := fields["repo_id"].(string)
+			matter, ok := subjects[parent]
+			if !ok || matter.matter != parent || matter.repo != repo || id == "" {
+				return nil, ErrInvalidClientState
+			}
+			subjects[id] = subject{matter: parent, repo: repo}
+		case "content.created", "content.appended":
+			_, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			contentPayload := payload
+			_, ok := fields["payload"].(map[string]any)
+			if !valid || !ok || !wipdwire.ExactMapKeys(contentPayload, "kind", "content", "bytes", "blob_ref", "byte_len", "sha256") ||
+				contentPayload["bytes"] != nil {
+				return nil, ErrInvalidClientState
+			}
+			id, idOK := contentPayload["content"].(string)
+			contentKind, kindOK := contentPayload["kind"].(string)
+			digest, digestOK := contentPayload["blob_ref"].(string)
+			sha, shaOK := contentPayload["sha256"].(string)
+			length, lengthOK := contentPayload["byte_len"].(uint64)
+			subjectID, subjectOK := fields["subject_id"].(string)
+			repoID, repoOK := fields["repo_id"].(string)
+			parent, parentOK := subjects[subjectID]
+			if !idOK || !clientULIDPattern.MatchString(id) || !kindOK || !digestOK || !shaOK || !lengthOK ||
+				!validDigest(digest) || !validDigest("sha256:"+sha) || digest != "sha256:"+sha ||
+				!subjectOK || !parentOK || !repoOK || parent.repo != repoID || fields["event_id"] != record.EventID {
+				return nil, ErrInvalidClientState
+			}
+			if kind == "content.created" && (contentKind != "brief" && contentKind != "workplan" && contentKind != "body") ||
+				kind == "content.appended" && contentKind != "findings" {
+				return nil, ErrInvalidClientState
+			}
+			if _, duplicate := contentIDs[id]; duplicate {
+				return nil, ErrInvalidClientState
+			}
+			contentIDs[id] = struct{}{}
+			if contentKind != "findings" {
+				key := subjectID + "\x00" + contentKind
+				if _, duplicate := writeOnce[key]; duplicate {
+					return nil, ErrInvalidClientState
+				}
+				writeOnce[key] = struct{}{}
+			}
+			projections = append(projections, contentProjection{
+				ID: id, SubjectID: subjectID, MatterID: parent.matter, RepoID: repoID,
+				Kind: contentKind, BlobDigest: digest, ByteLength: length, EventID: record.EventID,
+			})
+		}
+	}
+	raw := make([]json.RawMessage, 0, len(projections))
+	for _, projection := range projections {
+		encoded, err := json.Marshal(projection)
+		if err != nil {
+			return nil, err
+		}
+		raw = append(raw, encoded)
+	}
+	return raw, nil
+}
+
+func validateContentManifest(content []json.RawMessage, entries []wipdwire.BlobManifestEntry) error {
+	return validateContentManifestForMatter(content, "", entries)
+}
+
+func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.EventRecord, entries []wipdwire.BlobManifestEntry) error {
+	matterID := ""
+	for _, record := range records {
+		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil || fields["kind"] != "claim.acquired" {
+			continue
+		}
+		payload, _ := fields["payload"].(map[string]any)
+		candidate, _ := payload["matter_id"].(string)
+		if matterID != "" || !clientULIDPattern.MatchString(candidate) {
+			return ErrInvalidClientState
+		}
+		matterID = candidate
+	}
+	if matterID == "" {
+		return ErrInvalidClientState
+	}
+	return validateContentManifestForMatter(content, matterID, entries)
+}
+
+func validateContentManifestForMatter(content []json.RawMessage, matterID string, entries []wipdwire.BlobManifestEntry) error {
+	expected := make(map[string]uint64)
+	for _, raw := range content {
+		var projection contentProjection
+		if json.Unmarshal(raw, &projection) != nil {
+			return ErrInvalidClientState
+		}
+		if matterID != "" && projection.MatterID != matterID {
+			continue
+		}
+		if length, exists := expected[projection.BlobDigest]; exists && length != projection.ByteLength {
+			return ErrInvalidClientState
+		}
+		expected[projection.BlobDigest] = projection.ByteLength
+	}
+	if len(expected) != len(entries) {
+		return ErrInvalidClientState
+	}
+	for _, entry := range entries {
+		length, ok := expected[entry.Digest]
+		if !ok || length != entry.ByteLength {
+			return ErrInvalidClientState
+		}
+		delete(expected, entry.Digest)
+	}
+	if len(expected) != 0 {
+		return ErrInvalidClientState
+	}
+	return nil
+}
+
 func sameFoldedLifecycleCommand(left, right foldedLifecycleEvent) bool {
 	return left.commandID == right.commandID && left.requestHash == right.requestHash &&
 		left.environmentID == right.environmentID && left.sequence == right.sequence && left.repoID == right.repoID && left.actedAt == right.actedAt
@@ -1076,10 +1244,12 @@ func validateInstalledState(state ClientState, profile wipdauthority.Profile) er
 		return ErrInvalidClientState
 	}
 	anchor, projections, stepProjections, err := foldEventRecords(state.EventRecords, state.DomainID)
+	contentProjections, contentErr := foldContentEvents(state.EventRecords, state.DomainID)
 	// Step projections are derived entirely from retained event records. Missing
 	// data is a pre-Step-8 client-state shape and is rebuilt on the next pull.
-	if err != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
-		state.StepProjections != nil && !equalJSONRaw(stepProjections, state.StepProjections) {
+	if err != nil || contentErr != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
+		state.StepProjections != nil && !equalJSONRaw(stepProjections, state.StepProjections) ||
+		state.ContentProjections != nil && !equalJSONRaw(contentProjections, state.ContentProjections) {
 		return ErrInvalidClientState
 	}
 	digest, err := clientManifestChain(state.ManifestEntries)

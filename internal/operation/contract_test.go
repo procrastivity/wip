@@ -38,11 +38,40 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 5 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+	if len(Catalogue()) != 7 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
 		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
 		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
-		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation {
-		t.Fatalf("catalogue = %+v, want the Matter/Step birth and Step 14 lifecycle operations", Catalogue())
+		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation ||
+		Catalogue()[5].Metadata().Operation != ContentWriteOnceV1.Metadata().Operation ||
+		Catalogue()[6].Metadata().Operation != FindingAppendV1.Metadata().Operation {
+		t.Fatalf("catalogue = %+v, want Matter/Step birth, lifecycle, and content operations", Catalogue())
+	}
+}
+
+func TestContentAndFindingDefinitionsRequireClaimAndStagedContent(t *testing.T) {
+	for _, definition := range []Definition{ContentWriteOnceV1, FindingAppendV1} {
+		metadata := definition.Metadata()
+		if metadata.Delivery != DeliveryClaim || metadata.Claim != ClaimExact || len(metadata.BlobInputs) != 1 ||
+			metadata.BlobInputs[0] != (BlobSpec{Name: "content", Required: true}) {
+			t.Fatalf("%s metadata = %+v, want exact claim and one required content blob", metadata.Operation, metadata)
+		}
+		if len(metadata.RequiredContext) != 3 {
+			t.Fatalf("%s context dimensions = %d, want Repo/Clone/Worktree", metadata.Operation, len(metadata.RequiredContext))
+		}
+	}
+	valid := Request{
+		Operation: ContentWriteOnceV1.Metadata().Operation, Actor: "human",
+		Context: Context{Repo: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Clone: "01ARZ3NDEKTSV4RRFFQ69G5FAW", Worktree: "01ARZ3NDEKTSV4RRFFQ69G5FAX"},
+		Claim:   &ClaimContext{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", Epoch: "2"},
+		Input:   ContentWriteInput{SubjectID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", Kind: "brief"},
+		Blobs:   []BlobInput{{Name: "content", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 7}},
+	}
+	if err := ContentWriteOnceV1.ValidateRequest(valid); err != nil {
+		t.Fatalf("valid claim-scoped content request: %v", err)
+	}
+	valid.Blobs = []BlobInput{}
+	if err := ContentWriteOnceV1.ValidateRequest(valid); err == nil || !strings.Contains(err.Error(), "required blob input") {
+		t.Fatalf("missing content blob error = %v, want required blob rejection", err)
 	}
 }
 

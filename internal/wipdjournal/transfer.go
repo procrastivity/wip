@@ -181,7 +181,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
-			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept") ||
+			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended") ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
@@ -252,6 +252,22 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest") &&
 			transferULID.MatchString(claimID) && fields["subject_id"] == claimID && epochOK && epoch > 0 &&
 			dispatchValid && transferHash.MatchString(barrier)
+	case "content.created", "content.appended":
+		contentID := asString(payload["content"])
+		contentKind := asString(payload["kind"])
+		digest := asString(payload["blob_ref"])
+		sha := asString(payload["sha256"])
+		length, lengthOK := payload["byte_len"].(uint64)
+		wantKind := "content.created"
+		kindOK := contentKind == "brief" || contentKind == "workplan" || contentKind == "body"
+		if fields["kind"] == "content.appended" {
+			wantKind = "content.appended"
+			kindOK = contentKind == "findings"
+		}
+		return wipdwire.ExactMapKeys(payload, "kind", "content", "bytes", "blob_ref", "byte_len", "sha256") &&
+			transferULID.MatchString(contentID) && transferULID.MatchString(asString(fields["subject_id"])) &&
+			fields["kind"] == wantKind && kindOK && payload["bytes"] == nil && lengthOK && length <= uint64(maxBlobSize) &&
+			transferHash.MatchString(digest) && transferHash.MatchString("sha256:"+sha) && digest == "sha256:"+sha
 	default:
 		return false
 	}

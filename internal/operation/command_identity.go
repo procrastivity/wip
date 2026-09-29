@@ -221,6 +221,10 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"step_id": input.StepID}, nil
 	case MatterFinishInput:
 		return canonicalMap{"matter_id": input.MatterID}, nil
+	case ContentWriteInput:
+		return canonicalMap{"subject_id": input.SubjectID, "kind": input.Kind}, nil
+	case FindingAppendInput:
+		return canonicalMap{"subject_id": input.SubjectID}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}

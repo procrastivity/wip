@@ -742,6 +742,10 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				output["state"] != "done" || !sealedOK {
 				return "", ErrCommandStartIdentity
 			}
+		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+			if _, outputErr := decodeCommandContentOutput(entry, outputBytes); outputErr != nil {
+				return "", ErrCommandStartIdentity
+			}
 		default:
 			return "", ErrCommandStartIdentity
 		}
@@ -844,6 +848,12 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		typed = operation.MatterFinishOutput{
 			MatterID: asCommandStartString(output["matter_id"]), State: asCommandStartString(output["state"]), BecameSealed: sealed,
 		}
+	case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
+		content, decodeErr := decodeCommandContentOutput(entry, outputBytes)
+		if decodeErr != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = content
 	default:
 		return operation.Result{}, ErrCommandStartIdentity
 	}
@@ -853,6 +863,35 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		return operation.Result{}, ErrCommandStartIdentity
 	}
 	return result, nil
+}
+
+func decodeCommandContentOutput(entry wipdjournal.Entry, raw []byte) (operation.ContentSegmentOutput, error) {
+	var empty operation.ContentSegmentOutput
+	fields, err := wipdwire.DecodeCanonicalMap(raw, "id", "subject_id", "kind", "blob_digest", "byte_length")
+	if err != nil || len(entry.Command.Request.Blobs) != 1 {
+		return empty, ErrCommandStartIdentity
+	}
+	var subject, kind string
+	switch input := entry.Command.Request.Input.(type) {
+	case operation.ContentWriteInput:
+		subject, kind = input.SubjectID, input.Kind
+	case operation.FindingAppendInput:
+		subject, kind = input.SubjectID, "findings"
+	default:
+		return empty, ErrCommandStartIdentity
+	}
+	length, lengthOK := fields["byte_length"].(uint64)
+	output := operation.ContentSegmentOutput{
+		ID: asCommandStartString(fields["id"]), SubjectID: asCommandStartString(fields["subject_id"]),
+		Kind: asCommandStartString(fields["kind"]), BlobDigest: asCommandStartString(fields["blob_digest"]),
+	}
+	if !lengthOK || length > math.MaxInt64 || !commandStartULID.MatchString(output.ID) || output.SubjectID != subject ||
+		output.Kind != kind || output.BlobDigest != entry.Command.Request.Blobs[0].Digest ||
+		length != uint64(entry.Command.Request.Blobs[0].Size) {
+		return empty, ErrCommandStartIdentity
+	}
+	output.ByteLength = int64(length)
+	return output, nil
 }
 
 func operationMetadata(id operation.ID) (operation.Metadata, bool) {

@@ -10,8 +10,9 @@ import (
 )
 
 // subtreeRequiredBlobClosureTx derives claim-required blobs from the exact
-// accepted birth events and immutable submitted commands in the Matter's
-// direct subtree. A caller-provided digest list is never the source of truth.
+// accepted birth events and content segments in the Matter's direct subtree,
+// then reads their immutable submitted commands. A caller-provided digest list
+// is never the source of truth.
 func subtreeRequiredBlobClosureTx(ctx context.Context, tx *sql.Tx, domain, matter string, asOf uint64) ([]string, error) {
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM matters m JOIN authority_events e ON e.domain_id=m.domain_id AND e.event_id=m.birth_event_id WHERE m.domain_id=? AND m.matter_id=? AND e.position<=?`, domain, matter, asOf).Scan(&exists); err != nil {
@@ -25,6 +26,7 @@ func subtreeRequiredBlobClosureTx(ctx context.Context, tx *sql.Tx, domain, matte
 		return nil, err
 	}
 	commands := make([]string, 0)
+	commandSet := make(map[string]struct{})
 	for rows.Next() {
 		var eventID string
 		var record []byte
@@ -42,6 +44,11 @@ func subtreeRequiredBlobClosureTx(ctx context.Context, tx *sql.Tx, domain, matte
 				err = ErrInvalidStore
 				break
 			}
+			if _, duplicate := commandSet[commandID]; duplicate {
+				err = ErrInvalidStore
+				break
+			}
+			commandSet[commandID] = struct{}{}
 			commands = append(commands, commandID)
 		}
 	}
@@ -49,6 +56,32 @@ func subtreeRequiredBlobClosureTx(ctx context.Context, tx *sql.Tx, domain, matte
 		err = rows.Err()
 	}
 	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	contentRows, err := tx.QueryContext(ctx, `SELECT c.command_id
+		FROM content_segments c
+		JOIN authority_events e ON e.domain_id=c.domain_id AND e.event_id=c.event_id AND e.command_id=c.command_id
+		WHERE c.domain_id=? AND c.matter_id=? AND e.position<=? ORDER BY e.position`, domain, matter, asOf)
+	if err != nil {
+		return nil, err
+	}
+	for contentRows.Next() {
+		var commandID string
+		if err = contentRows.Scan(&commandID); err != nil {
+			break
+		}
+		if _, duplicate := commandSet[commandID]; duplicate {
+			err = ErrInvalidStore
+			break
+		}
+		commandSet[commandID] = struct{}{}
+		commands = append(commands, commandID)
+	}
+	if err == nil {
+		err = contentRows.Err()
+	}
+	_ = contentRows.Close()
 	if err != nil {
 		return nil, err
 	}
