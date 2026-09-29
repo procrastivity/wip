@@ -87,7 +87,7 @@ func validateContentClaimTx(ctx context.Context, tx *sql.Tx, command operation.C
 	var closed sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT c.matter_id,c.owner_environment_id,c.worktree_id,c.claim_epoch,c.authority_epoch,c.close_command_id,j.state
 		FROM claims c JOIN claim_journals j USING(domain_id,claim_id)
-		WHERE c.domain_id=? AND c.claim_id=?`, command.AuthorityDomainID, command.Request.Claim.ID).
+		WHERE c.domain_id=? AND c.claim_id=? AND j.state IN ('open','sealed')`, command.AuthorityDomainID, command.Request.Claim.ID).
 		Scan(&matter, &owner, &worktree, &storedEpoch, &authorityEpoch, &closed, &journalState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrFenced

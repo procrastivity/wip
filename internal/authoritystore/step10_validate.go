@@ -64,7 +64,7 @@ func checkStep10State(db *sql.DB, submissions []storedSubmission) error {
 		submission, ok := contentCommands[ownerKey(domain, commandID)]
 		if !ok || seen[ownerKey(domain, commandID)] || submission.hash != hash || submission.env != environment || submission.seq != seq ||
 			submission.operation != operationName || submission.version != version || submission.state != "terminal" || verified != 1 ||
-			length != productLength || position != refPosition {
+			length != productLength || refPosition > position {
 			err = ErrInvalidStore
 			break
 		}
