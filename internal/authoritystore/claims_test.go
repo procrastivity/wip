@@ -449,18 +449,91 @@ func TestClaimAcquireGrantReopenAndContention(t *testing.T) {
 	if _, e := f.s.SubmitClaimAcquire(ctx, badRaw, badHash, f.anchor(t), f.peer, f.now); !errors.Is(e, ErrConflict) {
 		t.Fatalf("different-hash retry: %v", e)
 	}
-	contended := claimTestAllocation(2, f.anchor(t), 104, 105)
-	_, _, refused, noGrant := f.acquire(t, 12, 3, contended.Installed, contended)
-	claimTestReceipt(t, refused, "result.refused", nil)
-	if len(noGrant.Wrapper) != 0 {
-		t.Fatal("contention manufactured grant")
+	d, owner := identity(domainA, 7)
+	ca := key("step4-ca")
+	caDER := caFixture(t, ca, f.now)
+	leafKey := key("claim-contention-environment")
+	leaf := leafFixture(t, leafKey, ca, caDER, domainA, envB, d.OwnerKeyID, 7, f.now, 103)
+	enrollment := grantFixture(t, owner, d, "environment-enroll", claimTestID(96), envB, leafKey, 2)
+	if _, err = f.s.IssueEnvironmentCertificate(ctx, domainA, envB, enrollment, csrFixture(t, leafKey, "Environment B"), [][]byte{leaf, caDER}, f.now); err != nil {
+		t.Fatalf("enroll second Environment: %v", err)
 	}
-	var events, claims, batches int
-	_ = f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=?`, domainA).Scan(&events)
-	_ = f.s.db.QueryRow(`SELECT count(*) FROM claims WHERE domain_id=?`, domainA).Scan(&claims)
-	_ = f.s.db.QueryRow(`SELECT count(*) FROM anonymous_batches WHERE domain_id=?`, domainA).Scan(&batches)
-	if events != 4 || claims != 1 || batches != 1 {
-		t.Fatalf("contention mutated state: events=%d claims=%d batches=%d", events, claims, batches)
+	peerB := tls.ConnectionState{HandshakeComplete: true, PeerCertificates: []*x509.Certificate{mustCert(t, leaf), mustCert(t, caDER)}}
+	contended := claimTestAllocation(2, f.anchor(t), 104, 105)
+	contendedRaw, contendedHash := f.command(t, 12, 1, "claim.acquire", nil, map[string]any{
+		"matter_id": f.matter, "worktree_id": f.worktree, "dispatch_mode": "anonymous-matter", "requested_dispatch_id": claimTestID(52),
+	}, envB)
+	type contentionState struct {
+		anchor                                                               PrefixAnchor
+		claims, batches, events, grants, matters, steps, contenderDispatch   int
+		claimID, matterID, owner, worktree, batch, dispatch, acquire, closed string
+		repo, locator, title, birth                                          string
+	}
+	readState := func() contentionState {
+		t.Helper()
+		var state contentionState
+		var err error
+		if state.anchor, err = f.s.CurrentPrefixAnchor(ctx, domainA); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.db.QueryRow(`SELECT
+			(SELECT count(*) FROM claims WHERE domain_id=?),
+			(SELECT count(*) FROM anonymous_batches WHERE domain_id=? AND matter_id=?),
+			(SELECT count(*) FROM authority_events WHERE domain_id=?),
+			(SELECT count(*) FROM claim_grants WHERE domain_id=?),
+			(SELECT count(*) FROM matters WHERE domain_id=?),
+			(SELECT count(*) FROM steps WHERE domain_id=?),
+			(SELECT count(*) FROM claims WHERE domain_id=? AND dispatch_id=?)`,
+			domainA, domainA, f.matter, domainA, domainA, domainA, domainA, domainA, claimTestID(52)).Scan(
+			&state.claims, &state.batches, &state.events, &state.grants, &state.matters, &state.steps, &state.contenderDispatch); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.db.QueryRow(`SELECT claim_id,matter_id,owner_environment_id,worktree_id,batch_id,dispatch_id,acquire_command_id,COALESCE(close_command_id,'')
+			FROM claims WHERE domain_id=? AND matter_id=?`, domainA, f.matter).Scan(
+			&state.claimID, &state.matterID, &state.owner, &state.worktree, &state.batch, &state.dispatch, &state.acquire, &state.closed); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.db.QueryRow(`SELECT repo_id,locator,title,birth_event_id FROM matters WHERE domain_id=? AND matter_id=?`, domainA, f.matter).Scan(
+			&state.repo, &state.locator, &state.title, &state.birth); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	before := readState()
+	if before.anchor.EventCount != 4 || before.claims != 1 || before.batches != 1 || before.events != 4 || before.grants != 1 ||
+		before.matters != 1 || before.steps != 0 || before.contenderDispatch != 0 || before.claimID != a.ClaimID ||
+		before.owner != envA || before.dispatch != claimTestID(51) || before.closed != "" || before.acquire != claimTestID(11) ||
+		before.repo != repoA || before.matterID != f.matter {
+		t.Fatalf("unexpected authority state before contention: %+v", before)
+	}
+	pending, err := f.s.SubmitClaimAcquire(ctx, contendedRaw, contendedHash, contended.Installed, peerB, f.now)
+	if err != nil || pending.Owner == nil || !pending.Pending {
+		t.Fatalf("submit acquisition from distinct Environment: %+v %v", pending, err)
+	}
+	refused, noGrant, err := f.s.CompleteClaimAcquire(ctx, pending.Owner, contended, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimTestReceipt(t, refused, "result.refused", nil)
+	refusedReceipt, err := readReceipt(refused.Receipt)
+	if err != nil || refusedReceipt.Result.Problem == nil || *refusedReceipt.Result.Problem != "refusal.claim-contended" ||
+		refusedReceipt.Environment.ID != envB || refusedReceipt.ID != claimTestID(12) || refusedReceipt.Range != nil {
+		t.Fatalf("cross-Environment contention receipt = %+v, %v", refusedReceipt, err)
+	}
+	if len(noGrant.Wrapper) != 0 || len(noGrant.Delta) != 0 || len(noGrant.Manifest) != 0 || len(noGrant.End) != 0 {
+		t.Fatal("contention manufactured a grant product")
+	}
+	replay, err := f.s.SubmitClaimAcquire(ctx, contendedRaw, contendedHash, emptyAnchor(), peerB, f.now)
+	if err != nil || replay.Pending || replay.Owner != nil || !bytes.Equal(replay.Receipt, refused.Receipt) || !bytes.Equal(replay.SignedReceipt, refused.SignedReceipt) {
+		t.Fatalf("exact refused acquisition replay changed its terminal result: %+v %v", replay, err)
+	}
+	refusedQuery, err := f.s.QueryCommand(ctx, domainA, claimTestID(12), contendedHash, 7, peerB, envB, f.now)
+	if err != nil || refusedQuery.Pending || !bytes.Equal(refusedQuery.Receipt, refused.Receipt) || !bytes.Equal(refusedQuery.SignedReceipt, refused.SignedReceipt) {
+		t.Fatalf("cross-Environment refused receipt query = %+v %v", refusedQuery, err)
+	}
+	after := readState()
+	if after != before {
+		t.Fatalf("contention changed claim/Dispatch/events/projections:\n before=%+v\n after=%+v", before, after)
 	}
 	if err := f.s.CollectExpired(ctx, grant.Snapshot.ExpiresAt); err != nil {
 		t.Fatalf("collect expired temporary snapshot: %v", err)
@@ -479,6 +552,11 @@ func TestClaimAcquireGrantReopenAndContention(t *testing.T) {
 	_, reopened, err := f.s.QueryClaimGrant(ctx, domainA, claimTestID(11), hash, 7, f.peer, envA, grant.Snapshot.ExpiresAt.Add(time.Second))
 	if err != nil || reopened.ID != grant.ID || !bytes.Equal(reopened.Wrapper, grant.Wrapper) || !bytes.Equal(reopened.Start, grant.Start) || !bytes.Equal(reopened.Delta, grant.Delta) {
 		t.Fatalf("grant lost on reopen/expiry: %v %+v", err, reopened)
+	}
+	replayAfterReopen, err := f.s.SubmitClaimAcquire(ctx, contendedRaw, contendedHash, emptyAnchor(), peerB, f.now)
+	if err != nil || replayAfterReopen.Pending || replayAfterReopen.Owner != nil || !bytes.Equal(replayAfterReopen.Receipt, refused.Receipt) ||
+		!bytes.Equal(replayAfterReopen.SignedReceipt, refused.SignedReceipt) {
+		t.Fatalf("refused acquisition replay changed after reopen: %+v %v", replayAfterReopen, err)
 	}
 }
 
