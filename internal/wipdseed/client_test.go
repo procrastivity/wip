@@ -30,6 +30,7 @@ import (
 	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdauthority"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -650,6 +651,327 @@ func TestPullInstallsBirthClaimReleaseAndReopensForLaterPull(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedAcquisitionGrantInstallAllowsLaterPullAndReopen(t *testing.T) {
+	fixture := newClientFixture(t)
+	artifactSigner, artifactCertificate := registerClientFixtureArtifactKeyWithCertificate(t, fixture)
+	directory := t.TempDir()
+	initial := enrollFixtureClient(t, fixture, directory)
+	peer := peerStateFromClient(t, initial)
+	ctx := context.Background()
+	const (
+		matterCommandID = "01KZ7XHAQT1S46NYPN1PW1DX51"
+		matterID        = "01KZ7XHAQT1S46NYPN1PW1DX52"
+		matterEventID   = "01KZ7XHAQT1S46NYPN1PW1DX60"
+		releaseID       = "01KZ7XHAQT1S46NYPN1PW1DX5C"
+		releaseEventID  = "01KZ7XHAQT1S46NYPN1PW1DX65"
+		acquireID       = "01KZ7XHAQT1S46NYPN1PW1DX53"
+		worktreeID      = "01KZ7XHAQT1S46NYPN1PW1DX54"
+		dispatchID      = "01KZ7XHAQT1S46NYPN1PW1DX55"
+		claimID         = "01KZ7XHAQT1S46NYPN1PW1DX56"
+		batchID         = "01KZ7XHAQT1S46NYPN1PW1DX57"
+		grantID         = "01KZ7XHAQT1S46NYPN1PW1DX58"
+		snapshotID      = "01KZ7XHAQT1S46NYPN1PW1DX59"
+		journalID       = "01KZ7XHAQT1S46NYPN1PW1DX5A"
+		batchEventID    = "01KZ7XHAQT1S46NYPN1PW1DX70"
+		claimEventID    = "01KZ7XHAQT1S46NYPN1PW1DX71"
+		dispatchEventID = "01KZ7XHAQT1S46NYPN1PW1DX72"
+		laterCommandID  = "01KZ7XHAQT1S46NYPN1PW1DX73"
+		laterMatterID   = "01KZ7XHAQT1S46NYPN1PW1DX74"
+		laterEventID    = "01KZ7XHAQT1S46NYPN1PW1DX80"
+	)
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, initial, matterCommandID, matterID,
+		matterEventID, "Acquisition source", "acquisition-source", 1)
+	initialTransfer, _, err := VerifyPullTransfer(fixture.profile, initial, initial.Prefix,
+		authenticatedPullFrames(t, fixture, initial))
+	if err != nil || initialTransfer.End().EventCount != 1 {
+		t.Fatalf("verify authenticated initial Matter pull: end=%+v err=%v", initialTransfer.End(), err)
+	}
+	state, err := PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 1 {
+		t.Fatalf("install Matter prefix before acquisition: %+v %v", state.Prefix, err)
+	}
+
+	journalIdentity := wipdjournal.Identity{
+		RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID,
+	}
+	journalRoot := filepath.Join(t.TempDir(), "environment-journal")
+	journal, err := wipdjournal.Open(journalRoot, journalIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if journal != nil {
+			_ = journal.Close()
+		}
+	})
+	initialSnapshot, err := journal.InstallPull(ctx, installSnapshotExpectation(t, journal), initialTransfer)
+	if err != nil || initialSnapshot.Anchor.EventCount != 1 {
+		t.Fatalf("install initial Matter prefix into journal: %+v %v", initialSnapshot.Anchor, err)
+	}
+	completeFixtureBirthRelease(t, fixture, peer, state, matterID, releaseID, releaseEventID, artifactSigner)
+	releaseTransfer, _, err := VerifyPullTransfer(fixture.profile, state, state.Prefix,
+		authenticatedPullFrames(t, fixture, state))
+	if err != nil || releaseTransfer.End().EventCount != 2 || len(releaseTransfer.Records()) != 1 {
+		t.Fatalf("verify authenticated birth release before acquisition: end=%+v err=%v", releaseTransfer.End(), err)
+	}
+	initialSnapshot, err = journal.InstallPull(ctx, initialSnapshot.Expectation(), releaseTransfer)
+	if err != nil || initialSnapshot.Anchor.EventCount != 2 {
+		t.Fatalf("install released birth prefix before acquisition: %+v %v", initialSnapshot.Anchor, err)
+	}
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 2 {
+		t.Fatalf("persist released birth prefix before acquisition: %+v %v", state.Prefix, err)
+	}
+
+	authorityAnchor, err := fixture.store.CurrentPrefixAnchor(ctx, state.DomainID)
+	if err != nil || authorityAnchor.EventCount != state.Prefix.EventCount || authorityAnchor.Digest != state.Prefix.Digest {
+		t.Fatalf("authority/client pre-acquisition anchors disagree: authority=%+v client=%+v err=%v", authorityAnchor, state.Prefix, err)
+	}
+	installed := wipdwire.PrefixAnchor{EventCount: authorityAnchor.EventCount, Digest: authorityAnchor.Digest}
+	if authorityAnchor.EventID != "" {
+		id := authorityAnchor.EventID
+		installed.EventID = &id
+	}
+	acquireRaw, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": acquireID,
+		"authority":   map[string]any{"domain_id": state.DomainID, "expected_epoch": state.Epoch},
+		"environment": map[string]any{"id": state.EnvironmentID, "sequence": uint64(3)},
+		"acted_at":    time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano), "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": acquireID,
+		"operation": map[string]any{"name": "claim.acquire", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": state.RepoID, "clone_id": "01KZ7XHAQT1S46NYPN1PW1DX5B", "worktree_id": worktreeID},
+		"claim":     nil,
+		"input": map[string]any{
+			"matter_id": matterID, "worktree_id": worktreeID, "dispatch_mode": "anonymous-matter",
+			"requested_dispatch_id": dispatchID,
+		},
+		"blobs": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHash := testDigest(append([]byte("wipd/request-hash/v1\x00"), acquireRaw...))
+	pending, err := fixture.store.SubmitClaimAcquire(ctx, acquireRaw, requestHash, authorityAnchor, peer, time.Now().UTC())
+	if err != nil || !pending.Pending || pending.Owner == nil {
+		t.Fatalf("submit authenticated acquisition: status=%+v err=%v", pending, err)
+	}
+	completed, authorityGrant, err := fixture.store.CompleteClaimAcquire(ctx, pending.Owner, authoritystore.AcquireAllocation{
+		ClaimID: claimID, BatchID: batchID, GrantID: grantID, SnapshotID: snapshotID, JournalID: journalID,
+		Installed: authorityAnchor, EventIDs: []string{batchEventID, claimEventID, dispatchEventID},
+	}, time.Now().UTC(), func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(artifactSigner, message), nil
+	})
+	if err != nil || completed.Pending || len(completed.Receipt) == 0 || authorityGrant.ID != grantID {
+		t.Fatalf("complete real claim acquisition: status=%+v grant=%+v err=%v", completed, authorityGrant, err)
+	}
+
+	grantTransfer, grantManifest, err := VerifyPullTransfer(fixture.profile, state, state.Prefix,
+		authenticatedPullFrames(t, fixture, state))
+	if err != nil || grantTransfer.End().EventCount != 5 || len(grantTransfer.Records()) != 3 {
+		t.Fatalf("verify authenticated acquisition grant pull: end=%+v records=%d err=%v", grantTransfer.End(), len(grantTransfer.Records()), err)
+	}
+	fullAcquisitionPrefix := append(cloneEventRecords(state.EventRecords), grantTransfer.Records()...)
+	truncated := cloneEventRecords(fullAcquisitionPrefix[:len(fullAcquisitionPrefix)-1])
+	if _, _, _, err = foldEventRecords(truncated, state.DomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("incomplete acquisition event sequence folded: %v", err)
+	}
+	mislinked := cloneEventRecords(fullAcquisitionPrefix)
+	dispatchFields, err := wipdwire.DecodeCanonicalMap(mislinked[4].Record,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchPayload := dispatchFields["payload"].(map[string]any)
+	dispatchPayload["claim_id"] = matterID
+	mislinked[4].Record, err = wipdwire.EncodeCanonical(dispatchFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err = foldEventRecords(mislinked, state.DomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("dispatch.opened with a mismatched acquisition claim folded: %v", err)
+	}
+	openPayload := map[string]any{"unexpected": true}
+	closedPayload, err := wipdwire.DecodeCanonicalMap(fullAcquisitionPrefix[3].Record,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range closedPayload["payload"].(map[string]any) {
+		openPayload[key] = value
+	}
+	closedPayload["payload"] = openPayload
+	unknownField := cloneEventRecords(fullAcquisitionPrefix)
+	unknownField[3].Record, err = wipdwire.EncodeCanonical(closedPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err = foldEventRecords(unknownField, state.DomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("claim.acquired with an unrecognized payload field folded: %v", err)
+	}
+	trust := wipdjournal.ClaimGrantTrust{
+		OwnerRootPublicKey: fixture.ownerRoot, OwnerRootSPKI: fixture.ownerKeyID, VerifiedAt: time.Now().UTC(),
+	}
+	verifiedGrant, err := wipdjournal.VerifyClaimGrant(journalIdentity, trust, wipdjournal.ClaimGrantEvidence{
+		ArtifactKeyCertificate: artifactCertificate, Wrapper: authorityGrant.Wrapper,
+		Start: authorityGrant.Start, End: authorityGrant.End, Transfer: grantTransfer,
+	})
+	if err != nil {
+		t.Fatalf("verify real signed acquisition grant: %v", err)
+	}
+	installedGrant, err := journal.InstallClaimGrant(ctx, initialSnapshot.Expectation(), verifiedGrant)
+	if err != nil || installedGrant.Anchor.EventCount != 5 || installedGrant.Anchor.Digest != grantTransfer.End().Digest {
+		t.Fatalf("atomically install verified acquisition grant: anchor=%+v err=%v", installedGrant.Anchor, err)
+	}
+	hydration, err := journal.BeginClaimHydration(ctx, grantID)
+	if err != nil || hydration.State != "offline-ready" || hydration.ClaimID != claimID {
+		t.Fatalf("installed grant did not bind exact acquired claim: %+v %v", hydration, err)
+	}
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 5 || len(state.EventRecords) != 5 {
+		t.Fatalf("persist acquisition prefix through authenticated client: %+v %v", state.Prefix, err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = wipdjournal.Open(journalRoot, journalIdentity)
+	if err != nil {
+		t.Fatalf("reopen journal containing acquisition grant: %v", err)
+	}
+	reopenedSnapshot, err := journal.InstallSnapshot(ctx)
+	if err != nil || reopenedSnapshot.Anchor.EventCount != 5 {
+		t.Fatalf("reopened grant prefix = %+v, %v", reopenedSnapshot.Anchor, err)
+	}
+
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state, laterCommandID, laterMatterID,
+		laterEventID, "After acquisition", "after-acquisition", 4)
+	laterTransfer, laterManifest, err := VerifyPullTransfer(fixture.profile, state, state.Prefix,
+		authenticatedPullFrames(t, fixture, state))
+	if err != nil || laterTransfer.End().EventCount != 6 || len(laterTransfer.Records()) != 1 || len(laterManifest.Entries) != len(grantManifest.Entries) {
+		t.Fatalf("verify later authenticated pull from acquisition prefix: end=%+v records=%d err=%v", laterTransfer.End(), len(laterTransfer.Records()), err)
+	}
+	installedLater, err := journal.InstallPull(ctx, reopenedSnapshot.Expectation(), laterTransfer)
+	if err != nil || installedLater.Anchor.EventCount != 6 {
+		t.Fatalf("install later pull after reopening acquisition grant: anchor=%+v err=%v", installedLater.Anchor, err)
+	}
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 6 || len(state.EventRecords) != 6 || len(state.Projections) != 2 {
+		t.Fatalf("persist/reopen client after later acquisition-prefix pull: prefix=%+v matters=%d err=%v", state.Prefix, len(state.Projections), err)
+	}
+}
+
+func authenticatedPullFrames(t *testing.T, fixture *clientFixture, state ClientState) []wipdwire.Frame {
+	t.Helper()
+	client := installedClient(t, fixture, state)
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+	limits, err := negotiateRemote(ctx, client, fixture.profile.Origin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestFrame, requestID, err := encodeRequestFrame("pull.request", wipdwire.PullRequest{
+		Schema: "wipd.pull-request/1", DomainID: state.DomainID, Epoch: state.Epoch, Installed: state.Prefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := postFramesWithinSession(ctx, client, fixture.profile.Origin()+"/wipd/v1/exchange",
+		requestFrame, requestID, maxClientTransferEvents+3, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frames
+}
+
+func completeFixtureBirthRelease(t *testing.T, fixture *clientFixture, peer tls.ConnectionState, state ClientState, matterID, commandID, eventID string, signer ed25519.PrivateKey) {
+	t.Helper()
+	ctx := context.Background()
+	if len(state.EventRecords) == 0 {
+		t.Fatal("birth release requires the Matter birth record in the installed prefix")
+	}
+	record := state.EventRecords[len(state.EventRecords)-1]
+	fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	if err != nil || fields["kind"] != "matter.created" || fields["subject_id"] != matterID {
+		t.Fatalf("birth release source event does not match Matter %s: fields=%+v err=%v", matterID, fields, err)
+	}
+	birthCommandID, ok := fields["command_id"].(string)
+	birthRequestHash, hashOK := fields["request_hash"].(string)
+	if !ok || !hashOK {
+		t.Fatal("Matter birth event lacks command identity")
+	}
+	status, err := fixture.store.QueryCommand(ctx, state.DomainID, birthCommandID, birthRequestHash, state.Epoch,
+		peer, state.EnvironmentID, time.Now().UTC())
+	if err != nil || status.Pending || len(status.Receipt) == 0 {
+		t.Fatalf("query Matter birth receipt: status=%+v err=%v", status, err)
+	}
+	receipt, err := wipdwire.DecodeCanonicalMap(status.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || receipt["command_id"] != birthCommandID || receipt["request_hash"] != birthRequestHash {
+		t.Fatalf("Matter birth receipt identity=%+v err=%v", receipt, err)
+	}
+	result, resultOK := receipt["result"].(map[string]any)
+	accepted, acceptedOK := receipt["accepted_events"].(map[string]any)
+	if !resultOK || result["code"] != string(operation.ResultSucceeded) || !acceptedOK ||
+		accepted["first_event_id"] != record.EventID || accepted["last_event_id"] != record.EventID || accepted["event_count"] != uint64(1) {
+		t.Fatalf("Matter birth receipt is not an exact successful one-event range: %+v", receipt)
+	}
+	ack := wipdwire.BirthJournalAck{
+		Schema: "wipd.birth-journal-ack/1", DomainID: state.DomainID, Epoch: state.Epoch, MatterID: matterID,
+		CommandID: birthCommandID, RequestHash: birthRequestHash, Receipt: status.Receipt, Installed: state.Prefix,
+	}
+	if err = fixture.store.AcknowledgeBirthJournalEntry(ctx, ack, peer, state.EnvironmentID, time.Now().UTC()); err != nil {
+		t.Fatalf("acknowledge installed Matter birth receipt: %v", err)
+	}
+	barrierEntry := wipdwire.JournalBarrierEntry{
+		Position: 1, CommandID: birthCommandID, RequestHash: birthRequestHash, ResultCode: string(operation.ResultSucceeded),
+		Range: &wipdwire.JournalBarrierRange{First: record.EventID, Last: record.EventID, Count: 1},
+	}
+	barrierDigest, err := wipdwire.JournalBarrierDigest([]wipdwire.JournalBarrierEntry{barrierEntry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": matterID,
+		"claim":       map[string]any{"id": matterID, "epoch": uint64(1)},
+		"entry_count": uint64(1), "last_position": uint64(1), "terminal_receipt_count": uint64(1),
+		"entries_digest": barrierDigest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0),
+	}
+	release, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": commandID,
+		"authority":   map[string]any{"domain_id": state.DomainID, "expected_epoch": state.Epoch},
+		"environment": map[string]any{"id": state.EnvironmentID, "sequence": uint64(2)},
+		"acted_at":    time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano), "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": commandID,
+		"operation": map[string]any{"name": "claim.release", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": state.RepoID, "clone_id": nil, "worktree_id": nil},
+		"claim":     map[string]any{"id": matterID, "epoch": uint64(1)},
+		"input":     map[string]any{"barrier": barrier}, "blobs": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHash := testDigest(append([]byte("wipd/request-hash/v1\x00"), release...))
+	pending, err := fixture.store.SubmitClaimLifecycle(ctx, release, requestHash, peer, time.Now().UTC(), nil)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit fixture birth release: status=%+v err=%v", pending, err)
+	}
+	completed, err := fixture.store.CompleteClaimLifecycle(ctx, pending.Owner, "", []string{eventID}, time.Now().UTC(),
+		func(_ context.Context, message []byte) ([]byte, error) { return ed25519.Sign(signer, message), nil })
+	if err != nil || completed.Pending || len(completed.Receipt) == 0 {
+		t.Fatalf("complete fixture birth release: status=%+v err=%v", completed, err)
+	}
+}
+
+func installSnapshotExpectation(t *testing.T, journal *wipdjournal.Journal) wipdjournal.InstallExpectation {
+	t.Helper()
+	snapshot, err := journal.InstallSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.Expectation()
+}
+
 func enrollFixtureClient(t *testing.T, fixture *clientFixture, directory string) ClientState {
 	t.Helper()
 	if err := SavePending(directory, fixture.identity); err != nil {
@@ -664,6 +986,11 @@ func enrollFixtureClient(t *testing.T, fixture *clientFixture, directory string)
 }
 
 func registerClientFixtureArtifactKey(t *testing.T, fixture *clientFixture) ed25519.PrivateKey {
+	private, _ := registerClientFixtureArtifactKeyWithCertificate(t, fixture)
+	return private
+}
+
+func registerClientFixtureArtifactKeyWithCertificate(t *testing.T, fixture *clientFixture) (ed25519.PrivateKey, []byte) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -681,7 +1008,7 @@ func registerClientFixtureArtifactKey(t *testing.T, fixture *clientFixture) ed25
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { clear(private) })
-	return private
+	return private, bytes.Clone(certificate)
 }
 
 func peerStateFromClient(t *testing.T, state ClientState) tls.ConnectionState {

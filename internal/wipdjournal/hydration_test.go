@@ -257,11 +257,13 @@ func TestEmptyRequiredHydrationIsDurablyReadyOnlyForItsInstalledManifest(t *test
 }
 
 type hydrationGrantFixture struct {
-	identity Identity
-	grantID  string
-	claimID  string
-	manifest wipdwire.BlobManifest
-	grant    VerifiedClaimGrant
+	identity        Identity
+	trust           ClaimGrantTrust
+	artifactPrivate ed25519.PrivateKey
+	grantID         string
+	claimID         string
+	manifest        wipdwire.BlobManifest
+	grant           VerifiedClaimGrant
 }
 
 func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntry, base int) hydrationGrantFixture {
@@ -380,15 +382,103 @@ func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntr
 		"key_generation": uint64(1), "artifact_sequence": uint64(1), "previous_artifact_digest": nil, "issued_at": issued,
 		"payload_schema": "wipd.claim-grant-start/1", "payload_digest": hydrationDigest(start), "payload": start,
 	}, artifactPrivate)
-	grant, err := VerifyClaimGrant(identity, ClaimGrantTrust{
+	trust := ClaimGrantTrust{
 		OwnerRootPublicKey: ownerPublic, OwnerRootSPKI: ownerID, VerifiedAt: trustTime,
-	}, ClaimGrantEvidence{
+	}
+	evidence := ClaimGrantEvidence{
 		ArtifactKeyCertificate: certificate, Wrapper: wrapper, Start: start, End: grantEnd, Transfer: transfer,
-	})
+	}
+	grant, err := VerifyClaimGrant(identity, trust, evidence)
 	if err != nil {
 		t.Fatalf("verify fixture signed claim grant: %v", err)
 	}
-	return hydrationGrantFixture{identity: identity, grantID: grantID, claimID: claimID, manifest: manifest, grant: grant}
+	return hydrationGrantFixture{
+		identity: identity, trust: trust, artifactPrivate: artifactPrivate,
+		grantID: grantID, claimID: claimID, manifest: manifest, grant: grant,
+	}
+}
+
+func hydrationGrantEvidenceForRepo(t *testing.T, fixture hydrationGrantFixture, repoID string) ClaimGrantEvidence {
+	t.Helper()
+	records := fixture.grant.transfer.Records()
+	for index := range records {
+		fields, err := wipdwire.DecodeCanonicalMap(records[index].Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields["repo_id"] = repoID
+		records[index].Record, err = wipdwire.EncodeCanonical(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	end := hydrationEventAnchor(records)
+	manifest := hydrationManifest(fixture.identity, end, fixture.grant.manifest.Entries)
+	transfer, err := VerifyTransfer(fixture.identity.DomainID, fixture.identity.AuthorityEpoch,
+		fixture.grant.start, end, records, manifest)
+	if err != nil {
+		t.Fatalf("verify signed wrong-Repo transfer: %v", err)
+	}
+	startFields, err := wipdwire.DecodeCanonicalMap(fixture.grant.startBytes,
+		"schema", "grant_id", "acquire_command_id", "acquire_request_hash", "domain_id", "authority_epoch", "owner_environment_id",
+		"claim", "matter_id", "batch_id", "dispatch_id", "receipt", "prefix", "blob_manifest_digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, ok := startFields["prefix"].(map[string]any)
+	if !ok {
+		t.Fatalf("grant prefix has type %T", startFields["prefix"])
+	}
+	prefix["end"] = hydrationAnchorMap(end)
+	start, err := wipdwire.EncodeCanonical(startFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperFields, err := wipdwire.DecodeCanonicalMap(fixture.grant.wrapper,
+		"schema", "kind", "domain_id", "authority_epoch", "signer_role", "signer_key_id", "key_generation", "artifact_sequence",
+		"previous_artifact_digest", "issued_at", "payload_schema", "payload_digest", "payload", "signature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(wrapperFields, "signature")
+	wrapperFields["payload_digest"] = hydrationDigest(start)
+	wrapperFields["payload"] = start
+	wrapper := signHydrationArtifact(t, wrapperFields, fixture.artifactPrivate)
+	endBytes, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.claim-grant-end/1", "grant_id": fixture.grantID, "verified_prefix": hydrationAnchorMap(end),
+		"verified_blob_manifest_digest": manifest.Digest, "complete": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ClaimGrantEvidence{
+		ArtifactKeyCertificate: fixture.grant.artifactKeyCertificate,
+		Wrapper:                wrapper, Start: start, End: endBytes, Transfer: transfer,
+	}
+}
+
+func TestClaimGrantRepoIsBoundToJournalIdentity(t *testing.T) {
+	fixture := makeHydrationGrantFixture(t, nil, 50)
+	const otherRepoID = "01KZ7XHAQT1S46NYPN1PW1DX3E"
+	evidence := hydrationGrantEvidenceForRepo(t, fixture, otherRepoID)
+	if _, err := VerifyClaimGrant(fixture.identity, fixture.trust, evidence); !errors.Is(err, errInvalidClaimGrant) {
+		t.Fatalf("validly signed grant for Repo B verified for Repo A: %v", err)
+	}
+	otherRepoIdentity := fixture.identity
+	otherRepoIdentity.RepoID = otherRepoID
+	verifiedForOtherRepo, err := VerifyClaimGrant(otherRepoIdentity, fixture.trust, evidence)
+	if err != nil {
+		t.Fatalf("validly signed Repo B grant did not verify for Repo B: %v", err)
+	}
+	journal, err := Open(filepath.Join(t.TempDir(), "repo-a-journal"), fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = journal.Close() }()
+	if _, err = journal.InstallClaimGrant(context.Background(), mustInstallSnapshot(t, journal).Expectation(), verifiedForOtherRepo); !errors.Is(err, ErrInvalidTransfer) {
+		t.Fatalf("Repo B grant installed into Repo A journal: %v", err)
+	}
 }
 
 func signHydrationArtifact(t *testing.T, fields map[string]any, private ed25519.PrivateKey) []byte {

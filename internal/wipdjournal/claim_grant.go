@@ -262,6 +262,9 @@ func verifyAcquireReceipt(identity Identity, commandID, requestHash, claimID str
 		} else if repo != commonRepo {
 			return errInvalidClaimGrant
 		}
+		if commonRepo != identity.RepoID {
+			return errInvalidClaimGrant
+		}
 		payload, ok := fields["payload"].(map[string]any)
 		if !ok {
 			return errInvalidClaimGrant
