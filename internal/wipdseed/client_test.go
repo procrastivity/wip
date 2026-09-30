@@ -652,6 +652,72 @@ func TestPullInstallsBirthClaimReleaseAndReopensForLaterPull(t *testing.T) {
 	}
 }
 
+func TestClaimGrantManifestPinsOnlyAcquiredMatterContent(t *testing.T) {
+	matterWithContent := "01KZ7XHAQT1S46NYPN1PW1DX90"
+	claimedMatter := "01KZ7XHAQT1S46NYPN1PW1DX91"
+	claimID := "01KZ7XHAQT1S46NYPN1PW1DX92"
+	otherBytes := []byte("earlier matter content")
+	claimBytes := []byte("claimed matter content has another length")
+	otherDigest := testDigest(otherBytes)
+	claimDigest := testDigest(claimBytes)
+	content := []json.RawMessage{}
+	for _, projection := range []contentProjection{
+		{
+			ID: "01KZ7XHAQT1S46NYPN1PW1DX93", SubjectID: matterWithContent, MatterID: matterWithContent,
+			RepoID: testRepoID, Kind: "brief", BlobDigest: otherDigest, ByteLength: uint64(len(otherBytes)),
+		},
+		{
+			ID: "01KZ7XHAQT1S46NYPN1PW1DX94", SubjectID: claimedMatter, MatterID: claimedMatter,
+			RepoID: testRepoID, Kind: "findings", BlobDigest: claimDigest, ByteLength: uint64(len(claimBytes)),
+		},
+	} {
+		raw, err := json.Marshal(projection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content = append(content, raw)
+	}
+	const eventID = "01KZ7XHAQT1S46NYPN1PW1DX95"
+	const commandID = "01KZ7XHAQT1S46NYPN1PW1DX96"
+	const environmentID = "01KZ7XHAQT1S46NYPN1PW1DX97"
+	const actedAt = "2026-09-23T11:59:00Z"
+	acquired, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": testDomainID,
+		"command_id": commandID, "request_hash": testDigest([]byte("acquire")),
+		"environment": map[string]any{"id": environmentID, "sequence": uint64(3)},
+		"acted_at":    actedAt, "occurred_at": actedAt, "kind": "claim.acquired",
+		"subject_id": claimID, "repo_id": testRepoID, "payload": map[string]any{"matter_id": claimedMatter},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := []wipdwire.EventRecord{{EventID: eventID, Record: acquired}}
+	manifest := []wipdwire.BlobManifestEntry{
+		{Digest: otherDigest, ByteLength: uint64(len(otherBytes)), Requirement: "lazy"},
+		{Digest: claimDigest, ByteLength: uint64(len(claimBytes)), Requirement: "pin-before-use"},
+	}
+	if err = validateClaimContentManifest(content, records, manifest); err != nil {
+		t.Fatalf("valid domain manifest with unrelated lazy content rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func([]wipdwire.BlobManifestEntry){
+		"unrelated content marked required": func(entries []wipdwire.BlobManifestEntry) { entries[0].Requirement = "pin-before-use" },
+		"claimed content left lazy":         func(entries []wipdwire.BlobManifestEntry) { entries[1].Requirement = "lazy" },
+		"unbacked digest": func(entries []wipdwire.BlobManifestEntry) {
+			entries[0].Digest = testDigest([]byte("not in accepted content"))
+		},
+		"wrong byte length": func(entries []wipdwire.BlobManifestEntry) { entries[1].ByteLength++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := append([]wipdwire.BlobManifestEntry(nil), manifest...)
+			mutate(candidate)
+			if err := validateClaimContentManifest(content, records, candidate); !errors.Is(err, ErrInvalidClientState) {
+				t.Fatalf("invalid claim-scoped manifest accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testing.T) {
 	domainID, repoID, environmentID := testDomainID, testRepoID, "01KZ7XHAQT1S46NYPN1PW1DX3A"
 	matterID, stepID := "01KZ7XHAQT1S46NYPN1PW1DX90", "01KZ7XHAQT1S46NYPN1PW1DX91"

@@ -325,6 +325,8 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 		return err
 	}
 	latest := make(map[string]wipdjournal.Entry)
+	needsAck := make(map[string]bool)
+	claimEpochs := make(map[string]string)
 	for _, entry := range entries {
 		if entry.EnvironmentSeq > current.EnvironmentSeq || entry.Delivery != operation.DeliveryClaim {
 			continue
@@ -332,6 +334,21 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 		claim := entry.Command.Request.Claim
 		if claim == nil || claim.ID == "" {
 			return ErrCommandStartIdentity
+		}
+		if epoch, exists := claimEpochs[claim.ID]; exists && epoch != claim.Epoch {
+			return ErrCommandStartIdentity
+		}
+		claimEpochs[claim.ID] = claim.Epoch
+		if _, checked := needsAck[claim.ID]; !checked {
+			needsAck[claim.ID], err = coordinator.claimJournalNeedsAcknowledgment(claim)
+			if err != nil {
+				return err
+			}
+		}
+		if !needsAck[claim.ID] {
+			// A sealed generation has no remaining receipt head to acknowledge;
+			// a released generation is historical and must never be queried again.
+			continue
 		}
 		receipt, ok := installed.Receipts[entry.Command.ID]
 		if !ok {
@@ -370,6 +387,38 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 		}
 	}
 	return nil
+}
+
+func (coordinator *CommandStartCoordinator) claimJournalNeedsAcknowledgment(claim *operation.ClaimContext) (bool, error) {
+	if coordinator == nil || coordinator.journal == nil || claim == nil || claim.ID == "" {
+		return false, ErrCommandStartIdentity
+	}
+	epoch, err := strconv.ParseUint(claim.Epoch, 10, 64)
+	if err != nil || epoch == 0 {
+		return false, ErrCommandStartIdentity
+	}
+	grant, _, err := coordinator.journal.InstalledClaimGrantForClaim(claim.ID)
+	if err != nil || grant.ClaimEpoch != epoch || grant.ClaimID != claim.ID {
+		return false, ErrCommandStartIdentity
+	}
+	binding, err := coordinator.journal.InstalledClaimJournalBinding(claim.ID)
+	if errors.Is(err, wipdjournal.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if binding.ClaimEpoch != grant.ClaimEpoch || binding.MatterID != grant.MatterID || binding.DispatchID != grant.DispatchID {
+		return false, ErrCommandStartIdentity
+	}
+	switch binding.State {
+	case "open":
+		return true, nil
+	case "sealed", "released":
+		return false, nil
+	default:
+		return false, ErrCommandStartIdentity
+	}
 }
 
 // acknowledgeClaimJournalReceipt advances one exact acquired-journal head

@@ -1140,7 +1140,46 @@ func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.
 	if matterID == "" {
 		return ErrInvalidClientState
 	}
-	return validateContentManifestForMatter(content, matterID, entries)
+	allContent := make(map[string]uint64)
+	claimContent := make(map[string]uint64)
+	for _, raw := range content {
+		var projection contentProjection
+		if json.Unmarshal(raw, &projection) != nil {
+			return ErrInvalidClientState
+		}
+		if length, exists := allContent[projection.BlobDigest]; exists && length != projection.ByteLength {
+			return ErrInvalidClientState
+		}
+		allContent[projection.BlobDigest] = projection.ByteLength
+		if projection.MatterID == matterID {
+			if length, exists := claimContent[projection.BlobDigest]; exists && length != projection.ByteLength {
+				return ErrInvalidClientState
+			}
+			claimContent[projection.BlobDigest] = projection.ByteLength
+		}
+	}
+	if len(entries) != len(allContent) {
+		return ErrInvalidClientState
+	}
+	for _, entry := range entries {
+		length, exists := allContent[entry.Digest]
+		if !exists || length != entry.ByteLength {
+			return ErrInvalidClientState
+		}
+		if claimLength, required := claimContent[entry.Digest]; required {
+			if claimLength != entry.ByteLength || entry.Requirement != "pin-before-use" {
+				return ErrInvalidClientState
+			}
+			delete(claimContent, entry.Digest)
+		} else if entry.Requirement != "lazy" {
+			return ErrInvalidClientState
+		}
+		delete(allContent, entry.Digest)
+	}
+	if len(allContent) != 0 || len(claimContent) != 0 {
+		return ErrInvalidClientState
+	}
+	return nil
 }
 
 func validateContentManifestForMatter(content []json.RawMessage, matterID string, entries []wipdwire.BlobManifestEntry) error {

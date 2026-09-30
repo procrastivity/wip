@@ -1,6 +1,7 @@
 package wipdjournal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -58,6 +59,66 @@ func TestClaimJournalCloseBlocksUnresolvedAndQuarantinedWork(t *testing.T) {
 			t.Fatalf("quarantined command created release attempts=%d, err=%v", attempts, err)
 		}
 	})
+}
+
+func TestSealedClaimJournalWithoutAttemptCanPrepareSameReleaseAfterReopen(t *testing.T) {
+	journal, binding, acquired := openClaimJournalCloseTestFixture(t, 70)
+	root := filepath.Dir(journal.lock.Name())
+	identity := journal.Identity()
+	barrier, _, err := journal.ClaimJournal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := binding
+	sealed.State = "sealed"
+	if _, err = journal.PinClaimJournalIdentity(context.Background(), sealed); err != nil {
+		t.Fatalf("persist the verified sealed identity before attempt preparation: %v", err)
+	}
+	barrier.Sealed = true
+	const releaseID = testCommandPrefix + "90"
+	if _, err = journal.ClaimJournalReleaseAttempt(releaseID); !errors.Is(err, ErrNotFound) {
+		_ = journal.Close()
+		t.Fatalf("sealed-before-prepare fixture already has an attempt: %v", err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	journal, err = Open(root, identity)
+	if err != nil {
+		t.Fatalf("reopen sealed identity without release attempt: %v", err)
+	}
+	defer func() { _ = journal.Close() }()
+	installedBinding, err := journal.InstalledClaimJournalBinding(binding.ClaimID)
+	if err != nil || installedBinding != sealed {
+		t.Fatalf("reopened sealed binding = %+v, %v", installedBinding, err)
+	}
+	if _, err = journal.ClaimJournalReleaseAttempt(releaseID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reopen unexpectedly created a release attempt: %v", err)
+	}
+	attempt, err := journal.PrepareClaimJournalRelease(releaseID, sealed, barrier, acquired.CloneID, acquired.WorktreeID, "human")
+	if err != nil || attempt.ID != releaseID || attempt.Binding != sealed || attempt.Returned ||
+		!bytes.Equal(encodeClaimJournalBarrier(attempt.Barrier), encodeClaimJournalBarrier(barrier)) {
+		t.Fatalf("prepare exact release from sealed no-attempt state = %+v, %v", attempt, err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	journal, err = Open(root, identity)
+	if err != nil {
+		t.Fatalf("reopen prepared release attempt: %v", err)
+	}
+	replayed, err := journal.PrepareClaimJournalRelease(releaseID, sealed, barrier, acquired.CloneID, acquired.WorktreeID, "human")
+	if err != nil || replayed.ID != attempt.ID || replayed.RequestHash != attempt.RequestHash ||
+		!bytes.Equal(replayed.CanonicalBytes, attempt.CanonicalBytes) ||
+		!bytes.Equal(encodeClaimJournalBarrier(replayed.Barrier), encodeClaimJournalBarrier(attempt.Barrier)) {
+		_ = journal.Close()
+		t.Fatalf("same-ID release preparation replay changed durable identity: %+v, %v", replayed, err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func openClaimJournalCloseTestFixture(t *testing.T, base int) (*Journal, ClaimJournalBinding, ClaimAcquireAttempt) {

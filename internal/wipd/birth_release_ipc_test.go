@@ -11,6 +11,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 func TestDefaultDaemonDoesNotAdvertiseOrExecuteBirthClaimRelease(t *testing.T) {
@@ -219,6 +220,31 @@ func TestBirthClaimReleaseCancellationAfterDurableAttemptContinuesResolution(t *
 	snapshot, err := journal.InstallSnapshot(context.Background())
 	if err != nil || snapshot.Anchor.EventCount != before.Anchor.EventCount+2 {
 		t.Fatalf("post-boundary release installed tail = %+v, before=%+v, err=%v", snapshot.Anchor, before.Anchor, err)
+	}
+}
+
+func TestClaimJournalReleaseCancellationAfterSealedPinStopsBeforePrepare(t *testing.T) {
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	boundary := &birthReleaseBoundary{
+		requestContext: requestContext,
+		serverContext:  context.Background(),
+		cancel:         func() {},
+	}
+	// The sealed binding represents the durable local pin immediately before
+	// release-attempt preparation. A canceled request must leave that identity
+	// recoverable without crossing the durable-submission boundary.
+	binding := wipdjournal.ClaimJournalBinding{
+		ClaimID: commandStartCommandPrefix + "91", ClaimEpoch: 1,
+		MatterID: commandStartCommandPrefix + "92", DispatchID: commandStartCommandPrefix + "93",
+		JournalID: commandStartCommandPrefix + "94", Generation: 1, State: "sealed",
+	}
+	cancel()
+	_, err := boundary.prepareClaimJournalRelease(requestContext, nil, commandStartCommandPrefix+"95",
+		binding, wipdwire.JournalBarrier{}, commandStartCommandPrefix+"96", commandStartCommandPrefix+"97", "human")
+	if !errors.Is(err, errBirthReleaseCancelled) || !boundary.cancelled || boundary.crossed {
+		t.Fatalf("post-pin/pre-prepare cancellation = err %v, cancelled=%v, crossed=%v",
+			err, boundary.cancelled, boundary.crossed)
 	}
 }
 

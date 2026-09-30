@@ -74,7 +74,8 @@ func createClaimAcquireSchema(executor sqlExecutor) error {
 			WHEN NOT (OLD.state='attempt-prepared' AND NEW.state='returned')
 			BEGIN SELECT RAISE(ABORT,'invalid claim-acquire transition'); END`,
 		`CREATE TRIGGER claim_acquire_before_insert BEFORE INSERT ON claim_acquire_attempts
-			WHEN EXISTS(SELECT 1 FROM commands WHERE state!='returned') OR
+			WHEN EXISTS(SELECT 1 FROM commands c LEFT JOIN authority_command_outcomes o USING(command_id)
+				WHERE c.state!='returned' AND (c.delivery!='authority' OR o.command_id IS NULL)) OR
 				EXISTS(SELECT 1 FROM birth_release_attempts WHERE state='attempt-prepared') OR
 				EXISTS(SELECT 1 FROM claim_acquire_attempts WHERE state='attempt-prepared')
 			BEGIN SELECT RAISE(ABORT,'Environment work is unresolved'); END`,
