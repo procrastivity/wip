@@ -10,17 +10,18 @@ import (
 )
 
 const (
-	identitySchemaV1      = "wipd.command/1"
-	storeSchemaV1         = "wipd.store/1"
-	birthReleaseFeature   = "wipd.birth-claim-release/1"
-	claimAcquireFeature   = "wipd.claim-acquire/1"
-	defaultChunkSize      = uint64(65_536)
-	defaultStreamMax      = uint64(8_589_934_592)
-	absoluteStreamMax     = uint64(1_099_511_627_776)
-	maxExchangesAbsolute  = uint64(64)
-	defaultExchanges      = uint64(32)
-	defaultReceiveWindow  = uint64(1_048_576)
-	absoluteReceiveWindow = uint64(16_777_216)
+	identitySchemaV1         = "wipd.command/1"
+	storeSchemaV1            = "wipd.store/1"
+	birthReleaseFeature      = "wipd.birth-claim-release/1"
+	claimAcquireFeature      = "wipd.claim-acquire/1"
+	claimJournalCloseFeature = "wipd.claim-journal-close/1"
+	defaultChunkSize         = uint64(65_536)
+	defaultStreamMax         = uint64(8_589_934_592)
+	absoluteStreamMax        = uint64(1_099_511_627_776)
+	maxExchangesAbsolute     = uint64(64)
+	defaultExchanges         = uint64(32)
+	defaultReceiveWindow     = uint64(1_048_576)
+	absoluteReceiveWindow    = uint64(16_777_216)
 )
 
 var capabilityIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*(?:/[1-9][0-9]*)?$`)
@@ -120,7 +121,7 @@ func decodeClientHello(payload []byte) (capabilityHello, error) {
 	return hello, nil
 }
 
-func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire bool) (serverHello, sessionParameters, error) {
+func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose bool) (serverHello, sessionParameters, error) {
 	const supportedMajor, supportedMinor = uint16(1), uint16(0)
 	if client.protocolMin.major != supportedMajor || client.protocolMin.minor > supportedMinor ||
 		client.protocolMax.major != supportedMajor || client.protocolMax.minor < supportedMinor {
@@ -135,6 +136,9 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 	}
 	if claimAcquire {
 		serverFeatures = append(serverFeatures, claimAcquireFeature)
+	}
+	if claimJournalClose {
+		serverFeatures = append(serverFeatures, claimJournalCloseFeature)
 	}
 	sort.Strings(serverFeatures)
 	result := serverHello{

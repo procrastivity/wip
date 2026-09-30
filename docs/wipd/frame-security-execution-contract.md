@@ -330,6 +330,19 @@ returns the generic `response.end` or `problem`; it does not accept a raw
 `command.submit` for `claim.release@v1`, because the command identity and
 receipt barrier are owned by the Environment journal/coordinator.
 
+Acquired-claim close uses the authority controls `claim-journal.query`,
+`claim-journal.ack`, and `claim-journal.seal`, distinct from Step 9's
+birth-only `birth-journal.ack`. Each control is bound to the authenticated
+Environment and exact current claim generation. The Environment persists the
+first verified journal ID/generation and fails closed if a later lookup
+changes it except after verified journal repair. Only after sealing does it
+submit the unchanged `claim.release@v1` command with the exact
+`JournalBarrier/1`. The local daemon request is the negotiated
+`claim.journal.close` frame carrying `local-claim-journal-close/1`; the daemon
+returns the exact installed terminal receipt in
+`local-claim-journal-close-result/1`. These controls do not alter
+ClaimGrantStart/1.
+
 For a read-only or transfer exchange, validated post-first-frame client
 outcomes are published to a shared per-exchange arbiter, which serializes
 publication against response-record start and final-response start. A frame

@@ -55,12 +55,15 @@ func (s *Store) submitConnectedContent(ctx context.Context, command operation.Co
 			return nil
 		}
 	}
+	afterInsert := func(tx *sql.Tx) error {
+		return appendConnectedClaimJournalEntry(ctx, tx, command, canonical, hash)
+	}
 	return s.submitIdentity(ctx, commandIdentity{
 		domain: command.AuthorityDomainID, epoch: command.ExpectedAuthorityEpoch,
 		environment: command.EnvironmentID, sequence: command.EnvironmentSequence,
 		id: command.ID, name: metadata.Operation.Name, version: uint64(metadata.Operation.Version),
 		repo: command.Request.Context.Repo, encoded: canonical, hash: hash, m1: &command,
-	}, peer, at, before, beforeCommit, nil)
+	}, peer, at, before, beforeCommit, afterInsert)
 }
 
 func contentInput(request operation.Request) (string, string) {

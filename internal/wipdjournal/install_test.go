@@ -397,6 +397,15 @@ func installTestReceipt(t *testing.T, entry Entry, result operation.ResultCode, 
 
 func downgradeInstallTestDBToV1(db *sql.DB) error {
 	for _, statement := range []string{
+		`DROP TRIGGER claim_acquire_after_quarantined_claim_journal_release`, `DROP TRIGGER birth_release_after_quarantined_claim_journal_release`,
+		`DROP TRIGGER command_after_quarantined_claim_journal_release`,
+		`DROP TRIGGER claim_acquire_claim_journal_release_id_conflict`, `DROP TRIGGER claim_acquire_after_pending_claim_journal_release`,
+		`DROP TRIGGER birth_release_after_pending_claim_journal_release`, `DROP TRIGGER command_claim_journal_release_id_conflict`,
+		`DROP TRIGGER command_after_pending_claim_journal_release`, `DROP TRIGGER claim_journal_release_before_insert`,
+		`DROP TRIGGER claim_journal_release_outcome_immutable`, `DROP TRIGGER claim_journal_release_state_transition`,
+		`DROP TRIGGER claim_journal_release_no_delete`, `DROP TRIGGER claim_journal_release_identity_immutable`,
+		`DROP TABLE claim_journal_release_attempts`, `DROP TRIGGER claim_journal_binding_no_delete`,
+		`DROP TRIGGER claim_journal_binding_immutable`, `DROP TABLE installed_claim_journals`,
 		`DROP TRIGGER authority_command_outcome_immutable`, `DROP TRIGGER authority_command_outcome_no_delete`, `DROP TABLE authority_command_outcomes`,
 		`DROP TRIGGER birth_release_after_pending_claim_acquire`, `DROP TRIGGER command_claim_acquire_id_conflict`,
 		`DROP TRIGGER command_after_pending_claim_acquire`, `DROP TRIGGER claim_acquire_command_id_conflict`,

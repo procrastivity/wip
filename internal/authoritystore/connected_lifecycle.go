@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
@@ -72,7 +73,50 @@ func (s *Store) submitConnectedLifecycle(ctx context.Context, command operation.
 			return nil
 		}
 	}
-	return s.submitIdentity(ctx, identity, peer, at, before, beforeCommit, nil)
+	var afterInsert func(*sql.Tx) error
+	if metadata.Delivery == operation.DeliveryClaim {
+		afterInsert = func(tx *sql.Tx) error {
+			return appendConnectedClaimJournalEntry(ctx, tx, command, canonical, hash)
+		}
+	}
+	return s.submitIdentity(ctx, identity, peer, at, before, beforeCommit, afterInsert)
+}
+
+func appendConnectedClaimJournalEntry(ctx context.Context, tx *sql.Tx, command operation.Command, canonical []byte, hash string) error {
+	parsed, err := parseJournalCommand(canonical, hash)
+	if err != nil || command.Request.Claim == nil || parsed.ID != command.ID || parsed.Domain != command.AuthorityDomainID ||
+		parsed.Epoch != command.ExpectedAuthorityEpoch || parsed.Environment != command.EnvironmentID ||
+		parsed.Sequence != command.EnvironmentSequence || parsed.Repo != command.Request.Context.Repo ||
+		parsed.Worktree != command.Request.Context.Worktree || parsed.Claim != command.Request.Claim.ID {
+		return ErrInvalidProof
+	}
+	claimEpoch, err := strconv.ParseUint(command.Request.Claim.Epoch, 10, 64)
+	if err != nil || strconv.FormatUint(claimEpoch, 10) != command.Request.Claim.Epoch || claimEpoch != parsed.ClaimEpoch {
+		return ErrInvalidProof
+	}
+	var journalID, journalState, owner, worktree, repo string
+	var authorityEpoch, storedClaimEpoch uint64
+	var closed sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT j.journal_id,j.state,c.owner_environment_id,c.worktree_id,m.repo_id,c.authority_epoch,c.claim_epoch,c.close_command_id
+		FROM claim_journals j JOIN claims c USING(domain_id,claim_id) JOIN matters m ON m.domain_id=c.domain_id AND m.matter_id=c.matter_id
+		JOIN domains d ON d.domain_id=c.domain_id
+		WHERE j.domain_id=? AND j.claim_id=? AND j.state IN ('open','sealed') AND c.authority_epoch=d.active_epoch`, parsed.Domain, parsed.Claim).
+		Scan(&journalID, &journalState, &owner, &worktree, &repo, &authorityEpoch, &storedClaimEpoch, &closed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFenced
+	}
+	if err != nil {
+		return err
+	}
+	if journalState != "open" || closed.Valid || owner != parsed.Environment || worktree != parsed.Worktree ||
+		repo != parsed.Repo || authorityEpoch != parsed.Epoch || storedClaimEpoch != parsed.ClaimEpoch {
+		return ErrFenced
+	}
+	var position uint64
+	if err = tx.QueryRowContext(ctx, `SELECT count(*)+1 FROM claim_journal_entries WHERE domain_id=? AND journal_id=?`, parsed.Domain, journalID).Scan(&position); err != nil {
+		return err
+	}
+	return appendClaimJournalEntryTx(ctx, tx, journalID, position, parsed, canonical)
 }
 
 func resolveConnectedLifecycleMatter(ctx context.Context, tx *sql.Tx, command *lifecycleCommand) error {

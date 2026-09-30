@@ -531,6 +531,17 @@ func (app *m5LabHandler) serveBirthClaimRelease(writer http.ResponseWriter, requ
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
 		return
 	}
+	fields, decodeErr := wipdwire.DecodeCanonicalMap(release.CanonicalCommand,
+		"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs")
+	if decodeErr != nil {
+		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	contextFields, _ := fields["context"].(map[string]any)
+	if contextFields["clone_id"] != nil || contextFields["worktree_id"] != nil {
+		app.serveAcquiredClaimRelease(writer, request, body, frame, environment, release)
+		return
+	}
 	commandID, environmentID, err := app.validateBirthReleaseCommand(release)
 	if err != nil || environmentID != environment.EnvironmentID {
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")

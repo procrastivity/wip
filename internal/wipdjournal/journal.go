@@ -35,7 +35,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 7
+	schemaVersion  = 8
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
@@ -224,6 +224,8 @@ func Open(root string, identity Identity) (*Journal, error) {
 				err = upgradeSchemaV5(db, identity)
 			case 6:
 				err = upgradeSchemaV6(db, identity)
+			case 7:
+				err = upgradeSchemaV7(db, identity)
 			case schemaVersion:
 				err = checkIdentity(db, identity)
 			default:
@@ -874,7 +876,7 @@ func installSchema(db *sql.DB, identity Identity) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=7), name TEXT NOT NULL CHECK(name='environment-authority-command-outcomes')) STRICT`,
+		`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version=8), name TEXT NOT NULL CHECK(name='environment-claim-journal-close')) STRICT`,
 		`CREATE TABLE environment_state(
 			singleton INTEGER PRIMARY KEY CHECK(singleton=1),
 			repo_id TEXT NOT NULL, domain_id TEXT NOT NULL,
@@ -916,8 +918,8 @@ func installSchema(db *sql.DB, identity Identity) error {
 		BEGIN SELECT RAISE(ABORT, 'immutable staged blob'); END`,
 		`CREATE TRIGGER staged_blob_no_delete BEFORE DELETE ON staged_blobs
 		BEGIN SELECT RAISE(ABORT, 'retained staged blob'); END`,
-		`INSERT INTO schema_migrations(version, name) VALUES(7, 'environment-authority-command-outcomes')`,
-		`PRAGMA user_version=7`,
+		`INSERT INTO schema_migrations(version, name) VALUES(8, 'environment-claim-journal-close')`,
+		`PRAGMA user_version=8`,
 	} {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
@@ -939,6 +941,9 @@ func installSchema(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if err = createAuthorityOutcomeSchema(tx); err != nil {
+		return err
+	}
+	if err = createClaimJournalCloseSchema(tx); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO environment_state(singleton, repo_id, domain_id, authority_epoch, environment_id, next_environment_sequence, next_journal_position)
@@ -965,29 +970,33 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=7`).Scan(&migration); err != nil || migration != "environment-authority-command-outcomes" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&migration); err != nil || migration != "environment-claim-journal-close" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)
 }
 
 func checkSchemaObjects(db *sql.DB) error {
-	return checkSchemaObjectsVersion(db, true, true, true, true)
+	return checkSchemaObjectsVersion(db, true, true, true, true, true)
+}
+
+func checkSchemaObjectsV7(db *sql.DB) error {
+	return checkSchemaObjectsVersion(db, true, true, true, true, false)
 }
 
 func checkSchemaObjectsV3(db *sql.DB) error {
-	return checkSchemaObjectsVersion(db, false, false, false, false)
+	return checkSchemaObjectsVersion(db, false, false, false, false, false)
 }
 
 func checkSchemaObjectsV4(db *sql.DB) error {
-	return checkSchemaObjectsVersion(db, true, false, false, false)
+	return checkSchemaObjectsVersion(db, true, false, false, false, false)
 }
 
 func checkSchemaObjectsV6(db *sql.DB) error {
-	return checkSchemaObjectsVersion(db, true, true, true, false)
+	return checkSchemaObjectsVersion(db, true, true, true, false, false)
 }
 
-func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants, includeClaimAcquire, includeAuthorityOutcomes bool) error {
+func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants, includeClaimAcquire, includeAuthorityOutcomes, includeClaimJournalClose bool) error {
 	expected := map[string]string{
 		"schema_migrations": "table", "environment_state": "table", "environment_identity_immutable": "trigger",
 		"environment_counters_increment": "trigger", "commands": "table", "commands_pending_order": "index",
@@ -1033,6 +1042,25 @@ func checkSchemaObjectsVersion(db *sql.DB, includeHydration, includeClaimGrants,
 		expected["authority_command_outcomes"] = "table"
 		expected["authority_command_outcome_immutable"] = "trigger"
 		expected["authority_command_outcome_no_delete"] = "trigger"
+	}
+	if includeClaimJournalClose {
+		expected["installed_claim_journals"] = "table"
+		expected["claim_journal_binding_immutable"] = "trigger"
+		expected["claim_journal_binding_no_delete"] = "trigger"
+		expected["claim_journal_release_attempts"] = "table"
+		expected["claim_journal_release_identity_immutable"] = "trigger"
+		expected["claim_journal_release_no_delete"] = "trigger"
+		expected["claim_journal_release_state_transition"] = "trigger"
+		expected["claim_journal_release_outcome_immutable"] = "trigger"
+		expected["claim_journal_release_before_insert"] = "trigger"
+		expected["command_after_pending_claim_journal_release"] = "trigger"
+		expected["command_after_quarantined_claim_journal_release"] = "trigger"
+		expected["command_claim_journal_release_id_conflict"] = "trigger"
+		expected["birth_release_after_pending_claim_journal_release"] = "trigger"
+		expected["birth_release_after_quarantined_claim_journal_release"] = "trigger"
+		expected["claim_acquire_after_pending_claim_journal_release"] = "trigger"
+		expected["claim_acquire_after_quarantined_claim_journal_release"] = "trigger"
+		expected["claim_acquire_claim_journal_release_id_conflict"] = "trigger"
 	}
 	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
@@ -1119,6 +1147,9 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 	if err = checkClaimHydrationState(db, identity, blobDir); err != nil {
 		return err
 	}
+	if err = checkClaimJournalCloseState(db, identity); err != nil {
+		return err
+	}
 	releaseSequences, releaseIDs, err := checkBirthReleaseAttempts(db, identity)
 	if err != nil {
 		return err
@@ -1127,7 +1158,11 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 	if err != nil {
 		return err
 	}
-	allSequences := append(append(commandSequences, releaseSequences...), acquireSequences...)
+	claimReleaseSequences, claimReleaseIDs, err := checkClaimJournalReleaseAttempts(db, identity)
+	if err != nil {
+		return err
+	}
+	allSequences := append(append(append(commandSequences, releaseSequences...), acquireSequences...), claimReleaseSequences...)
 	sort.Slice(allSequences, func(left, right int) bool { return allSequences[left] < allSequences[right] })
 	if nextSequence != int64(len(allSequences))+1 {
 		return ErrInvalidJournal
@@ -1143,6 +1178,11 @@ func checkDatabase(db *sql.DB, identity Identity, blobDir string) error {
 		}
 	}
 	for _, attemptID := range acquireIDs {
+		if _, exists := commandIDs[attemptID]; exists {
+			return ErrInvalidJournal
+		}
+	}
+	for _, attemptID := range claimReleaseIDs {
 		if _, exists := commandIDs[attemptID]; exists {
 			return ErrInvalidJournal
 		}

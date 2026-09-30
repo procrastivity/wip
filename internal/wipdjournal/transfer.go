@@ -180,6 +180,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
 		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
+			fields["kind"] != "dispatch.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
 			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended") ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
@@ -232,6 +233,12 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			transferULID.MatchString(dispatchID) && fields["subject_id"] == dispatchID &&
 			transferULID.MatchString(asString(payload["matter_id"])) && transferULID.MatchString(asString(payload["batch_id"])) &&
 			transferULID.MatchString(asString(payload["claim_id"])) && transferULID.MatchString(asString(payload["worktree_id"]))
+	case "dispatch.closed":
+		dispatchID := asString(payload["dispatch_id"])
+		claimEpoch, epochOK := payload["claim_epoch"].(uint64)
+		return wipdwire.ExactMapKeys(payload, "dispatch_id", "claim_id", "claim_epoch") &&
+			transferULID.MatchString(dispatchID) && fields["subject_id"] == dispatchID &&
+			transferULID.MatchString(asString(payload["claim_id"])) && epochOK && claimEpoch > 0
 	case "matter.created":
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&

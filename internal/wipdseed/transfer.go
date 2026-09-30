@@ -152,13 +152,19 @@ type acquisitionFoldState struct {
 
 type acquiredClaimProjection struct {
 	ID, OwnerEnvironmentID, BatchID, DispatchID string
-	Epoch                                       uint64
+	Epoch, AcquiredSequence                     uint64
 }
 
 type lifecycleFoldState struct {
 	stage   string
 	command foldedLifecycleEvent
 	matter  string
+}
+
+type claimReleaseFoldState struct {
+	command                                                   foldedLifecycleEvent
+	claimID, matterID, dispatchID, repoID, ownerEnvironmentID string
+	epoch                                                     uint64
 }
 
 // PullAndInstall fetches one bounded complete delta from the installed anchor,
@@ -492,7 +498,10 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 		}
 	}
 	anchor, projections, stepProjections, err := foldEventRecords(records, domainID)
-	if err != nil || !anchorEqual(anchor, endAnchor) {
+	if err != nil {
+		return zero, fmt.Errorf("verify transferred event prefix: %w", err)
+	}
+	if !anchorEqual(anchor, endAnchor) {
 		return zero, ErrInvalidClientState
 	}
 	contentProjections, err := foldContentEvents(records, domainID)
@@ -554,6 +563,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 	claimEpochs := make(map[string]uint64)
 	var pendingAcquisition *acquisitionFoldState
 	var pendingLifecycle *lifecycleFoldState
+	var pendingClaimRelease *claimReleaseFoldState
 	previousEventID := ""
 	for _, record := range records {
 		if !clientULIDPattern.MatchString(record.EventID) || previousEventID != "" && record.EventID <= previousEventID {
@@ -574,6 +584,9 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		}
 		if pendingLifecycle != nil && (pendingLifecycle.stage == "step-start-target" && kind != "step.started" ||
 			pendingLifecycle.stage == "matter-sweep" && kind != "batch.swept") {
+			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+		}
+		if pendingClaimRelease != nil && kind != "claim.released" {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
 		switch kind {
@@ -710,7 +723,8 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			claimEpochs[matterID] = claimEpoch
 			activeClaims[matterID] = acquiredClaimProjection{
-				ID: claimID, Epoch: claimEpoch, OwnerEnvironmentID: ownerEnvironmentID, BatchID: batchID, DispatchID: dispatchID,
+				ID: claimID, Epoch: claimEpoch, AcquiredSequence: lifecycle.sequence,
+				OwnerEnvironmentID: ownerEnvironmentID, BatchID: batchID, DispatchID: dispatchID,
 			}
 			pendingAcquisition = &acquisitionFoldState{
 				stage: "dispatch", command: lifecycle, matterID: matterID, batchID: batchID,
@@ -839,6 +853,25 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			sweptBatches[batchID] = true
 			pendingLifecycle = nil
+		case "dispatch.closed":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			dispatchID, dispatchOK := payload["dispatch_id"].(string)
+			claimID, claimOK := payload["claim_id"].(string)
+			claimEpoch, epochOK := payload["claim_epoch"].(uint64)
+			matterID, claim := activeMatterForClaim(activeClaims, claimID)
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "dispatch_id", "claim_id", "claim_epoch") ||
+				!dispatchOK || !clientULIDPattern.MatchString(dispatchID) || !claimOK || !clientULIDPattern.MatchString(claimID) ||
+				!epochOK || claimEpoch == 0 || pendingAcquisition != nil || pendingLifecycle != nil || pendingClaimRelease != nil ||
+				matterID == "" || claim.ID != claimID || claim.Epoch != claimEpoch || claim.DispatchID != dispatchID ||
+				claim.OwnerEnvironmentID != lifecycle.environmentID || lifecycle.sequence <= claim.AcquiredSequence ||
+				matterRepos[matterID] != lifecycle.repoID || fields["subject_id"] != dispatchID {
+				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid acquired dispatch.closed event", ErrInvalidClientState)
+			}
+			pendingClaimRelease = &claimReleaseFoldState{
+				command: lifecycle, claimID: claimID, matterID: matterID, dispatchID: dispatchID,
+				repoID: lifecycle.repoID, ownerEnvironmentID: lifecycle.environmentID, epoch: claimEpoch,
+			}
 		case "content.created", "content.appended":
 			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
@@ -849,8 +882,28 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 				event.DomainID != domainID || !clientULIDPattern.MatchString(event.CommandID) || !validDigest(event.Hash) ||
 				!clientULIDPattern.MatchString(event.Environment.ID) || event.Environment.Sequence == 0 ||
 				!validUTC(event.ActedAt) || !validUTC(event.OccurredAt) || event.Kind != "claim.released" || !clientULIDPattern.MatchString(event.RepoID) ||
-				event.Payload.DispatchID != nil || event.Payload.ClaimEpoch != 1 || !clientULIDPattern.MatchString(event.Payload.ClaimID) ||
+				event.Payload.ClaimEpoch == 0 || !clientULIDPattern.MatchString(event.Payload.ClaimID) ||
 				event.SubjectID != event.Payload.ClaimID || !validDigest(event.Payload.BarrierDigest) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if event.Payload.DispatchID != nil {
+				pending := pendingClaimRelease
+				matterID, claim := activeMatterForClaim(activeClaims, event.Payload.ClaimID)
+				if pending == nil || !sameFoldedLifecycleCommand(pending.command, foldedLifecycleEvent{
+					commandID: event.CommandID, requestHash: event.Hash, environmentID: event.Environment.ID,
+					sequence: event.Environment.Sequence, repoID: event.RepoID, actedAt: event.ActedAt,
+				}) || pending.claimID != event.Payload.ClaimID || pending.matterID != matterID ||
+					pending.dispatchID != *event.Payload.DispatchID || pending.epoch != event.Payload.ClaimEpoch ||
+					pending.repoID != event.RepoID || pending.ownerEnvironmentID != event.Environment.ID ||
+					claim.ID != pending.claimID || claim.Epoch != pending.epoch || claim.DispatchID != pending.dispatchID ||
+					claim.OwnerEnvironmentID != pending.ownerEnvironmentID || !validDigest(event.Payload.BarrierDigest) {
+					return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid acquired claim.released event", ErrInvalidClientState)
+				}
+				delete(activeClaims, matterID)
+				pendingClaimRelease = nil
+				break
+			}
+			if pendingClaimRelease != nil || event.Payload.ClaimEpoch != 1 {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
 			repo, exists := matterRepos[event.Payload.ClaimID]
@@ -899,7 +952,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		copy(chain[:], hash.Sum(nil))
 		previousEventID = record.EventID
 	}
-	if pendingAcquisition != nil || pendingLifecycle != nil {
+	if pendingAcquisition != nil || pendingLifecycle != nil || pendingClaimRelease != nil {
 		return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 	}
 	sort.Slice(projections, func(i, j int) bool {
@@ -1140,6 +1193,15 @@ func stepMatterID(steps []stepProjection, stepID string) string {
 	return ""
 }
 
+func activeMatterForClaim(active map[string]acquiredClaimProjection, claimID string) (string, acquiredClaimProjection) {
+	for matterID, claim := range active {
+		if claim.ID == claimID {
+			return matterID, claim
+		}
+	}
+	return "", acquiredClaimProjection{}
+}
+
 func decodeM1Event(data []byte, event *matterCreatedEvent) error {
 	fields, err := wipdwire.DecodeCanonicalMap(data,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
@@ -1192,7 +1254,8 @@ func decodeClaimReleasedEvent(data []byte, event *claimReleasedEvent) error {
 		return ErrInvalidClientState
 	}
 	payload, ok := fields["payload"].(map[string]any)
-	if !ok || !wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest") || payload["dispatch_id"] != nil {
+	if !ok || !wipdwire.ExactMapKeys(payload, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest") ||
+		(payload["dispatch_id"] != nil && !clientULIDPattern.MatchString(asString(payload["dispatch_id"]))) {
 		return ErrInvalidClientState
 	}
 	if err = wipdwire.DecodeCanonical(data, event,

@@ -341,6 +341,15 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		app.serveBirthJournalAck(writer, request, body, frame, environment)
 		return
+	case "claim-journal.query":
+		app.serveClaimJournalQuery(writer, request, body, frame, environment)
+		return
+	case "claim-journal.ack":
+		app.serveClaimJournalAck(writer, request, body, frame, environment)
+		return
+	case "claim-journal.seal":
+		app.serveClaimJournalSeal(writer, request, body, frame, environment)
+		return
 	case "claim.release":
 		if app.registry == nil || app.sign == nil {
 			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")

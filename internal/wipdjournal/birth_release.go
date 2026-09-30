@@ -521,7 +521,10 @@ func validateInstalledBirthRelease(tx *sql.Tx, anchor wipdwire.PrefixAnchor, ide
 	return nil
 }
 
-func installedEventCountForCommand(tx *sql.Tx, commandID string) (int, error) {
+func installedEventCountForCommand(tx interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, commandID string,
+) (int, error) {
 	rows, err := tx.Query(`SELECT record FROM installed_events ORDER BY position`)
 	if err != nil {
 		return 0, err

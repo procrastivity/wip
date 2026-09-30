@@ -171,6 +171,20 @@ func claimTestReceipt(t *testing.T, status CommandStatus, code string, output ma
 	}
 }
 
+func claimTestAcknowledge(t *testing.T, f *claimTestFixture, journalID string, position uint64, status CommandStatus) {
+	t.Helper()
+	if status.Pending || status.Owner != nil || len(status.Receipt) == 0 {
+		t.Fatalf("cannot acknowledge nonterminal claim command: %+v", status)
+	}
+	installed, err := f.s.CurrentPrefixAnchor(context.Background(), domainA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.s.AcknowledgeClaimJournalEntry(context.Background(), domainA, journalID, position, status.Receipt, installed); err != nil {
+		t.Fatalf("acknowledge installed claim command at position %d: %v", position, err)
+	}
+}
+
 func claimTestBirthStep(t *testing.T, f *claimTestFixture, id, event int) ([]byte, string, CommandStatus) {
 	t.Helper()
 	command := operation.Command{
@@ -254,6 +268,7 @@ func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
 	claimTestReceipt(t, started, "result.succeeded", map[string]any{
 		"step_id": stepID, "matter_id": f.matter, "state": "in-progress",
 	}, 107, 108)
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, started)
 
 	finishedMatter := submitLifecycle(13, 5, operation.MatterFinishV1.Metadata().Operation,
 		operation.MatterFinishInput{MatterID: f.matter}, 109, 110)
@@ -274,6 +289,7 @@ func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
 	claimTestReceipt(t, finishedStep, "result.succeeded", map[string]any{
 		"step_id": stepID, "matter_id": f.matter, "state": "done",
 	}, 111)
+	claimTestAcknowledge(t, f, allocation.JournalID, 2, finishedStep)
 	anchor, err := f.s.CurrentPrefixAnchor(ctx, domainA)
 	if err != nil || anchor.EventCount != 9 || anchor.EventID != claimTestID(111) {
 		t.Fatalf("authority prefix after incomplete-then-complete lifecycle = %+v, %v", anchor, err)
@@ -392,6 +408,7 @@ func TestConnectedStepFinishRecoversAfterStoreReopen(t *testing.T) {
 	claimTestReceipt(t, started, "result.succeeded", map[string]any{
 		"step_id": stepID, "matter_id": f.matter, "state": "in-progress",
 	}, 107, 108)
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, started)
 
 	command := claimTestConnectedStepCommand(f, 13, 5, operation.StepFinishV1.Metadata().Operation, allocation.ClaimID, stepID)
 	hash, err := command.RequestHash()
@@ -863,6 +880,59 @@ func TestClaimReleaseEmptySealedJournalReopenAndEpochFence(t *testing.T) {
 		"batch_id": a.BatchID, "dispatch_id": claimTestID(55), "owner_environment_id": envA,
 		"worktree_id": f.worktree,
 	})
+}
+
+func TestOwnedCurrentClaimJournalBindingAndSeal(t *testing.T) {
+	f := newClaimTestFixture(t)
+	ctx := context.Background()
+	a := claimTestAllocation(1, f.anchor(t), 101, 102, 103)
+	_, _, acquired, _ := f.acquire(t, 11, 2, a.Installed, a)
+	current, err := f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, a.ClaimID, 1, f.matter, claimTestID(51))
+	if err != nil || current.JournalID != a.JournalID || current.Generation != 1 || current.State != "open" ||
+		current.MatterID != f.matter || current.DispatchID != claimTestID(51) {
+		t.Fatalf("current acquired journal = %+v, %v", current, err)
+	}
+	if _, err = f.s.GetCurrentClaimJournal(ctx, domainA, 7, envB, a.ClaimID, 1, f.matter, claimTestID(51)); !errors.Is(err, ErrFenced) {
+		t.Fatalf("foreign owner obtained current journal: %v", err)
+	}
+	if _, err = f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, a.ClaimID, 2, f.matter, claimTestID(51)); !errors.Is(err, ErrFenced) {
+		t.Fatalf("wrong claim epoch obtained current journal: %v", err)
+	}
+	staleBindings := map[string]CurrentClaimJournal{
+		"owner":           func() CurrentClaimJournal { value := current; value.EnvironmentID = envB; return value }(),
+		"authority epoch": func() CurrentClaimJournal { value := current; value.AuthorityEpoch++; return value }(),
+		"claim epoch":     func() CurrentClaimJournal { value := current; value.ClaimEpoch++; return value }(),
+		"Matter":          func() CurrentClaimJournal { value := current; value.MatterID = claimTestID(52); return value }(),
+		"Dispatch":        func() CurrentClaimJournal { value := current; value.DispatchID = claimTestID(52); return value }(),
+		"journal ID":      func() CurrentClaimJournal { value := current; value.JournalID = claimTestID(52); return value }(),
+		"generation":      func() CurrentClaimJournal { value := current; value.Generation++; return value }(),
+		"domain":          func() CurrentClaimJournal { value := current; value.DomainID = domainB; return value }(),
+	}
+	installed := f.anchor(t)
+	for label, stale := range staleBindings {
+		if err = f.s.AcknowledgeOwnedClaimJournalEntry(ctx, stale, 1, acquired.Receipt, installed); !errors.Is(err, ErrFenced) {
+			t.Fatalf("%s control identity acknowledged a claim-journal entry: %v", label, err)
+		}
+		if _, _, err = f.s.SealOwnedClaimJournal(ctx, stale); !errors.Is(err, ErrFenced) {
+			t.Fatalf("%s control identity sealed a claim journal: %v", label, err)
+		}
+	}
+	var journalState string
+	var entries int
+	if err = f.s.db.QueryRow(`SELECT state FROM claim_journals WHERE domain_id=? AND journal_id=?`, domainA, a.JournalID).Scan(&journalState); err != nil || journalState != "open" {
+		t.Fatalf("stale controls changed current journal state=%q err=%v", journalState, err)
+	}
+	if err = f.s.db.QueryRow(`SELECT count(*) FROM claim_journal_entries WHERE domain_id=? AND journal_id=?`, domainA, a.JournalID).Scan(&entries); err != nil || entries != 0 {
+		t.Fatalf("stale controls created journal entries=%d err=%v", entries, err)
+	}
+	digest, count, err := f.s.SealOwnedClaimJournal(ctx, current)
+	if err != nil || count != 0 || digest == "" {
+		t.Fatalf("owner seal = %q/%d, %v", digest, count, err)
+	}
+	sealed, err := f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, a.ClaimID, 1, f.matter, claimTestID(51))
+	if err != nil || sealed.JournalID != a.JournalID || sealed.State != "sealed" {
+		t.Fatalf("sealed current journal = %+v, %v", sealed, err)
+	}
 }
 
 func TestClaimAcquireSignerFailureRollsBackEveryEffect(t *testing.T) {

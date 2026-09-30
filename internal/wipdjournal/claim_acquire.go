@@ -115,7 +115,7 @@ func upgradeSchemaV5(db *sql.DB, identity Identity) error {
 	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=5`).Scan(&marker); err != nil || marker != "environment-verified-claim-grants" {
 		return fmt.Errorf("%w: v5 claim-acquire-upgrade marker %q: %v", ErrInvalidJournal, marker, err)
 	}
-	if err := checkSchemaObjectsVersion(db, true, true, false, false); err != nil {
+	if err := checkSchemaObjectsVersion(db, true, true, false, false, false); err != nil {
 		return fmt.Errorf("%w: v5 claim-acquire-upgrade schema: %v", ErrInvalidJournal, err)
 	}
 	tx, err := db.BeginTx(context.Background(), nil)

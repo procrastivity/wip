@@ -568,10 +568,9 @@ func parseJournalCommand(raw []byte, hash string) (journalCommand, error) {
 	return journalCommand{w.Authority.Domain, w.ID, hash, w.Environment.ID, contextFields.Repo, contextFields.Worktree, w.Claim.ID, w.Authority.Epoch, w.Claim.Epoch, w.Environment.Sequence}, nil
 }
 
-// AppendClaimJournalEntry persists one exact command at the next position.
-// This is an internal journal primitive, not claim-delivery admission: the
-// trusted caller must check operation delivery, negotiation, footprint, and
-// pins before calling it. No claim-delivery operation is registered yet.
+// AppendClaimJournalEntry persists one exact command at the requested next
+// position. Connected claim-delivery submission uses the transaction helper
+// below so admission and journal append commit atomically.
 func (s *Store) AppendClaimJournalEntry(ctx context.Context, journal string, position uint64, raw []byte, hash string) error {
 	c, err := parseJournalCommand(raw, hash)
 	if err != nil || !ulid.MatchString(journal) || position == 0 {
@@ -587,10 +586,17 @@ func (s *Store) AppendClaimJournalEntry(ctx context.Context, journal string, pos
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = appendClaimJournalEntryTx(ctx, tx, journal, position, c, raw); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func appendClaimJournalEntryTx(ctx context.Context, tx *sql.Tx, journal string, position uint64, c journalCommand, raw []byte) error {
 	var owner, worktree, repo, state string
 	var claimEpoch, authorityEpoch uint64
 	var closed sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT c.owner_environment_id,c.worktree_id,m.repo_id,j.state,c.claim_epoch,c.authority_epoch,c.close_command_id FROM claim_journals j JOIN claims c USING(domain_id,claim_id) JOIN matters m ON m.domain_id=c.domain_id AND m.matter_id=c.matter_id JOIN domains d ON d.domain_id=c.domain_id WHERE j.domain_id=? AND j.journal_id=? AND j.claim_id=? AND c.authority_epoch=d.active_epoch`, c.Domain, journal, c.Claim).Scan(&owner, &worktree, &repo, &state, &claimEpoch, &authorityEpoch, &closed)
+	err := tx.QueryRowContext(ctx, `SELECT c.owner_environment_id,c.worktree_id,m.repo_id,j.state,c.claim_epoch,c.authority_epoch,c.close_command_id FROM claim_journals j JOIN claims c USING(domain_id,claim_id) JOIN matters m ON m.domain_id=c.domain_id AND m.matter_id=c.matter_id JOIN domains d ON d.domain_id=c.domain_id WHERE j.domain_id=? AND j.journal_id=? AND j.claim_id=? AND c.authority_epoch=d.active_epoch`, c.Domain, journal, c.Claim).Scan(&owner, &worktree, &repo, &state, &claimEpoch, &authorityEpoch, &closed)
 	if err != nil {
 		return err
 	}
@@ -605,7 +611,7 @@ func (s *Store) AppendClaimJournalEntry(ctx context.Context, journal string, pos
 	if position != uint64(count)+1 || pending != 0 {
 		return ErrPending
 	}
-	if count > 0 && c.Sequence != lastSeq+1 {
+	if count > 0 && c.Sequence <= lastSeq {
 		return ErrPending
 	}
 	if count == 0 {
@@ -624,10 +630,10 @@ func (s *Store) AppendClaimJournalEntry(ctx context.Context, journal string, pos
 	if existing != 0 {
 		return ErrConflict
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO claim_journal_entries(domain_id,journal_id,position,command_id,request_hash,command,environment_sequence,state) VALUES(?,?,?,?,?,?,?,'pending-return')`, c.Domain, journal, position, c.ID, hash, raw, c.Sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO claim_journal_entries(domain_id,journal_id,position,command_id,request_hash,command,environment_sequence,state) VALUES(?,?,?,?,?,?,?,'pending-return')`, c.Domain, journal, position, c.ID, c.Hash, raw, c.Sequence); err != nil {
 		return writeError(err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // AcknowledgeClaimJournalEntry requires the exact retained terminal receipt
@@ -651,7 +657,7 @@ func (s *Store) AcknowledgeClaimJournalEntry(ctx context.Context, domain, journa
 	var seq uint64
 	var retained, command []byte
 	var receiptEpoch, lastPosition uint64
-	err = tx.QueryRowContext(ctx, `SELECT e.command_id,e.request_hash,e.state,e.environment_sequence,e.command,t.receipt,t.epoch,COALESCE(t.last_position,0) FROM claim_journal_entries e JOIN claim_journals j USING(domain_id,journal_id) JOIN terminal_receipts t ON t.domain_id=e.domain_id AND t.command_id=e.command_id WHERE e.domain_id=? AND e.journal_id=? AND e.position=? AND j.state='open'`, domain, journal, position).Scan(&id, &hash, &state, &seq, &command, &retained, &receiptEpoch, &lastPosition)
+	err = tx.QueryRowContext(ctx, `SELECT e.command_id,e.request_hash,e.state,e.environment_sequence,e.command,t.receipt,t.artifact_epoch,COALESCE(t.last_position,0) FROM claim_journal_entries e JOIN claim_journals j USING(domain_id,journal_id) JOIN terminal_receipts t ON t.domain_id=e.domain_id AND t.command_id=e.command_id WHERE e.domain_id=? AND e.journal_id=? AND e.position=? AND j.state='open'`, domain, journal, position).Scan(&id, &hash, &state, &seq, &command, &retained, &receiptEpoch, &lastPosition)
 	if err != nil {
 		return err
 	}

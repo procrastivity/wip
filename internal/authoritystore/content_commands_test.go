@@ -74,6 +74,7 @@ func TestContentWritePromotesOnlySuccessfulTerminalFold(t *testing.T) {
 		"id": claimTestID(130), "subject_id": f.matter, "kind": "brief",
 		"blob_digest": acceptedDigest, "byte_length": uint64(len(acceptedBytes)),
 	}, 104)
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, accepted)
 	var err error
 	var acceptedSubmission storedSubmission
 	if err = f.s.db.QueryRow(`SELECT domain_id,command_id,request_hash,environment_id,operation_name,state,command,epoch,environment_sequence,operation_version
@@ -210,11 +211,13 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 		t.Fatalf("submit Step finding: %+v %v", pending, err)
 	}
 	contentID := claimTestID(132)
-	if _, err = f.s.CompleteCommand(ctx, pending.Owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
+	firstCompleted, err := f.s.CompleteCommand(ctx, pending.Owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
 		ID: contentID, SubjectID: stepID, Kind: "findings", BlobDigest: digest, ByteLength: int64(len(content)),
-	}}, contentID, claimTestID(106), f.now, signWith(f.key)); err != nil {
+	}}, contentID, claimTestID(106), f.now, signWith(f.key))
+	if err != nil {
 		t.Fatalf("complete Step finding: %v", err)
 	}
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, firstCompleted)
 	second := command
 	second.ID = claimTestID(13)
 	second.EnvironmentSequence = 5

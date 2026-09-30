@@ -712,6 +712,46 @@ func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testin
 		event(509, 404, 5, "batch.swept", batchID, map[string]any{})), domainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("sweep after a Matter finish with an incomplete child folded: %v", err)
 	}
+
+	barrierDigest := testDigest([]byte("acquired claim close barrier"))
+	closed := append(append([]wipdwire.EventRecord(nil), records...),
+		event(509, 406, 7, "dispatch.closed", dispatchID, map[string]any{
+			"dispatch_id": dispatchID, "claim_id": claimID, "claim_epoch": uint64(1),
+		}),
+		event(510, 406, 7, "claim.released", claimID, map[string]any{
+			"claim_id": claimID, "claim_epoch": uint64(1), "dispatch_id": dispatchID, "barrier_digest": barrierDigest,
+		}))
+	if _, _, _, err = foldEventRecords(closed, domainID); err != nil {
+		t.Fatalf("fold exact acquired Dispatch/claim release pair: %v", err)
+	}
+	for name, mutate := range map[string]func(map[string]any, map[string]any){
+		"wrong closed Dispatch": func(_ map[string]any, payload map[string]any) { payload["dispatch_id"] = batchID },
+		"wrong claim epoch":     func(_ map[string]any, payload map[string]any) { payload["claim_epoch"] = uint64(2) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := append([]wipdwire.EventRecord(nil), closed...)
+			fields, decodeErr := wipdwire.DecodeCanonicalMap(candidate[len(candidate)-2].Record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			payload, ok := fields["payload"].(map[string]any)
+			if !ok {
+				t.Fatalf("dispatch.closed payload has type %T", fields["payload"])
+			}
+			mutate(fields, payload)
+			candidate[len(candidate)-2].Record, decodeErr = wipdwire.EncodeCanonical(fields)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if _, _, _, foldErr := foldEventRecords(candidate, domainID); !errors.Is(foldErr, ErrInvalidClientState) {
+				t.Fatalf("mismatched acquired Dispatch close folded: %v", foldErr)
+			}
+		})
+	}
+	if _, _, _, err = foldEventRecords(closed[:len(closed)-1], domainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("unpaired acquired Dispatch close folded: %v", err)
+	}
 }
 
 func TestAuthenticatedAcquisitionGrantInstallAllowsLaterPullAndReopen(t *testing.T) {

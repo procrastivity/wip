@@ -362,6 +362,80 @@ type BirthJournalAcked struct {
 	RequestHash string `cbor:"request_hash"`
 }
 
+// ClaimJournalQuery identifies an acquired claim by the complete authenticated
+// holder binding. Journal identity is authority-assigned and never inferred.
+type ClaimJournalQuery struct {
+	Schema        string `cbor:"schema"`
+	DomainID      string `cbor:"domain_id"`
+	Epoch         uint64 `cbor:"authority_epoch"`
+	EnvironmentID string `cbor:"environment_id"`
+	ClaimID       string `cbor:"claim_id"`
+	ClaimEpoch    uint64 `cbor:"claim_epoch"`
+	MatterID      string `cbor:"matter_id"`
+	DispatchID    string `cbor:"dispatch_id"`
+}
+
+// ClaimJournalCurrent is the authenticated response containing the current
+// open/sealed claim journal generation.
+type ClaimJournalCurrent struct {
+	Schema        string `cbor:"schema"`
+	DomainID      string `cbor:"domain_id"`
+	Epoch         uint64 `cbor:"authority_epoch"`
+	EnvironmentID string `cbor:"environment_id"`
+	ClaimID       string `cbor:"claim_id"`
+	ClaimEpoch    uint64 `cbor:"claim_epoch"`
+	MatterID      string `cbor:"matter_id"`
+	DispatchID    string `cbor:"dispatch_id"`
+	JournalID     string `cbor:"journal_id"`
+	Generation    uint64 `cbor:"generation"`
+	State         string `cbor:"state"`
+}
+
+// ClaimJournalReceiptAck binds one acquired-journal receipt to its exact
+// locally installed prefix before authority admission.
+type ClaimJournalReceiptAck struct {
+	Schema        string       `cbor:"schema"`
+	DomainID      string       `cbor:"domain_id"`
+	Epoch         uint64       `cbor:"authority_epoch"`
+	EnvironmentID string       `cbor:"environment_id"`
+	ClaimID       string       `cbor:"claim_id"`
+	ClaimEpoch    uint64       `cbor:"claim_epoch"`
+	MatterID      string       `cbor:"matter_id"`
+	DispatchID    string       `cbor:"dispatch_id"`
+	JournalID     string       `cbor:"journal_id"`
+	Generation    uint64       `cbor:"generation"`
+	Position      uint64       `cbor:"position"`
+	Receipt       []byte       `cbor:"terminal_receipt"`
+	Installed     PrefixAnchor `cbor:"installed_prefix"`
+}
+
+// ClaimJournalSeal freezes an exact current generation after all receipts
+// have been acknowledged in order.
+type ClaimJournalSeal struct {
+	Schema        string `cbor:"schema"`
+	DomainID      string `cbor:"domain_id"`
+	Epoch         uint64 `cbor:"authority_epoch"`
+	EnvironmentID string `cbor:"environment_id"`
+	ClaimID       string `cbor:"claim_id"`
+	ClaimEpoch    uint64 `cbor:"claim_epoch"`
+	MatterID      string `cbor:"matter_id"`
+	DispatchID    string `cbor:"dispatch_id"`
+	JournalID     string `cbor:"journal_id"`
+	Generation    uint64 `cbor:"generation"`
+}
+
+// ClaimJournalSealed is the authority-confirmed identity and digest of a closed
+// acquired-claim journal generation.
+type ClaimJournalSealed struct {
+	Schema     string `cbor:"schema"`
+	DomainID   string `cbor:"domain_id"`
+	ClaimID    string `cbor:"claim_id"`
+	JournalID  string `cbor:"journal_id"`
+	Generation uint64 `cbor:"generation"`
+	Count      uint64 `cbor:"entry_count"`
+	Digest     string `cbor:"entries_digest"`
+}
+
 // ClaimRelease carries the existing claim.release@v1 lifecycle command. It
 // introduces no M1 operation schema.
 type ClaimRelease struct {

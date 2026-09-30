@@ -87,6 +87,21 @@ func (environment *JournalCommandStartEnvironment) InstallBirthRelease(ctx conte
 	return commandStartSnapshot(installed), nil
 }
 
+// InstallClaimJournalRelease commits the acquired release receipt, verified
+// tail, returned-attempt state, and released journal pin as one transaction.
+func (environment *JournalCommandStartEnvironment) InstallClaimJournalRelease(ctx context.Context, expected CommandStartSnapshot,
+	attempt wipdjournal.ClaimJournalReleaseCommand, receipt []byte, tail CommandPull,
+) (CommandStartSnapshot, error) {
+	if err := environment.checkExpected(expected); err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	installed, err := environment.journal.InstallClaimJournalRelease(ctx, installExpectation(expected), attempt, receipt, tail.VerifiedTransfer)
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	return commandStartSnapshot(installed), nil
+}
+
 // AdmitPending commits the recoverable provisional overlay with return eligibility.
 func (environment *JournalCommandStartEnvironment) AdmitPending(ctx context.Context, expected CommandStartSnapshot, entry wipdjournal.Entry) (CommandStartSnapshot, error) {
 	if err := environment.checkExpected(expected); err != nil {
@@ -134,4 +149,7 @@ func commandStartSnapshot(installed wipdjournal.InstallSnapshot) CommandStartSna
 	}
 }
 
-var _ CommandStartEnvironment = (*JournalCommandStartEnvironment)(nil)
+var (
+	_ CommandStartEnvironment        = (*JournalCommandStartEnvironment)(nil)
+	_ ClaimJournalReleaseEnvironment = (*JournalCommandStartEnvironment)(nil)
+)

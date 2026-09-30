@@ -422,7 +422,7 @@ func (c *Client) negotiate(ctx context.Context) error {
 			"identity_schemas": []any{identitySchemaV1},
 		}},
 		"store_schemas": []any{storeSchemaV1},
-		"features":      []any{birthReleaseFeature, claimAcquireFeature, frameSchema},
+		"features":      []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema},
 	})
 	if err != nil {
 		return err
@@ -501,7 +501,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !containsString(features, frameSchema) || len(features) > 3 ||
+	if err != nil || !containsString(features, frameSchema) || len(features) > 4 ||
 		!onlyKnownFeatures(features) {
 		return serverHello{}, errUnsupportedExtension
 	}
@@ -528,7 +528,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 
 func onlyKnownFeatures(features []string) bool {
 	for _, feature := range features {
-		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature {
+		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature {
 			return false
 		}
 	}

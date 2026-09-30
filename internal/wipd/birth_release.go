@@ -104,6 +104,51 @@ func (boundary *birthReleaseBoundary) prepare(ctx context.Context, journal *wipd
 	return attempt, nil
 }
 
+func (boundary *birthReleaseBoundary) prepareClaimJournalRelease(ctx context.Context, journal *wipdjournal.Journal,
+	commandID string, binding wipdjournal.ClaimJournalBinding, barrier wipdwire.JournalBarrier,
+	cloneID, worktreeID, actor string,
+) (wipdjournal.ClaimJournalReleaseCommand, error) {
+	boundary.mu.Lock()
+	if boundary.cancelled || ctx.Err() != nil || boundary.requestContext.Err() != nil || boundary.serverContext.Err() != nil {
+		boundary.cancelled = true
+		cancel := boundary.cancel
+		boundary.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return wipdjournal.ClaimJournalReleaseCommand{}, errBirthReleaseCancelled
+	}
+	attempt, err := journal.PrepareClaimJournalRelease(commandID, binding, barrier, cloneID, worktreeID, actor)
+	if err != nil {
+		persisted, lookupErr := journal.ClaimJournalReleaseAttempt(commandID)
+		if lookupErr == nil && sameClaimJournalReleaseIntent(persisted, binding, barrier, cloneID, worktreeID, actor) {
+			boundary.crossed = true
+			boundary.mu.Unlock()
+			return persisted, nil
+		}
+		boundary.mu.Unlock()
+		return wipdjournal.ClaimJournalReleaseCommand{}, err
+	}
+	boundary.crossed = true
+	boundary.mu.Unlock()
+	return attempt, nil
+}
+
+func sameClaimJournalReleaseIntent(attempt wipdjournal.ClaimJournalReleaseCommand, binding wipdjournal.ClaimJournalBinding,
+	barrier wipdwire.JournalBarrier, cloneID, worktreeID, actor string,
+) bool {
+	fields, err := wipdwire.DecodeCanonicalMap(attempt.CanonicalBytes,
+		"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs")
+	contextFields, contextOK := fields["context"].(map[string]any)
+	left, leftErr := wipdwire.EncodeCanonical(attempt.Barrier)
+	right, rightErr := wipdwire.EncodeCanonical(barrier)
+	return err == nil && attempt.Binding.ClaimID == binding.ClaimID && attempt.Binding.ClaimEpoch == binding.ClaimEpoch &&
+		attempt.Binding.MatterID == binding.MatterID && attempt.Binding.DispatchID == binding.DispatchID &&
+		attempt.Binding.JournalID == binding.JournalID && attempt.Binding.Generation == binding.Generation &&
+		leftErr == nil && rightErr == nil && bytes.Equal(left, right) && contextOK &&
+		contextFields["clone_id"] == cloneID && contextFields["worktree_id"] == worktreeID && fields["actor"] == actor
+}
+
 func newBirthReleaseBoundary(requestContext, serverContext context.Context) (context.Context, *birthReleaseBoundary, func()) {
 	preSubmissionContext, cancel := context.WithCancel(context.WithoutCancel(requestContext))
 	boundary := &birthReleaseBoundary{

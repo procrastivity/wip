@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -36,6 +38,9 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	fixture.config.Registry = registry
 	fixture.server = fixture.serverForStore(t, fixture.store)
+	var dropClaimReleaseResponse atomic.Bool
+	authorityHandler := fixture.server.http.Handler
+	fixture.server.http.Handler = discardOneClaimReleaseResponse(authorityHandler, &dropClaimReleaseResponse)
 
 	authorityCtx, stopAuthority := context.WithCancel(context.Background())
 	authorityDone := make(chan error, 1)
@@ -668,6 +673,29 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		!bytes.Equal(acquireAttempt.Receipt, acquired.Receipt) || acquireAttempt.GrantID != acquired.Grant.GrantID {
 		t.Fatalf("durable acquisition receipt/grant identity = %+v, %v", acquireAttempt, err)
 	}
+	currentClaimJournal, err := fixture.store.GetCurrentClaimJournal(context.Background(), m5TestDomain, 1, m5TestEnv,
+		acquired.Grant.ClaimID, acquired.Grant.ClaimEpoch, matterOutput.ID, dispatchID)
+	if err != nil {
+		t.Fatalf("authority current acquired journal lookup = %+v, %v", currentClaimJournal, err)
+	}
+	pinnedClaimJournal, err := journal.PinClaimJournalIdentity(context.Background(), wipdjournal.ClaimJournalBinding{
+		ClaimID: currentClaimJournal.ClaimID, ClaimEpoch: currentClaimJournal.ClaimEpoch, MatterID: currentClaimJournal.MatterID,
+		DispatchID: currentClaimJournal.DispatchID, JournalID: currentClaimJournal.JournalID,
+		Generation: currentClaimJournal.Generation, State: currentClaimJournal.State,
+	})
+	if err != nil || pinnedClaimJournal.JournalID == "" || pinnedClaimJournal.Generation == 0 {
+		t.Fatalf("persist authority-assigned current generation: %+v, %v", pinnedClaimJournal, err)
+	}
+	driftedClaimJournal := pinnedClaimJournal
+	driftedClaimJournal.JournalID = "01KZ7XHAQT1S46NYPN1PW1DX5B"
+	driftedClaimJournal.Generation++
+	if _, err = journal.PinClaimJournalIdentity(context.Background(), driftedClaimJournal); err == nil {
+		t.Fatal("Environment accepted an unverified claim-journal generation change")
+	}
+	retainedClaimJournal, err := journal.InstalledClaimJournalBinding(acquired.Grant.ClaimID)
+	if err != nil || retainedClaimJournal != pinnedClaimJournal {
+		t.Fatalf("unverified generation drift changed the retained binding: %+v err=%v", retainedClaimJournal, err)
+	}
 	installedGrant, err := journal.InstalledClaimGrantByCommand(acquireID)
 	if err != nil || installedGrant.GrantID != acquired.Grant.GrantID || installedGrant.ClaimID != acquired.Grant.ClaimID ||
 		installedGrant.ClaimEpoch != acquired.Grant.ClaimEpoch || installedGrant.DispatchID != dispatchID ||
@@ -707,27 +735,133 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	if err != nil || finishAfterReopen.Code != operation.ResultSucceeded || finishAfterReopen.Output != finishedMatter.Output {
 		t.Fatalf("same-ID lifecycle receipt replay after daemon/journal reopen = %+v, %v", finishAfterReopen, err)
 	}
-	postReopenStart := operation.Command{
-		ID: "01KZ7XHAQT1S46NYPN1PW1DX4R", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
-		EnvironmentID: m5TestEnv, EnvironmentSequence: 10, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1DX4R",
-		Request: operation.Request{
-			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
-			Context: commandContext, Claim: claimContext, Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
-		},
-	}
-	postReopenResult, err := assertClient.ExecuteCommand(context.Background(), postReopenStart)
-	if err != nil || postReopenResult.Code != operation.ResultRefused || postReopenResult.Output != nil {
-		t.Fatalf("subsequent authenticated post-reopen lifecycle behavior = %+v, %v; daemon=%s", postReopenResult, err, assertOutput.String())
-	}
-	postLifecycleAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || postLifecycleAnchor.EventCount != 13 {
-		t.Fatalf("subsequent authenticated pull changed lifecycle event tail = %+v, %v", postLifecycleAnchor, err)
+	claimReleaseID := "01KZ7XHAQT1S46NYPN1PW1DX5A"
+	dropClaimReleaseResponse.Store(true)
+	_, err = assertClient.ReleaseClaimJournal(context.Background(), claimReleaseID, acquired.Grant.ClaimID,
+		acquired.Grant.ClaimEpoch, matterOutput.ID, dispatchID, operation.Actor("human"))
+	var closeExchangeErr *wipd.ExchangeError
+	if !errors.As(err, &closeExchangeErr) || closeExchangeErr.Code != "transport.outcome-unknown" ||
+		!closeExchangeErr.Uncertain || dropClaimReleaseResponse.Load() {
+		t.Fatalf("expected the authority to commit acquired close before losing its response: err=%v dropped=%v; daemon=%s",
+			err, !dropClaimReleaseResponse.Load(), assertOutput.String())
 	}
 	if err = assertClient.Close(); err != nil {
 		t.Fatal(err)
 	}
 	stopAssertDaemon()
+	closedJournal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
+		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	})
+	if err != nil {
+		t.Fatalf("reopen Environment after acquired-claim response loss: %v", err)
+	}
+	pendingClose, err := closedJournal.ClaimJournalReleaseAttempt(claimReleaseID)
+	if err != nil || pendingClose.Returned || pendingClose.Binding.State != "sealed" || pendingClose.ID != claimReleaseID {
+		t.Fatalf("lost response did not retain the exact sealed local attempt: %+v, %v", pendingClose, err)
+	}
+	authorityClose, err := fixture.store.QueryCommand(context.Background(), m5TestDomain, claimReleaseID,
+		pendingClose.RequestHash, 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	if err != nil || authorityClose.Pending || len(authorityClose.Receipt) == 0 {
+		t.Fatalf("authority did not retain the committed close after response loss: %+v, %v", authorityClose, err)
+	}
+	closeReceiptFields, err := wipdwire.DecodeCanonicalMap(authorityClose.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || closeReceiptFields["command_id"] != claimReleaseID {
+		t.Fatalf("durable acquired-claim release receipt identity = %#v, %v", closeReceiptFields, err)
+	}
+	releaseResult, ok := closeReceiptFields["result"].(map[string]any)
+	releaseOutput, outputOK := releaseResult["output"].([]byte)
+	releaseOutputFields, outputErr := wipdwire.DecodeCanonicalMap(releaseOutput, "claim_id", "claim_epoch", "dispatch_id", "barrier_digest")
+	if !ok || !outputOK || outputErr != nil || releaseResult["code"] != string(operation.ResultSucceeded) ||
+		releaseOutputFields["claim_id"] != acquired.Grant.ClaimID || releaseOutputFields["claim_epoch"] != acquired.Grant.ClaimEpoch ||
+		releaseOutputFields["dispatch_id"] != dispatchID || releaseOutputFields["barrier_digest"] == "" {
+		t.Fatalf("durable acquired-claim close receipt output = %#v, %v", releaseResult, outputErr)
+	}
+	closedAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || closedAnchor.EventCount != 15 {
+		t.Fatalf("authority prefix after lost close response = %+v, %v; want fifteen committed events", closedAnchor, err)
+	}
+	closeAttempt, err := closedJournal.ClaimJournalReleaseAttempt(claimReleaseID)
+	if err != nil || closeAttempt.Returned || len(closeAttempt.Receipt) != 0 || closeAttempt.ResultCode != "" ||
+		closeAttempt.Binding.State != "sealed" || closeAttempt.Barrier.Count != 4 ||
+		closeAttempt.Barrier.Receipts != 4 || !closeAttempt.Barrier.Sealed || closeAttempt.Barrier.Unresolved != 0 || closeAttempt.Barrier.Quarantined != 0 {
+		_ = closedJournal.Close()
+		t.Fatalf("reopened unresolved acquired-claim attempt = %+v, %v", closeAttempt, err)
+	}
+	closedBinding, err := closedJournal.InstalledClaimJournalBinding(acquired.Grant.ClaimID)
+	if err != nil || closedBinding.State != "sealed" || closedBinding.JournalID == "" || closedBinding.Generation == 0 ||
+		closedBinding.ClaimEpoch != acquired.Grant.ClaimEpoch || closedBinding.MatterID != matterOutput.ID || closedBinding.DispatchID != dispatchID {
+		_ = closedJournal.Close()
+		t.Fatalf("reopened sealed acquired-claim journal identity/state = %+v, %v", closedBinding, err)
+	}
+	if _, err = closedJournal.PinClaimJournalIdentity(context.Background(), wipdjournal.ClaimJournalBinding{
+		ClaimID: closedBinding.ClaimID, ClaimEpoch: closedBinding.ClaimEpoch, MatterID: closedBinding.MatterID,
+		DispatchID: closedBinding.DispatchID, JournalID: closedBinding.JournalID, Generation: closedBinding.Generation + 1, State: "open",
+	}); err == nil {
+		_ = closedJournal.Close()
+		t.Fatal("reopened Environment silently advanced its pinned claim-journal generation")
+	}
+	closedRecords, err := closedJournal.EventRecords(context.Background())
+	if err != nil || len(closedRecords) != 13 {
+		_ = closedJournal.Close()
+		t.Fatalf("lost response leaked an uninstalled acquired-claim event tail = %d, %v", len(closedRecords), err)
+	}
+	if err = closedJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closeReplayClient, stopCloseReplayDaemon, closeReplayOutput := startWipdForBirthReleaseRecovery(t, binary, profileRoot)
+	closeReplay, err := closeReplayClient.ReleaseClaimJournal(context.Background(), claimReleaseID, acquired.Grant.ClaimID,
+		acquired.Grant.ClaimEpoch, matterOutput.ID, dispatchID, operation.Actor("human"))
+	if err != nil || closeReplay.CommandID != claimReleaseID || closeReplay.Code != operation.ResultSucceeded ||
+		!bytes.Equal(closeReplay.Receipt, authorityClose.Receipt) {
+		t.Fatalf("same-ID acquired-claim close recovery after daemon/journal reopen = %+v, %v; daemon=%s", closeReplay, err, closeReplayOutput.String())
+	}
+	if err = closeReplayClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopCloseReplayDaemon()
+	closedAnchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || closedAnchor.EventCount != 15 {
+		t.Fatalf("exact close replay changed authority event tail = %+v, %v", closedAnchor, err)
+	}
+	closedJournal, err = wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
+		OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	})
+	if err != nil {
+		t.Fatalf("reopen Environment after lost-response recovery: %v", err)
+	}
+	closeAttempt, err = closedJournal.ClaimJournalReleaseAttempt(claimReleaseID)
+	if err != nil || !closeAttempt.Returned || closeAttempt.ResultCode != operation.ResultSucceeded ||
+		!bytes.Equal(closeAttempt.Receipt, authorityClose.Receipt) || closeAttempt.Barrier.Count != 4 {
+		_ = closedJournal.Close()
+		t.Fatalf("recovered acquired-claim barrier/receipt = %+v, %v", closeAttempt, err)
+	}
+	closedBinding, err = closedJournal.InstalledClaimJournalBinding(acquired.Grant.ClaimID)
+	if err != nil || closedBinding.State != "released" || closedBinding.JournalID == "" || closedBinding.Generation == 0 ||
+		closedBinding.ClaimEpoch != acquired.Grant.ClaimEpoch || closedBinding.MatterID != matterOutput.ID || closedBinding.DispatchID != dispatchID {
+		_ = closedJournal.Close()
+		t.Fatalf("recovered acquired-claim journal identity/state = %+v, %v", closedBinding, err)
+	}
+	closedRecords, err = closedJournal.EventRecords(context.Background())
+	if err != nil || len(closedRecords) != 15 {
+		_ = closedJournal.Close()
+		t.Fatalf("recovered acquired-claim event tail = %d, %v", len(closedRecords), err)
+	}
+	wantReleaseKinds := []string{"dispatch.closed", "claim.released"}
+	wantReleaseSubjects := []string{dispatchID, acquired.Grant.ClaimID}
+	for index, kind := range wantReleaseKinds {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(closedRecords[len(closedRecords)-2+index].Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil || fields["command_id"] != claimReleaseID || fields["kind"] != kind || fields["subject_id"] != wantReleaseSubjects[index] {
+			_ = closedJournal.Close()
+			t.Fatalf("recovered acquired-claim close event %d = %#v, %v", index, fields, decodeErr)
+		}
+	}
+	if err = closedJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
 	legacyConfig := map[string]any{
 		"schema": "wipd.connected-authority-profile/1", "origin": config.Origin, "domain_id": config.DomainID,
 		"authority_epoch": config.Epoch, "repo_id": config.RepoID, "owner_root_spki": config.OwnerRootSPKI,
@@ -786,6 +920,7 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 		close(done)
 	}()
 	stopped := false
+	var lastConnectErr error
 	stop := func() {
 		if stopped {
 			return
@@ -809,6 +944,7 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 		if err == nil {
 			return client, stop, &output
 		}
+		lastConnectErr = err
 		select {
 		case <-done:
 			t.Fatalf("restarted wipd exited before recovery: %v: %s", processErr, output.String())
@@ -816,7 +952,7 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("connect to restarted wipd for birth-release recovery: %s", output.String())
+	t.Fatalf("connect to restarted wipd for birth-release recovery: %v; output: %s", lastConnectErr, output.String())
 	return nil, stop, &output
 }
 
@@ -829,3 +965,53 @@ func emptyManifestDigest() string {
 	sum := sha256.Sum256([]byte("wipd/blob-manifest/v1\x00"))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
+
+func discardOneClaimReleaseResponse(next http.Handler, armed *atomic.Bool) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != labExchangePath || !armed.Load() {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		originalBody := request.Body
+		body, err := io.ReadAll(originalBody)
+		if err != nil {
+			_ = originalBody.Close()
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			next.ServeHTTP(writer, request)
+			return
+		}
+		defer func() { _ = originalBody.Close() }()
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		frame, err := wipdwire.ReadFrame(bytes.NewReader(body))
+		if err != nil || frame.Kind != "claim.release" {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		var release wipdwire.ClaimRelease
+		if err = wipdwire.DecodeCanonical(frame.Payload, &release, "schema", "canonical_command", "request_hash", "barrier", "deadline"); err != nil {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		command, err := wipdwire.DecodeCanonicalMap(release.CanonicalCommand,
+			"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs")
+		operationFields, ok := command["operation"].(map[string]any)
+		if err != nil || !ok || !wipdwire.ExactMapKeys(operationFields, "name", "version") ||
+			operationFields["name"] != "claim.release" || operationFields["version"] != uint64(1) || !armed.CompareAndSwap(true, false) {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		next.ServeHTTP(m5DiscardResponseWriter{ResponseWriter: writer}, request)
+	})
+}
+
+type m5DiscardResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (writer m5DiscardResponseWriter) WriteHeader(int) {}
+
+func (writer m5DiscardResponseWriter) Write(payload []byte) (int, error) {
+	return len(payload), nil
+}
+
+func (writer m5DiscardResponseWriter) Flush() {}

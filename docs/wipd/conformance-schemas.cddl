@@ -139,6 +139,25 @@ local-birth-claim-release-result = {
                  "result.refused" / "result.failed",
   "terminal_receipt": bstr
 }
+; Local-only Step 16 acquired-claim close action. The daemon resolves the
+; authority-assigned journal generation and constructs the unchanged
+; claim.release@v1 command after receipt ACKs and sealing.
+local-claim-journal-close = {
+  "schema": "wipd.local-claim-journal-close/1",
+  "command_id": ulid,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "matter_id": ulid,
+  "dispatch_id": ulid,
+  "actor": tstr
+}
+local-claim-journal-close-result = {
+  "schema": "wipd.local-claim-journal-close-result/1",
+  "command_id": ulid,
+  "result_code": "result.succeeded" / "result.rejected" /
+                 "result.refused" / "result.failed",
+  "terminal_receipt": bstr
+}
 query-request = {
   "schema": "wipd.query-request/1",
   "query": operation,
@@ -404,6 +423,66 @@ birth-journal-acked = {
   "matter_id": ulid,
   "command_id": ulid,
   "request_hash": digest
+}
+; Step 16 acquired-claim controls are distinct from Step 9's birth-only ACK.
+claim-journal-query = {
+  "schema": "wipd.claim-journal-query/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "environment_id": ulid,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "matter_id": ulid,
+  "dispatch_id": ulid
+}
+claim-journal-current = {
+  "schema": "wipd.claim-journal-current/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "environment_id": ulid,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "matter_id": ulid,
+  "dispatch_id": ulid,
+  "journal_id": ulid,
+  "generation": positive,
+  "state": "open" / "sealed"
+}
+claim-journal-ack = {
+  "schema": "wipd.claim-journal-ack/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "environment_id": ulid,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "matter_id": ulid,
+  "dispatch_id": ulid,
+  "journal_id": ulid,
+  "generation": positive,
+  "position": positive,
+  "terminal_receipt": bstr,
+  "installed_prefix": prefix-anchor
+}
+claim-journal-seal = {
+  "schema": "wipd.claim-journal-seal/1",
+  "domain_id": ulid,
+  "authority_epoch": positive,
+  "environment_id": ulid,
+  "claim_id": ulid,
+  "claim_epoch": positive,
+  "matter_id": ulid,
+  "dispatch_id": ulid,
+  "journal_id": ulid,
+  "generation": positive
+}
+claim-journal-sealed = {
+  "schema": "wipd.claim-journal-sealed/1",
+  "domain_id": ulid,
+  "claim_id": ulid,
+  "journal_id": ulid,
+  "generation": positive,
+  "entry_count": uint,
+  "entries_digest": digest
 }
 claim-stand-down = {
   "schema": "wipd.claim-stand-down/1",

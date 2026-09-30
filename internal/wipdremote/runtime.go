@@ -159,6 +159,12 @@ func (runtime *Runtime) SupportsClaimAcquisition() bool {
 		len(runtime.config.OwnerRootPublicKey) == ed25519.PublicKeySize && len(runtime.config.ArtifactKeyCertificate) != 0
 }
 
+// SupportsClaimJournalClose reports whether this runtime can operate acquired
+// claims backed by the v2 signed-grant trust configuration.
+func (runtime *Runtime) SupportsClaimJournalClose() bool {
+	return runtime != nil && runtime.SupportsClaimAcquisition()
+}
+
 // NewServer creates a normal empty server when no connected profile is
 // installed, and otherwise composes the authenticated command runtime before
 // returning a daemon server ready to Serve.

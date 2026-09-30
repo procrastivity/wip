@@ -103,6 +103,16 @@ type ClaimAcquireAuthority interface {
 	AcquireClaim(context.Context, wipdjournal.ClaimAcquireAttempt, wipdwire.PrefixAnchor) (ClaimAcquireAuthorityResult, error)
 }
 
+// ClaimJournalCloseAuthority exposes only authenticated, owner-bound controls
+// for the authority-assigned acquired-claim journal generation.
+type ClaimJournalCloseAuthority interface {
+	SupportsClaimJournalClose() bool
+	CurrentClaimJournal(context.Context, wipdjournal.ClaimGrantSummary) (wipdjournal.ClaimJournalBinding, error)
+	AcknowledgeClaimJournalEntry(context.Context, wipdjournal.ClaimJournalBinding, wipdwire.ClaimJournalReceiptAck) error
+	SealClaimJournal(context.Context, wipdjournal.ClaimJournalBinding) (wipdwire.ClaimJournalSealed, error)
+	SubmitClaimJournalRelease(context.Context, wipdjournal.ClaimJournalReleaseCommand, wipdwire.PrefixAnchor) ([]byte, operation.ResultCode, CommandPull, error)
+}
+
 // ClaimAcquireAuthorityResult is one terminal authority disposition. Grant is
 // present only for a successful acquisition and has already been verified.
 type ClaimAcquireAuthorityResult struct {
@@ -133,6 +143,12 @@ type CommandStartEnvironment interface {
 	InstallBirthRelease(context.Context, CommandStartSnapshot, wipdjournal.BirthReleaseCommand, []byte, CommandPull) (CommandStartSnapshot, error)
 	AdmitPending(context.Context, CommandStartSnapshot, wipdjournal.Entry) (CommandStartSnapshot, error)
 	commandStartJournal() *wipdjournal.Journal
+}
+
+// ClaimJournalReleaseEnvironment installs an acquired-claim release receipt,
+// verified tail, and released journal state atomically.
+type ClaimJournalReleaseEnvironment interface {
+	InstallClaimJournalRelease(context.Context, CommandStartSnapshot, wipdjournal.ClaimJournalReleaseCommand, []byte, CommandPull) (CommandStartSnapshot, error)
 }
 
 // CommandStartCoordinator is the common D120/D128 path for a connected
@@ -254,6 +270,20 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 	if pendingRelease {
 		return empty, fmt.Errorf("%w: a birth-claim release outcome is unresolved", ErrCommandStartBlocked)
 	}
+	pendingClaimJournalRelease, err := coordinator.journal.HasPendingClaimJournalRelease()
+	if err != nil {
+		return empty, err
+	}
+	if pendingClaimJournalRelease {
+		return empty, fmt.Errorf("%w: an acquired-claim release outcome is unresolved", ErrCommandStartBlocked)
+	}
+	quarantinedClaimJournalRelease, err := coordinator.journal.HasQuarantinedClaimJournalRelease()
+	if err != nil {
+		return empty, err
+	}
+	if quarantinedClaimJournalRelease {
+		return empty, fmt.Errorf("%w: an acquired-claim release has a terminal non-success receipt", ErrCommandStartBlocked)
+	}
 	entry, err := prepare()
 	if err != nil {
 		return empty, err
@@ -331,6 +361,9 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 		!commandStartReceiptsPreserved(previousSnapshot.Receipts, installed.Receipts) {
 		return empty, fmt.Errorf("%w: installed authority pull does not match its verified product", ErrCommandStartIdentity)
 	}
+	if err = coordinator.acknowledgeLatestClaimJournalHeads(ctx, entry, installed); err != nil {
+		return empty, fmt.Errorf("wipd: acknowledge installed claim journal head: %w", err)
+	}
 
 	if result.Returned {
 		return result, nil
@@ -398,6 +431,11 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 			!bytes.Equal(receipt.CanonicalReceipt, fold.CanonicalReceipt) {
 			return empty, fmt.Errorf("%w: installed command receipt differs from returned fold", ErrCommandStartIdentity)
 		}
+		if entry.Delivery == operation.DeliveryClaim {
+			if err = coordinator.acknowledgeClaimJournalReceipt(ctx, entry, installed); err != nil {
+				return empty, fmt.Errorf("wipd: acknowledge installed claim journal receipt: %w", err)
+			}
+		}
 		result.Returned = true
 		result.ResultCode = fold.ResultCode
 		result.Receipt = append([]byte(nil), fold.CanonicalReceipt...)
@@ -448,6 +486,11 @@ func (coordinator *CommandStartCoordinator) returnPending(
 			installedReceipt.JournalPosition != pendingEntry.JournalPosition || installedReceipt.ResultCode != fold.ResultCode ||
 			!bytes.Equal(installedReceipt.CanonicalReceipt, fold.CanonicalReceipt) || installed.ManifestDigest != fold.Manifest.Digest {
 			return installed, false, ErrCommandStartIdentity
+		}
+		if pendingEntry.Delivery == operation.DeliveryClaim {
+			if err = coordinator.acknowledgeClaimJournalReceipt(ctx, pendingEntry, installed); err != nil {
+				return installed, false, fmt.Errorf("acknowledge returned claim journal receipt: %w", err)
+			}
 		}
 		if pendingEntry.Command.ID == current.Command.ID && result != nil {
 			result.Returned = true

@@ -402,6 +402,30 @@ install before local state becomes `closed`. Same-ID/hash replay returns the
 same receipt/close product. No subsequent command under the old epoch can be
 submitted.
 
+**M5 Step 16 acquired-journal controls.** Before preparing the barrier, the
+Environment queries the authenticated authority for the current open or sealed
+journal using the domain/authority epoch/Environment and exact claim ID/epoch,
+Matter ID, and Dispatch ID. The authority returns the assigned journal ID and
+generation; the Environment persists the first verified identity and rejects
+later mismatches. A generation can change locally only after installing a
+verified successful journal-repair result. The query never derives the journal
+ID from the claim ID or from the signed ClaimGrantStart/1.
+
+For an acquired claim, each returned command receipt is acknowledged only
+after its exact terminal receipt and accepted range are atomically installed
+through the asserted Environment prefix. ACK positions are contiguous and
+ordered; their Environment sequence numbers are strictly increasing but need
+not be adjacent, because authority-class commands (including Matter finish)
+advance the Environment sequence without adding a claim-local receipt. The
+owner-scoped seal operation accepts only the current open
+generation and succeeds only when the authority can compute its complete
+terminal barrier. Query, ACK, and seal each recheck the authenticated owner,
+claim epoch, Matter, Dispatch, and current journal identity; the authority
+does not expose an unscoped ACK or seal primitive. These acquired-claim
+controls are distinct from Step 9's `birth-journal.ack`, which remains limited
+to the dispatch-less provisional birth journal. The existing
+`claim.release@v1` command and `JournalBarrier/1` are unchanged.
+
 **Step 9 amendment — dispatch-less provisional birth claim.** The existing
 `claim.release@v1` command also releases the implicit claim created atomically
 with a successful Step 8 Matter birth. This is not a new operation or request

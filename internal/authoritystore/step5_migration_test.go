@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestM5FreshAndExplicitV4ToV9Upgrade(t *testing.T) {
+func TestM5FreshAndExplicitV4ToV10Upgrade(t *testing.T) {
 	s, root := fresh(t)
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 9 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
 		t.Fatalf("fresh schema version %d: %v", version, err)
 	}
 	if err := s.Close(); err != nil {
@@ -75,6 +75,12 @@ func TestM5FreshAndExplicitV4ToV9Upgrade(t *testing.T) {
 	if err = UpgradeV8(legacy); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = OpenExisting(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("ordinary open of v9: %v", err)
+	}
+	if err = UpgradeV9(legacy); err != nil {
+		t.Fatal(err)
+	}
 	upgraded, err := OpenExisting(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +94,9 @@ func TestM5FreshAndExplicitV4ToV9Upgrade(t *testing.T) {
 	if err = UpgradeV8(legacy); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("repeated v8 upgrade: %v", err)
 	}
+	if err = UpgradeV9(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("repeated v9 upgrade: %v", err)
+	}
 	backup8, err := connect(filepath.Join(legacy, "authority-v8.backup.db"), "ro", false)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +105,14 @@ func TestM5FreshAndExplicitV4ToV9Upgrade(t *testing.T) {
 		t.Fatalf("retained v8 backup: %v", err)
 	}
 	_ = backup8.Close()
+	backup9, err := connect(filepath.Join(legacy, "authority-v9.backup.db"), "ro", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backup9.Close() }()
+	if err = checkSchemaVersion(backup9, 9); err != nil {
+		t.Fatalf("retained v9 backup: %v", err)
+	}
 	backup, err := connect(filepath.Join(legacy, "authority-v4.backup.db"), "ro", false)
 	if err != nil {
 		t.Fatal(err)
@@ -137,8 +154,11 @@ func TestStep5JournalAcceptsBeforeSubmissionAndRejectsGaps(t *testing.T) {
 	if _, err := s.db.Exec(insert, domainA, journal, 3, repoA, "hash", []byte{0xa0}, 19); err == nil {
 		t.Fatal("accepted skipped journal position")
 	}
-	if _, err := s.db.Exec(insert, domainA, journal, 2, repoA, "hash", []byte{0xa0}, 19); err == nil {
-		t.Fatal("accepted skipped environment sequence")
+	if _, err := s.db.Exec(insert, domainA, journal, 2, repoA, "hash", []byte{0xa0}, 19); err != nil {
+		t.Fatalf("rejected increasing Environment sequence with an intervening non-claim command: %v", err)
+	}
+	if _, err := s.db.Exec(insert, domainA, journal, 3, command, "hash", []byte{0xa0}, 19); err == nil {
+		t.Fatal("accepted non-increasing Environment sequence")
 	}
 	if _, err := s.db.Exec(`DELETE FROM claim_journal_entries WHERE domain_id=? AND journal_id=?`, domainA, journal); err == nil {
 		t.Fatal("deleted immutable journal evidence")
