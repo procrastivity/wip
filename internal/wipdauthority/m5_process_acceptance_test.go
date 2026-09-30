@@ -40,7 +40,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	fixture.config.Registry = registry
 	fixture.server = fixture.serverForStore(t, fixture.store)
 	var responseDrops m5ClaimJournalResponseDrops
-	var ordinaryCommandResponseDrop atomic.Bool
+	var ordinaryCommandResponseDrop m5OrdinaryCommandResponseDrop
 	var claimJournalQueries m5ClaimJournalQueryTrace
 	authorityHandler := fixture.server.http.Handler
 	authorityHandler = discardOneOrdinaryCommandResponse(authorityHandler, &ordinaryCommandResponseDrop)
@@ -241,10 +241,11 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 			Input: operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Process Acceptance Step"},
 		},
 	}
-	ordinaryCommandResponseDrop.Store(true)
+	ordinaryCommandResponseDrop.armed.Store(true)
 	_, err = client.ExecuteCommand(context.Background(), step)
-	if err == nil || ordinaryCommandResponseDrop.Load() {
-		t.Fatalf("ordinary connected Step response was not lost: err=%v dropped=%v", err, !ordinaryCommandResponseDrop.Load())
+	if !ordinaryCommandResponseDrop.dropped.Load() || ordinaryCommandResponseDrop.armed.Load() {
+		t.Fatalf("ordinary connected Step terminal response was not lost after completion: err=%v armed=%v dropped=%v",
+			err, ordinaryCommandResponseDrop.armed.Load(), ordinaryCommandResponseDrop.dropped.Load())
 	}
 	stepStatus, statusErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID,
 		m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
@@ -258,8 +259,18 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	committedSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1,
 		authoritystore.EmptyPrefixAnchor(), "01KZ7XHAQT1S46NYPN1PW1DX4C", time.Now().UTC(), time.Minute)
 	if err != nil || len(committedSnapshot.Delta.Events) != 2 {
-		t.Fatalf("capture exact committed event range before retry: events=%d err=%v", len(committedSnapshot.Delta.Events), err)
+		t.Fatalf("capture exact committed event range before retry: events=%d err=%v; prefix has Matter and Step events", len(committedSnapshot.Delta.Events), err)
 	}
+	stepReceiptFields, err := wipdwire.DecodeCanonicalMap(stepStatus.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	acceptedEvents, acceptedEventsOK := stepReceiptFields["accepted_events"].(map[string]any)
+	if err != nil || !acceptedEventsOK || acceptedEvents["event_count"] != uint64(1) ||
+		acceptedEvents["first_event_id"] != acceptedEvents["last_event_id"] ||
+		acceptedEvents["first_event_id"] != committedSnapshot.Delta.Events[1].EventID {
+		t.Fatalf("pre-retry Step receipt does not bind exactly its event in the Matter+Step prefix: fields=%#v snapshot=%+v err=%v",
+			stepReceiptFields, committedSnapshot.Delta.Events, err)
+	}
+	retainedStepReceipt := bytes.Clone(stepStatus.Receipt)
 	stepResult, err := client.ExecuteCommand(context.Background(), step)
 	if err != nil || stepResult.Code != operation.ResultSucceeded {
 		t.Fatalf("exact same-ID/hash Step retry after lost terminal response = %+v, %v", stepResult, err)
@@ -294,7 +305,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("Matter terminal authority status = %+v, %v", matterStatus, err)
 	}
 	stepStatus, err = fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID, m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
-	if err != nil || stepStatus.Pending || len(stepStatus.Receipt) == 0 {
+	if err != nil || stepStatus.Pending || !bytes.Equal(stepStatus.Receipt, retainedStepReceipt) {
 		t.Fatalf("Step terminal authority status = %+v, %v", stepStatus, err)
 	}
 	for label, receipt := range map[string][]byte{"Matter": matterStatus.Receipt, "Step": stepStatus.Receipt} {
@@ -1246,9 +1257,14 @@ func discardOneClaimJournalResponse(next http.Handler, drops *m5ClaimJournalResp
 	})
 }
 
-func discardOneOrdinaryCommandResponse(next http.Handler, enabled *atomic.Bool) http.Handler {
+type m5OrdinaryCommandResponseDrop struct {
+	armed   atomic.Bool
+	dropped atomic.Bool
+}
+
+func discardOneOrdinaryCommandResponse(next http.Handler, drop *m5OrdinaryCommandResponseDrop) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != labExchangePath || !enabled.Load() {
+		if request.URL.Path != labExchangePath || !drop.armed.Load() {
 			next.ServeHTTP(writer, request)
 			return
 		}
@@ -1259,12 +1275,32 @@ func discardOneOrdinaryCommandResponse(next http.Handler, enabled *atomic.Bool) 
 		}
 		request.Body = io.NopCloser(bytes.NewReader(body))
 		frame, err := wipdwire.ReadFrame(bytes.NewReader(body))
-		if err != nil || frame.Kind != "command.submit" || !enabled.CompareAndSwap(true, false) {
+		if err != nil || frame.Kind != "command.submit" {
 			next.ServeHTTP(writer, request)
 			return
 		}
-		next.ServeHTTP(m5DiscardResponseWriter{ResponseWriter: writer}, request)
+		next.ServeHTTP(m5DropTerminalResponseWriter{ResponseWriter: writer, drop: drop}, request)
 	})
+}
+
+type m5DropTerminalResponseWriter struct {
+	http.ResponseWriter
+	drop *m5OrdinaryCommandResponseDrop
+}
+
+func (writer m5DropTerminalResponseWriter) Write(payload []byte) (int, error) {
+	frame, err := wipdwire.ReadFrame(bytes.NewReader(payload))
+	if err == nil && frame.Kind == "command.terminal" && writer.drop.armed.CompareAndSwap(true, false) {
+		writer.drop.dropped.Store(true)
+		return len(payload), nil
+	}
+	return writer.ResponseWriter.Write(payload)
+}
+
+func (writer m5DropTerminalResponseWriter) Flush() {
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 type m5DiscardResponseWriter struct {
