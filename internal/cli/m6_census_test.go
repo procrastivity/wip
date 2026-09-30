@@ -67,6 +67,219 @@ func TestM6OperationCensus(t *testing.T) {
 	}
 }
 
+// These expectations are intentionally independent of the census TSV. They
+// pin the current multi-mode dispatch branches in next, init, finding,
+// lifecycle, and outbox CLI sources to their semantic operation identities,
+// so a relabelled mode or valid-but-wrong operation cannot make the table
+// self-consistent while losing the source behavior it describes.
+var m6PinnedCLIModes = map[string]map[string]string{
+	"next": {
+		"frontier-read": "next.read@v1",
+		"cursor-set":    "cursor.set@v1",
+		"cursor-clear":  "cursor.clear@v1",
+	},
+	"init": {
+		"resolve-route":      "route.resolve@v1",
+		"remote-less-create": "repo.create-local@v1",
+		"attach-once":        "environment.attach-once@v1",
+		"tier-enrollment":    "tier.enroll@v1",
+	},
+	"plumbing finding add": {
+		"Matter-or-Step-subject": "finding.append@v1",
+		"BacklogEntry-subject":   "backlog.finding.append@v1",
+	},
+	"plumbing finish": {
+		"finish-Matter": "matter.finish@v1;render.sealed-node@v1",
+		"finish-Stage":  "stage.finish@v1",
+		"finish-Step":   "step.finish@v1",
+	},
+	"plumbing next": {
+		"frontier-read": "next.read@v1",
+		"cursor-set":    "cursor.set@v1",
+		"cursor-clear":  "cursor.clear@v1",
+	},
+	"plumbing outbox level": {
+		"read-level": "tracker.config.read@v1",
+		"set-level":  "tracker.config.set@v1",
+	},
+	"plumbing outbox backlog-push": {
+		"read-backlog-push": "tracker.config.read@v1",
+		"set-backlog-push":  "tracker.config.set@v1",
+	},
+	"plumbing outbox backend": {
+		"read-backend": "tracker.config.read@v1",
+		"set-backend":  "tracker.config.set@v1",
+	},
+	"plumbing outbox target": {
+		"read-target": "tracker.config.read@v1",
+		"set-target":  "tracker.config.set@v1",
+	},
+	"plumbing outbox project": {
+		"read-project": "tracker.config.read@v1",
+		"set-project":  "tracker.config.set@v1",
+	},
+	"plumbing outbox canceled-label": {
+		"read-canceled-label": "tracker.config.read@v1",
+		"set-canceled-label":  "tracker.config.set@v1",
+	},
+}
+
+var m6PinnedAliases = map[string]string{
+	"next": "plumbing next",
+}
+
+func TestM6PinnedCLIModeExpectationsRejectMutations(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := readCensusTSV(t, root, "docs/wipd/m6-cli-modes.tsv", []string{
+		"path", "mode", "disposition", "owner_step", "alias_of", "operation_ids",
+		"current_owner", "current_behavior", "target_behavior", "test_owner",
+	})
+	if problems := m6PinnedCLIModeErrors(rows); len(problems) != 0 {
+		t.Fatalf("checked-in multi-mode branches do not match pinned expectations: %s", strings.Join(problems, "; "))
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*testing.T, []map[string]string) []map[string]string
+		wantErrors []string
+	}{
+		{
+			name: "relabel cursor clear",
+			mutate: func(t *testing.T, rows []map[string]string) []map[string]string {
+				findCensusModeRow(t, rows, "next", "cursor-clear")["mode"] = "cursor-reset"
+				return rows
+			},
+			wantErrors: []string{"missing pinned mode next/cursor-clear", "unexpected mode next/cursor-reset"},
+		},
+		{
+			name: "map cursor clear to another defined operation",
+			mutate: func(t *testing.T, rows []map[string]string) []map[string]string {
+				findCensusModeRow(t, rows, "next", "cursor-clear")["operation_ids"] = "cursor.set@v1"
+				return rows
+			},
+			wantErrors: []string{"next/cursor-clear operation_ids"},
+		},
+		{
+			name: "omit cursor clear",
+			mutate: func(t *testing.T, rows []map[string]string) []map[string]string {
+				index := findCensusModeIndex(t, rows, "next", "cursor-clear")
+				return append(rows[:index], rows[index+1:]...)
+			},
+			wantErrors: []string{"missing pinned mode next/cursor-clear"},
+		},
+		{
+			name: "break alias semantic parity",
+			mutate: func(t *testing.T, rows []map[string]string) []map[string]string {
+				findCensusModeRow(t, rows, "next", "cursor-clear")["operation_ids"] = "cursor.set@v1"
+				return rows
+			},
+			wantErrors: []string{"alias next -> plumbing next differs for mode cursor-clear"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mutated := cloneCensusRows(rows)
+			mutated = tt.mutate(t, mutated)
+			problems := m6PinnedCLIModeErrors(mutated)
+			for _, want := range tt.wantErrors {
+				if !containsCensusProblem(problems, want) {
+					t.Errorf("validation errors %q do not include %q", problems, want)
+				}
+			}
+		})
+	}
+}
+
+func m6PinnedCLIModeErrors(rows []map[string]string) []string {
+	actual := make(map[string]map[string]string)
+	var problems []string
+	for _, row := range rows {
+		path, mode := row["path"], row["mode"]
+		if actual[path] == nil {
+			actual[path] = make(map[string]string)
+		}
+		if _, exists := actual[path][mode]; exists {
+			problems = append(problems, fmt.Sprintf("duplicate mode %s/%s", path, mode))
+		}
+		actual[path][mode] = row["operation_ids"]
+	}
+
+	for path, expectedModes := range m6PinnedCLIModes {
+		for mode, wantOperation := range expectedModes {
+			gotOperation, exists := actual[path][mode]
+			if !exists {
+				problems = append(problems, fmt.Sprintf("missing pinned mode %s/%s", path, mode))
+				continue
+			}
+			if gotOperation != wantOperation {
+				problems = append(problems, fmt.Sprintf("%s/%s operation_ids = %q, want %q", path, mode, gotOperation, wantOperation))
+			}
+		}
+		for mode := range actual[path] {
+			if _, exists := expectedModes[mode]; !exists {
+				problems = append(problems, fmt.Sprintf("unexpected mode %s/%s", path, mode))
+			}
+		}
+	}
+
+	for alias, canonical := range m6PinnedAliases {
+		aliasModes, canonicalModes := actual[alias], actual[canonical]
+		for mode, aliasOperation := range aliasModes {
+			canonicalOperation, exists := canonicalModes[mode]
+			if !exists || aliasOperation != canonicalOperation {
+				problems = append(problems, fmt.Sprintf("alias %s -> %s differs for mode %s", alias, canonical, mode))
+			}
+		}
+		for mode := range canonicalModes {
+			if _, exists := aliasModes[mode]; !exists {
+				problems = append(problems, fmt.Sprintf("alias %s -> %s is missing mode %s", alias, canonical, mode))
+			}
+		}
+	}
+
+	sort.Strings(problems)
+	return problems
+}
+
+func cloneCensusRows(rows []map[string]string) []map[string]string {
+	cloned := make([]map[string]string, len(rows))
+	for index, row := range rows {
+		cloned[index] = make(map[string]string, len(row))
+		for key, value := range row {
+			cloned[index][key] = value
+		}
+	}
+	return cloned
+}
+
+func findCensusModeRow(t *testing.T, rows []map[string]string, path, mode string) map[string]string {
+	t.Helper()
+	return rows[findCensusModeIndex(t, rows, path, mode)]
+}
+
+func findCensusModeIndex(t *testing.T, rows []map[string]string, path, mode string) int {
+	t.Helper()
+	for index, row := range rows {
+		if row["path"] == path && row["mode"] == mode {
+			return index
+		}
+	}
+	t.Fatalf("missing test fixture mode %s/%s", path, mode)
+	return -1
+}
+
+func containsCensusProblem(problems []string, fragment string) bool {
+	for _, problem := range problems {
+		if strings.Contains(problem, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 func readCensusTSV(t *testing.T, root, relative string, wantHeader []string) []map[string]string {
 	t.Helper()
 	file, err := os.Open(filepath.Join(root, relative))
@@ -240,6 +453,9 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 	if len(rows) != 95 {
 		t.Errorf("CLI mode table has %d rows, want census baseline 95", len(rows))
 	}
+	for _, problem := range m6PinnedCLIModeErrors(rows) {
+		t.Errorf("CLI mode expectations: %s", problem)
+	}
 	seenModes := make(map[string]bool, len(rows))
 	paths := make(map[string]bool)
 	pathModes := make(map[string][]map[string]string)
@@ -301,6 +517,20 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 			if row["alias_of"] != verb.AliasOf {
 				t.Errorf("path %q modes disagree with manifest alias identity", path)
 			}
+		}
+	}
+	actualAliases := make(map[string]string)
+	for path, verb := range verbs {
+		if verb.AliasOf != "" {
+			actualAliases[path] = verb.AliasOf
+		}
+	}
+	if len(actualAliases) != len(m6PinnedAliases) {
+		t.Errorf("manifest aliases = %v, want exactly %v", actualAliases, m6PinnedAliases)
+	}
+	for alias, canonical := range m6PinnedAliases {
+		if got := actualAliases[alias]; got != canonical {
+			t.Errorf("manifest alias %q targets %q, want %q", alias, got, canonical)
 		}
 	}
 	wantLocal := []string{"install", "manifest", "uninstall", "version"}
