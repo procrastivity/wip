@@ -40,8 +40,10 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	fixture.config.Registry = registry
 	fixture.server = fixture.serverForStore(t, fixture.store)
 	var responseDrops m5ClaimJournalResponseDrops
+	var ordinaryCommandResponseDrop atomic.Bool
 	var claimJournalQueries m5ClaimJournalQueryTrace
 	authorityHandler := fixture.server.http.Handler
+	authorityHandler = discardOneOrdinaryCommandResponse(authorityHandler, &ordinaryCommandResponseDrop)
 	authorityHandler = discardOneClaimJournalResponse(authorityHandler, &responseDrops)
 	fixture.server.http.Handler = recordClaimJournalQueries(authorityHandler, &claimJournalQueries)
 
@@ -239,9 +241,28 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 			Input: operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Process Acceptance Step"},
 		},
 	}
+	ordinaryCommandResponseDrop.Store(true)
+	_, err = client.ExecuteCommand(context.Background(), step)
+	if err == nil || ordinaryCommandResponseDrop.Load() {
+		t.Fatalf("ordinary connected Step response was not lost: err=%v dropped=%v", err, !ordinaryCommandResponseDrop.Load())
+	}
+	stepStatus, statusErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID,
+		m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	if statusErr != nil || stepStatus.Pending || len(stepStatus.Receipt) == 0 {
+		t.Fatalf("lost response did not follow durable ordinary-command terminal commit: status=%+v err=%v", stepStatus, statusErr)
+	}
+	committedAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || committedAnchor.EventCount != 2 {
+		t.Fatalf("authority did not commit the Step before response loss: anchor=%+v err=%v", committedAnchor, err)
+	}
+	committedSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1,
+		authoritystore.EmptyPrefixAnchor(), "01KZ7XHAQT1S46NYPN1PW1DX4C", time.Now().UTC(), time.Minute)
+	if err != nil || len(committedSnapshot.Delta.Events) != 2 {
+		t.Fatalf("capture exact committed event range before retry: events=%d err=%v", len(committedSnapshot.Delta.Events), err)
+	}
 	stepResult, err := client.ExecuteCommand(context.Background(), step)
 	if err != nil || stepResult.Code != operation.ResultSucceeded {
-		t.Fatalf("Step birth through daemon process = %+v, %v", stepResult, err)
+		t.Fatalf("exact same-ID/hash Step retry after lost terminal response = %+v, %v", stepResult, err)
 	}
 	stepOutput, ok := stepResult.Output.(operation.StepCreateOutput)
 	if !ok || stepOutput.ID == "" || stepOutput.ParentID != matterOutput.ID || stepOutput.MatterID != matterOutput.ID ||
@@ -254,14 +275,25 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("same-ID Step replay = %+v, %v; original=%+v", replay, err, stepResult)
 	}
 	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || anchor.EventCount != 2 {
-		t.Fatalf("authority event range after exact replay = %+v, %v; want exactly two birth events", anchor, err)
+	if err != nil || anchor != committedAnchor {
+		t.Fatalf("same-ID/hash retry changed the retained authority event range: before=%+v after=%+v err=%v", committedAnchor, anchor, err)
+	}
+	retriedSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1,
+		authoritystore.EmptyPrefixAnchor(), "01KZ7XHAQT1S46NYPN1PW1DX4D", time.Now().UTC(), time.Minute)
+	if err != nil || len(retriedSnapshot.Delta.Events) != len(committedSnapshot.Delta.Events) {
+		t.Fatalf("same-ID/hash retry changed event count: before=%d after=%d err=%v", len(committedSnapshot.Delta.Events), len(retriedSnapshot.Delta.Events), err)
+	}
+	for index := range committedSnapshot.Delta.Events {
+		before, after := committedSnapshot.Delta.Events[index], retriedSnapshot.Delta.Events[index]
+		if before.EventID != after.EventID || !bytes.Equal(before.Record, after.Record) {
+			t.Fatalf("same-ID/hash retry changed authority event %d: before=%+v after=%+v", index, before, after)
+		}
 	}
 	matterStatus, err := fixture.store.QueryCommand(context.Background(), m5TestDomain, matter.ID, m5CommandHash(t, matter), 1, fixture.peer, m5TestEnv, time.Now().UTC())
 	if err != nil || matterStatus.Pending || len(matterStatus.Receipt) == 0 {
 		t.Fatalf("Matter terminal authority status = %+v, %v", matterStatus, err)
 	}
-	stepStatus, err := fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID, m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	stepStatus, err = fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID, m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
 	if err != nil || stepStatus.Pending || len(stepStatus.Receipt) == 0 {
 		t.Fatalf("Step terminal authority status = %+v, %v", stepStatus, err)
 	}
@@ -1207,6 +1239,27 @@ func discardOneClaimJournalResponse(next http.Handler, drops *m5ClaimJournalResp
 		operationFields, ok := command["operation"].(map[string]any)
 		if err != nil || !ok || !wipdwire.ExactMapKeys(operationFields, "name", "version") ||
 			operationFields["name"] != "claim.release" || operationFields["version"] != uint64(1) || !drops.release.CompareAndSwap(true, false) {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		next.ServeHTTP(m5DiscardResponseWriter{ResponseWriter: writer}, request)
+	})
+}
+
+func discardOneOrdinaryCommandResponse(next http.Handler, enabled *atomic.Bool) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != labExchangePath || !enabled.Load() {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		frame, err := wipdwire.ReadFrame(bytes.NewReader(body))
+		if err != nil || frame.Kind != "command.submit" || !enabled.CompareAndSwap(true, false) {
 			next.ServeHTTP(writer, request)
 			return
 		}
