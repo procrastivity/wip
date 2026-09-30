@@ -116,7 +116,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(clientStateRoot, "client-state.json"), stateBytes, 0o600); err != nil {
 		t.Fatalf("write authenticated empty-prefix client state: %v", err)
 	}
-	profileRoot, err := os.MkdirTemp("/tmp", "w8-")
+	profileRoot, err := os.MkdirTemp("", "w8-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,17 +151,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("write connected authority profile: %v", err)
 	}
 
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve repository root for wipd process build")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
-	binary := filepath.Join(t.TempDir(), "wipd")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/wipd")
-	build.Dir = repoRoot
-	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		t.Fatalf("build wipd process: %v\n%s", buildErr, output)
-	}
+	binary := m5WipdBinary(t)
 	processCtx, stopProcess := context.WithCancel(context.Background())
 	defer stopProcess()
 	process := exec.CommandContext(processCtx, binary, "--profile-root", profileRoot)
@@ -1143,6 +1133,32 @@ func sameClaimGrantSummary(left, right wipdjournal.ClaimGrantSummary) bool {
 		left.ClaimID == right.ClaimID && left.ClaimEpoch == right.ClaimEpoch && left.MatterID == right.MatterID &&
 		left.BatchID == right.BatchID && left.DispatchID == right.DispatchID && left.Manifest == right.Manifest &&
 		sameAuthorityAnchor(left.AsOf, right.AsOf)
+}
+
+func m5WipdBinary(t *testing.T) string {
+	t.Helper()
+	if binary := os.Getenv("WIP_M5_WIPD_BINARY"); binary != "" {
+		info, err := os.Stat(binary)
+		if err != nil {
+			t.Fatalf("stat configured wipd process binary: %v", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("configured wipd process binary is not executable: %s", binary)
+		}
+		return binary
+	}
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve repository root for wipd process build")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
+	binary := filepath.Join(t.TempDir(), "wipd")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/wipd")
+	build.Dir = repoRoot
+	if output, buildErr := build.CombinedOutput(); buildErr != nil {
+		t.Fatalf("build wipd process: %v\n%s", buildErr, output)
+	}
+	return binary
 }
 
 func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) (*wipd.Client, func(), *bytes.Buffer) {

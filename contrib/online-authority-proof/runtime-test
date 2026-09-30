@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+run="$root/contrib/online-authority-proof/run"
+compose_file="$root/contrib/online-authority-proof/compose.yaml"
+image='alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1'
+volume_root=/var/lib/online-authority-proof
+state_root="$volume_root/.step20"
+owner_label=com.procrastivity.wip.authority-proof
+project="${WIP_AUTHORITY_LAB_PROJECT:-wip-authority-proof-step20-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
+tmp_dir="$(mktemp -d)"
+cleanup_needed=0
+
+fail() {
+  printf 'online authority lab runtime: %s\n' "$*" >&2
+  exit 1
+}
+
+command -v docker >/dev/null || fail 'docker CLI is unavailable'
+command -v jq >/dev/null || fail 'jq is unavailable'
+command -v go >/dev/null || fail 'Go is unavailable; enter the repository dev shell first'
+[[ "$project" =~ ^wip-authority-proof-[a-z0-9][a-z0-9_-]{0,31}$ ]] \
+  || fail 'project must match wip-authority-proof-<lowercase-id> (1-32 characters)'
+
+compose() {
+  docker compose -p "$project" -f "$compose_file" "$@"
+}
+
+project_resources_absent() {
+  local resource
+  [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]] || return 1
+  for resource in "${project}_authority-state" "${project}_client-state"; do
+    docker volume inspect "$resource" >/dev/null 2>&1 && return 1
+  done
+  docker network inspect "${project}_lab" >/dev/null 2>&1 && return 1
+  return 0
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ "$cleanup_needed" -eq 1 ]]; then
+    if WIP_AUTHORITY_LAB_PROJECT="$project" "$run" down >"$tmp_dir/compose-down.log" 2>&1 \
+      && project_resources_absent; then
+      printf "PASS teardown removed this run's containers, network, and named volumes\n"
+    else
+      printf 'FAIL teardown did not remove all resources for project %s\n' "$project" >&2
+      status=1
+    fi
+  fi
+  rm -rf "$tmp_dir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+docker info --format '{{.ServerVersion}}' >/dev/null \
+  || fail 'Docker Engine is unavailable'
+"$run" config >/dev/null
+project_resources_absent || fail "project collision: $project already has containers, network, or volumes"
+
+CGO_ENABLED=0 go build -trimpath -o "$tmp_dir/wipd" ./cmd/wipd
+CGO_ENABLED=0 go test -c -trimpath -o "$tmp_dir/wipdauthority.test" ./internal/wipdauthority
+test_filter='^(TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess|TestM5TwoEnvironmentClaimCloseAndFinalPullSpine)$'
+listed_tests="$("$tmp_dir/wipdauthority.test" -test.list "$test_filter")"
+for test_name in \
+  TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess \
+  TestM5TwoEnvironmentClaimCloseAndFinalPullSpine; do
+  grep -Fqx "$test_name" <<<"$listed_tests" \
+    || fail "compiled process acceptance binary is missing $test_name"
+done
+
+cleanup_needed=1
+if ! WIP_AUTHORITY_LAB_PROJECT="$project" "$run" up >"$tmp_dir/compose-up.log" 2>&1; then
+  printf 'FAIL Compose startup for project %s\n' "$project" >&2
+  tail -n 20 "$tmp_dir/compose-up.log" >&2 || true
+  exit 1
+fi
+
+mapfile -t authority_containers < <(compose ps --status running --quiet authority-env)
+mapfile -t client_containers < <(compose ps --status running --quiet client-env)
+[[ "${#authority_containers[@]}" -eq 1 && "${#client_containers[@]}" -eq 1 ]] \
+  || fail 'runtime did not start exactly one authority-env and one client-env'
+authority_id="${authority_containers[0]}"
+client_id="${client_containers[0]}"
+network_id="${project}_lab"
+
+assert_container_isolation() {
+  local container_id="$1" service="$2" environment="$3" volume="$4" inspection checks
+  inspection="$(docker inspect "$container_id")"
+  checks="$(jq \
+    --arg project "$project" \
+    --arg network "$network_id" \
+    --arg image "$image" \
+    --arg service "$service" \
+    --arg environment "$environment" \
+    --arg volume "${project}_${volume}" \
+    --arg owner_label "$owner_label" \
+    --arg state_root "$volume_root" \
+    '
+      .[0] as $container |
+      {
+        running: ($container.State.Running == true),
+        pinned_image: ($container.Config.Image == $image),
+        project_label: ($container.Config.Labels["com.docker.compose.project"] == $project),
+        service_label: ($container.Config.Labels["com.docker.compose.service"] == $service),
+        owner_label: ($container.Config.Labels[$owner_label] == "lab-v1"),
+        read_only_root: ($container.HostConfig.ReadonlyRootfs == true),
+        not_privileged: ($container.HostConfig.Privileged == false),
+        all_capabilities_dropped: (($container.HostConfig.CapDrop | index("ALL")) != null),
+        no_added_capabilities: ($container.HostConfig.CapAdd == null or ($container.HostConfig.CapAdd | length) == 0),
+        no_new_privileges: (($container.HostConfig.SecurityOpt | index("no-new-privileges:true")) != null),
+        no_host_bind_mounts: all($container.Mounts[]; .Type == "volume"),
+        no_devices: ($container.HostConfig.Devices == null or ($container.HostConfig.Devices | length) == 0),
+        no_volumes_from: ($container.HostConfig.VolumesFrom == null or ($container.HostConfig.VolumesFrom | length) == 0),
+        no_published_ports: ($container.HostConfig.PortBindings == null or ($container.HostConfig.PortBindings | length) == 0),
+        correct_network_mode: ($container.HostConfig.NetworkMode == $network),
+        private_pid_namespace: ($container.HostConfig.PidMode != "host"),
+        private_ipc_namespace: ($container.HostConfig.IpcMode != "host"),
+        expected_environment: ($container.Config.Env | map(select(startswith("LAB_ENVIRONMENT="))) == ["LAB_ENVIRONMENT=" + $environment]),
+        no_secret_environment_keys: all($container.Config.Env[]?;
+          (split("=")[0] | test("(?i)(token|secret|password|credential|private[_-]?key)")) | not),
+        only_lab_network: ($container.NetworkSettings.Networks | keys == [$network]),
+        one_mount: (($container.Mounts | length) == 1),
+        named_volume: ($container.Mounts[0].Type == "volume" and $container.Mounts[0].Name == $volume),
+        volume_target: ($container.Mounts[0].Destination == $state_root),
+        volume_writable: ($container.Mounts[0].RW == true)
+      }
+    ' <<<"$inspection")"
+  if ! jq -e 'all(.[]; . == true)' <<<"$checks" >/dev/null; then
+    printf 'FAIL runtime container isolation for %s (project=%s, container=%s): ' \
+      "$service" "$project" "${container_id:0:12}" >&2
+    jq -c '.' <<<"$checks" >&2
+    fail "runtime container isolation check failed for $service"
+  fi
+
+  if docker exec "$container_id" sh -c 'touch /etc/.step20-readonly-probe' \
+    >/dev/null 2>&1; then
+    docker exec "$container_id" rm -f /etc/.step20-readonly-probe >/dev/null 2>&1 || true
+    fail "$service root filesystem accepted a write despite read_only"
+  fi
+  docker exec "$container_id" sh -c '
+    for path in /run/docker.sock /var/run/docker.sock /home/user/workspace/repo/.wip /home/user/.wip /root/.wip; do
+      [ ! -e "$path" ] || exit 1
+    done
+  ' || fail "$service can see a host Docker socket or host WIP state path"
+}
+
+network_inspection="$(docker network inspect "$network_id")"
+jq -e \
+  --arg project "$project" \
+  --arg owner_label "$owner_label" \
+  --arg authority_id "$authority_id" \
+  --arg client_id "$client_id" \
+  '
+    .[0] as $network |
+    $network.Internal == true and
+    $network.Driver == "bridge" and
+    $network.Labels["com.docker.compose.project"] == $project and
+    $network.Labels[$owner_label] == "lab-v1" and
+    $network.Containers[$authority_id] != null and
+    $network.Containers[$client_id] != null and
+    ($network.Containers | length) == 2
+  ' <<<"$network_inspection" >/dev/null \
+  || fail 'runtime network is not the isolated two-container lab network'
+
+assert_container_isolation "$authority_id" authority-env authority authority-state
+assert_container_isolation "$client_id" client-env client client-state
+printf 'PASS runtime isolation: project=%s authority=%s client=%s internal-network=%s\n' \
+  "$project" "${authority_id:0:12}" "${client_id:0:12}" "$network_id"
+
+docker exec "$authority_id" sh -c 'printf authority-only > "$1/.step20-authority-volume-probe"' sh "$volume_root"
+docker exec "$authority_id" test -f "$volume_root/.step20-authority-volume-probe"
+if docker exec "$client_id" test -e "$volume_root/.step20-authority-volume-probe"; then
+  fail 'authority named volume is visible in client-env'
+fi
+docker exec "$client_id" sh -c 'printf client-only > "$1/.step20-client-volume-probe"' sh "$volume_root"
+docker exec "$client_id" test -f "$volume_root/.step20-client-volume-probe"
+if docker exec "$authority_id" test -e "$volume_root/.step20-client-volume-probe"; then
+  fail 'client named volume is visible in authority-env'
+fi
+docker exec "$authority_id" rm -f "$volume_root/.step20-authority-volume-probe"
+docker exec "$client_id" rm -f "$volume_root/.step20-client-volume-probe"
+printf 'PASS named-volume isolation: each service sees only its own writable state volume\n'
+
+run_process_acceptance() {
+  local container_id="$1" service="$2" state_dir="$state_root/acceptance" log="$tmp_dir/$2-acceptance.log"
+  docker exec "$container_id" mkdir -p "$state_dir"
+  docker exec "$container_id" chmod 700 "$volume_root" "$state_root" "$state_dir"
+  docker cp "$tmp_dir/wipd" "$container_id:$state_root/wipd" >/dev/null
+  docker cp "$tmp_dir/wipdauthority.test" "$container_id:$state_root/wipdauthority.test" >/dev/null
+  if ! docker exec \
+    --env "TMPDIR=$state_dir" \
+    --env "WIP_M5_WIPD_BINARY=$state_root/wipd" \
+    "$container_id" "$state_root/wipdauthority.test" \
+    -test.v -test.run "$test_filter" -test.count=1 >"$log" 2>&1; then
+    printf 'FAIL M5 process acceptance in %s; failed tests: ' "$service" >&2
+    awk '/^--- FAIL: / { printf "%s ", $3 } END { print "" }' "$log" >&2
+    awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[[:alnum:]_.\/-]+\.go:[0-9]+:$/) { sub(/:$/, "", $i); print $i } }' \
+      "$log" | sort -u | tr '\n' ' ' >&2
+    printf '\n' >&2
+    return 1
+  fi
+  for test_name in \
+    TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess \
+    TestM5TwoEnvironmentClaimCloseAndFinalPullSpine; do
+    awk -v name="$test_name" '$1 == "---" && $2 == "PASS:" && $3 == name { passed = 1 } END { exit !passed }' "$log" \
+      || fail "$service did not report a pass for $test_name"
+  done
+  docker exec "$container_id" sh -c '
+    [ -z "$(ls -1A "$1")" ]
+  ' sh "$state_dir" \
+    || fail "$service retained temporary M5 profile/journal state after acceptance"
+  printf 'PASS M5 fault-injection and two-Environment acceptance: service=%s volume=%s\n' \
+    "$service" "${project}_$( [[ "$service" == authority-env ]] && printf authority-state || printf client-state )"
+}
+
+run_process_acceptance "$authority_id" authority-env
+run_process_acceptance "$client_id" client-env
+
+ordering_filter='^TestConnectedCommandStart(ReturnsPendingPrefixBeforeTailAndWrite|WithoutPendingPullsBeforeGuard|PullFailureAndRestartDoNotReturnUnadmittedHead|SerializesAdmissionAndPullThroughSharedDomainLane)$'
+if go test ./internal/wipd -run "$ordering_filter" -count=1 >"$tmp_dir/command-start.log" 2>&1; then
+  printf 'PASS command-start pull ordering: pending and no-pending concurrent-advance cases\n'
+else
+  printf 'FAIL command-start pull-ordering regressions\n' >&2
+  awk '/^--- FAIL: / { print; next } /^FAIL([[:space:]]|$)/ { print "wipd test package failed" }' "$tmp_dir/command-start.log" >&2
+  exit 1
+fi
+
+printf 'PASS runtime acceptance suites completed with fresh per-run volumes; teardown follows\n'

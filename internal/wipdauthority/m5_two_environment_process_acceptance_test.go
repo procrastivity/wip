@@ -16,7 +16,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -98,7 +97,7 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		}
 	})
 
-	root, err := os.MkdirTemp("/tmp", "w19-")
+	root, err := os.MkdirTemp("", "w19-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,17 +128,7 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		t.Fatalf("independent Environment staging changed identical content identity: A=%+v B=%+v", stagedA, stagedB)
 	}
 
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve repository root for wipd process build")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
-	binary := filepath.Join(t.TempDir(), "wipd")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/wipd")
-	build.Dir = repoRoot
-	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		t.Fatalf("build wipd process: %v\n%s", buildErr, output)
-	}
+	binary := m5WipdBinary(t)
 	clientA, stopA, outputA := startWipdForBirthReleaseRecovery(t, binary, a.profileRoot)
 	clientB, stopB, outputB := startWipdForBirthReleaseRecovery(t, binary, b.profileRoot)
 	defer func() {

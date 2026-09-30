@@ -142,3 +142,32 @@ The legacy CLI path is unchanged. This remains a bounded lab subset: it makes
 no claim that M4 synthetic fixture state is canonical authority state and does
 not implement migration, disconnected claim commands, other operation
 families, or later acceptance work.
+
+## Step 20 runtime acceptance
+
+With the repository Go dev shell active and a working Docker Engine, run:
+
+```sh
+make authority-lab-runtime-test
+```
+
+This builds static test binaries, starts a uniquely named project from absent
+containers/network/volumes, and verifies the live runtime has the pinned image,
+read-only roots, dropped capabilities, an internal-only network, no host binds,
+ports, Docker socket, host WIP paths, or secret-like environment keys, and two
+different writable named volumes. A write probe proves each service cannot see
+the other service's volume. The M5 real-process fault/replay and two-Environment
+acceptance tests then run separately inside each service, with `TMPDIR` on that
+service's fresh named volume; command-start tests cover authority advancement
+with pending work and without pending work. Temporary profile/journal state is
+checked for cleanup, and the script removes and verifies absence of only its
+own project's containers, network, and volumes on success or failure.
+
+The in-container acceptance fixtures bind their test authority to loopback;
+this verifies real `wipd` processes and disposable volume-backed state inside
+the actual Compose runtime, but does not claim authority traffic between the
+two Compose containers. The sanitized runtime output retains the per-run
+Compose project/container IDs and pass outcomes, not test payloads, credentials,
+tokens, or private keys. An optional `WIP_AUTHORITY_LAB_PROJECT` can select a
+lowercase project suffix; the runtime test refuses to reuse any existing
+resources under that name.
