@@ -218,8 +218,26 @@ run_process_acceptance() {
 run_process_acceptance "$authority_id" authority-env
 run_process_acceptance "$client_id" client-env
 
-ordering_filter='^TestConnectedCommandStart(ReturnsPendingPrefixBeforeTailAndWrite|WithoutPendingPullsBeforeGuard|PullFailureAndRestartDoNotReturnUnadmittedHead|SerializesAdmissionAndPullThroughSharedDomainLane)$'
-if go test ./internal/wipd -run "$ordering_filter" -count=1 >"$tmp_dir/command-start.log" 2>&1; then
+ordering_filter='^(TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite|TestConnectedCommandStartWithoutPendingPullsBeforeGuard|TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead|TestConnectedCommandStartSerializesAdmissionAndPullThroughSharedDomainLane)$'
+ordering_tests="$(go test ./internal/wipd -list "$ordering_filter")" \
+  || fail 'could not list command-start pull-ordering regressions'
+for test_name in \
+  TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite \
+  TestConnectedCommandStartWithoutPendingPullsBeforeGuard \
+  TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead \
+  TestConnectedCommandStartSerializesAdmissionAndPullThroughSharedDomainLane; do
+  grep -Fqx "$test_name" <<<"$ordering_tests" \
+    || fail "command-start pull-ordering suite does not select $test_name"
+done
+if go test -v ./internal/wipd -run "$ordering_filter" -count=1 >"$tmp_dir/command-start.log" 2>&1; then
+  for test_name in \
+    TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite \
+    TestConnectedCommandStartWithoutPendingPullsBeforeGuard \
+    TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead \
+    TestConnectedCommandStartSerializesAdmissionAndPullThroughSharedDomainLane; do
+    grep -F -- "--- PASS: $test_name (" "$tmp_dir/command-start.log" >/dev/null \
+      || fail "command-start pull-ordering test did not execute: $test_name"
+  done
   printf 'PASS command-start pull ordering: pending and no-pending concurrent-advance cases\n'
 else
   printf 'FAIL command-start pull-ordering regressions\n' >&2

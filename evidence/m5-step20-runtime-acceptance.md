@@ -28,13 +28,23 @@
   post-commit terminal/receipt-query response with exact-identity recovery, and
   acquired claim-journal close recovery. Temporary profile/journal directories
   were absent after each test suite.
-- Command-start pull-ordering regressions for pending and no-pending concurrent
-  authority advancement: PASS.
-- Repository verification: `make check`, `go vet ./...`, and `git diff --check`:
-  PASS. Race commands also passed:
-  `go test -race ./internal/wipdauthority -run '^(TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess|TestM5TwoEnvironmentClaimCloseAndFinalPullSpine)$' -count=1`
-  and
-  `go test -race ./internal/wipd -run '^TestConnectedCommandStart(ReturnsPendingPrefixBeforeTailAndWrite|WithoutPendingPullsBeforeGuard|PullFailureAndRestartDoNotReturnUnadmittedHead|SerializesAdmissionAndPullThroughSharedDomainLane)$' -count=1`.
+- The original command-start runtime selector ran the pending and
+  no-pending/concurrent-advance cases below, but omitted the restart regression
+  due to its incorrect test name; see the review-correction record below.
+- HIGH review found that the original runtime-script selector omitted
+  `TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead`; the script
+  now verifies all four intended names with `go test -list` and requires each
+  to appear as `PASS` in the executed test log. HIGH independently ran the
+  omitted regression with `-race -count=3`: PASS.
+- Correction validation: `go test -list` selected all four names; the verbose
+  focused suite reported PASS for each, including
+  `TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead`; its
+  focused `go test -race ./internal/wipd -run
+  '^TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead$' -count=3`
+  run also passed.
+- Earlier repository verification: `make check`, `go vet ./...`, and
+  `git diff --check` passed. The authority-process race command also passed:
+  `go test -race ./internal/wipdauthority -run '^(TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess|TestM5TwoEnvironmentClaimCloseAndFinalPullSpine)$' -count=1`.
 - Teardown removed the per-run containers, network, and volumes; independent
   Docker inspection confirmed none of those project resources remained: PASS.
 - Sanitization: this record contains only matter/step, project, container,
