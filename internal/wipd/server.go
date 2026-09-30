@@ -408,6 +408,9 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 					if errors.Is(err, wipdjournal.ErrCommandIDConflict) {
 						return dispatchOutcome{problemCode: "command.id-conflict"}
 					}
+					if errors.Is(err, ErrOutcomeUnknown) {
+						return dispatchOutcome{problemCode: "transport.outcome-unknown"}
+					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						return dispatchOutcome{problemCode: "transport.outcome-unknown"}
 					}

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -273,7 +274,8 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 	}
 	receipt, err := terminalFromSubmit(ctx, runtime.client, runtime.state.DomainID, entry, frames)
 	if err != nil {
-		return empty, err
+		return empty, fmt.Errorf("wipdremote: command %s may have been submitted: %w", entry.Command.ID,
+			errors.Join(wipd.ErrOutcomeUnknown, err))
 	}
 	resultCode, err := terminalResultCode(receipt)
 	if err != nil {

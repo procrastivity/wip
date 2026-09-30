@@ -41,9 +41,11 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	fixture.server = fixture.serverForStore(t, fixture.store)
 	var responseDrops m5ClaimJournalResponseDrops
 	var ordinaryCommandResponseDrop m5OrdinaryCommandResponseDrop
+	var connectionFaults m5ConnectionFaults
 	var claimJournalQueries m5ClaimJournalQueryTrace
 	authorityHandler := fixture.server.http.Handler
 	authorityHandler = discardOneOrdinaryCommandResponse(authorityHandler, &ordinaryCommandResponseDrop)
+	authorityHandler = injectM5ConnectionFaults(authorityHandler, &connectionFaults)
 	authorityHandler = discardOneClaimJournalResponse(authorityHandler, &responseDrops)
 	fixture.server.http.Handler = recordClaimJournalQueries(authorityHandler, &claimJournalQueries)
 
@@ -222,6 +224,25 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 			Context: operation.Context{Repo: m5TestRepo}, Input: operation.MatterCreateInput{Title: "Process Acceptance Matter", Locator: "process-acceptance"},
 		},
 	}
+	connectionFaults.blockPull.Store(true)
+	_, err = client.ExecuteCommand(context.Background(), matter)
+	var unavailable *wipd.ExchangeError
+	if !errors.As(err, &unavailable) || unavailable.Code != "authority.unavailable" {
+		t.Fatalf("pre-submission M5 connectivity loss = %v; want authority.unavailable", err)
+	}
+	connectionFaults.blockPull.Store(false)
+	if connectionFaults.commandSubmits.Load() != 0 || connectionFaults.receiptQueries.Load() != 0 {
+		t.Fatalf("pre-submission pull failure reached command submit/receipt query: submits=%d queries=%d",
+			connectionFaults.commandSubmits.Load(), connectionFaults.receiptQueries.Load())
+	}
+	if _, err = fixture.store.QueryCommand(context.Background(), m5TestDomain, matter.ID, m5CommandHash(t, matter),
+		1, fixture.peer, m5TestEnv, time.Now().UTC()); !errors.Is(err, authoritystore.ErrNotFound) {
+		t.Fatalf("pre-submission failure created an authority receipt: %v", err)
+	}
+	noEffectAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || noEffectAnchor.EventCount != 0 {
+		t.Fatalf("pre-submission failure mutated authority prefix: %+v err=%v", noEffectAnchor, err)
+	}
 	matterResult, err := client.ExecuteCommand(context.Background(), matter)
 	if err != nil || matterResult.Code != operation.ResultSucceeded {
 		t.Fatalf("Matter birth through daemon process = %+v, %v", matterResult, err)
@@ -241,11 +262,20 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 			Input: operation.StepCreateInput{ParentID: matterOutput.ID, Title: "Process Acceptance Step"},
 		},
 	}
+	queriesBeforeUnknown := connectionFaults.receiptQueries.Load()
 	ordinaryCommandResponseDrop.armed.Store(true)
+	connectionFaults.blockReceiptQuery.Store(true)
 	_, err = client.ExecuteCommand(context.Background(), step)
+	connectionFaults.blockReceiptQuery.Store(false)
+	var uncertain *wipd.ExchangeError
 	if !ordinaryCommandResponseDrop.dropped.Load() || ordinaryCommandResponseDrop.armed.Load() {
 		t.Fatalf("ordinary connected Step terminal response was not lost after completion: err=%v armed=%v dropped=%v",
 			err, ordinaryCommandResponseDrop.armed.Load(), ordinaryCommandResponseDrop.dropped.Load())
+	}
+	if !errors.As(err, &uncertain) || uncertain.Code != "transport.outcome-unknown" || !uncertain.Uncertain ||
+		connectionFaults.receiptQueries.Load() != queriesBeforeUnknown+1 {
+		t.Fatalf("post-submission terminal/query response loss = %v with %d receipt queries; want outcome-unknown after one failed query",
+			err, connectionFaults.receiptQueries.Load()-queriesBeforeUnknown)
 	}
 	stepStatus, statusErr := fixture.store.QueryCommand(context.Background(), m5TestDomain, step.ID,
 		m5CommandHash(t, step), 1, fixture.peer, m5TestEnv, time.Now().UTC())
@@ -460,6 +490,25 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 			Operation: operation.StepStartV1.Metadata().Operation, Actor: "human",
 			Context: commandContext, Claim: claimContext, Input: operation.StepLifecycleInput{StepID: stepOutput.ID},
 		},
+	}
+	claimSubmitsBeforeOfflineAttempt := connectionFaults.commandSubmits.Load()
+	connectionFaults.blockPull.Store(true)
+	_, err = recoveredClient.ExecuteCommand(context.Background(), stepStart)
+	connectionFaults.blockPull.Store(false)
+	if !errors.As(err, &unavailable) || unavailable.Code != "authority.unavailable" {
+		t.Fatalf("disconnected M5 claim continuation = %v; want explicit authority.unavailable, not deferred execution", err)
+	}
+	if connectionFaults.commandSubmits.Load() != claimSubmitsBeforeOfflineAttempt {
+		t.Fatalf("disconnected claim continuation reached authority command.submit: before=%d after=%d",
+			claimSubmitsBeforeOfflineAttempt, connectionFaults.commandSubmits.Load())
+	}
+	if _, err = fixture.store.QueryCommand(context.Background(), m5TestDomain, stepStart.ID, m5CommandHash(t, stepStart),
+		1, fixture.peer, m5TestEnv, time.Now().UTC()); !errors.Is(err, authoritystore.ErrNotFound) {
+		t.Fatalf("disconnected claim continuation was queued at the authority: %v", err)
+	}
+	claimOfflineAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || !sameAuthorityAnchor(acquired.Installed, wireAnchor(claimOfflineAnchor)) {
+		t.Fatalf("disconnected claim continuation mutated the authority prefix: %+v err=%v", claimOfflineAnchor, err)
 	}
 	started, err := recoveredClient.ExecuteCommand(context.Background(), stepStart)
 	if err != nil || started.Code != operation.ResultSucceeded || started.Output != (operation.StepLifecycleOutput{
@@ -1260,6 +1309,49 @@ func discardOneClaimJournalResponse(next http.Handler, drops *m5ClaimJournalResp
 type m5OrdinaryCommandResponseDrop struct {
 	armed   atomic.Bool
 	dropped atomic.Bool
+}
+
+type m5ConnectionFaults struct {
+	blockPull         atomic.Bool
+	blockReceiptQuery atomic.Bool
+	commandSubmits    atomic.Int32
+	receiptQueries    atomic.Int32
+}
+
+func injectM5ConnectionFaults(next http.Handler, faults *m5ConnectionFaults) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != labExchangePath {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		frame, err := wipdwire.ReadFrame(bytes.NewReader(body))
+		if err != nil {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		switch frame.Kind {
+		case "command.submit":
+			faults.commandSubmits.Add(1)
+		case "receipt.query":
+			faults.receiptQueries.Add(1)
+			if faults.blockReceiptQuery.Load() {
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		case "pull.request":
+			if faults.blockPull.Load() {
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
 }
 
 func discardOneOrdinaryCommandResponse(next http.Handler, drop *m5OrdinaryCommandResponseDrop) http.Handler {

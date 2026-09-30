@@ -303,6 +303,9 @@ func (c *Client) ExecuteCommand(ctx context.Context, command operation.Command) 
 		if _, err := readFrame(response.Body, uint32(c.parameters.maxFrameBody)); !errors.Is(err, io.EOF) {
 			return operation.Result{}, &ExchangeError{Code: code, Err: err}
 		}
+		if code == "transport.outcome-unknown" {
+			return operation.Result{}, uncertainExchange(ErrOutcomeUnknown)
+		}
 		return operation.Result{}, &ExchangeError{Code: code}
 	}
 	if frame.kind != "response.end" {
