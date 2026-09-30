@@ -377,10 +377,20 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 			secondReplayAfterReopen, dispatches, err)
 	}
 	postReopen, err := f.s.PinSnapshot(ctx, domainA, 7, emptyAnchor(), claimTestID(202), f.now, time.Minute)
-	if err != nil || postReopen.Delta.End != wantAnchor || !reflect.DeepEqual(postReopen.Delta.Events, wantEvents) ||
+	if err != nil {
+		t.Fatalf("pin authority snapshot after reopen: %v", err)
+	}
+	if postReopen.Delta.End != wantAnchor || !reflect.DeepEqual(postReopen.Delta.Events, wantEvents) ||
+		postReopen.Manifest.Digest != snapshot.Manifest.Digest || len(postReopen.Manifest.Entries) != 1 ||
+		postReopen.Manifest.Entries[0].Digest != digest || postReopen.Manifest.Entries[0].ByteLength != uint64(len(content)) ||
 		!reflect.DeepEqual(readFindings(), wantProjection) || dispatches != 2 {
 		t.Fatalf("finding authority reopen changed event bytes/order or folded projection: end=%+v want=%+v events=%d/%d dispatches=%d err=%v",
 			postReopen.Delta.End, wantAnchor, len(postReopen.Delta.Events), len(wantEvents), dispatches, err)
+	}
+	reopenedPull, reopenedDigest, err := f.s.BlobRange(ctx, domainA, 7, postReopen.ID, postReopen.Manifest.Digest,
+		digest, uint64(len(content)), 0, uint64(len(content)), f.now)
+	if err != nil || !bytes.Equal(reopenedPull, content) || reopenedDigest != digestBytes(content) {
+		t.Fatalf("pull finding through post-reopen manifest: bytes=%q digest=%s err=%v", reopenedPull, reopenedDigest, err)
 	}
 }
 
