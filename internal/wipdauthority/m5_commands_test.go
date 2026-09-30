@@ -454,6 +454,115 @@ func m5HTTPSExchange(t *testing.T, client *http.Client, profile Profile, path, k
 	return frames
 }
 
+func assertFindingAppendAuthorityReplay(t *testing.T, fixture *m5CommandFixture, command operation.Command, want operation.ContentSegmentOutput) {
+	t.Helper()
+	client, err := fixture.profile.HTTPClientWithCertificate(fixture.serverRoots, &fixture.clientCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	var connection net.Conn
+	hello, err := wipdwire.EncodeCanonical(map[string]any{
+		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
+		"identity_schemas": []any{"wipd.command/1"},
+		"operations": []any{map[string]any{
+			"name": "finding.append", "versions": []any{uint64(1)}, "identity_schemas": []any{"wipd.command/1"},
+		}},
+		"store_schemas": []any{"wipd.store/1"}, "features": []any{"wipd.frame/1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	negotiated := m5HTTPSExchange(t, client, fixture.profile, labNegotiatePath, "client.hello", hello, &connection)
+	if len(negotiated) != 2 || negotiated[0].Kind != "server.hello" || negotiated[1].Kind != "session.parameters" {
+		t.Fatalf("finding.append authenticated negotiation = %+v", negotiated)
+	}
+	hash := m5CommandHash(t, command)
+	status, err := fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, hash, 1, fixture.peer, m5TestEnv, time.Now().UTC())
+	if err != nil || status.Pending || len(status.Receipt) == 0 {
+		t.Fatalf("finding.append durable receipt before retry = %+v, %v", status, err)
+	}
+	receipt, err := wipdwire.DecodeCanonicalMap(status.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || receipt["command_id"] != command.ID || receipt["request_hash"] != hash {
+		t.Fatalf("finding.append receipt identity = %#v, %v", receipt, err)
+	}
+	result, ok := receipt["result"].(map[string]any)
+	outputBytes, outputOK := result["output"].([]byte)
+	output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "id", "subject_id", "kind", "blob_digest", "byte_length")
+	if !ok || !outputOK || outputErr != nil || result["code"] != string(operation.ResultSucceeded) ||
+		output["id"] != want.ID || output["subject_id"] != want.SubjectID || output["kind"] != want.Kind ||
+		output["blob_digest"] != want.BlobDigest || output["byte_length"] != uint64(want.ByteLength) {
+		t.Fatalf("finding.append durable output = %#v, %v", result, outputErr)
+	}
+	before, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSnapshotID, err := randomULID(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1,
+		authoritystore.EmptyPrefixAnchor(), beforeSnapshotID, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit, err := wipdwire.EncodeCanonical(wipdwire.CommandSubmit{
+		Schema: "wipd.command-submit/1", CanonicalCommand: canonical, RequestHash: hash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := m5HTTPSExchange(t, client, fixture.profile, labExchangePath, "command.submit", submit, &connection)
+	if len(replay) != 1 || replay[0].Kind != "command.terminal" || !bytes.Equal(replay[0].Payload, status.Receipt) {
+		t.Fatalf("authenticated finding.append exact retry = %+v, want exact durable receipt", replay)
+	}
+	conflict := command
+	input, ok := conflict.Request.Input.(operation.FindingAppendInput)
+	if !ok {
+		t.Fatalf("finding.append command input = %T", conflict.Request.Input)
+	}
+	input.SubjectID = "01KZ7XHAQT1S46NYPN1PW1DX99"
+	conflict.Request.Input = input
+	conflictCanonical, err := conflict.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictHash, err := conflict.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictPayload, err := wipdwire.EncodeCanonical(wipdwire.CommandSubmit{
+		Schema: "wipd.command-submit/1", CanonicalCommand: conflictCanonical, RequestHash: conflictHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictFrames := m5HTTPSExchange(t, client, fixture.profile, labExchangePath, "command.submit", conflictPayload, &connection)
+	if len(conflictFrames) != 1 || conflictFrames[0].Kind != "problem" || m5ProblemCode(t, conflictFrames[0]) != "command.id-conflict" {
+		t.Fatalf("authenticated finding.append same-ID/different-hash retry = %+v", conflictFrames)
+	}
+	after, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSnapshotID, err := randomULID(time.Now().UTC().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSnapshot, err := fixture.store.PinSnapshot(context.Background(), m5TestDomain, 1,
+		authoritystore.EmptyPrefixAnchor(), afterSnapshotID, time.Now().UTC(), time.Minute)
+	if err != nil || after != before || !reflect.DeepEqual(afterSnapshot.Delta.Events, beforeSnapshot.Delta.Events) {
+		t.Fatalf("finding.append replay/conflict changed authority event bytes/order: before=%+v after=%+v events=%d/%d err=%v",
+			before, after, len(beforeSnapshot.Delta.Events), len(afterSnapshot.Delta.Events), err)
+	}
+}
+
 func TestM5CommandExchangeUsesNegotiatedAuthenticatedHTTP2(t *testing.T) {
 	fixture := newM5CommandFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

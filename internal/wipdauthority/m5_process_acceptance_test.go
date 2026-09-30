@@ -608,6 +608,11 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		findingOutput.Kind != "findings" || findingOutput.BlobDigest != stagedBlobs["finding"].Digest || findingOutput.ByteLength != stagedBlobs["finding"].Size {
 		t.Fatalf("claim-scoped finding append = %+v, %v; daemon=%s", findingResult, err, recoveredOutput.String())
 	}
+	findingReplay, err := recoveredClient.ExecuteCommand(context.Background(), findingCommand)
+	if err != nil || findingReplay.Code != operation.ResultSucceeded || findingReplay.Output != findingOutput {
+		t.Fatalf("same-ID finding retry through isolated wipd IPC changed the accepted output = %+v, %v", findingReplay, err)
+	}
+	assertFindingAppendAuthorityReplay(t, fixture, findingCommand, findingOutput)
 	matterFinish := operation.Command{
 		ID: "01KZ7XHAQT1S46NYPN1PW1DX4N", AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
 		EnvironmentID: m5TestEnv, EnvironmentSequence: 9, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),

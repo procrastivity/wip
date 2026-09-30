@@ -3,6 +3,8 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -167,6 +169,7 @@ func TestContentWritePromotesOnlySuccessfulTerminalFold(t *testing.T) {
 
 func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	f := newClaimTestFixture(t)
+	t.Cleanup(func() { _ = f.s.Close() })
 	ctx := context.Background()
 	_, _, step := claimTestBirthStep(t, f, 31, 101)
 	if step.Pending || step.Owner != nil {
@@ -190,6 +193,24 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	if err := f.s.FinishBlob(ctx, domainA, 7, digest); err != nil {
 		t.Fatalf("verify staged finding: %v", err)
 	}
+	contentIDs := []string{claimTestID(132), claimTestID(133)}
+	dispatches := 0
+	registry := operation.NewRegistry()
+	if err := registry.Register(operation.FindingAppendV1, func(_ context.Context, request operation.Request) operation.Result {
+		input, ok := request.Input.(operation.FindingAppendInput)
+		if !ok || dispatches >= len(contentIDs) || len(request.Blobs) != 1 {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "invalid finding fixture request",
+			}}
+		}
+		dispatches++
+		blob := request.Blobs[0]
+		return operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
+			ID: contentIDs[dispatches-1], SubjectID: input.SubjectID, Kind: "findings", BlobDigest: blob.Digest, ByteLength: blob.Size,
+		}}
+	}); err != nil {
+		t.Fatal(err)
+	}
 	command := operation.Command{
 		ID: claimTestID(12), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
 		EnvironmentID: envA, EnvironmentSequence: 4,
@@ -210,14 +231,39 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	if err != nil || pending.Owner == nil || !pending.Pending {
 		t.Fatalf("submit Step finding: %+v %v", pending, err)
 	}
-	contentID := claimTestID(132)
-	firstCompleted, err := f.s.CompleteCommand(ctx, pending.Owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
-		ID: contentID, SubjectID: stepID, Kind: "findings", BlobDigest: digest, ByteLength: int64(len(content)),
-	}}, contentID, claimTestID(106), f.now, signWith(f.key))
+	firstResult := registry.Dispatch(ctx, command.Request)
+	firstOutput, ok := firstResult.Output.(operation.ContentSegmentOutput)
+	if firstResult.Code != operation.ResultSucceeded || !ok || firstOutput.ID != contentIDs[0] || firstOutput.SubjectID != stepID ||
+		firstOutput.Kind != "findings" || firstOutput.BlobDigest != digest || firstOutput.ByteLength != int64(len(content)) {
+		t.Fatalf("direct finding registry dispatch = %+v", firstResult)
+	}
+	contentID := firstOutput.ID
+	firstCompleted, err := f.s.CompleteCommand(ctx, pending.Owner, firstResult, contentID, claimTestID(106), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatalf("complete Step finding: %v", err)
 	}
 	claimTestAcknowledge(t, f, allocation.JournalID, 1, firstCompleted)
+	firstAnchor := f.anchor(t)
+	firstReplay, err := f.s.SubmitCommand(ctx, command, hash, f.peer, f.now)
+	if err != nil || firstReplay.Pending || firstReplay.Owner != nil || !bytes.Equal(firstReplay.Receipt, firstCompleted.Receipt) || dispatches != 1 {
+		t.Fatalf("exact finding replay changed durable result or dispatched again: replay=%+v dispatches=%d err=%v", firstReplay, dispatches, err)
+	}
+	conflict := command
+	conflict.Request.Input = operation.FindingAppendInput{SubjectID: f.matter}
+	conflictHash, err := conflict.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.s.SubmitCommand(ctx, conflict, conflictHash, f.peer, f.now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same finding ID with different subject/hash = %v, want command conflict", err)
+	}
+	if afterConflict := f.anchor(t); afterConflict != firstAnchor || dispatches != 1 {
+		t.Fatalf("finding conflict changed authority state: before=%+v after=%+v dispatches=%d", firstAnchor, afterConflict, dispatches)
+	}
+	var segmentsAfterConflict uint64
+	if err = f.s.db.QueryRow(`SELECT count(*) FROM content_segments WHERE domain_id=? AND command_id=?`, domainA, command.ID).Scan(&segmentsAfterConflict); err != nil || segmentsAfterConflict != 1 {
+		t.Fatalf("finding conflict produced %d segments, %v; want the one original segment", segmentsAfterConflict, err)
+	}
 	second := command
 	second.ID = claimTestID(13)
 	second.EnvironmentSequence = 5
@@ -230,10 +276,14 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	if err != nil || secondPending.Owner == nil || !secondPending.Pending {
 		t.Fatalf("submit repeated Step finding: %+v %v", secondPending, err)
 	}
-	secondContentID := claimTestID(133)
-	secondCompleted, err := f.s.CompleteCommand(ctx, secondPending.Owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.ContentSegmentOutput{
-		ID: secondContentID, SubjectID: stepID, Kind: "findings", BlobDigest: digest, ByteLength: int64(len(content)),
-	}}, secondContentID, claimTestID(107), f.now, signWith(f.key))
+	secondResult := registry.Dispatch(ctx, second.Request)
+	secondOutput, ok := secondResult.Output.(operation.ContentSegmentOutput)
+	if secondResult.Code != operation.ResultSucceeded || !ok || secondOutput.ID != contentIDs[1] || secondOutput.SubjectID != stepID ||
+		secondOutput.Kind != "findings" || secondOutput.BlobDigest != digest || secondOutput.ByteLength != int64(len(content)) {
+		t.Fatalf("second direct finding registry dispatch = %+v", secondResult)
+	}
+	secondContentID := secondOutput.ID
+	secondCompleted, err := f.s.CompleteCommand(ctx, secondPending.Owner, secondResult, secondContentID, claimTestID(107), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatalf("complete repeated Step finding: %v", err)
 	}
@@ -269,6 +319,36 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	if err != nil || len(snapshot.Manifest.Entries) != 1 || snapshot.Manifest.Entries[0].Digest != digest || snapshot.Manifest.Entries[0].ByteLength != uint64(len(content)) {
 		t.Fatalf("reused digest snapshot manifest = %+v, %v", snapshot.Manifest, err)
 	}
+	wantEvents := append([]PrefixRecord(nil), snapshot.Delta.Events...)
+	wantAnchor := snapshot.Delta.End
+	type findingProjection struct {
+		contentID, subjectID, matterID, repoID, kind, blobDigest, commandID, eventID string
+		byteLength                                                                   int64
+	}
+	readFindings := func() []findingProjection {
+		t.Helper()
+		rows, queryErr := f.s.db.Query(`SELECT c.content_id,c.subject_id,c.matter_id,c.repo_id,c.kind,c.blob_digest,c.byte_length,c.command_id,c.event_id
+			FROM content_segments c JOIN authority_events e USING(domain_id,event_id)
+			WHERE c.domain_id=? AND c.kind='findings' ORDER BY e.position`, domainA)
+		if queryErr != nil {
+			t.Fatal(queryErr)
+		}
+		defer func() { _ = rows.Close() }()
+		var result []findingProjection
+		for rows.Next() {
+			var item findingProjection
+			if queryErr = rows.Scan(&item.contentID, &item.subjectID, &item.matterID, &item.repoID, &item.kind,
+				&item.blobDigest, &item.byteLength, &item.commandID, &item.eventID); queryErr != nil {
+				t.Fatal(queryErr)
+			}
+			result = append(result, item)
+		}
+		if queryErr = rows.Err(); queryErr != nil {
+			t.Fatal(queryErr)
+		}
+		return result
+	}
+	wantProjection := readFindings()
 	if err = f.s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -279,6 +359,28 @@ func TestClaimBlobClosureIncludesContentOnDirectSubtreeStep(t *testing.T) {
 	pulled, rangeDigest, err := f.s.BlobRange(ctx, domainA, 7, snapshot.ID, snapshot.Manifest.Digest, digest, uint64(len(content)), 0, uint64(len(content)), f.now)
 	if err != nil || !bytes.Equal(pulled, content) || rangeDigest != digestBytes(content) {
 		t.Fatalf("pull reused digest after reopen: bytes=%q digest=%s err=%v", pulled, rangeDigest, err)
+	}
+	replayedAfterReopen, err := f.s.SubmitCommand(ctx, command, hash, f.peer, f.now)
+	if err != nil || replayedAfterReopen.Pending || replayedAfterReopen.Owner != nil ||
+		!bytes.Equal(replayedAfterReopen.Receipt, firstCompleted.Receipt) || dispatches != 2 {
+		t.Fatalf("finding replay after authority reopen changed receipt/output or dispatched again: replay=%+v dispatches=%d err=%v",
+			replayedAfterReopen, dispatches, err)
+	}
+	queriedAfterReopen, err := f.s.QueryCommand(ctx, domainA, command.ID, hash, 7, f.peer, envA, f.now)
+	if err != nil || queriedAfterReopen.Pending || !bytes.Equal(queriedAfterReopen.Receipt, firstCompleted.Receipt) {
+		t.Fatalf("finding receipt query after authority reopen = %+v, %v", queriedAfterReopen, err)
+	}
+	secondReplayAfterReopen, err := f.s.SubmitCommand(ctx, second, secondHash, f.peer, f.now)
+	if err != nil || secondReplayAfterReopen.Pending || secondReplayAfterReopen.Owner != nil ||
+		!bytes.Equal(secondReplayAfterReopen.Receipt, secondCompleted.Receipt) || dispatches != 2 {
+		t.Fatalf("second finding replay after authority reopen changed receipt/output or dispatched again: replay=%+v dispatches=%d err=%v",
+			secondReplayAfterReopen, dispatches, err)
+	}
+	postReopen, err := f.s.PinSnapshot(ctx, domainA, 7, emptyAnchor(), claimTestID(202), f.now, time.Minute)
+	if err != nil || postReopen.Delta.End != wantAnchor || !reflect.DeepEqual(postReopen.Delta.Events, wantEvents) ||
+		!reflect.DeepEqual(readFindings(), wantProjection) || dispatches != 2 {
+		t.Fatalf("finding authority reopen changed event bytes/order or folded projection: end=%+v want=%+v events=%d/%d dispatches=%d err=%v",
+			postReopen.Delta.End, wantAnchor, len(postReopen.Delta.Events), len(wantEvents), dispatches, err)
 	}
 }
 
