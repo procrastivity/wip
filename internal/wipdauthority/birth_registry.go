@@ -13,6 +13,34 @@ import (
 // Authority IDs and projections are still committed only by CompleteCommand.
 func NewM5BirthRegistry() (*operation.Registry, error) {
 	registry := operation.NewRegistry()
+	if err := registerM5BirthOperations(registry); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+// NewM6Step4Registry is a separate closed acceptance capability set: it keeps
+// the complete M5 compatibility registry and adds only Step 4 definitions.
+// Every M6 mutation is completed by one authority transaction, not by the
+// transport-neutral placeholder handler registered here.
+func NewM6Step4Registry() (*operation.Registry, error) {
+	registry, err := NewM5BirthRegistry()
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range operation.Step4Catalogue() {
+		if err := registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "Step 4 operation requires an authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
+}
+
+func registerM5BirthOperations(registry *operation.Registry) error {
 	if err := registry.Register(operation.MatterCreateV1, func(_ context.Context, request operation.Request) operation.Result {
 		input, ok := request.Input.(operation.MatterCreateInput)
 		if !ok {
@@ -34,7 +62,7 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 			ID: id, Locator: locator, Title: input.Title,
 		}}
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	if err := registry.Register(operation.StepCreateV1, func(_ context.Context, request operation.Request) operation.Result {
 		input, ok := request.Input.(operation.StepCreateInput)
@@ -47,7 +75,7 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 			ParentID: input.ParentID, Title: input.Title,
 		}}
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	for _, definition := range []operation.Definition{
 		operation.StepStartV1, operation.StepFinishV1, operation.MatterFinishV1,
@@ -57,7 +85,7 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 				Code: operation.ProblemExecutionFailed, Message: "lifecycle operation requires an authority transaction",
 			}}
 		}); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	for _, definition := range []operation.Definition{operation.ContentWriteOnceV1, operation.FindingAppendV1} {
@@ -84,8 +112,8 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 				ID: id, SubjectID: subject, Kind: kind, BlobDigest: blob.Digest, ByteLength: blob.Size,
 			}}
 		}); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return registry, nil
+	return nil
 }

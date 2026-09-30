@@ -56,15 +56,16 @@ func checkStep8State(db *sql.DB, submissions []storedSubmission) error {
 		return ErrInvalidStore
 	}
 
-	eventRows, err := db.Query(`SELECT record FROM authority_events`)
+	eventRows, err := db.Query(`SELECT domain_id,record FROM authority_events`)
 	if err != nil {
 		return err
 	}
 	stepEvents := 0
 	for eventRows.Next() {
+		var domain string
 		var raw []byte
 		var fields map[string]cbor.RawMessage
-		if err = eventRows.Scan(&raw); err != nil {
+		if err = eventRows.Scan(&domain, &raw); err != nil {
 			break
 		}
 		if canonicalDecode(raw, &fields) != nil {
@@ -77,6 +78,19 @@ func checkStep8State(db *sql.DB, submissions []storedSubmission) error {
 			break
 		}
 		if kind == "step.created" {
+			var commandID string
+			if artifactDecoder.Unmarshal(fields["command_id"], &commandID) != nil {
+				err = ErrInvalidStore
+				break
+			}
+			submission, ok := byID[ownerKey(domain, commandID)]
+			if !ok {
+				err = ErrInvalidStore
+				break
+			}
+			if submission.version != 1 {
+				continue
+			}
 			stepEvents++
 		}
 	}

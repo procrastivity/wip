@@ -103,8 +103,13 @@ func checkStep4State(db *sql.DB) error {
 	}
 	var terminals int
 	for _, s := range all {
+		id := operation.ID{Name: s.operation, Version: uint16(s.version)}
+		step4 := operation.Step4Operation(id)
+		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)})) || s.version != 1 {
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4) ||
+			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
+			!step4 && s.version != 1 {
 			return ErrInvalidStore
 		}
 		if lifecycleOperation(s.operation) {
@@ -164,10 +169,10 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		if code == "result.succeeded" {
-			if !first.Valid || !last.Valid || ((s.operation == "matter.create" || s.operation == "step.create") && first.Int64 != last.Int64) || r.Range == nil || ((s.operation == "matter.create" || s.operation == "step.create") && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
+			if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -194,7 +199,7 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		var eventCount int
-		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && (s.operation == "matter.create" || s.operation == "step.create") && eventCount != 1) || (code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)})) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
+		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && legacyBirth && eventCount != 1) || (code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -265,7 +270,7 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 	if err != nil {
 		return err
 	}
-	type projected struct{ domain, id, repo, locator, title, birth, command string }
+	type projected struct{ domain, id, repo, locator, assigned, title, birth, command string }
 	var expected []projected
 	lifecycleEvents := make(map[string][]lifecycleEvent)
 	var domain, previousID string
@@ -340,6 +345,67 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {
 				err = eventErr
 				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if operation.Step4Operation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			event, eventErr := parseStep12Event(raw, d, pos, id, cmd)
+			if decodeErr != nil || eventErr != nil || validateStep12Event(event, s, command) != nil {
+				err = ErrInvalidStore
+				break
+			}
+			if event.kind == "matter.created" {
+				if !exactKeys(event.payload, "id", "locator", "title") {
+					err = ErrInvalidStore
+					break
+				}
+				var idValue, locator, title string
+				if artifactDecoder.Unmarshal(event.payload["id"], &idValue) != nil || artifactDecoder.Unmarshal(event.payload["locator"], &locator) != nil ||
+					artifactDecoder.Unmarshal(event.payload["title"], &title) != nil || event.subject != idValue {
+					err = ErrInvalidStore
+					break
+				}
+				expected = append(expected, projected{
+					domain: d, id: idValue, repo: event.repo, locator: locator,
+					assigned: locator, title: title, birth: id, command: cmd,
+				})
+			} else if event.kind == "matter.locator-repaired" {
+				if !exactKeys(event.payload, "action", "requested_locator", "previous_locator", "assigned_locator") {
+					err = ErrInvalidStore
+					break
+				}
+				var previous, assigned string
+				if artifactDecoder.Unmarshal(event.payload["previous_locator"], &previous) != nil ||
+					artifactDecoder.Unmarshal(event.payload["assigned_locator"], &assigned) != nil {
+					err = ErrInvalidStore
+					break
+				}
+				found := false
+				for index := range expected {
+					if expected[index].domain == d && expected[index].id == event.subject && expected[index].locator == previous {
+						expected[index].locator = assigned
+						found = true
+						break
+					}
+				}
+				if !found {
+					err = ErrInvalidStore
+					break
+				}
 			}
 			var length [8]byte
 			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
@@ -498,7 +564,10 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 			err = ErrInvalidStore
 			break
 		}
-		expected = append(expected, projected{d, event.Payload.ID, event.Repo, event.Payload.Locator, event.Payload.Title, id, cmd})
+		expected = append(expected, projected{
+			domain: d, id: event.Payload.ID, repo: event.Repo, locator: event.Payload.Locator,
+			assigned: event.Payload.Locator, title: event.Payload.Title, birth: id, command: cmd,
+		})
 	}
 	if err == nil {
 		err = rows.Err()
@@ -539,6 +608,27 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 		r, e := readReceipt(receipt)
 		if e != nil {
 			return ErrInvalidStore
+		}
+		submission := byID[ownerKey(p.domain, p.command)]
+		if submission.operation == operation.MatterCreateV2.Metadata().Operation.Name && submission.version == uint64(operation.MatterCreateV2.Metadata().Operation.Version) {
+			command, decodeErr := operation.DecodeCanonicalCommand(submission.command)
+			input, inputOK := command.Request.Input.(operation.MatterCreateInput)
+			var output struct {
+				ID                    string `cbor:"id"`
+				Title                 string `cbor:"title"`
+				RequestedLocator      string `cbor:"requested_locator"`
+				AssignedLocator       string `cbor:"assigned_locator"`
+				LocatorRepairRequired bool   `cbor:"locator_repair_required"`
+			}
+			requested := input.Locator
+			if requested == "" {
+				requested = MatterLocator(input.Title)
+			}
+			if decodeErr != nil || !inputOK || closedPayload(r.Result.Output, &output, "id", "title", "requested_locator", "assigned_locator", "locator_repair_required") != nil ||
+				output.ID != p.id || output.Title != p.title || output.RequestedLocator != requested || output.AssignedLocator != p.assigned || output.LocatorRepairRequired != (requested != p.assigned) {
+				return ErrInvalidStore
+			}
+			continue
 		}
 		var output struct {
 			ID      string `cbor:"id"`

@@ -790,7 +790,13 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				return "", ErrCommandStartIdentity
 			}
 		default:
-			return "", ErrCommandStartIdentity
+			if !operation.Step4Operation(entry.Command.Request.Operation) || !hasRange {
+				return "", ErrCommandStartIdentity
+			}
+			count, countOK := accepted["event_count"].(uint64)
+			if !countOK || validateStep4Receipt(entry, outputBytes, count) != nil {
+				return "", ErrCommandStartIdentity
+			}
 		}
 		metadata, found := operationMetadata(entry.Command.Request.Operation)
 		if !found || metadata.Delivery != entry.Delivery {
@@ -898,7 +904,13 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		}
 		typed = content
 	default:
-		return operation.Result{}, ErrCommandStartIdentity
+		if !operation.Step4Operation(entry.Command.Request.Operation) {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed, err = decodeStep4Output(entry.Command.Request.Operation, outputBytes)
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
 	}
 	result := operation.Result{Code: code, Output: typed}
 	definition, found := operationDefinition(entry.Command.Request.Operation)

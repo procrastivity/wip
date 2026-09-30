@@ -587,7 +587,7 @@ func TestRejectedCommandDoesNotConsumeIDSequenceOrJournalPosition(t *testing.T) 
 		t.Fatalf("wrong-Repo command = %v, want ErrInvalidCommand", err)
 	}
 	unsupportedVersion := commandInput(testCommandPrefix+"60", "unsupported-version", "Unknown operation version")
-	unsupportedVersion.Request.Operation.Version++
+	unsupportedVersion.Request.Operation.Version = 99
 	if _, err = journal.PrepareCommand(unsupportedVersion); !errors.Is(err, ErrInvalidCommand) {
 		t.Fatalf("unsupported operation version = %v, want ErrInvalidCommand", err)
 	}

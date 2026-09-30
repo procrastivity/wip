@@ -326,6 +326,14 @@ func readCensusTSV(t *testing.T, root, relative string, wantHeader []string) []m
 
 func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]map[string]string {
 	t.Helper()
+	m5Operations := map[string]bool{
+		"matter.create@v1": true, "step.create@v1": true, "step.start@v1": true, "step.finish@v1": true,
+		"matter.finish@v1": true, "content.write-once@v1": true, "finding.append@v1": true,
+	}
+	m6Operations := map[string]bool{
+		"matter.create@v2": true, "stage.create@v1": true, "step.create@v2": true, "step.insert@v1": true,
+		"step.reorder@v1": true, "step.replace@v1": true, "step.remove@v1": true, "matter.locator-repair@v1": true,
+	}
 	definitions := make(map[string]map[string]string, len(rows))
 	registered := make(map[string]map[string]string)
 	for index, row := range rows {
@@ -338,8 +346,11 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		if !validCensusOperationID(id) {
 			t.Errorf("operation row %d has invalid versioned ID %q", index+1, id)
 		}
-		if !oneOf(row["status"], "catalogued-m5", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
+		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
 			t.Errorf("%s has unsupported status %q", id, row["status"])
+		}
+		if row["status"] == "catalogued-m5" && !m5Operations[id] || row["status"] == "catalogued-m6" && !m6Operations[id] {
+			t.Errorf("%s has a catalogued status that disagrees with its approved M5/M6 operation set", id)
 		}
 		step, err := strconv.Atoi(row["owner_step"])
 		if err != nil || step < 2 || step > 20 {
@@ -374,7 +385,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 				t.Errorf("%s has duplicate entries in %s: %q", id, field, row[field])
 			}
 		}
-		if row["status"] == "catalogued-m5" {
+		if row["status"] == "catalogued-m5" || row["status"] == "catalogued-m6" {
 			registered[id] = row
 		}
 	}
@@ -385,20 +396,20 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		actual[metadata.Operation.String()] = metadata
 	}
 	if len(actual) != len(registered) {
-		t.Errorf("catalogued-m5 row count = %d, runtime Catalogue has %d entries", len(registered), len(actual))
+		t.Errorf("catalogued operation row count = %d, runtime Catalogue has %d entries", len(registered), len(actual))
 	}
 	for id, metadata := range actual {
 		row, ok := registered[id]
 		if !ok {
-			t.Errorf("runtime catalogue operation %s has no catalogued-m5 row", id)
+			t.Errorf("runtime catalogue operation %s has no catalogued row", id)
 			continue
 		}
 		compareCensusMetadata(t, id, row, metadata)
 	}
 	for id, row := range definitions {
-		if row["status"] == "catalogued-m5" {
+		if row["status"] == "catalogued-m5" || row["status"] == "catalogued-m6" {
 			if _, ok := actual[id]; !ok {
-				t.Errorf("%s is marked catalogued-m5 but is absent from operation.Catalogue()", id)
+				t.Errorf("%s is marked catalogued but is absent from operation.Catalogue()", id)
 			}
 		}
 		if row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
@@ -597,7 +608,7 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 	for _, kind := range []string{
 		"store-open", "migration", "blob-store", "blob-retention", "filesystem", "advisory-lock",
 		"cli-files", "git-read", "cli-input", "provider-http", "external-hook",
-		"authenticated-control", "environment-identity", "authority-read", "daemon-diagnostics",
+		"authenticated-control", "environment-identity", "authority-read", "authority-operation", "daemon-diagnostics",
 	} {
 		if !kinds[kind] {
 			t.Errorf("non-CLI owner inventory is missing effect category %q", kind)
@@ -614,6 +625,7 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 		"authenticated-control": {"claim.acquire@v1", "claim.release@v1", "claim.stand-down@v1", "claim-journal.repair@v1", "claim-journal.close@v1"},
 		"environment-identity":  {"environment.certificate.renew@v1", "environment.certificate.rotate@v1", "environment.identity.recover@v1", "environment.identity.revoke@v1"},
 		"authority-read":        {"batch.read@v1"},
+		"authority-operation":   {"matter.locator-repair@v1"},
 		"daemon-diagnostics":    {"diagnostics.inspect@v1"},
 	}
 	for kind, operationIDs := range requiredOwnerOperations {

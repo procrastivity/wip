@@ -156,18 +156,28 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 }
 
 func registeredOperationCapabilities(registry *operation.Registry) []operationCapability {
-	var capabilities []operationCapability
+	byName := make(map[string]*operationCapability)
 	for _, definition := range registry.Definitions() {
 		id := definition.Metadata().Operation
 		schema, ok := identitySchemaFor(id)
 		if !ok {
 			continue
 		}
-		capabilities = append(capabilities, operationCapability{
-			name:            id.Name,
-			versions:        []uint16{id.Version},
-			identitySchemas: []string{schema},
-		})
+		capability := byName[id.Name]
+		if capability == nil {
+			capability = &operationCapability{name: id.Name}
+			byName[id.Name] = capability
+		}
+		capability.versions = append(capability.versions, id.Version)
+		if !containsString(capability.identitySchemas, schema) {
+			capability.identitySchemas = append(capability.identitySchemas, schema)
+		}
+	}
+	capabilities := make([]operationCapability, 0, len(byName))
+	for _, capability := range byName {
+		sort.Slice(capability.versions, func(i, j int) bool { return capability.versions[i] < capability.versions[j] })
+		sort.Strings(capability.identitySchemas)
+		capabilities = append(capabilities, *capability)
 	}
 	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i].name < capabilities[j].name })
 	return capabilities
@@ -180,6 +190,10 @@ func identitySchemaFor(id operation.ID) (string, bool) {
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
 		operation.FindingAppendV1.Metadata().Operation:
 		return identitySchemaV1, true
+	default:
+		if operation.Step4Operation(id) {
+			return identitySchemaV1, true
+		}
 	}
 	return "", false
 }

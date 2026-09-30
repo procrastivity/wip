@@ -61,12 +61,24 @@ type m5LabHandler struct {
 	registry   *operation.Registry
 	operations []operation.Definition
 	sign       authoritystore.Signer
+	m6         bool
 }
 
 // NewM5LabServer exposes the existing M2 enrollment and negotiated exchange
 // records for one exact Repo in the disposable M5 lab. NewServer remains
 // health-only.
 func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
+	return newLabServer(profile, certificate, config, false)
+}
+
+// NewM6LabServer creates the explicit M6 acceptance path. It preserves the
+// closed M5 compatibility set and additionally requires the complete Step 4
+// operation catalogue; the M5 lab allowlist itself remains unchanged.
+func NewM6LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
+	return newLabServer(profile, certificate, config, true)
+}
+
+func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConfig, m6 bool) (*Server, error) {
 	if config.Store == nil || !ulidPattern.MatchString(config.RepoID) || len(config.EnrollmentGrant) == 0 || len(config.EnrollmentGrant) > 4096 ||
 		len(config.ExpectedCSRDER) == 0 || len(config.ExpectedCSRDER) > 16_384 || len(config.EnvironmentCACertificateDER) == 0 || config.SignEnvironmentLeaf == nil {
 		return nil, ErrInvalidLabConfig
@@ -92,15 +104,29 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 		return nil, ErrInvalidLabConfig
 	}
 	var operations []operation.Definition
+	if m6 && config.Registry == nil {
+		return nil, ErrInvalidLabConfig
+	}
 	if config.Registry != nil {
 		operations = config.Registry.Definitions()
-		if len(operations) == 0 || len(operations) > 7 ||
+		maxOperations := 7
+		if m6 {
+			maxOperations += len(operation.Step4Catalogue())
+		}
+		if len(operations) == 0 || len(operations) > maxOperations || m6 && len(operations) != maxOperations ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
 			return nil, ErrInvalidLabConfig
 		}
 		matterRegistered := false
+		step4Registered := make(map[operation.ID]bool)
+		registered := make(map[operation.ID]bool, len(operations))
 		for _, definition := range operations {
 			id := definition.Metadata().Operation
+			registered[id] = true
+			if m6 && operation.Step4Operation(id) {
+				step4Registered[id] = true
+				continue
+			}
 			switch id {
 			case operation.MatterCreateV1.Metadata().Operation:
 				matterRegistered = true
@@ -116,6 +142,21 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 		}
 		if !matterRegistered {
 			return nil, ErrInvalidLabConfig
+		}
+		if m6 {
+			for _, definition := range []operation.Definition{
+				operation.MatterCreateV1, operation.StepCreateV1, operation.StepStartV1,
+				operation.StepFinishV1, operation.MatterFinishV1, operation.ContentWriteOnceV1, operation.FindingAppendV1,
+			} {
+				if !registered[definition.Metadata().Operation] {
+					return nil, ErrInvalidLabConfig
+				}
+			}
+			for _, definition := range operation.Step4Catalogue() {
+				if !step4Registered[definition.Metadata().Operation] {
+					return nil, ErrInvalidLabConfig
+				}
+			}
 		}
 		if len(certificate.Certificate) == 0 {
 			return nil, ErrInvalidLabConfig
@@ -144,7 +185,7 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 	app := &m5LabHandler{
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
-		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf,
+		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6,
 		registry: config.Registry, operations: operations, sign: config.SignArtifact,
 	}
 	mux := http.NewServeMux()

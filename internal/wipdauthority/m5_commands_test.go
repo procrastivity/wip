@@ -21,6 +21,7 @@ import (
 	"net/http/httptrace"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -822,6 +823,169 @@ func testM5OpenBodyCancellation(t *testing.T, mode string) {
 		t.Fatalf("receipt query after %s = %+v", mode, queryFrames)
 	}
 }
+
+func TestM6MatterCreateV2AuthenticatedCollisionReplayAndReopen(t *testing.T) {
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step4Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	server, err := NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatalf("create explicit M6 lab server: %v", err)
+	}
+	fixture.server, fixture.handler = server, server.http.Handler
+	session := m6Step4Session(t, fixture.handler, fixture.peer, registry)
+
+	first := m5Command(claimTestIDForM6(201), 1, "shared")
+	first.Request.Operation = operation.MatterCreateV2.Metadata().Operation
+	first.Request.Input = operation.MatterCreateInput{Title: "First Matter", Locator: "shared"}
+	firstFrames := submitM6Matter(t, fixture, session, first)
+	firstReceipt := m6TerminalReceipt(t, firstFrames)
+	firstOutput, firstCount := m6MatterCreateOutput(t, firstReceipt)
+	if firstOutput["requested_locator"] != "shared" || firstOutput["assigned_locator"] != "shared" || firstOutput["locator_repair_required"] != false || firstCount != 1 {
+		t.Fatalf("first Matter result = %#v, events=%d; want un-repaired one-event birth", firstOutput, firstCount)
+	}
+
+	second := m5Command(claimTestIDForM6(202), 2, "shared")
+	second.Request.Operation = operation.MatterCreateV2.Metadata().Operation
+	second.Request.Input = operation.MatterCreateInput{Title: "Second Matter", Locator: "shared"}
+	secondFrames := submitM6Matter(t, fixture, session, second)
+	secondReceipt := m6TerminalReceipt(t, secondFrames)
+	secondOutput, secondCount := m6MatterCreateOutput(t, secondReceipt)
+	secondID, ok := secondOutput["id"].(string)
+	assigned, assignedOK := secondOutput["assigned_locator"].(string)
+	if !ok || !assignedOK || secondOutput["requested_locator"] != "shared" || secondOutput["title"] != "Second Matter" ||
+		secondOutput["locator_repair_required"] != true || assigned != "shared-"+strings.ToLower(secondID[:6]) || secondCount != 2 {
+		t.Fatalf("collision repair result = %#v, events=%d; want deterministic ID-suffix repair with two ordered events", secondOutput, secondCount)
+	}
+	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || anchor.EventCount != 3 {
+		t.Fatalf("prefix after two M6 births = %+v, %v; want three events", anchor, err)
+	}
+
+	firstRetry := submitM6Matter(t, fixture, session, second)
+	if len(firstRetry) != 1 || firstRetry[0].Kind != "command.terminal" || !bytes.Equal(firstRetry[0].Payload, secondReceipt) {
+		t.Fatalf("exact M6 retry = %+v; want the byte-identical durable receipt", firstRetry)
+	}
+	conflict := second
+	conflict.Request.Input = operation.MatterCreateInput{Title: "Changed intent", Locator: "shared"}
+	conflictFrames := submitM6Matter(t, fixture, session, conflict)
+	if len(conflictFrames) != 1 || conflictFrames[0].Kind != "problem" || m5ProblemCode(t, conflictFrames[0]) != "command.id-conflict" {
+		t.Fatalf("same-ID different-hash M6 command = %+v", conflictFrames)
+	}
+	unchanged, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || unchanged != anchor {
+		t.Fatalf("M6 replay/conflict changed authority prefix: %+v, %v; before %+v", unchanged, err, anchor)
+	}
+
+	if err = fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := authoritystore.OpenExisting(fixture.root)
+	if err != nil {
+		t.Fatalf("reopen M6 authority projection: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	fixture.store = reopened
+	config.Store = reopened
+	server, err = NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatalf("recreate M6 lab server after reopen: %v", err)
+	}
+	fixture.server, fixture.handler = server, server.http.Handler
+	session = m6Step4Session(t, fixture.handler, fixture.peer, registry)
+	reopenedRetry := submitM6Matter(t, fixture, session, second)
+	if len(reopenedRetry) != 1 || reopenedRetry[0].Kind != "command.terminal" || !bytes.Equal(reopenedRetry[0].Payload, secondReceipt) {
+		t.Fatalf("post-reopen exact retry = %+v; want original durable receipt", reopenedRetry)
+	}
+	finalAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
+	if err != nil || finalAnchor != anchor {
+		t.Fatalf("reopened retry changed event bytes/order: %+v, %v; want %+v", finalAnchor, err, anchor)
+	}
+}
+
+func m6Step4Session(t *testing.T, handler http.Handler, peer tls.ConnectionState, registry *operation.Registry) *labConnectionSession {
+	t.Helper()
+	byName := make(map[string][]any)
+	for _, definition := range registry.Definitions() {
+		id := definition.Metadata().Operation
+		byName[id.Name] = append(byName[id.Name], uint64(id.Version))
+	}
+	operations := make([]any, 0, len(byName))
+	for _, definition := range registry.Definitions() {
+		id := definition.Metadata().Operation
+		if len(byName[id.Name]) == 0 {
+			continue
+		}
+		operations = append(operations, map[string]any{"name": id.Name, "versions": byName[id.Name], "identity_schemas": []any{"wipd.command/1"}})
+		delete(byName, id.Name)
+	}
+	session := &labConnectionSession{}
+	hello, err := wipdwire.EncodeCanonical(map[string]any{
+		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
+		"identity_schemas": []any{"wipd.command/1"}, "operations": operations,
+		"store_schemas": []any{"wipd.store/1"}, "features": []any{"wipd.frame/1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, request := m5Request(t, session, peer, "client.hello", hello, http.MethodPost, labNegotiatePath)
+	handler.ServeHTTP(record, request)
+	frames := m5ResponseFrames(t, record, 2)
+	if len(frames) != 2 || frames[0].Kind != "server.hello" || !session.negotiated || len(session.operations) != len(registry.Definitions()) {
+		t.Fatalf("M6 capability negotiation = %+v; operations=%d", frames, len(session.operations))
+	}
+	return session
+}
+
+func submitM6Matter(t *testing.T, fixture *m5CommandFixture, session *labConnectionSession, command operation.Command) []wipdwire.Frame {
+	t.Helper()
+	response, frames := m5Submit(t, session, fixture, command)
+	if response.Code != http.StatusOK || len(frames) == 0 {
+		t.Fatalf("M6 command.submit status=%d frames=%+v", response.Code, frames)
+	}
+	return frames
+}
+
+func m6TerminalReceipt(t *testing.T, frames []wipdwire.Frame) []byte {
+	t.Helper()
+	if len(frames) != 2 || frames[0].Kind != "submission.accepted" || frames[1].Kind != "command.terminal" {
+		t.Fatalf("M6 accepted terminal sequence = %+v", frames)
+	}
+	return bytes.Clone(frames[1].Payload)
+}
+
+func m6MatterCreateOutput(t *testing.T, receipt []byte) (map[string]any, uint64) {
+	t.Helper()
+	fields, err := wipdwire.DecodeCanonicalMap(receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok || result["code"] != "result.succeeded" {
+		t.Fatalf("M6 result = %#v", fields["result"])
+	}
+	outputBytes, ok := result["output"].([]byte)
+	if !ok {
+		t.Fatalf("M6 output type = %T", result["output"])
+	}
+	output, err := wipdwire.DecodeCanonicalMap(outputBytes, "id", "title", "requested_locator", "assigned_locator", "locator_repair_required")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, ok := fields["accepted_events"].(map[string]any)
+	count, countOK := accepted["event_count"].(uint64)
+	if !ok || !countOK {
+		t.Fatalf("M6 accepted event range = %#v", fields["accepted_events"])
+	}
+	return output, count
+}
+
+func claimTestIDForM6(n int) string { return fmt.Sprintf("%026d", n) }
 
 func TestM5ArtifactSignerCannotReuseCAOrEnvironmentKey(t *testing.T) {
 	fixture := newM5CommandFixture(t)

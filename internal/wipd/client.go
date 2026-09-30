@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,6 +46,7 @@ type Client struct {
 	httpClient *http.Client
 	hello      serverHello
 	parameters sessionParameters
+	m6         bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -72,6 +74,16 @@ func Connect(ctx context.Context, explicitProfileRoot string) (*Client, error) {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
 	return connectProfile(ctx, profile)
+}
+
+// ConnectM6 is reserved for isolated M6 acceptance. Ordinary CLI activation
+// and Connect retain the sealed M5 capability request unchanged.
+func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -362,6 +374,10 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
+	return connectProfileCapabilities(ctx, profile, false)
+}
+
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6 bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -372,6 +388,7 @@ func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, 
 	}
 	client := &Client{
 		transport: transport,
+		m6:        m6,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -391,41 +408,52 @@ func (c *Client) negotiate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	matterVersions := []any{uint64(1)}
+	stepVersions := []any{uint64(1)}
+	if c.m6 {
+		matterVersions = append(matterVersions, uint64(2))
+		stepVersions = append(stepVersions, uint64(2))
+	}
+	operations := []any{map[string]any{
+		"name": "content.write-once", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "finding.append", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "matter.create", "versions": matterVersions, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "matter.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "step.create", "versions": stepVersions, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "step.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+	}, map[string]any{
+		"name": "step.start", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+	}}
+	if c.m6 {
+		operations = append(operations, map[string]any{
+			"name": "matter.locator-repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "stage.create", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.insert", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.reorder", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.replace", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.remove", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		})
+		sort.Slice(operations, func(i, j int) bool {
+			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
+		})
+	}
 	payload, err := encodePayload(map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
 		"protocol_max":     []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{identitySchemaV1},
-		"operations": []any{map[string]any{
-			"name":             "content.write-once",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "finding.append",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "matter.create",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "matter.finish",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "step.create",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "step.finish",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}, map[string]any{
-			"name":             "step.start",
-			"versions":         []any{uint64(1)},
-			"identity_schemas": []any{identitySchemaV1},
-		}},
-		"store_schemas": []any{storeSchemaV1},
-		"features":      []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema},
+		"operations":       operations,
+		"store_schemas":    []any{storeSchemaV1},
+		"features":         []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema},
 	})
 	if err != nil {
 		return err
@@ -513,11 +541,13 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errInvalidCapabilities
 	}
 	for _, capability := range operations {
-		if capability.name != "content.write-once" && capability.name != "finding.append" && capability.name != "matter.create" &&
-			capability.name != "matter.finish" && capability.name != "step.create" &&
-			capability.name != "step.finish" && capability.name != "step.start" || len(capability.versions) != 1 || capability.versions[0] != 1 ||
-			!equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
+		if !equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
 			return serverHello{}, errInvalidCapabilities
+		}
+		for _, version := range capability.versions {
+			if !knownOperationVersion(capability.name, version) {
+				return serverHello{}, errInvalidCapabilities
+			}
 		}
 	}
 	return serverHello{
@@ -527,6 +557,20 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		storeSchemas:     storeSchemas,
 		features:         features,
 	}, nil
+}
+
+func knownOperationVersion(name string, version uint16) bool {
+	id := operation.ID{Name: name, Version: version}
+	switch id {
+	case operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateV2.Metadata().Operation,
+		operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation,
+		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
+		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
+		operation.FindingAppendV1.Metadata().Operation:
+		return true
+	default:
+		return operation.Step4Operation(id)
+	}
 }
 
 func onlyKnownFeatures(features []string) bool {

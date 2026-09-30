@@ -44,6 +44,7 @@ type Execution struct {
 type CommandCompletion struct {
 	Result             operation.Result
 	SubjectID, EventID string
+	AdditionalEventIDs []string
 	Occurred           time.Time
 }
 
@@ -85,6 +86,9 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	}
 	if contentOperation(command.Request.Operation) {
 		return s.submitConnectedContent(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
+	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
+		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
 	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation) ||
 		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
@@ -354,7 +358,7 @@ type Signer func(context.Context, []byte) ([]byte, error)
 
 // CompleteCommand commits one supported birth fold. A successful Matter or Step
 // create writes its exact event range and projection with the receipt.
-func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result operation.Result, subjectID, eventID string, occurred time.Time, sign Signer) (CommandStatus, error) {
+func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result operation.Result, subjectID, eventID string, occurred time.Time, sign Signer, additionalEventIDs ...string) (CommandStatus, error) {
 	var out CommandStatus
 	if owner == nil || owner.store != s || sign == nil {
 		return out, ErrNotOwner
@@ -364,11 +368,18 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if !ok {
 		definition, ok = contentDefinition(cmd.Request.Operation)
 		if !ok {
-			return out, ErrInvalidProof
+			definition, ok = step4Definition(cmd.Request.Operation)
+			if !ok {
+				return out, ErrInvalidProof
+			}
 		}
 	}
-	if err := definition.ValidateResult(result); err != nil {
-		return out, err
+	if _, ok := step4Definition(cmd.Request.Operation); !ok {
+		if err := definition.ValidateResult(result); err != nil {
+			return out, err
+		}
+	} else if result.Code != operation.ResultSucceeded || result.Problem != nil {
+		return out, ErrInvalidProof
 	}
 	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) {
 		return out, ErrInvalidProof
@@ -382,7 +393,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if s.db == nil || !s.owners[key] || s.executions[key] != owner {
 		return out, ErrNotOwner
 	}
-	completion := CommandCompletion{Result: result, SubjectID: subjectID, EventID: eventID, Occurred: occurred}
+	completion := CommandCompletion{
+		Result: result, SubjectID: subjectID, EventID: eventID,
+		AdditionalEventIDs: append([]string(nil), additionalEventIDs...), Occurred: occurred,
+	}
 	if owner.completion != nil && !sameCommandCompletion(*owner.completion, completion) {
 		return out, ErrConflict
 	}
@@ -451,6 +465,22 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	var position uint64
 	if result.Code == operation.ResultSucceeded {
 		switch cmd.Request.Operation {
+		case operation.MatterCreateV2.Metadata().Operation, operation.StageCreateV1.Metadata().Operation,
+			operation.StepCreateV2.Metadata().Operation, operation.StepInsertV1.Metadata().Operation,
+			operation.StepReorderV1.Metadata().Operation, operation.StepReplaceV1.Metadata().Operation,
+			operation.StepRemoveV1.Metadata().Operation, operation.MatterLocatorRepairV1.Metadata().Operation:
+			fold, foldErr := completeStep4Tx(ctx, tx, cmd, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
+				result, subjectID, append([]string{eventID}, additionalEventIDs...), occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result, subjectID, eventID = fold.result, fold.subject, ""
+			if result.Code == operation.ResultSucceeded {
+				position = fold.first.(uint64)
+				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+			} else {
+				problem = string(result.Problem.Code)
+			}
 		case operation.MatterCreateV1.Metadata().Operation:
 			input := cmd.Request.Input.(operation.MatterCreateInput)
 			got := result.Output.(operation.MatterCreateOutput)
@@ -477,6 +507,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 				return out, err
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO matters VALUES(?,?,?,?,?,?)`, d.ID, subjectID, cmd.Request.Context.Repo, got.Locator, got.Title, eventID); err != nil {
+				return out, writeError(err)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO m6_nodes(domain_id,node_id,kind,repo_id,matter_id,parent_id,locator,title,sort_key,birth_event_id,last_event_id,repair_required)
+				VALUES(?,?,'matter',?,?,NULL,?,?,0,?,?,0)`, d.ID, subjectID, cmd.Request.Context.Repo, subjectID, got.Locator, got.Title, eventID, eventID); err != nil {
 				return out, writeError(err)
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO implicit_birth_claims VALUES(?,?,1,?,?,?)`, d.ID, subjectID, cmd.EnvironmentID, cmd.Request.Context.Repo, cmd.ID); err != nil {
@@ -529,6 +563,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO steps VALUES(?,?,?,?,?,?,?,?,?,?)`, d.ID, subjectID, cmd.Request.Context.Repo,
 				input.ParentID, input.ParentID, locator, input.Title, sortKey, "planned", eventID); err != nil {
+				return out, writeError(err)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO m6_nodes(domain_id,node_id,kind,repo_id,matter_id,parent_id,locator,title,sort_key,birth_event_id,last_event_id,repair_required)
+				VALUES(?,?,'step',?,?,?,?,?,?,?,?,0)`, d.ID, subjectID, cmd.Request.Context.Repo, input.ParentID, input.ParentID, locator, input.Title, sortKey, eventID, eventID); err != nil {
 				return out, writeError(err)
 			}
 			first, last = position, position
@@ -592,9 +630,15 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	} else {
 		problem = string(result.Problem.Code)
 	}
+	if _, ok := step4Definition(cmd.Request.Operation); ok && result.Code == operation.ResultSucceeded {
+		definition, _ := step4Definition(cmd.Request.Operation)
+		if err = definition.ValidateResult(result); err != nil {
+			return out, ErrInvalidProof
+		}
+	}
 	var beforeCommit func([]byte, []byte, uint64, uint64) error
 	switch cmd.Request.Operation {
-	case operation.MatterCreateV1.Metadata().Operation:
+	case operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateV2.Metadata().Operation:
 		if result.Code == operation.ResultSucceeded {
 			beforeCommit = func(_ []byte, _ []byte, _, _ uint64) error {
 				if _, err := tx.ExecContext(ctx, `INSERT INTO birth_journals(domain_id,matter_id,claim_epoch,owner_environment_id,repo_id,birth_command_id,state)
@@ -755,7 +799,7 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 
 func sameCommandCompletion(left, right CommandCompletion) bool {
 	return reflect.DeepEqual(left.Result, right.Result) && left.SubjectID == right.SubjectID &&
-		left.EventID == right.EventID && left.Occurred.Equal(right.Occurred)
+		left.EventID == right.EventID && reflect.DeepEqual(left.AdditionalEventIDs, right.AdditionalEventIDs) && left.Occurred.Equal(right.Occurred)
 }
 
 func birthDefinition(id operation.ID) (operation.Definition, bool) {

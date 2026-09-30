@@ -206,6 +206,8 @@ var FindingAppendV1 = mustDefine[FindingAppendInput, ContentSegmentOutput](Metad
 var catalogue = []Definition{
 	MatterCreateV1, StepCreateV1, StepStartV1, StepFinishV1, MatterFinishV1,
 	ContentWriteOnceV1, FindingAppendV1,
+	MatterCreateV2, StageCreateV1, StepCreateV2, StepInsertV1, StepReorderV1,
+	StepReplaceV1, StepRemoveV1, MatterLocatorRepairV1,
 }
 
 // Catalogue returns the currently defined semantic operations. It is not the

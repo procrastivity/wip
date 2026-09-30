@@ -72,6 +72,18 @@ const (
 	FootprintStepSortKey             Footprint = "step.sibling-sort-key"
 	FootprintNodeContent             Footprint = "node.content"
 	FootprintFindingSegments         Footprint = "node.finding-segments"
+	FootprintStageParent             Footprint = "stage.parent"
+	FootprintMatterStageLocators     Footprint = "matter.stage-locators"
+	FootprintNewStageSubtree         Footprint = "new-stage-subtree"
+	FootprintStepSiblingSet          Footprint = "step.sibling-set"
+	FootprintStepAnchor              Footprint = "step.anchor"
+	FootprintStepOrderPermutation    Footprint = "step.order-permutation"
+	FootprintStepLive                Footprint = "step.live"
+	FootprintStepNextLocator         Footprint = "step.next-locator"
+	FootprintStepTombstone           Footprint = "step.tombstone"
+	FootprintReplacementStep         Footprint = "replacement-step"
+	FootprintStepRemovalReason       Footprint = "step.removal-reason"
+	FootprintMatterLocatorRepair     Footprint = "matter.locator-repair"
 )
 
 // BlobSpec statically names one accepted staged blob input.

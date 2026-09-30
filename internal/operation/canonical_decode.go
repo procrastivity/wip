@@ -229,6 +229,130 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return StepCreateInput{ParentID: parent, Title: title}, nil
+	case MatterCreateV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "title", "requested_locator")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		locator, err := commandString(fields, "requested_locator")
+		if err != nil {
+			return nil, err
+		}
+		return MatterCreateInput{Title: title, Locator: locator}, nil
+	case StageCreateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "title")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		return StageCreateInput{MatterID: matter, Title: title}, nil
+	case StepCreateV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "parent_id", "title")
+		if err != nil {
+			return nil, err
+		}
+		parent, err := commandString(fields, "parent_id")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		return StepCreateInput{ParentID: parent, Title: title}, nil
+	case StepInsertV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "parent_id", "title", "after_id", "before_id")
+		if err != nil {
+			return nil, err
+		}
+		parent, err := commandString(fields, "parent_id")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		after, err := commandNullableString(fields, "after_id")
+		if err != nil {
+			return nil, err
+		}
+		before, err := commandNullableString(fields, "before_id")
+		if err != nil {
+			return nil, err
+		}
+		return StepInsertInput{ParentID: parent, Title: title, AfterID: after, BeforeID: before}, nil
+	case StepReorderV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "parent_id", "order")
+		if err != nil {
+			return nil, err
+		}
+		parent, err := commandString(fields, "parent_id")
+		if err != nil {
+			return nil, err
+		}
+		order, err := commandStringArray(fields, "order")
+		if err != nil {
+			return nil, err
+		}
+		return StepReorderInput{ParentID: parent, Order: order}, nil
+	case StepReplaceV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "step_id", "title")
+		if err != nil {
+			return nil, err
+		}
+		step, err := commandString(fields, "step_id")
+		if err != nil {
+			return nil, err
+		}
+		title, err := commandString(fields, "title")
+		if err != nil {
+			return nil, err
+		}
+		return StepReplaceInput{StepID: step, Title: title}, nil
+	case StepRemoveV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "step_id", "reason")
+		if err != nil {
+			return nil, err
+		}
+		step, err := commandString(fields, "step_id")
+		if err != nil {
+			return nil, err
+		}
+		reason, err := commandString(fields, "reason")
+		if err != nil {
+			return nil, err
+		}
+		return StepRemoveInput{StepID: step, Reason: reason}, nil
+	case MatterLocatorRepairV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "action", "assigned_locator")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		locator, err := commandString(fields, "assigned_locator")
+		if err != nil {
+			return nil, err
+		}
+		action, err := commandString(fields, "action")
+		if err != nil {
+			return nil, err
+		}
+		return MatterLocatorRepairInput{MatterID: matter, AssignedLocator: locator, Action: action}, nil
 	case StepStartV1.Metadata().Operation, StepFinishV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "step_id")
 		if err != nil {
@@ -276,6 +400,22 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 	default:
 		return nil, fmt.Errorf("operation: no canonical identity schema for %s", id)
 	}
+}
+
+func commandStringArray(fields map[string]any, key string) ([]string, error) {
+	values, ok := fields[key].([]any)
+	if !ok {
+		return nil, fmt.Errorf("operation: %s must be an array", key)
+	}
+	result := make([]string, len(values))
+	for index, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("operation: %s[%d] must be text", key, index)
+		}
+		result[index] = text
+	}
+	return result, nil
 }
 
 func commandDecodeBlobs(value any) ([]BlobInput, error) {

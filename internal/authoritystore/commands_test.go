@@ -293,14 +293,14 @@ func TestCommandRollbackOnProjectionAndReopenTamper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`DROP TRIGGER matters_no_update`); err != nil {
+	if _, err = db.Exec(`DROP TRIGGER matters_identity_immutable`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = db.Exec(`UPDATE matters SET title='altered'`); err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range step4Schema {
-		if o.name == "matters_no_update" {
+	for _, o := range step12Schema {
+		if o.name == "matters_identity_immutable" {
 			if _, err = db.Exec(o.sql); err != nil {
 				t.Fatal(err)
 			}

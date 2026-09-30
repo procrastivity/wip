@@ -365,6 +365,13 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
+	if app.m6 && operation.Step4Operation(command.Request.Operation) {
+		completion, err := app.step4Completion(command)
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, completion)
+	}
 	switch command.Request.Operation {
 	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation:
@@ -429,7 +436,7 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 
 func (app *m5LabHandler) completeContinuation(owner *authoritystore.Execution, completion authoritystore.CommandCompletion) ([]byte, error) {
 	status, err := app.store.CompleteCommand(context.Background(), owner, completion.Result,
-		completion.SubjectID, completion.EventID, completion.Occurred, app.sign)
+		completion.SubjectID, completion.EventID, completion.Occurred, app.sign, completion.AdditionalEventIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +444,100 @@ func (app *m5LabHandler) completeContinuation(owner *authoritystore.Execution, c
 		return nil, errors.New("authoritystore: terminal completion returned no receipt")
 	}
 	return status.Receipt, nil
+}
+
+func (app *m5LabHandler) step4Completion(command operation.Command) (authoritystore.CommandCompletion, error) {
+	var completion authoritystore.CommandCompletion
+	var subject string
+	var result operation.Result
+	switch input := command.Request.Input.(type) {
+	case operation.MatterCreateInput:
+		if command.Request.Operation != operation.MatterCreateV2.Metadata().Operation {
+			return completion, authoritystore.ErrInvalidProof
+		}
+		id, err := randomULID(time.Now().UTC())
+		if err != nil {
+			return completion, err
+		}
+		requested := input.Locator
+		if requested == "" {
+			requested = authoritystore.MatterLocator(input.Title)
+		}
+		subject = id
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateV2Output{
+			ID: id, Title: input.Title, RequestedLocator: requested, AssignedLocator: requested,
+		}}
+	case operation.StageCreateInput:
+		id, err := randomULID(time.Now().UTC())
+		if err != nil {
+			return completion, err
+		}
+		locator := authoritystore.MatterLocator(input.Title)
+		subject = id
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StageCreateOutput{
+			ID: id, MatterID: input.MatterID, Locator: locator, Title: input.Title, SortKey: 1, State: "planned",
+		}}
+	case operation.StepCreateInput:
+		if command.Request.Operation != operation.StepCreateV2.Metadata().Operation {
+			return completion, authoritystore.ErrInvalidProof
+		}
+		id, err := randomULID(time.Now().UTC())
+		if err != nil {
+			return completion, err
+		}
+		subject = id
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+			ID: id, ParentID: input.ParentID, MatterID: input.ParentID, Locator: "step-01", Title: input.Title, SortKey: 1, State: "planned",
+		}}
+	case operation.StepInsertInput:
+		id, err := randomULID(time.Now().UTC())
+		if err != nil {
+			return completion, err
+		}
+		subject = id
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+			ID: id, ParentID: input.ParentID, MatterID: input.ParentID, Locator: "step-01", Title: input.Title, SortKey: 1, State: "planned",
+		}}
+	case operation.StepReorderInput:
+		subject = input.ParentID
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StepReorderOutput{ParentID: input.ParentID, Order: append([]string(nil), input.Order...)}}
+	case operation.StepReplaceInput:
+		id, err := randomULID(time.Now().UTC())
+		if err != nil {
+			return completion, err
+		}
+		subject = id
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StepReplaceOutput{
+			RemovedStepID: input.StepID, Replacement: operation.StepCreateOutput{
+				ID: id, ParentID: input.StepID, MatterID: input.StepID, Locator: "step-01", Title: input.Title, SortKey: 1, State: "planned",
+			},
+		}}
+	case operation.StepRemoveInput:
+		subject = input.StepID
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.StepRemoveOutput{StepID: input.StepID}}
+	case operation.MatterLocatorRepairInput:
+		subject = input.MatterID
+		result = operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterLocatorRepairOutput{
+			ID: input.MatterID, Action: input.Action, RequestedLocator: input.AssignedLocator,
+			PreviousLocator: input.AssignedLocator, AssignedLocator: input.AssignedLocator,
+		}}
+	default:
+		return completion, authoritystore.ErrInvalidProof
+	}
+	base := time.Now().UTC()
+	eventID, err := randomULID(base.Add(2 * time.Millisecond))
+	if err != nil {
+		return completion, err
+	}
+	completion = authoritystore.CommandCompletion{Result: result, SubjectID: subject, EventID: eventID, Occurred: base}
+	if command.Request.Operation == operation.MatterCreateV2.Metadata().Operation || command.Request.Operation == operation.StepInsertV1.Metadata().Operation {
+		additional, allocationErr := randomULID(base.Add(3 * time.Millisecond))
+		if allocationErr != nil {
+			return authoritystore.CommandCompletion{}, allocationErr
+		}
+		completion.AdditionalEventIDs = []string{additional}
+	}
+	return completion, nil
 }
 
 func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {

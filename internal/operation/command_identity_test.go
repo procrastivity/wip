@@ -174,7 +174,7 @@ func TestEveryCommandIdentityFieldChangesRequestHash(t *testing.T) {
 		{"actor", func(c *Command) { c.Request.Actor = "human" }},
 		{"causation", func(c *Command) { c.CausationCommandID = otherID }},
 		{"correlation", func(c *Command) { c.CausationCommandID, c.CorrelationCommandID = otherID, testDomainID }},
-		{"operation version", func(c *Command) { c.Request.Operation.Version = 2 }},
+		{"operation version", func(c *Command) { c.Request.Operation.Version = 99 }},
 		{"Repo context", func(c *Command) { c.Request.Context.Repo = otherID }},
 		{"Clone context", func(c *Command) { c.Request.Context.Clone = otherID }},
 		{"Worktree context", func(c *Command) { c.Request.Context.Worktree = otherID }},

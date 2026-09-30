@@ -519,33 +519,17 @@ func checkStep6State(db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		projected, err := db.Query(`SELECT m.matter_id,m.repo_id,m.locator,m.title,m.birth_event_id FROM matters m JOIN authority_events e ON e.domain_id=m.domain_id AND e.event_id=m.birth_event_id WHERE m.domain_id=? AND e.position<=? ORDER BY m.locator,m.matter_id`, p.domain, p.count)
+		projected, err := matterSnapshotItemsAt(db, p.domain, p.count)
 		if err != nil {
 			return err
 		}
-		ordinal := 0
-		for projected.Next() {
-			var id, repo, locator, title, birth string
-			if err = projected.Scan(&id, &repo, &locator, &title, &birth); err != nil {
-				break
-			}
-			var value []byte
-			value, err = artifactEncoder.Marshal(map[string]any{"id": id, "repo_id": repo, "locator": locator, "title": title, "birth_event_id": birth})
-			if err != nil {
-				break
-			}
-			if ordinal >= len(items) || items[ordinal].ID != id || !bytes.Equal(items[ordinal].Value, value) {
-				err = ErrInvalidStore
-				break
-			}
-			ordinal++
-		}
-		if err == nil {
-			err = projected.Err()
-		}
-		_ = projected.Close()
-		if err != nil || ordinal != len(items) {
+		if len(projected) != len(items) {
 			return ErrInvalidStore
+		}
+		for ordinal := range projected {
+			if items[ordinal].ID != projected[ordinal].ID || !bytes.Equal(items[ordinal].Value, projected[ordinal].Value) {
+				return ErrInvalidStore
+			}
 		}
 	}
 	rows, err = db.Query(`SELECT t.transfer_id,t.start_count,t.start_event_id,t.start_digest,t.next_event,t.next_entry,s.snapshot_id,s.domain_id,s.event_count,s.expires_at,t.expires_at FROM transfers t JOIN snapshots s USING(snapshot_id)`)

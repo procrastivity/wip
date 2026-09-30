@@ -38,13 +38,40 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 7 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+	if len(Catalogue()) != 15 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
 		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
 		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
 		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation ||
 		Catalogue()[5].Metadata().Operation != ContentWriteOnceV1.Metadata().Operation ||
-		Catalogue()[6].Metadata().Operation != FindingAppendV1.Metadata().Operation {
-		t.Fatalf("catalogue = %+v, want Matter/Step birth, lifecycle, and content operations", Catalogue())
+		Catalogue()[6].Metadata().Operation != FindingAppendV1.Metadata().Operation ||
+		Catalogue()[7].Metadata().Operation != MatterCreateV2.Metadata().Operation ||
+		Catalogue()[8].Metadata().Operation != StageCreateV1.Metadata().Operation ||
+		Catalogue()[9].Metadata().Operation != StepCreateV2.Metadata().Operation ||
+		Catalogue()[10].Metadata().Operation != StepInsertV1.Metadata().Operation ||
+		Catalogue()[11].Metadata().Operation != StepReorderV1.Metadata().Operation ||
+		Catalogue()[12].Metadata().Operation != StepReplaceV1.Metadata().Operation ||
+		Catalogue()[13].Metadata().Operation != StepRemoveV1.Metadata().Operation ||
+		Catalogue()[14].Metadata().Operation != MatterLocatorRepairV1.Metadata().Operation {
+		t.Fatalf("catalogue = %+v, want M5 operations followed by the complete Step 4 set", Catalogue())
+	}
+}
+
+func TestStep4RequestValidationLeavesM5BirthInputsUnchanged(t *testing.T) {
+	matter := Request{
+		Operation: MatterCreateV1.Metadata().Operation, Actor: "human", Context: Context{Repo: "01REPO"},
+		Input: MatterCreateInput{Title: " ", Locator: "Legacy-Input"}, Blobs: []BlobInput{},
+	}
+	if err := MatterCreateV1.ValidateRequest(matter); err != nil {
+		t.Fatalf("M5 matter.create@v1 input was tightened by M6 validation: %v", err)
+	}
+	parent := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	step := Request{
+		Operation: StepCreateV1.Metadata().Operation, Actor: "human",
+		Context: Context{Repo: "01REPO"}, Claim: &ClaimContext{ID: parent, Epoch: "1"},
+		Input: StepCreateInput{ParentID: parent, Title: " "}, Blobs: []BlobInput{},
+	}
+	if err := StepCreateV1.ValidateRequest(step); err != nil {
+		t.Fatalf("M5 step.create@v1 input was tightened by M6 validation: %v", err)
 	}
 }
 

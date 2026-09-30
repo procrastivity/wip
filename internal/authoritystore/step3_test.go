@@ -262,6 +262,9 @@ func TestV1ExplicitUpgradeAndRecovery(t *testing.T) {
 	if err = UpgradeV9(root); err != nil {
 		t.Fatal(err)
 	}
+	if err = UpgradeV10(root); err != nil {
+		t.Fatal(err)
+	}
 	s, err := OpenExisting(root)
 	if err != nil {
 		t.Fatal(err)

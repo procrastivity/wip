@@ -417,7 +417,7 @@ func checkBirthJournalState(db *sql.DB) error {
 		}
 	}
 	var orphan int
-	if err = db.QueryRow(`SELECT count(*) FROM submissions s JOIN implicit_birth_claims c ON c.domain_id=s.domain_id AND c.owner_environment_id=s.environment_id WHERE s.operation_name='step.create' AND NOT EXISTS(SELECT 1 FROM birth_journal_entries e WHERE e.domain_id=s.domain_id AND e.command_id=s.command_id)`).Scan(&orphan); err != nil || orphan != 0 {
+	if err = db.QueryRow(`SELECT count(*) FROM submissions s JOIN implicit_birth_claims c ON c.domain_id=s.domain_id AND c.owner_environment_id=s.environment_id WHERE s.operation_name='step.create' AND s.operation_version=1 AND NOT EXISTS(SELECT 1 FROM birth_journal_entries e WHERE e.domain_id=s.domain_id AND e.command_id=s.command_id)`).Scan(&orphan); err != nil || orphan != 0 {
 		return ErrInvalidStore
 	}
 	return nil

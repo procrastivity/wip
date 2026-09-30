@@ -217,6 +217,18 @@ func canonicalInput(input Input) (canonicalMap, error) {
 			"parent_id": input.ParentID,
 			"title":     input.Title,
 		}, nil
+	case StageCreateInput:
+		return canonicalMap{"matter_id": input.MatterID, "title": input.Title}, nil
+	case StepInsertInput:
+		return canonicalMap{"parent_id": input.ParentID, "title": input.Title, "after_id": nullableIdentity(input.AfterID), "before_id": nullableIdentity(input.BeforeID)}, nil
+	case StepReorderInput:
+		return canonicalMap{"parent_id": input.ParentID, "order": canonicalStrings(input.Order)}, nil
+	case StepReplaceInput:
+		return canonicalMap{"step_id": input.StepID, "title": input.Title}, nil
+	case StepRemoveInput:
+		return canonicalMap{"step_id": input.StepID, "reason": input.Reason}, nil
+	case MatterLocatorRepairInput:
+		return canonicalMap{"matter_id": input.MatterID, "action": input.Action, "assigned_locator": input.AssignedLocator}, nil
 	case StepLifecycleInput:
 		return canonicalMap{"step_id": input.StepID}, nil
 	case MatterFinishInput:
@@ -228,6 +240,14 @@ func canonicalInput(input Input) (canonicalMap, error) {
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}
+}
+
+func canonicalStrings(values []string) canonicalArray {
+	result := make(canonicalArray, len(values))
+	for i, value := range values {
+		result[i] = value
+	}
+	return result
 }
 
 func canonicalBlobs(blobs []BlobInput) (canonicalArray, error) {

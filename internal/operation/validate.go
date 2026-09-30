@@ -3,8 +3,11 @@ package operation
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 )
+
+var locatorPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // ValidateRequest checks the envelope and typed payload against this
 // Definition before a handler runs.
@@ -64,6 +67,83 @@ func (d Definition) ValidateRequest(request Request) error {
 	case FindingAppendInput:
 		if err := validateULID("finding subject ID", input.SubjectID); err != nil {
 			return err
+		}
+	case MatterCreateInput:
+		if d.metadata.Operation != MatterCreateV2.Metadata().Operation {
+			break
+		}
+		if strings.TrimSpace(input.Title) == "" {
+			return fmt.Errorf("matter title is empty")
+		}
+		if input.Locator != "" && !locatorPattern.MatchString(input.Locator) {
+			return fmt.Errorf("requested Matter locator is not canonical")
+		}
+	case StageCreateInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Title) == "" {
+			return fmt.Errorf("stage title is empty")
+		}
+	case StepCreateInput:
+		if d.metadata.Operation == StepCreateV1.Metadata().Operation {
+			break
+		}
+		if err := validateULID("Step parent ID", input.ParentID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Title) == "" {
+			return fmt.Errorf("step title is empty")
+		}
+	case StepInsertInput:
+		if err := validateULID("Step parent ID", input.ParentID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Title) == "" || input.AfterID != "" && input.BeforeID != "" {
+			return fmt.Errorf("step insertion requires a title and at most one anchor")
+		}
+		if input.AfterID != "" {
+			if err := validateULID("after Step ID", input.AfterID); err != nil {
+				return err
+			}
+		}
+		if input.BeforeID != "" {
+			if err := validateULID("before Step ID", input.BeforeID); err != nil {
+				return err
+			}
+		}
+	case StepReorderInput:
+		if err := validateULID("Step parent ID", input.ParentID); err != nil {
+			return err
+		}
+		if len(input.Order) == 0 {
+			return fmt.Errorf("step order is empty")
+		}
+		for _, id := range input.Order {
+			if err := validateULID("ordered Step ID", id); err != nil {
+				return err
+			}
+		}
+	case StepReplaceInput:
+		if err := validateULID("Step ID", input.StepID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Title) == "" {
+			return fmt.Errorf("replacement Step title is empty")
+		}
+	case StepRemoveInput:
+		if err := validateULID("Step ID", input.StepID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Reason) == "" {
+			return fmt.Errorf("step removal reason is empty")
+		}
+	case MatterLocatorRepairInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if !locatorPattern.MatchString(input.AssignedLocator) || (input.Action != "rename" && input.Action != "accept") {
+			return fmt.Errorf("assigned Matter locator is not canonical")
 		}
 	}
 	return d.validateBlobs(request.Blobs)
@@ -126,6 +206,58 @@ func (d Definition) ValidateResult(result Result) error {
 				d.metadata.Operation == ContentWriteOnceV1.Metadata().Operation && output.Kind == "findings" ||
 				d.metadata.Operation == FindingAppendV1.Metadata().Operation && output.Kind != "findings" {
 				return fmt.Errorf("content output has invalid identity, kind, or staged-blob metadata")
+			}
+		case MatterCreateV2Output:
+			if validateULID("Matter output ID", output.ID) != nil || output.Title == "" ||
+				!locatorPattern.MatchString(output.RequestedLocator) || !locatorPattern.MatchString(output.AssignedLocator) ||
+				output.LocatorRepairRequired != (output.RequestedLocator != output.AssignedLocator) {
+				return fmt.Errorf("matter v2 output has invalid identity or locator")
+			}
+		case StageCreateOutput:
+			if validateULID("Stage output ID", output.ID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
+				!locatorPattern.MatchString(output.Locator) || output.Title == "" || output.SortKey <= 0 || output.State != "planned" {
+				return fmt.Errorf("stage output has invalid identity, locator, or order")
+			}
+		case StepCreateOutput:
+			if d.metadata.Operation == StepCreateV1.Metadata().Operation {
+				if output.ID == "" && output.MatterID == "" && output.Locator == "" && output.SortKey == 0 && output.State == "" {
+					if validateULID("Step parent output ID", output.ParentID) != nil || strings.TrimSpace(output.Title) == "" {
+						return fmt.Errorf("step.create@v1 provisional result has invalid parent or title")
+					}
+					break
+				}
+			}
+			if validateULID("Step output ID", output.ID) != nil || validateULID("Step parent output ID", output.ParentID) != nil ||
+				validateULID("Matter output ID", output.MatterID) != nil || !locatorPattern.MatchString(output.Locator) ||
+				output.Title == "" || output.SortKey <= 0 || output.State != "planned" {
+				return fmt.Errorf("step output has invalid identity, locator, or order")
+			}
+		case StepReorderOutput:
+			if validateULID("Step parent output ID", output.ParentID) != nil || len(output.Order) == 0 {
+				return fmt.Errorf("step reorder output has invalid parent or order")
+			}
+			for _, id := range output.Order {
+				if validateULID("ordered Step output ID", id) != nil {
+					return fmt.Errorf("step reorder output has invalid step identity")
+				}
+			}
+		case StepReplaceOutput:
+			replacement := output.Replacement
+			if validateULID("removed Step output ID", output.RemovedStepID) != nil || validateULID("replacement Step output ID", replacement.ID) != nil ||
+				replacement.ID == output.RemovedStepID || validateULID("replacement parent output ID", replacement.ParentID) != nil ||
+				validateULID("replacement Matter output ID", replacement.MatterID) != nil || !locatorPattern.MatchString(replacement.Locator) ||
+				replacement.Title == "" || replacement.SortKey <= 0 || replacement.State != "planned" {
+				return fmt.Errorf("step replacement output has invalid identity")
+			}
+		case StepRemoveOutput:
+			if validateULID("removed Step output ID", output.StepID) != nil {
+				return fmt.Errorf("step removal output has invalid identity")
+			}
+		case MatterLocatorRepairOutput:
+			if validateULID("Matter output ID", output.ID) != nil || (output.Action != "rename" && output.Action != "accept") ||
+				!locatorPattern.MatchString(output.RequestedLocator) || !locatorPattern.MatchString(output.PreviousLocator) ||
+				!locatorPattern.MatchString(output.AssignedLocator) {
+				return fmt.Errorf("matter locator repair output is invalid")
 			}
 		}
 		return nil
