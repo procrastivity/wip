@@ -630,8 +630,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	} else {
 		problem = string(result.Problem.Code)
 	}
-	if _, ok := step4Definition(cmd.Request.Operation); ok && result.Code == operation.ResultSucceeded {
-		definition, _ := step4Definition(cmd.Request.Operation)
+	if definition, ok := step4Definition(cmd.Request.Operation); ok {
 		if err = definition.ValidateResult(result); err != nil {
 			return out, ErrInvalidProof
 		}

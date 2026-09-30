@@ -43,6 +43,9 @@ func (s *Store) submitStep4(ctx context.Context, command operation.Command, cano
 		if metadata.Operation == operation.MatterCreateV2.Metadata().Operation {
 			return nil
 		}
+		if input, ok := command.Request.Input.(operation.StageCreateInput); ok {
+			return verifyStep4MatterClaim(ctx, tx, command, input.MatterID)
+		}
 		return validateStep4ClaimTx(ctx, tx, command)
 	}
 	var beforeCommit func() error
@@ -129,7 +132,7 @@ func completeStep4Tx(ctx context.Context, tx *sql.Tx, command operation.Command,
 ) (step4Fold, error) {
 	fold := step4Fold{result: result, subject: subjectID, eventIDs: eventIDs}
 	refuse := func(code string, message string) (step4Fold, error) {
-		fold.result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{Code: operation.ProblemCode(code), Message: message}}
+		fold.result = step4Problem(code, message)
 		fold.subject, fold.eventIDs = "", nil
 		return fold, nil
 	}
@@ -230,8 +233,11 @@ func completeStep4Tx(ctx context.Context, tx *sql.Tx, command operation.Command,
 		if err != nil || !live || kind != "matter" || matter != input.MatterID {
 			return refuse("not-found.stage-parent", "Stage parent Matter is not live")
 		}
-		if command.Request.Claim == nil {
-			return fold, ErrInvalidProof
+		if err = verifyStep4MatterClaim(ctx, tx, command, input.MatterID); err != nil {
+			if errors.Is(err, ErrFenced) {
+				return refuse("refusal.claim-fenced", "Stage parent is outside the active Matter claim")
+			}
+			return fold, err
 		}
 		locator := MatterLocator(input.Title)
 		if locator == "" {
@@ -598,6 +604,14 @@ func nullableLocator(repair bool, requested string) any {
 	return nil
 }
 
+func step4Problem(code, message string) operation.Result {
+	disposition := operation.ResultRefused
+	if strings.HasPrefix(code, "validation.") || strings.HasPrefix(code, "not-found.") {
+		disposition = operation.ResultRejected
+	}
+	return operation.Result{Code: disposition, Problem: &operation.Problem{Code: operation.ProblemCode(code), Message: message}}
+}
+
 func sha256Bytes(parts ...[]byte) []byte {
 	h := sha256.New()
 	for _, part := range parts {
@@ -637,9 +651,7 @@ func createM6Step(ctx context.Context, tx *sql.Tx, command operation.Command, ev
 		return fold, err
 	}
 	if MatterLocator(title) == "" {
-		fold.result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
-			Code: "validation.empty-locator", Message: "Step title does not yield a canonical locator",
-		}}
+		fold.result = step4Problem("validation.empty-locator", "Step title does not yield a canonical locator")
 		fold.subject, fold.eventIDs = "", nil
 		return fold, nil
 	}
@@ -709,9 +721,7 @@ func insertM6Step(ctx context.Context, tx *sql.Tx, command operation.Command, ev
 			}
 		}
 		if !found {
-			fold.result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
-				Code: "validation.not-a-live-sibling", Message: "insertion anchor is not a live Step child of the parent",
-			}}
+			fold.result = step4Problem("validation.not-a-live-sibling", "insertion anchor is not a live Step child of the parent")
 			fold.subject, fold.eventIDs = "", nil
 			return fold, nil
 		}
@@ -721,9 +731,7 @@ func insertM6Step(ctx context.Context, tx *sql.Tx, command operation.Command, ev
 		return fold, err
 	}
 	if MatterLocator(input.Title) == "" {
-		fold.result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
-			Code: "validation.empty-locator", Message: "Step title does not yield a canonical locator",
-		}}
+		fold.result = step4Problem("validation.empty-locator", "Step title does not yield a canonical locator")
 		fold.subject, fold.eventIDs = "", nil
 		return fold, nil
 	}

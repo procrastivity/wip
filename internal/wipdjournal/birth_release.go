@@ -175,17 +175,33 @@ func (j *Journal) BirthJournal(matterID string) (wipdwire.JournalBarrier, []Birt
 	var members []Entry
 	for index := range entries {
 		entry := entries[index]
-		if entry.Command.Request.Operation == operation.MatterCreateV1.Metadata().Operation {
+		birthOperation := entry.Command.Request.Operation == operation.MatterCreateV1.Metadata().Operation ||
+			entry.Command.Request.Operation == operation.MatterCreateV2.Metadata().Operation
+		if birthOperation {
 			if receipt, ok := installed.Receipts[entry.Command.ID]; ok && receipt.ResultCode == operation.ResultSucceeded {
 				fields, decodeErr := wipdwire.DecodeCanonicalMap(receipt.CanonicalReceipt,
 					"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
 				result, resultOK := fields["result"].(map[string]any)
 				output, outputOK := result["output"].([]byte)
-				created, outputErr := wipdwire.DecodeCanonicalMap(output, "id", "locator", "title")
-				if decodeErr != nil || !resultOK || !outputOK || outputErr != nil {
+				if decodeErr != nil || !resultOK || !outputOK {
 					return empty, nil, ErrInvalidJournal
 				}
-				if created["id"] == matterID {
+				var createdID string
+				if entry.Command.Request.Operation == operation.MatterCreateV1.Metadata().Operation {
+					created, outputErr := wipdwire.DecodeCanonicalMap(output, "id", "locator", "title")
+					if outputErr != nil {
+						return empty, nil, ErrInvalidJournal
+					}
+					createdID = asString(created["id"])
+				} else {
+					created, outputErr := wipdwire.DecodeCanonicalMap(output,
+						"id", "title", "requested_locator", "assigned_locator", "locator_repair_required")
+					if outputErr != nil {
+						return empty, nil, ErrInvalidJournal
+					}
+					createdID = asString(created["id"])
+				}
+				if createdID == matterID {
 					if birth != nil {
 						return empty, nil, ErrInvalidJournal
 					}
@@ -219,7 +235,8 @@ func (j *Journal) BirthJournal(matterID string) (wipdwire.JournalBarrier, []Birt
 			return empty, nil, fmt.Errorf("%w: a birth journal command is not returned in this Repo and Environment", ErrBirthBarrierIncomplete)
 		}
 		if index == 0 {
-			if entry.Command.Request.Operation != operation.MatterCreateV1.Metadata().Operation ||
+			if (entry.Command.Request.Operation != operation.MatterCreateV1.Metadata().Operation &&
+				entry.Command.Request.Operation != operation.MatterCreateV2.Metadata().Operation) ||
 				entry.Command.CausationCommandID != "" || entry.Command.CorrelationCommandID != birth.Command.ID {
 				return empty, nil, fmt.Errorf("%w: Matter birth identity is inconsistent", ErrBirthBarrierIncomplete)
 			}

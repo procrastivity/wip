@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -18,9 +19,10 @@ const (
 )
 
 var (
-	transferULID        = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	transferHash        = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	transferStepLocator = regexp.MustCompile(`^step-[0-9]{2,}$`)
+	transferULID          = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	transferHash          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	transferMatterLocator = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	transferStepLocator   = regexp.MustCompile(`^step-[0-9]{2,}$`)
 	// ErrInvalidTransfer means transfer records do not prove the advertised
 	// complete prefix delta and manifest.
 	ErrInvalidTransfer = errors.New("wipdjournal: invalid verified transfer")
@@ -182,7 +184,10 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
 			fields["kind"] != "dispatch.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
-			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended") ||
+			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended" &&
+			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
+			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
+			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired") ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
@@ -243,13 +248,64 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&
 			asString(payload["locator"]) != "" && asString(payload["title"]) != ""
+	case "stage.created":
+		title := asString(payload["title"])
+		return wipdwire.ExactMapKeys(payload, "matter_id", "locator", "title", "sort_key") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(asString(payload["matter_id"])) &&
+			transferMatterLocator.MatchString(asString(payload["locator"])) && strings.TrimSpace(title) != "" && positiveUint(payload["sort_key"])
 	case "step.created":
 		parent := asString(payload["parent"])
 		locator, locatorOK := payload["locator"].(string)
-		_, titleOK := payload["title"].(string)
+		title := asString(payload["title"])
 		return wipdwire.ExactMapKeys(payload, "title", "locator", "parent", "sort_key") &&
 			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(parent) &&
-			locatorOK && transferStepLocator.MatchString(locator) && titleOK && positiveUint(payload["sort_key"])
+			locatorOK && transferStepLocator.MatchString(locator) && strings.TrimSpace(title) != "" && positiveUint(payload["sort_key"])
+	case "step.inserted":
+		parent := asString(payload["parent"])
+		locator := asString(payload["locator"])
+		title := asString(payload["title"])
+		return wipdwire.ExactMapKeys(payload, "title", "locator", "parent", "sort_key") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(parent) &&
+			transferStepLocator.MatchString(locator) && strings.TrimSpace(title) != "" && positiveUint(payload["sort_key"])
+	case "step.reordered":
+		order, ok := payload["order"].([]any)
+		if !wipdwire.ExactMapKeys(payload, "order") || !transferULID.MatchString(asString(fields["subject_id"])) || !ok || len(order) == 0 {
+			return false
+		}
+		seen := make(map[string]bool, len(order))
+		for _, value := range order {
+			id := asString(value)
+			if !transferULID.MatchString(id) || seen[id] {
+				return false
+			}
+			seen[id] = true
+		}
+		return true
+	case "step.replaced":
+		replacement := asString(payload["replacement"])
+		title := asString(payload["title"])
+		return wipdwire.ExactMapKeys(payload, "replacement", "title", "locator") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && transferULID.MatchString(replacement) && replacement != fields["subject_id"] &&
+			transferStepLocator.MatchString(asString(payload["locator"])) && strings.TrimSpace(title) != ""
+	case "step.removed":
+		reason := asString(payload["reason"])
+		return wipdwire.ExactMapKeys(payload, "reason") && transferULID.MatchString(asString(fields["subject_id"])) &&
+			strings.TrimSpace(reason) != ""
+	case "matter.locator-repair-required":
+		requested, assigned := asString(payload["requested_locator"]), asString(payload["assigned_locator"])
+		return wipdwire.ExactMapKeys(payload, "requested_locator", "assigned_locator") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && transferMatterLocator.MatchString(requested) &&
+			transferMatterLocator.MatchString(assigned) && requested != assigned
+	case "matter.locator-repaired":
+		action := asString(payload["action"])
+		requested := asString(payload["requested_locator"])
+		previous := asString(payload["previous_locator"])
+		assigned := asString(payload["assigned_locator"])
+		return wipdwire.ExactMapKeys(payload, "action", "requested_locator", "previous_locator", "assigned_locator") &&
+			transferULID.MatchString(asString(fields["subject_id"])) && (action == "accept" || action == "rename") &&
+			transferMatterLocator.MatchString(requested) && transferMatterLocator.MatchString(previous) &&
+			transferMatterLocator.MatchString(assigned) && requested != previous &&
+			(action == "accept" && assigned == previous || action == "rename" && assigned != previous)
 	case "claim.released":
 		claimID := asString(payload["claim_id"])
 		epoch, epochOK := payload["claim_epoch"].(uint64)

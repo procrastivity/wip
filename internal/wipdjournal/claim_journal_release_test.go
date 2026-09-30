@@ -138,9 +138,9 @@ func openClaimJournalCloseTestFixture(t *testing.T, base int) (*Journal, ClaimJo
 		_ = journal.Close()
 		t.Fatalf("empty verified grant hydration status = %+v, %v", status, err)
 	}
-	if installed.Anchor.EventCount != 3 {
+	if installed.Anchor.EventCount != 4 {
 		_ = journal.Close()
-		t.Fatalf("installed acquisition anchor = %+v; want three claim acquisition events", installed.Anchor)
+		t.Fatalf("installed acquisition anchor = %+v; want Matter birth plus three claim-acquisition events", installed.Anchor)
 	}
 	acquired := ClaimAcquireAttempt{CloneID: testCommandPrefix + "97", WorktreeID: fixture.grant.WorktreeID()}
 	if acquired.WorktreeID == "" {

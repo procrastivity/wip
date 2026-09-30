@@ -44,8 +44,8 @@ func TestClaimHydrationRequiresExactVerifiedPinnedClosureAcrossReopen(t *testing
 		t.Fatalf("uninstalled acquisition grant became ready: %v", err)
 	}
 	installed, err := journal.InstallClaimGrant(ctx, mustInstallSnapshot(t, journal).Expectation(), fixture.grant)
-	if err != nil || installed.ManifestDigest != fixture.manifest.Digest || installed.Anchor.EventCount != 3 {
-		t.Fatalf("atomically install verified acquisition grant: %+v, %v", installed, err)
+	if err != nil || installed.ManifestDigest != fixture.manifest.Digest || installed.Anchor.EventCount != 4 {
+		t.Fatalf("atomically install verified acquisition grant and Matter parent: %+v, %v", installed, err)
 	}
 	replayed, err := journal.InstallClaimGrant(ctx, installed.Expectation(), fixture.grant)
 	if err != nil || replayed.Revision != installed.Revision || !sameTransferAnchor(replayed.Anchor, installed.Anchor) {
@@ -215,7 +215,7 @@ func TestEmptyRequiredHydrationIsDurablyReadyOnlyForItsInstalledManifest(t *test
 		t.Fatalf("empty closure on an invented grant became ready: %v", err)
 	}
 	installed, err := journal.InstallClaimGrant(ctx, mustInstallSnapshot(t, journal).Expectation(), fixture.grant)
-	if err != nil || installed.ManifestDigest != fixture.manifest.Digest || installed.Anchor.EventCount != 3 {
+	if err != nil || installed.ManifestDigest != fixture.manifest.Digest || installed.Anchor.EventCount != 4 {
 		t.Fatalf("install exact empty-closure acquisition: %+v, %v", installed, err)
 	}
 	status, err := journal.BeginClaimHydration(ctx, fixture.grantID)
@@ -310,11 +310,12 @@ func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntr
 	requestHash := hydrationDigest([]byte("asymmetric claim acquire request"))
 	worktreeID := makeID(10)
 	const eventTime = issued
-	eventIDs := []string{makeID(1), makeID(2), makeID(3)}
+	eventIDs := []string{makeID(0), makeID(1), makeID(2), makeID(3)}
 	eventSpecs := []struct {
 		kind, subject string
 		payload       map[string]any
 	}{
+		{"matter.created", matterID, map[string]any{"id": matterID, "locator": "hydration", "title": "Hydration Matter"}},
 		{"batch.anonymous-created", batchID, map[string]any{"batch_id": batchID, "matter_id": matterID}},
 		{"claim.acquired", claimID, map[string]any{
 			"claim_id": claimID, "claim_epoch": uint64(1), "matter_id": matterID, "batch_id": batchID,
@@ -326,10 +327,16 @@ func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntr
 	}
 	records := make([]wipdwire.EventRecord, 0, len(eventSpecs))
 	for index, spec := range eventSpecs {
+		eventCommandID, eventHash, eventSequence := commandID, requestHash, uint64(2)
+		if index == 0 {
+			eventCommandID = makeID(11)
+			eventHash = hydrationDigest([]byte("Matter birth request"))
+			eventSequence = 1
+		}
 		record, encodeErr := wipdwire.EncodeCanonical(map[string]any{
 			"schema": "wipd.event/1", "event_id": eventIDs[index], "domain_id": identity.DomainID,
-			"command_id": commandID, "request_hash": requestHash,
-			"environment": map[string]any{"id": identity.EnvironmentID, "sequence": uint64(1)},
+			"command_id": eventCommandID, "request_hash": eventHash,
+			"environment": map[string]any{"id": identity.EnvironmentID, "sequence": eventSequence},
 			"acted_at":    eventTime, "occurred_at": eventTime, "kind": spec.kind, "subject_id": spec.subject,
 			"repo_id": identity.RepoID, "payload": spec.payload,
 		})
@@ -354,9 +361,9 @@ func makeHydrationGrantFixture(t *testing.T, entries []wipdwire.BlobManifestEntr
 		"schema": "wipd.terminal-receipt/1", "domain_id": identity.DomainID, "authority_epoch": identity.AuthorityEpoch,
 		"identity_schema": "wipd.command/1", "command_id": commandID, "request_hash": requestHash,
 		"operation":       map[string]any{"name": "claim.acquire", "version": uint64(1)},
-		"environment":     map[string]any{"id": identity.EnvironmentID, "sequence": uint64(1)},
+		"environment":     map[string]any{"id": identity.EnvironmentID, "sequence": uint64(2)},
 		"result":          map[string]any{"code": "result.succeeded", "output": output, "problem_code": nil},
-		"accepted_events": map[string]any{"first_event_id": eventIDs[0], "last_event_id": eventIDs[2], "event_count": uint64(3)},
+		"accepted_events": map[string]any{"first_event_id": eventIDs[1], "last_event_id": eventIDs[3], "event_count": uint64(3)},
 	}
 	start, err := wipdwire.EncodeCanonical(map[string]any{
 		"schema": "wipd.claim-grant-start/1", "grant_id": grantID, "acquire_command_id": commandID,

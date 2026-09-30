@@ -216,6 +216,7 @@ type commandStartFakeAuthority struct {
 	releaseContinue      <-chan struct{}
 	claimAcquireCalls    int
 	claimAcquireAttempts []wipdjournal.ClaimAcquireAttempt
+	birthRepair          bool
 }
 
 func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipdjournal.Entry, start wipdwire.PrefixAnchor) (CommandFold, error) {
@@ -224,9 +225,11 @@ func (authority *commandStartFakeAuthority) Return(_ context.Context, entry wipd
 	if index >= len(authority.returnResults) {
 		return CommandFold{}, errors.New("unexpected authority return")
 	}
-	eventID := nextCommandStartEventID(start)
-	record := commandStartEventRecordForEntry(eventID, entry)
-	transfer, err := commandStartVerifiedTransfer(start, []wipdwire.EventRecord{{EventID: eventID, Record: record}})
+	records, err := commandStartEventRecordsForEntry(start, entry, authority.birthRepair)
+	if err != nil {
+		return CommandFold{}, err
+	}
+	transfer, err := commandStartVerifiedTransfer(start, records)
 	if err != nil {
 		return CommandFold{}, err
 	}
@@ -902,6 +905,107 @@ func TestBirthClaimReleaseReturnsPrefixAndInstallsBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestMatterCreateV2BirthBarrierSurvivesReopenAndReleases(t *testing.T) {
+	for _, repair := range []bool{false, true} {
+		name := "without collision"
+		if repair {
+			name = "with collision repair"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir() + "/journal"
+			coordinator, journal, environment, authority, _, _ := newCommandStartFixtureAt(t, root)
+			authority.returnResults = []operation.ResultCode{operation.ResultSucceeded}
+			authority.returnContinue = []bool{false}
+			authority.birthRepair = repair
+			const requested = "m6-birth"
+			matter := commandStartCanonicalCommand(commandStartCommandPrefix+"81", 1, "", commandStartCommandPrefix+"81",
+				operation.MatterCreateV2.Metadata().Operation, operation.MatterCreateInput{Title: "M6 birth", Locator: requested}, nil)
+			environment.setCurrentID(matter.ID)
+			created, err := coordinator.RunConnectedCanonicalTerminal(context.Background(), matter,
+				func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
+			if err != nil || !created.Returned || created.ResultCode != operation.ResultSucceeded {
+				t.Fatalf("matter.create@v2 terminal result=%+v err=%v", created, err)
+			}
+			output, ok := created.SemanticResult.Output.(operation.MatterCreateV2Output)
+			if !ok || output.RequestedLocator != requested || output.LocatorRepairRequired != repair ||
+				repair && output.AssignedLocator == requested || !repair && output.AssignedLocator != requested {
+				t.Fatalf("matter.create@v2 output = %#v; collision=%t", created.SemanticResult.Output, repair)
+			}
+			if repair && output.AssignedLocator != requested+"-"+strings.ToLower(output.ID[:6]) {
+				t.Fatalf("collision assigned locator=%q; want deterministic suffix for %s", output.AssignedLocator, output.ID)
+			}
+
+			barrier, receipts, err := journal.BirthJournal(output.ID)
+			wantEventCount := map[bool]uint64{false: 1, true: 2}[repair]
+			var returnedEventCount uint64
+			if len(receipts) == 1 {
+				fields, decodeErr := wipdwire.DecodeCanonicalMap(receipts[0].Receipt.CanonicalReceipt,
+					"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+				accepted, acceptedOK := fields["accepted_events"].(map[string]any)
+				if decodeErr != nil || !acceptedOK {
+					t.Fatalf("decode v2 birth accepted event range: fields=%v err=%v", fields, decodeErr)
+				}
+				returnedEventCount, _ = accepted["event_count"].(uint64)
+			}
+			if err != nil || barrier.Count != 1 || len(receipts) != 1 || receipts[0].Entry.Command.ID != matter.ID ||
+				receipts[0].Receipt.ResultCode != operation.ResultSucceeded || returnedEventCount != wantEventCount {
+				t.Fatalf("v2 birth barrier=%+v receipts=%+v err=%v", barrier, receipts, err)
+			}
+			firstBarrierBytes, err := wipdwire.EncodeCanonical(barrier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			birthReceipt := bytes.Clone(receipts[0].Receipt.CanonicalReceipt)
+			if err = journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, err := wipdjournal.Open(root, wipdjournal.Identity{
+				RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID,
+			})
+			if err != nil {
+				t.Fatalf("reopen v2 birth journal: %v", err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			recoveredBarrier, recoveredReceipts, err := reopened.BirthJournal(output.ID)
+			barrierBytes, encodeErr := wipdwire.EncodeCanonical(recoveredBarrier)
+			if err != nil || encodeErr != nil || !bytes.Equal(firstBarrierBytes, barrierBytes) || len(recoveredReceipts) != 1 ||
+				!bytes.Equal(birthReceipt, recoveredReceipts[0].Receipt.CanonicalReceipt) {
+				t.Fatalf("reopened v2 birth evidence barrier=%+v receipts=%+v err=%v encode=%v", recoveredBarrier, recoveredReceipts, err, encodeErr)
+			}
+
+			trace := &commandStartTrace{}
+			reopenedEnvironment := newCommandStartTestEnvironment(t, reopened, trace, "")
+			reopenedAuthority := &commandStartFakeAuthority{trace: trace, pullEventID: commandStartCommandPrefix + "45"}
+			server := newServer(operation.NewRegistry(), 4)
+			reopenedCoordinator, err := server.NewCommandStartCoordinator(commandStartDomainID, reopened, reopenedAuthority, reopenedEnvironment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseID := commandStartCommandPrefix + "82"
+			released, err := reopenedCoordinator.ReleaseBirthClaim(context.Background(), output.ID, releaseID, operation.Actor("human"))
+			if err != nil || released.Code != operation.ResultSucceeded || released.Attempt.Barrier.Count != 1 ||
+				len(reopenedAuthority.acks) != 1 || reopenedAuthority.acks[0].CommandID != matter.ID {
+				t.Fatalf("release v2 birth=%+v acks=%+v err=%v", released, reopenedAuthority.acks, err)
+			}
+			if err = reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			afterRelease, err := wipdjournal.Open(root, wipdjournal.Identity{
+				RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID,
+			})
+			if err != nil {
+				t.Fatalf("reopen released v2 birth: %v", err)
+			}
+			defer func() { _ = afterRelease.Close() }()
+			stored, err := afterRelease.BirthReleaseAttempt(releaseID)
+			if err != nil || !stored.Returned || stored.ResultCode != operation.ResultSucceeded || !bytes.Equal(stored.Receipt, released.Receipt) {
+				t.Fatalf("reopened v2 release receipt=%+v err=%v", stored, err)
+			}
+		})
+	}
+}
+
 func TestBirthReleaseUnknownOutcomeBlocksCommandsAndRetriesExactIdentity(t *testing.T) {
 	root := t.TempDir() + "/journal"
 	coordinator, journal, environment, authority, _, _ := newCommandStartFixtureAt(t, root)
@@ -1329,6 +1433,23 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 	var output, problem any
 	if code == operation.ResultSucceeded {
 		switch entry.Command.Request.Operation {
+		case operation.MatterCreateV2.Metadata().Operation:
+			input := entry.Command.Request.Input.(operation.MatterCreateInput)
+			if len(eventIDs) == 0 {
+				return nil, ErrCommandStartIdentity
+			}
+			assigned := input.Locator
+			if assigned == "" {
+				return nil, ErrCommandStartIdentity
+			}
+			repair := len(eventIDs) == 2
+			if repair {
+				assigned += "-" + strings.ToLower(eventIDs[0][:6])
+			}
+			output, _ = wipdwire.EncodeCanonical(map[string]any{
+				"id": eventIDs[0], "title": input.Title, "requested_locator": input.Locator,
+				"assigned_locator": assigned, "locator_repair_required": repair,
+			})
 		case operation.MatterCreateV1.Metadata().Operation:
 			input := entry.Command.Request.Input.(operation.MatterCreateInput)
 			output, _ = wipdwire.EncodeCanonical(map[string]any{"id": eventIDs[0], "locator": input.Locator, "title": input.Title})
@@ -1519,6 +1640,9 @@ func commandStartEventRecord(eventID, commandID, requestHash, environmentID stri
 
 func commandStartEventRecordForEntry(eventID string, entry wipdjournal.Entry) []byte {
 	switch entry.Command.Request.Operation {
+	case operation.MatterCreateV2.Metadata().Operation:
+		input := entry.Command.Request.Input.(operation.MatterCreateInput)
+		return commandStartMatterV2EventRecord(eventID, eventID, entry, input.Locator, false)
 	case operation.MatterCreateV1.Metadata().Operation:
 		input := entry.Command.Request.Input.(operation.MatterCreateInput)
 		encoded, _ := wipdwire.EncodeCanonical(map[string]any{
@@ -1544,6 +1668,50 @@ func commandStartEventRecordForEntry(eventID string, entry wipdjournal.Entry) []
 	default:
 		return nil
 	}
+}
+
+func commandStartEventRecordsForEntry(start wipdwire.PrefixAnchor, entry wipdjournal.Entry, repair bool) ([]wipdwire.EventRecord, error) {
+	firstID := nextCommandStartEventID(start)
+	if entry.Command.Request.Operation != operation.MatterCreateV2.Metadata().Operation {
+		return []wipdwire.EventRecord{{EventID: firstID, Record: commandStartEventRecordForEntry(firstID, entry)}}, nil
+	}
+	input := entry.Command.Request.Input.(operation.MatterCreateInput)
+	assigned := input.Locator
+	if repair {
+		assigned += "-" + strings.ToLower(firstID[:6])
+	}
+	records := []wipdwire.EventRecord{{
+		EventID: firstID, Record: commandStartMatterV2EventRecord(firstID, firstID, entry, assigned, false),
+	}}
+	if repair {
+		firstAnchor := start
+		firstAnchor.EventCount++
+		firstAnchor.EventID = &firstID
+		secondID := nextCommandStartEventID(firstAnchor)
+		records = append(records, wipdwire.EventRecord{
+			EventID: secondID, Record: commandStartMatterV2EventRecord(secondID, firstID, entry, assigned, true),
+		})
+	}
+	return records, nil
+}
+
+func commandStartMatterV2EventRecord(eventID, matterID string, entry wipdjournal.Entry, assigned string, repairRequired bool) []byte {
+	input := entry.Command.Request.Input.(operation.MatterCreateInput)
+	kind := "matter.created"
+	subject := matterID
+	payload := map[string]any{"id": eventID, "locator": assigned, "title": input.Title}
+	if repairRequired {
+		kind = "matter.locator-repair-required"
+		payload = map[string]any{"requested_locator": input.Locator, "assigned_locator": assigned}
+	}
+	encoded, _ := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": commandStartDomainID,
+		"command_id": entry.Command.ID, "request_hash": entry.RequestHash,
+		"environment": map[string]any{"id": entry.Command.EnvironmentID, "sequence": entry.EnvironmentSeq},
+		"acted_at":    entry.Command.ActedAt, "occurred_at": "2026-09-28T00:00:00Z",
+		"kind": kind, "subject_id": subject, "repo_id": commandStartRepoID, "payload": payload,
+	})
+	return encoded
 }
 
 func commandStartCanonicalCommand(id string, sequence uint64, causationID, correlationID string, operationID operation.ID, input operation.Input, claim *operation.ClaimContext) operation.Command {

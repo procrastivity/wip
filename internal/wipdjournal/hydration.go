@@ -412,10 +412,11 @@ func (j *Journal) ValidateInstalledClaimContext(ctx context.Context, claim *oper
 	return j.validateInstalledClaimContextLocked(ctx, claim, matterID, worktreeID)
 }
 
-// ValidateCommandClaimReadiness resolves a Step's parent from the installed
-// immutable birth event, then validates the exact grant and hydration product.
+// ValidateCommandClaimReadiness resolves the command's Matter through the
+// installed immutable event prefix, then validates the exact grant and
+// hydration product.
 func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request operation.Request) error {
-	if j == nil || ctx == nil {
+	if j == nil || ctx == nil || request.Context.Repo != j.identity.RepoID || !transferULID.MatchString(request.Context.Clone) {
 		return ErrClaimNotReady
 	}
 	j.mu.Lock()
@@ -423,61 +424,123 @@ func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request ope
 	if j.db == nil {
 		return ErrClosed
 	}
-	matterID := ""
-	subjectID := ""
-	switch input := request.Input.(type) {
-	case operation.MatterFinishInput:
-		matterID = input.MatterID
-	case operation.StepLifecycleInput:
-		subjectID = input.StepID
-	case operation.ContentWriteInput:
-		subjectID = input.SubjectID
-	case operation.FindingAppendInput:
-		subjectID = input.SubjectID
-	default:
-		return ErrClaimNotReady
+	matterID, ready, err := installedClaimMatter(ctx, j.db, j.identity.RepoID, request.Input)
+	if err != nil {
+		return err
 	}
-	if subjectID != "" {
-		rows, err := j.db.QueryContext(ctx, `SELECT record FROM installed_events ORDER BY position`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var record []byte
-			if err = rows.Scan(&record); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
-				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
-			if decodeErr != nil {
-				_ = rows.Close()
-				return ErrInvalidJournal
-			}
-			if fields["subject_id"] != subjectID {
-				continue
-			}
-			switch fields["kind"] {
-			case "matter.created":
-				matterID = subjectID
-			case "step.created":
-				payload, _ := fields["payload"].(map[string]any)
-				matterID, _ = payload["parent"].(string)
-			}
-			if matterID != "" {
-				break
-			}
-		}
-		if err = rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		_ = rows.Close()
-	}
-	if matterID == "" {
+	if !ready {
 		return ErrClaimNotReady
 	}
 	return j.validateInstalledClaimContextLocked(ctx, request.Claim, matterID, request.Context.Worktree)
+}
+
+type installedClaimNode struct {
+	kind, matterID, parentID string
+	live                     bool
+}
+
+func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input operation.Input) (string, bool, error) {
+	targetID := ""
+	parentKinds := map[string]bool{}
+	targetKinds := map[string]bool{}
+	switch value := input.(type) {
+	case operation.MatterFinishInput:
+		targetID, targetKinds[value.MatterID] = value.MatterID, true
+	case operation.MatterLocatorRepairInput:
+		targetID, targetKinds[value.MatterID] = value.MatterID, true
+	case operation.StageCreateInput:
+		targetID, targetKinds[value.MatterID] = value.MatterID, true
+	case operation.StepLifecycleInput:
+		targetID, targetKinds[value.StepID] = value.StepID, true
+	case operation.StepCreateInput:
+		targetID, parentKinds[value.ParentID] = value.ParentID, true
+	case operation.StepInsertInput:
+		targetID, parentKinds[value.ParentID] = value.ParentID, true
+	case operation.StepReorderInput:
+		targetID, parentKinds[value.ParentID] = value.ParentID, true
+	case operation.StepReplaceInput:
+		targetID, targetKinds[value.StepID] = value.StepID, true
+	case operation.StepRemoveInput:
+		targetID, targetKinds[value.StepID] = value.StepID, true
+	case operation.ContentWriteInput:
+		targetID, targetKinds[value.SubjectID] = value.SubjectID, true
+	case operation.FindingAppendInput:
+		targetID, targetKinds[value.SubjectID] = value.SubjectID, true
+	default:
+		return "", false, nil
+	}
+	if !transferULID.MatchString(targetID) {
+		return "", false, nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT record FROM installed_events ORDER BY position`)
+	if err != nil {
+		return "", false, err
+	}
+	nodes := make(map[string]installedClaimNode)
+	for rows.Next() {
+		var record []byte
+		if err = rows.Scan(&record); err != nil {
+			break
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			err = ErrInvalidJournal
+			break
+		}
+		if fields["repo_id"] != repoID {
+			continue
+		}
+		payload, _ := fields["payload"].(map[string]any)
+		subject := asString(fields["subject_id"])
+		switch fields["kind"] {
+		case "matter.created":
+			if payload["id"] == subject {
+				nodes[subject] = installedClaimNode{kind: "matter", matterID: subject, live: true}
+			}
+		case "stage.created", "step.created", "step.inserted":
+			parentID := asString(payload["parent"])
+			kind := "step"
+			if fields["kind"] == "stage.created" {
+				parentID = asString(payload["matter_id"])
+				kind = "stage"
+			}
+			matterID := parentID
+			parent := nodes[parentID]
+			if parent.kind == "stage" {
+				matterID = parent.matterID
+			}
+			if (kind == "stage" && nodes[matterID].kind == "matter" && nodes[matterID].live) ||
+				(kind == "step" && parent.live && (parent.kind == "matter" || parent.kind == "stage")) {
+				nodes[subject] = installedClaimNode{kind: kind, matterID: matterID, parentID: parentID, live: true}
+			}
+		case "step.replaced":
+			previous := nodes[subject]
+			replacement := asString(payload["replacement"])
+			if previous.kind == "step" && previous.live && transferULID.MatchString(replacement) {
+				previous.live = false
+				nodes[subject] = previous
+				nodes[replacement] = installedClaimNode{kind: "step", matterID: previous.matterID, parentID: previous.parentID, live: true}
+			}
+		case "step.removed":
+			previous := nodes[subject]
+			previous.live = false
+			nodes[subject] = previous
+		}
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	if err != nil {
+		return "", false, err
+	}
+	node := nodes[targetID]
+	if !node.live || parentKinds[targetID] && node.kind != "matter" && node.kind != "stage" ||
+		targetKinds[targetID] && node.kind != "matter" && node.kind != "step" {
+		return "", false, nil
+	}
+	return node.matterID, true, nil
 }
 
 func (j *Journal) validateInstalledClaimContextLocked(ctx context.Context, claim *operation.ClaimContext, matterID, worktreeID string) error {

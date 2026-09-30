@@ -573,7 +573,7 @@ func (j *Journal) InstallBirthRelease(ctx context.Context, expected InstallExpec
 		}
 		if persisted.Returned {
 			if !bytes.Equal(persisted.Receipt, receipt) {
-				return ErrInvalidTransfer
+				return fmt.Errorf("%w: replayed birth-release receipt differs from the durable receipt", ErrInvalidTransfer)
 			}
 			return nil
 		}
@@ -585,7 +585,7 @@ func (j *Journal) InstallBirthRelease(ctx context.Context, expected InstallExpec
 			return fmt.Errorf("validate birth-release event: %w", err)
 		}
 		if err = appendVerifiedEvents(ctx, tx, state.anchor.EventCount, transfer.records); err != nil {
-			return err
+			return fmt.Errorf("append verified birth-release events: %w", err)
 		}
 		manifest, err := encodeManifest(transfer.manifest)
 		if err != nil {

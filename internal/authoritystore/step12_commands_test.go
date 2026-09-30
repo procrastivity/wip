@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdjournal"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 func step12Command(f *claimTestFixture, id int, sequence uint64, definition operation.Definition, input operation.Input, claimID string) operation.Command {
@@ -36,7 +38,7 @@ func completeStep12Command(t *testing.T, f *claimTestFixture, command operation.
 	hash := hashCommand(t, command)
 	pending, err := f.s.SubmitCommand(context.Background(), command, hash, f.peer, f.now)
 	if err != nil || pending.Owner == nil || !pending.Pending {
-		t.Fatalf("submit %s: status=%+v err=%v", command.Request.Operation, pending, err)
+		t.Fatalf("submit %s command %s sequence %d: status=%+v err=%v", command.Request.Operation, command.ID, command.EnvironmentSequence, pending, err)
 	}
 	extra := make([]string, len(additional))
 	for index, value := range additional {
@@ -149,6 +151,7 @@ func TestStep4ClaimOperationsReplayReopenAndRefusalAreAtomic(t *testing.T) {
 	if err := f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=?`, domainA).Scan(&eventCount); err != nil || eventCount != 12 {
 		t.Fatalf("event count after Step 4 writes = %d, %v; want 12", eventCount, err)
 	}
+	verifyStep12SnapshotTransfer(t, f, claimTestID(95))
 	var nodeCount, stepCount, tombstoneCount int
 	if err := f.s.db.QueryRow(`SELECT count(*),sum(kind='step'),sum(tombstone_event_id IS NOT NULL) FROM m6_nodes WHERE domain_id=?`, domainA).
 		Scan(&nodeCount, &stepCount, &tombstoneCount); err != nil || nodeCount != 7 || stepCount != 5 || tombstoneCount != 2 {
@@ -380,5 +383,163 @@ func TestMatterCreateV2CollisionRepairAndExplicitAcceptanceSurviveReopen(t *test
 	var eventCount int
 	if err = f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=?`, domainA).Scan(&eventCount); err != nil || eventCount != 14 {
 		t.Fatalf("collision, rename, free-locator reuse and accept event count = %d, %v; want 14", eventCount, err)
+	}
+	verifyStep12SnapshotTransfer(t, f, claimTestID(96))
+}
+
+func TestStageCreateIsFencedToTheClaimedMatterBeforeSequenceReservation(t *testing.T) {
+	f := newClaimTestFixtureWithRepoB(t)
+	_, _, _ = claimTestBirthStep(t, f, 31, 101)
+	otherMatter := step12Command(f, 32, 3, operation.MatterCreateV2,
+		operation.MatterCreateInput{Title: "Other in Repo", Locator: "other-in-repo"}, "")
+	completeStep12Command(t, f, otherMatter, 210, 130)
+	otherRepoMatter := step12Command(f, 33, 4, operation.MatterCreateV2,
+		operation.MatterCreateInput{Title: "Other Repo", Locator: "other-repo"}, "")
+	otherRepoMatter.Request.Context.Repo = repoB
+	completeStep12Command(t, f, otherRepoMatter, 211, 131)
+
+	anchor := f.anchor(t)
+	allocation := claimTestAllocation(1, anchor, 214, 215, 216)
+	f.acquire(t, 11, 5, anchor, allocation)
+	before := f.anchor(t)
+	var sequenceBefore uint64
+	if err := f.s.db.QueryRow(`SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, domainA, envA).Scan(&sequenceBefore); err != nil || sequenceBefore != 5 {
+		t.Fatalf("environment head before denied Stage = %d, %v; want 5", sequenceBefore, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		repo   string
+		id     int
+		parent string
+	}{
+		{"another Matter in the same Repo", repoA, 15, claimTestID(210)},
+		{"Matter in another Repo", repoB, 16, claimTestID(211)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := step12Command(f, test.id, 6, operation.StageCreateV1,
+				operation.StageCreateInput{MatterID: test.parent, Title: "Must not be created"}, allocation.ClaimID)
+			command.Request.Context.Repo = test.repo
+			if _, err := f.s.SubmitCommand(context.Background(), command, hashCommand(t, command), f.peer, f.now); !errors.Is(err, ErrFenced) {
+				t.Fatalf("Stage under unclaimed Matter submit err=%v; want ErrFenced", err)
+			}
+		})
+	}
+	after := f.anchor(t)
+	var sequenceAfter, deniedCommands, deniedNodes uint64
+	if err := f.s.db.QueryRow(`SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, domainA, envA).Scan(&sequenceAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.db.QueryRow(`SELECT count(*) FROM submissions WHERE domain_id=? AND command_id IN (?,?)`, domainA, claimTestID(15), claimTestID(16)).Scan(&deniedCommands); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.db.QueryRow(`SELECT count(*) FROM m6_nodes WHERE domain_id=? AND title='Must not be created'`, domainA).Scan(&deniedNodes); err != nil {
+		t.Fatal(err)
+	}
+	if after != before || sequenceAfter != sequenceBefore || deniedCommands != 0 || deniedNodes != 0 {
+		t.Fatalf("denied cross-Matter Stage changed state: prefix %+v->%+v, env head %d->%d, commands=%d nodes=%d",
+			before, after, sequenceBefore, sequenceAfter, deniedCommands, deniedNodes)
+	}
+
+	valid := step12Command(f, 17, 6, operation.StageCreateV1,
+		operation.StageCreateInput{MatterID: f.matter, Title: "Claimed Matter Stage"}, allocation.ClaimID)
+	_, completed := completeStep12ClaimCommand(t, f, valid, allocation.JournalID, 1, 212, 217)
+	claimTestReceipt(t, completed, "result.succeeded", map[string]any{
+		"id": claimTestID(212), "matter_id": f.matter, "locator": "claimed-matter-stage", "title": "Claimed Matter Stage", "sort_key": int64(2000), "state": "planned",
+	}, 217)
+}
+
+func TestStep4ValidationAndNotFoundReceiptsUseRejectedDisposition(t *testing.T) {
+	cases := []struct {
+		id         int
+		definition operation.Definition
+		input      operation.Input
+		code       operation.ResultCode
+		problem    string
+	}{
+		{14, operation.StepCreateV2, operation.StepCreateInput{ParentID: claimTestID(299), Title: "Missing parent"}, operation.ResultRejected, "not-found.step-parent"},
+		{15, operation.StepCreateV2, operation.StepCreateInput{ParentID: claimTestID(200), Title: "!!!"}, operation.ResultRejected, "validation.empty-locator"},
+		{16, operation.StepReorderV1, operation.StepReorderInput{ParentID: claimTestID(200), Order: []string{claimTestID(201), claimTestID(202)}}, operation.ResultRejected, "validation.incomplete-order"},
+		{17, operation.StepReplaceV1, operation.StepReplaceInput{StepID: claimTestID(298), Title: "Missing"}, operation.ResultRejected, "not-found.step"},
+		{18, operation.StepRemoveV1, operation.StepRemoveInput{StepID: claimTestID(298), Reason: "obsolete"}, operation.ResultRejected, "not-found.step"},
+		{19, operation.StageCreateV1, operation.StageCreateInput{MatterID: claimTestID(20), Title: "!!!"}, operation.ResultRejected, "validation.empty-locator"},
+		{20, operation.StageCreateV1, operation.StageCreateInput{MatterID: claimTestID(20), Title: "Roadmap"}, operation.ResultRefused, "refusal.locator-conflict"},
+	}
+	for _, test := range cases {
+		t.Run(test.problem, func(t *testing.T) {
+			f := newClaimTestFixture(t)
+			_, _, _ = claimTestBirthStep(t, f, 31, 101)
+			anchor := f.anchor(t)
+			allocation := claimTestAllocation(1, anchor, 104, 105, 106)
+			f.acquire(t, 11, 3, anchor, allocation)
+			stageCommand := step12Command(f, 12, 4, operation.StageCreateV1,
+				operation.StageCreateInput{MatterID: f.matter, Title: "Roadmap"}, allocation.ClaimID)
+			completeStep12ClaimCommand(t, f, stageCommand, allocation.JournalID, 1, 200, 107)
+			stepCommand := step12Command(f, 13, 5, operation.StepCreateV2,
+				operation.StepCreateInput{ParentID: claimTestID(200), Title: "First"}, allocation.ClaimID)
+			completeStep12ClaimCommand(t, f, stepCommand, allocation.JournalID, 2, 201, 108)
+			before := f.anchor(t)
+			command := step12Command(f, test.id, 6, test.definition, test.input, allocation.ClaimID)
+			_, status := completeStep12Command(t, f, command, 220+test.id, 140+test.id)
+			receipt, err := readReceipt(status.Receipt)
+			if err != nil || receipt.Result.Code != string(test.code) || receipt.Result.Problem == nil || *receipt.Result.Problem != test.problem {
+				t.Fatalf("terminal %s receipt = %+v err=%v; want %s/%s", test.definition.Metadata().Operation, receipt.Result, err, test.code, test.problem)
+			}
+			if after := f.anchor(t); after != before {
+				t.Fatalf("terminal validation/not-found result mutated event prefix: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
+func newClaimTestFixtureWithRepoB(t *testing.T) *claimTestFixture {
+	t.Helper()
+	s, root, peer, key, now := commandFixture(t)
+	if err := s.AttachRepo(context.Background(), domainA, repoB); err != nil {
+		t.Fatalf("attach second Repo before authority history: %v", err)
+	}
+	f := &claimTestFixture{
+		s: s, root: root, peer: peer, key: key, now: now,
+		matter: claimTestID(20), worktree: claimTestID(21), clone: claimTestID(22),
+	}
+	command := matterCommand(claimTestID(10), 1, "alpha")
+	status, err := s.SubmitCommand(context.Background(), command, hashCommand(t, command), peer, now)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("create claimed Matter submission: %+v %v", status, err)
+	}
+	if _, err = s.CompleteCommand(context.Background(), status.Owner, success(f.matter, "alpha"), f.matter, claimTestID(100), now, signWith(key)); err != nil {
+		t.Fatalf("create claimed Matter completion: %v", err)
+	}
+	return f
+}
+
+func verifyStep12SnapshotTransfer(t *testing.T, f *claimTestFixture, snapshotID string) {
+	t.Helper()
+	snapshot, err := f.s.PinSnapshot(context.Background(), domainA, 7, emptyAnchor(), snapshotID, f.now, time.Minute)
+	if err != nil {
+		t.Fatalf("pin complete Step 4 event prefix: %v", err)
+	}
+	toWireAnchor := func(anchor PrefixAnchor) wipdwire.PrefixAnchor {
+		value := wipdwire.PrefixAnchor{EventCount: anchor.EventCount, Digest: anchor.Digest}
+		if anchor.EventID != "" {
+			eventID := anchor.EventID
+			value.EventID = &eventID
+		}
+		return value
+	}
+	records := make([]wipdwire.EventRecord, len(snapshot.Delta.Events))
+	for index, event := range snapshot.Delta.Events {
+		records[index] = wipdwire.EventRecord{EventID: event.EventID, Record: bytes.Clone(event.Record)}
+	}
+	entries := make([]wipdwire.BlobManifestEntry, len(snapshot.Manifest.Entries))
+	for index, entry := range snapshot.Manifest.Entries {
+		entries[index] = wipdwire.BlobManifestEntry{Digest: entry.Digest, ByteLength: entry.ByteLength, Requirement: entry.Requirement}
+	}
+	manifest := wipdwire.BlobManifest{
+		Schema: "wipd.blob-manifest/1", DomainID: domainA, Epoch: 7,
+		AsOf: toWireAnchor(snapshot.Delta.End), Entries: entries, Digest: snapshot.Manifest.Digest,
+	}
+	if _, err = wipdjournal.VerifyTransfer(domainA, 7, toWireAnchor(snapshot.Delta.Start), toWireAnchor(snapshot.Delta.End), records, manifest); err != nil {
+		t.Fatalf("verify complete Step 4 authority pull: %v", err)
 	}
 }
