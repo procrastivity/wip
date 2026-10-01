@@ -754,7 +754,7 @@ func step13ClosedPayload(fields map[string]cbor.RawMessage, value any, required 
 		if !allowed[key] {
 			return false
 		}
-		if bytes.Equal(fields[key], []byte{0xf6}) {
+		if bytes.Equal(fields[key], []byte{0xf6}) || bytes.Equal(fields[key], []byte{0xf7}) {
 			return false
 		}
 		if !requiredFields[key] && !step13OptionalPayloadValueIsNonzero(key, fields[key]) {

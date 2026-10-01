@@ -465,6 +465,35 @@ func TestStep13FoldRejectsExplicitZeroOptionalFields(t *testing.T) {
 	}
 }
 
+func TestStep13ConfigSetRejectsUndefinedValueAndAcceptsEmptyText(t *testing.T) {
+	undefinedNodes, undefinedEvents, _, _, _, _ := step13FoldFixture()
+	undefined := step13TestEvent(17, "config.set", repoA, map[string]any{
+		"key": "tracker.push-level", "value": "",
+	})
+	undefined.payload["value"] = cbor.RawMessage{0xf7}
+	undefinedEvents = append(undefinedEvents, undefined)
+	if _, err := deriveStep13Projection(undefinedNodes, undefinedEvents); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("config.set payload with undefined value accepted: %v", err)
+	}
+
+	emptyNodes, emptyEvents, _, _, _, _ := step13FoldFixture()
+	empty := step13TestEvent(17, "config.set", repoA, map[string]any{
+		"key": "tracker.push-level", "value": "",
+	})
+	if value := empty.payload["value"]; len(value) != 1 || value[0] != 0x60 {
+		t.Fatalf("config.set empty value is not CBOR empty text: %x", value)
+	}
+	emptyEvents = append(emptyEvents, empty)
+	projection, err := deriveStep13Projection(emptyNodes, emptyEvents)
+	if err != nil {
+		t.Fatalf("config.set with an empty text value rejected: %v", err)
+	}
+	if len(projection.config) != 1 || projection.config[0].key != "tracker.push-level" ||
+		projection.config[0].value != "" || projection.config[0].event != claimTestID(317) {
+		t.Fatalf("empty config.set value/source not projected exactly: %+v", projection.config)
+	}
+}
+
 func TestStep13CancelTransitionOmitsEmptyReason(t *testing.T) {
 	nodes, events, _, _, _, _ := step13FoldFixture()
 	const canceled = "00000000000000000000000044"
