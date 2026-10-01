@@ -96,6 +96,8 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		{"Step insert under Stage", operation.StepInsertInput{ParentID: stage, Title: "Next"}, matter},
 		{"Step reorder under Stage", operation.StepReorderInput{ParentID: stage, Order: []string{stepLive}}, matter},
 		{"Step lifecycle resolves Stage ancestry", operation.StepLifecycleInput{StepID: stepLive}, matter},
+		{"Matter lifecycle target", operation.NodeLifecycleInput{NodeID: matter}, matter},
+		{"Stage lifecycle target resolves Matter ancestry", operation.NodeLifecycleInput{NodeID: stage}, matter},
 		{"Step replacement target", operation.StepReplaceInput{StepID: stepLive, Title: "Again"}, matter},
 		{"Step removal target", operation.StepRemoveInput{StepID: stepLive, Reason: "done"}, matter},
 		{"Matter finish", operation.MatterFinishInput{MatterID: matter}, matter},

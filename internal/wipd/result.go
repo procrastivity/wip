@@ -56,6 +56,14 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				"blob_digest": content.BlobDigest, "byte_length": uint64(content.ByteLength),
 			}
 		default:
+			if operation.Step5Operation(id) {
+				encodedOutput, err := encodeStep5Output(id, result.Output)
+				if err != nil {
+					return nil, err
+				}
+				fields["output"] = encodedOutput
+				return encodePayload(fields)
+			}
 			if !operation.Step4Operation(id) {
 				return nil, errMalformedMessage
 			}
@@ -189,6 +197,13 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				ID: idValue, SubjectID: subjectID, Kind: kind, BlobDigest: digest, ByteLength: int64(byteLength),
 			}
 		default:
+			if operation.Step5Operation(id) {
+				result.Output, err = decodeStep5Output(id, encodedOutput)
+				if err != nil {
+					return operation.Result{}, err
+				}
+				break
+			}
 			if !operation.Step4Operation(id) {
 				return operation.Result{}, errMalformedMessage
 			}

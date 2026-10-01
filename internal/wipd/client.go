@@ -443,6 +443,12 @@ func (c *Client) negotiate(ctx context.Context) error {
 		}, map[string]any{
 			"name": "step.remove", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 		})
+		for _, definition := range operation.Step5Catalogue() {
+			id := definition.Metadata().Operation
+			operations = append(operations, map[string]any{
+				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+			})
+		}
 		sort.Slice(operations, func(i, j int) bool {
 			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
 		})
@@ -569,7 +575,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.FindingAppendV1.Metadata().Operation:
 		return true
 	default:
-		return operation.Step4Operation(id)
+		return operation.Step4Operation(id) || operation.Step5Operation(id)
 	}
 }
 

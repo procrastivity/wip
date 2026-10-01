@@ -790,11 +790,12 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				return "", ErrCommandStartIdentity
 			}
 		default:
-			if !operation.Step4Operation(entry.Command.Request.Operation) || !hasRange {
+			if !(operation.Step4Operation(entry.Command.Request.Operation) || operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
 				return "", ErrCommandStartIdentity
 			}
 			count, countOK := accepted["event_count"].(uint64)
-			if !countOK || validateStep4Receipt(entry, outputBytes, count) != nil {
+			if !countOK || operation.Step5Operation(entry.Command.Request.Operation) && validateStep5Receipt(entry, outputBytes, count) != nil ||
+				operation.Step4Operation(entry.Command.Request.Operation) && validateStep4Receipt(entry, outputBytes, count) != nil {
 				return "", ErrCommandStartIdentity
 			}
 		}
@@ -904,12 +905,18 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		}
 		typed = content
 	default:
-		if !operation.Step4Operation(entry.Command.Request.Operation) {
+		if operation.Step5Operation(entry.Command.Request.Operation) {
+			typed, err = decodeStep5Output(entry.Command.Request.Operation, outputBytes)
+			if err != nil {
+				return operation.Result{}, ErrCommandStartIdentity
+			}
+		} else if !operation.Step4Operation(entry.Command.Request.Operation) {
 			return operation.Result{}, ErrCommandStartIdentity
-		}
-		typed, err = decodeStep4Output(entry.Command.Request.Operation, outputBytes)
-		if err != nil {
-			return operation.Result{}, ErrCommandStartIdentity
+		} else {
+			typed, err = decodeStep4Output(entry.Command.Request.Operation, outputBytes)
+			if err != nil {
+				return operation.Result{}, ErrCommandStartIdentity
+			}
 		}
 	}
 	result := operation.Result{Code: code, Output: typed}

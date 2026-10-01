@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/procrastivity/wip/internal/operation"
 )
 
 func TestSaveConfigExactRetryAndConflict(t *testing.T) {
@@ -86,4 +88,36 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 	if (&Runtime{config: loadedLegacy}).SupportsClaimAcquisition() {
 		t.Fatal("legacy connected profile enabled acquisition without grant-verification trust")
 	}
+}
+
+func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
+	m5, err := registryForConfig(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasCommand(m5, operation.MatterStartV1.Metadata().Operation) {
+		t.Fatal("default M5 connected profile unexpectedly advertises M6 lifecycle commands")
+	}
+	m6, err := registryForConfig(Config{CommandCatalogue: "m6-step5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCommand(m6, operation.MatterStartV1.Metadata().Operation) {
+		t.Fatal("explicit M6 connected profile omitted matter.start")
+	}
+	if !hasCommand(m6, operation.StepCancelV1.Metadata().Operation) {
+		t.Fatal("explicit M6 connected profile omitted step.cancel")
+	}
+	if err = validateConfig(Config{Schema: "wipd.connected-authority-profile/2", CommandCatalogue: "m6-step4"}); err == nil {
+		t.Fatal("accepted an unrecognized connected command catalogue")
+	}
+}
+
+func hasCommand(registry *operation.Registry, command operation.ID) bool {
+	for _, definition := range registry.Definitions() {
+		if definition.Metadata().Operation == command {
+			return true
+		}
+	}
+	return false
 }

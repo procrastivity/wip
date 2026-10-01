@@ -448,6 +448,8 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.MatterLocatorRepairInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
+	case operation.NodeLifecycleInput:
+		targetID, targetKinds[value.NodeID] = value.NodeID, true
 	case operation.StageCreateInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.StepLifecycleInput:
@@ -537,7 +539,7 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 	}
 	node := nodes[targetID]
 	if !node.live || parentKinds[targetID] && node.kind != "matter" && node.kind != "stage" ||
-		targetKinds[targetID] && node.kind != "matter" && node.kind != "step" {
+		targetKinds[targetID] && node.kind != "matter" && node.kind != "stage" && node.kind != "step" {
 		return "", false, nil
 	}
 	return node.matterID, true, nil

@@ -90,7 +90,7 @@ func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []b
 		return nil, nil, nil, labProtocolProblemUnsupportedExtension
 	}
 	selected := make(map[operation.ID]struct{})
-	selectedCapabilities := make([]any, 0, len(supported))
+	selectedVersions := make(map[string][]any)
 	selectedSchemas := []string{"wipd.command/1"}
 	for _, definition := range supported {
 		id := definition.Metadata().Operation
@@ -99,8 +99,17 @@ func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []b
 			continue
 		}
 		selected[id] = struct{}{}
+		selectedVersions[id.Name] = append(selectedVersions[id.Name], uint64(id.Version))
+	}
+	selectedNames := make([]string, 0, len(selectedVersions))
+	for name := range selectedVersions {
+		selectedNames = append(selectedNames, name)
+	}
+	sort.Strings(selectedNames)
+	selectedCapabilities := make([]any, 0, len(selectedNames))
+	for _, name := range selectedNames {
 		selectedCapabilities = append(selectedCapabilities, map[string]any{
-			"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{"wipd.command/1"},
+			"name": name, "versions": selectedVersions[name], "identity_schemas": []any{"wipd.command/1"},
 		})
 	}
 	serverHello, err := wipdwire.EncodeCanonical(map[string]any{

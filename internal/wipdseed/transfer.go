@@ -244,15 +244,22 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	var limits sessionLimits
 	capabilities := make([]any, 0, len(operations))
 	previous := operation.ID{}
+	byName := make(map[string][]any)
 	for index, id := range operations {
 		if id.Name == "" || id.Version == 0 || index > 0 && (id.Name < previous.Name || id.Name == previous.Name && id.Version <= previous.Version) {
 			return limits, ErrInvalidClientState
 		}
-		capabilities = append(capabilities, map[string]any{
-			"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{"wipd.command/1"},
-		})
+		byName[id.Name] = append(byName[id.Name], uint64(id.Version))
 		previous = id
 	}
+	for name, versions := range byName {
+		capabilities = append(capabilities, map[string]any{
+			"name": name, "versions": versions, "identity_schemas": []any{"wipd.command/1"},
+		})
+	}
+	sort.Slice(capabilities, func(i, j int) bool {
+		return capabilities[i].(map[string]any)["name"].(string) < capabilities[j].(map[string]any)["name"].(string)
+	})
 	hello := map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
 		"protocol_max":     []any{uint64(1), uint64(0)},
@@ -311,7 +318,14 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 
 func equalNegotiatedOperations(value any, expected []operation.ID) bool {
 	items, ok := value.([]any)
-	if !ok || len(items) != len(expected) {
+	if !ok {
+		return false
+	}
+	byName := make(map[string][]uint64)
+	for _, id := range expected {
+		byName[id.Name] = append(byName[id.Name], uint64(id.Version))
+	}
+	if len(items) != len(byName) {
 		return false
 	}
 	for index, item := range items {
@@ -322,9 +336,21 @@ func equalNegotiatedOperations(value any, expected []operation.ID) bool {
 		name, nameOK := fields["name"].(string)
 		versions, versionsOK := fields["versions"].([]any)
 		schemas, schemaOK := fields["identity_schemas"].([]any)
-		if !nameOK || !versionsOK || len(versions) != 1 || versions[0] != uint64(expected[index].Version) ||
-			!schemaOK || len(schemas) != 1 || schemas[0] != "wipd.command/1" || name != expected[index].Name {
+		wantVersions, found := byName[name]
+		if !nameOK || !found || !versionsOK || len(versions) != len(wantVersions) ||
+			!schemaOK || len(schemas) != 1 || schemas[0] != "wipd.command/1" {
 			return false
+		}
+		for versionIndex, version := range versions {
+			if version != wantVersions[versionIndex] {
+				return false
+			}
+		}
+		if index > 0 {
+			prior := items[index-1].(map[string]any)["name"].(string)
+			if name <= prior {
+				return false
+			}
 		}
 	}
 	return true

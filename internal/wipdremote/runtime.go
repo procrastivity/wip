@@ -35,10 +35,12 @@ const (
 // ErrNotConfigured means the daemon profile has no connected-authority config.
 var ErrNotConfigured = errors.New("wipdremote: connected authority profile is not configured")
 
-// Config is the private local pin set installed by the M5 lab client-enroll
-// worker. It is not an M2 wire or normative profile schema.
+// Config is the private local pin set installed by the connected-authority
+// client-enroll worker. CommandCatalogue is opt-in: omitted profiles retain
+// the M5-only daemon command surface.
 type Config struct {
 	Schema                  string `json:"schema"`
+	CommandCatalogue        string `json:"command_catalogue,omitempty"`
 	Origin                  string `json:"origin"`
 	DomainID                string `json:"domain_id"`
 	Epoch                   uint64 `json:"authority_epoch"`
@@ -181,7 +183,7 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	registry, err := wipdauthority.NewM5BirthRegistry()
+	registry, err := registryForConfig(config)
 	if err != nil {
 		_ = runtime.Close()
 		return nil, nil, err
@@ -208,7 +210,7 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := wipdauthority.NewM5BirthRegistry()
+	registry, err := registryForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +444,9 @@ func validateConfig(config Config) error {
 		config.RepoID == "" || config.ClientStateDirectory == "" || !filepath.IsAbs(config.ClientStateDirectory) {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
+	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" {
+		return errors.New("wipdremote: unsupported connected command catalogue")
+	}
 	if config.Schema == "wipd.connected-authority-profile/1" {
 		if len(config.OwnerRootPublicKey) != 0 || len(config.ArtifactKeyCertificate) != 0 {
 			return errors.New("wipdremote: legacy connected profile cannot contain acquisition trust fields")
@@ -459,6 +464,13 @@ func validateConfig(config Config) error {
 	}
 	_, _, err = authorityProfile(config)
 	return err
+}
+
+func registryForConfig(config Config) (*operation.Registry, error) {
+	if config.CommandCatalogue == "m6-step5" {
+		return wipdauthority.NewM6Step5Registry()
+	}
+	return wipdauthority.NewM5BirthRegistry()
 }
 
 func authorityProfile(config Config) (wipdauthority.Profile, *x509.CertPool, error) {

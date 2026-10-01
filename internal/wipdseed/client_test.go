@@ -773,6 +773,10 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 1, matterACommand, 5, cloneID, worktreeA, claimContextA,
 		operation.MatterStartV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(28))
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || projectedMatterState(t, state, matterA) != "in-progress" {
+		t.Fatalf("PullAndInstall standalone Matter start projection: state=%+v err=%v", state, err)
+	}
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 2, "01KZ7XHAQT1S46NYPN1PW1WY03", 6, cloneID, worktreeA, claimContextA,
 		operation.MatterPauseV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(29))
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 3, "01KZ7XHAQT1S46NYPN1PW1WY04", 7, cloneID, worktreeA, claimContextA,
@@ -807,6 +811,42 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 		operation.StepStartV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(34), m6PullEventID(35), m6PullEventID(36))
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 4, "01KZ7XHAQT1S46NYPN1PW1WY07", 12, cloneID, worktreeB, claimContextB,
 		operation.StepPauseV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(37))
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil {
+		t.Fatalf("PullAndInstall paused nested Step projection: %v", err)
+	}
+	var pausedStep stepProjection
+	foundPausedStep := false
+	for _, raw := range state.StepProjections {
+		var projection stepProjection
+		if err = json.Unmarshal(raw, &projection); err != nil {
+			t.Fatal(err)
+		}
+		if projection.ID == stepB {
+			pausedStep, foundPausedStep = projection, true
+		}
+	}
+	if !foundPausedStep || pausedStep.State != "paused" || pausedStep.MatterID != matterB || projectedMatterState(t, state, matterB) != "in-progress" {
+		t.Fatalf("PullAndInstall folded nested Matter/Step projections: Matter=%q Step=%+v found=%t", projectedMatterState(t, state, matterB), pausedStep, foundPausedStep)
+	}
+	var stageParentFolded, stepParentFolded bool
+	for _, record := range state.EventRecords {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		payload, payloadOK := fields["payload"].(map[string]any)
+		if fields["kind"] == "stage.created" && fields["subject_id"] == stageB && payloadOK && payload["matter_id"] == matterB {
+			stageParentFolded = true
+		}
+		if fields["kind"] == "step.created" && fields["subject_id"] == stepB && payloadOK && payload["parent"] == stageB {
+			stepParentFolded = true
+		}
+	}
+	if !stageParentFolded || !stepParentFolded {
+		t.Fatalf("PullAndInstall nested event lineage: Stage→Matter=%t Step→Stage=%t", stageParentFolded, stepParentFolded)
+	}
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 5, "01KZ7XHAQT1S46NYPN1PW1WY08", 13, cloneID, worktreeB, claimContextB,
 		operation.StepResumeV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(38))
 	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 6, "01KZ7XHAQT1S46NYPN1PW1WY09", 14, cloneID, worktreeB, claimContextB,
@@ -889,6 +929,28 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 		t.Fatalf("installed lifecycle event evidence: standalone-matter-start=%t stage-finish=%t matter-seal=%t",
 			sawStandaloneMatterStart, sawStageFinish, sawMatterSeal)
 	}
+}
+
+func projectedMatterState(t *testing.T, state ClientState, matterID string) string {
+	t.Helper()
+	var lifecycle string
+	found := false
+	for _, raw := range state.Projections {
+		var projection eventProjection
+		if err := json.Unmarshal(raw, &projection); err != nil {
+			t.Fatalf("decode client Matter projection: %v", err)
+		}
+		if projection.ID == matterID {
+			if found {
+				t.Fatalf("duplicate client Matter projection for %s", matterID)
+			}
+			lifecycle, found = projection.State, true
+		}
+	}
+	if !found {
+		t.Fatalf("client Matter projection for %s is missing", matterID)
+	}
+	return lifecycle
 }
 
 func completeM6ClaimForPull(t *testing.T, fixture *clientFixture, state ClientState, peer tls.ConnectionState, signer ed25519.PrivateKey,

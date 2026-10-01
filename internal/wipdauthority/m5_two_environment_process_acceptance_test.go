@@ -552,7 +552,7 @@ type m5ProcessClientState struct {
 }
 
 func prepareM5ProcessEnvironment(t *testing.T, fixture *m5CommandFixture, parent, name, environmentID string,
-	private ed25519.PrivateKey, leafDER, caDER []byte,
+	private ed25519.PrivateKey, leafDER, caDER []byte, catalogue ...string,
 ) (m5ProcessEnvironment, error) {
 	t.Helper()
 	root := filepath.Join(parent, name)
@@ -598,6 +598,7 @@ func prepareM5ProcessEnvironment(t *testing.T, fixture *m5CommandFixture, parent
 	authoritySPKI := sha256.Sum256(authorityLeaf.RawSubjectPublicKeyInfo)
 	profileConfig := struct {
 		Schema                  string `json:"schema"`
+		CommandCatalogue        string `json:"command_catalogue,omitempty"`
 		Origin                  string `json:"origin"`
 		DomainID                string `json:"domain_id"`
 		Epoch                   uint64 `json:"authority_epoch"`
@@ -614,6 +615,12 @@ func prepareM5ProcessEnvironment(t *testing.T, fixture *m5CommandFixture, parent
 		AuthoritySPKIPin: "sha256:" + hex.EncodeToString(authoritySPKI[:]), AuthorityCertificateDER: bytes.Clone(fixture.serverCert.Certificate[1]),
 		OwnerRootPublicKey: bytes.Clone(fixture.ownerRoot), ArtifactKeyCertificate: bytes.Clone(fixture.config.ArtifactKeyCertificate),
 		ClientStateDirectory: environment.clientStateRoot,
+	}
+	if len(catalogue) > 1 || len(catalogue) == 1 && catalogue[0] != "m6-step5" {
+		return environment, fmt.Errorf("unsupported connected command catalogue %q", catalogue)
+	}
+	if len(catalogue) == 1 {
+		profileConfig.CommandCatalogue = catalogue[0]
 	}
 	configBytes, err := json.Marshal(profileConfig)
 	if err != nil {

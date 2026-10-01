@@ -1166,7 +1166,7 @@ func m5WipdBinary(t *testing.T) string {
 	return binary
 }
 
-func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) (*wipd.Client, func(), *bytes.Buffer) {
+func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string, m6 ...bool) (*wipd.Client, func(), *bytes.Buffer) {
 	t.Helper()
 	processCtx, cancelProcess := context.WithCancel(context.Background())
 	process := exec.CommandContext(processCtx, binary, "--profile-root", profileRoot)
@@ -1202,7 +1202,13 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string) 
 	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		client, err := wipd.Connect(ctx, profileRoot)
+		var client *wipd.Client
+		var err error
+		if len(m6) > 0 && m6[0] {
+			client, err = wipd.ConnectM6(ctx, profileRoot)
+		} else {
+			client, err = wipd.Connect(ctx, profileRoot)
+		}
 		cancel()
 		if err == nil {
 			return client, stop, &output
