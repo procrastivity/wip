@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestM6FreshAndExplicitV4ToV11Upgrade(t *testing.T) {
+func TestM6FreshAndExplicitV4ToV12Upgrade(t *testing.T) {
 	s, root := fresh(t)
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 11 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 12 {
 		t.Fatalf("fresh schema version %d: %v", version, err)
 	}
 	if err := s.Close(); err != nil {
@@ -87,6 +87,12 @@ func TestM6FreshAndExplicitV4ToV11Upgrade(t *testing.T) {
 	if err = UpgradeV10(legacy); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = OpenExisting(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("ordinary open of v11: %v", err)
+	}
+	if err = UpgradeV11(legacy); err != nil {
+		t.Fatal(err)
+	}
 	upgraded, err := OpenExisting(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +111,9 @@ func TestM6FreshAndExplicitV4ToV11Upgrade(t *testing.T) {
 	}
 	if err = UpgradeV10(legacy); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("repeated v10 upgrade: %v", err)
+	}
+	if err = UpgradeV11(legacy); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("repeated v11 upgrade: %v", err)
 	}
 	backup8, err := connect(filepath.Join(legacy, "authority-v8.backup.db"), "ro", false)
 	if err != nil {
@@ -130,6 +139,14 @@ func TestM6FreshAndExplicitV4ToV11Upgrade(t *testing.T) {
 		t.Fatalf("retained v10 backup: %v", err)
 	}
 	_ = backup10.Close()
+	backup11, err := connect(filepath.Join(legacy, "authority-v11.backup.db"), "ro", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkSchemaVersion(backup11, 11); err != nil {
+		t.Fatalf("retained v11 backup: %v", err)
+	}
+	_ = backup11.Close()
 	backup, err := connect(filepath.Join(legacy, "authority-v4.backup.db"), "ro", false)
 	if err != nil {
 		t.Fatal(err)

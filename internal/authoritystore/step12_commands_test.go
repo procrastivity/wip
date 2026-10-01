@@ -294,8 +294,8 @@ func TestMatterCreateV2CollisionRepairAndExplicitAcceptanceSurviveReopen(t *test
 		if dbErr != nil {
 			t.Fatalf("reopen renamed locator repair: %v (database: %v)", err, dbErr)
 		}
-		t.Fatalf("reopen renamed locator repair: %v (schema:%v step4:%v step5:%v step6:%v step12:%v)", err,
-			checkSchemaVersion(db, 11), checkStep4State(db), checkStep5State(db), checkStep6State(db), checkStep12State(db))
+		t.Fatalf("reopen renamed locator repair: %v (schema:%v step4:%v step5:%v step6:%v step12:%v step13:%v)", err,
+			checkSchemaVersion(db, 12), checkStep4State(db), checkStep5State(db), checkStep6State(db), checkStep12State(db), checkStep13State(db))
 	}
 	t.Cleanup(func() { _ = f.s.Close() })
 	replay, err := f.s.SubmitCommand(context.Background(), repair, hashCommand(t, repair), f.peer, f.now)

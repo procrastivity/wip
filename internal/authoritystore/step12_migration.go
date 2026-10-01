@@ -152,7 +152,7 @@ func UpgradeV10(root string) error {
 	if err = installStep12(db); err != nil {
 		return err
 	}
-	if err = checkSchema(db); err != nil {
+	if err = checkSchemaVersion(db, 11); err != nil {
 		return err
 	}
 	return checkStep4State(db)
