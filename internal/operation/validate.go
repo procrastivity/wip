@@ -79,6 +79,24 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("finding subject ID", input.SubjectID); err != nil {
 			return err
 		}
+	case GateDeclareInput:
+		if strings.TrimSpace(input.Gate) == "" || !validGateScale(input.Scale) {
+			return fmt.Errorf("gate.declare@v1 requires a gate name and matter, stage, or step scale")
+		}
+	case GateCloseInput:
+		if strings.TrimSpace(input.Gate) == "" {
+			return fmt.Errorf("gate.close@v1 requires a gate name")
+		}
+		if err := validateULID("gate subject ID", input.NodeID); err != nil {
+			return err
+		}
+	case GateDismissInput:
+		if strings.TrimSpace(input.Gate) == "" || strings.TrimSpace(input.Reason) == "" {
+			return fmt.Errorf("gate.dismiss@v1 requires a gate name and reason")
+		}
+		if err := validateULID("gate subject ID", input.NodeID); err != nil {
+			return err
+		}
 	case MatterCreateInput:
 		if d.metadata.Operation != MatterCreateV2.Metadata().Operation {
 			break
@@ -160,6 +178,10 @@ func (d Definition) ValidateRequest(request Request) error {
 	return d.validateBlobs(request.Blobs)
 }
 
+func validGateScale(scale string) bool {
+	return scale == "matter" || scale == "stage" || scale == "step"
+}
+
 func (d Definition) validateBlobs(blobs []BlobInput) error {
 	specs := make(map[string]BlobSpec, len(d.metadata.BlobInputs))
 	for _, spec := range d.metadata.BlobInputs {
@@ -217,6 +239,18 @@ func (d Definition) ValidateResult(result Result) error {
 		case MatterFinishOutput:
 			if validateULID("Matter output ID", output.MatterID) != nil || output.State != "done" {
 				return fmt.Errorf("matter finish output has invalid identity or state")
+			}
+		case GateDeclareOutput:
+			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {
+				return fmt.Errorf("gate declaration output is invalid")
+			}
+		case GateCloseOutput:
+			if strings.TrimSpace(output.Gate) == "" || validateULID("gate output node ID", output.NodeID) != nil || !validGateScale(output.Scale) {
+				return fmt.Errorf("gate close output is invalid")
+			}
+		case GateDismissOutput:
+			if strings.TrimSpace(output.Gate) == "" || validateULID("gate output node ID", output.NodeID) != nil || !validGateScale(output.Scale) {
+				return fmt.Errorf("gate dismissal output is invalid")
 			}
 		case ContentSegmentOutput:
 			if validateULID("content output ID", output.ID) != nil || validateULID("content subject ID", output.SubjectID) != nil ||

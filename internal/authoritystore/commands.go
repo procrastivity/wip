@@ -87,6 +87,9 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if contentOperation(command.Request.Operation) {
 		return s.submitConnectedContent(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
 	}
+	if definition, ok := gateDefinition(command.Request.Operation); ok {
+		return s.submitGateCommand(ctx, command, encoded, asserted, peer, at, deadline, checkContext, definition)
+	}
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
@@ -370,18 +373,24 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 		if !ok {
 			definition, ok = step4Definition(cmd.Request.Operation)
 			if !ok {
-				return out, ErrInvalidProof
+				definition, ok = gateDefinition(cmd.Request.Operation)
+				if !ok {
+					return out, ErrInvalidProof
+				}
 			}
 		}
 	}
-	if _, ok := step4Definition(cmd.Request.Operation); !ok {
+	_, isStep4 := step4Definition(cmd.Request.Operation)
+	_, isGate := gateDefinition(cmd.Request.Operation)
+	if !isStep4 && !isGate {
 		if err := definition.ValidateResult(result); err != nil {
 			return out, err
 		}
 	} else if result.Code != operation.ResultSucceeded || result.Problem != nil {
 		return out, ErrInvalidProof
 	}
-	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) {
+	gateNoop := cmd.Request.Operation == operation.GateDeclareV1.Metadata().Operation && subjectID == "" && eventID == ""
+	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) {
 		return out, ErrInvalidProof
 	}
 	if result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
@@ -477,6 +486,20 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			result, subjectID, eventID = fold.result, fold.subject, ""
 			if result.Code == operation.ResultSucceeded {
 				position = fold.first.(uint64)
+				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+			} else {
+				problem = string(result.Problem.Code)
+			}
+		case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation,
+			operation.GateDismissV1.Metadata().Operation:
+			fold, foldErr := completeGateTx(ctx, tx, cmd, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
+				result, appendNonemptyEventIDs(eventID, additionalEventIDs), occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result = fold.result
+			subjectID = fold.subject
+			if result.Code == operation.ResultSucceeded {
 				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
 			} else {
 				problem = string(result.Problem.Code)

@@ -38,7 +38,7 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 27 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+	if len(Catalogue()) != 30 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
 		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
 		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
 		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation ||
@@ -54,7 +54,10 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 		Catalogue()[14].Metadata().Operation != MatterLocatorRepairV1.Metadata().Operation ||
 		Catalogue()[15].Metadata().Operation != MatterStartV1.Metadata().Operation ||
 		Catalogue()[16].Metadata().Operation != StageStartV1.Metadata().Operation ||
-		Catalogue()[26].Metadata().Operation != StageFinishV1.Metadata().Operation {
+		Catalogue()[26].Metadata().Operation != StageFinishV1.Metadata().Operation ||
+		Catalogue()[27].Metadata().Operation != GateDeclareV1.Metadata().Operation ||
+		Catalogue()[28].Metadata().Operation != GateCloseV1.Metadata().Operation ||
+		Catalogue()[29].Metadata().Operation != GateDismissV1.Metadata().Operation {
 		t.Fatalf("catalogue = %+v, want M5 operations followed by the complete Step 4 set", Catalogue())
 	}
 }

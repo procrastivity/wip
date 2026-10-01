@@ -373,6 +373,52 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return MatterFinishInput{MatterID: matterID}, nil
+	case GateDeclareV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "gate", "scale")
+		if err != nil {
+			return nil, err
+		}
+		gate, err := commandString(fields, "gate")
+		if err != nil {
+			return nil, err
+		}
+		scale, err := commandString(fields, "scale")
+		if err != nil {
+			return nil, err
+		}
+		return GateDeclareInput{Gate: gate, Scale: scale}, nil
+	case GateCloseV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "gate", "node_id")
+		if err != nil {
+			return nil, err
+		}
+		gate, err := commandString(fields, "gate")
+		if err != nil {
+			return nil, err
+		}
+		nodeID, err := commandString(fields, "node_id")
+		if err != nil {
+			return nil, err
+		}
+		return GateCloseInput{Gate: gate, NodeID: nodeID}, nil
+	case GateDismissV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "gate", "node_id", "reason")
+		if err != nil {
+			return nil, err
+		}
+		gate, err := commandString(fields, "gate")
+		if err != nil {
+			return nil, err
+		}
+		nodeID, err := commandString(fields, "node_id")
+		if err != nil {
+			return nil, err
+		}
+		reason, err := commandString(fields, "reason")
+		if err != nil {
+			return nil, err
+		}
+		return GateDismissInput{Gate: gate, NodeID: nodeID, Reason: reason}, nil
 	case MatterStartV1.Metadata().Operation, MatterPauseV1.Metadata().Operation,
 		MatterResumeV1.Metadata().Operation, MatterCancelV1.Metadata().Operation,
 		StageStartV1.Metadata().Operation, StagePauseV1.Metadata().Operation,

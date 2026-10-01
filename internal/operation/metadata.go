@@ -87,6 +87,15 @@ const (
 	FootprintReplacementStep         Footprint = "replacement-step"
 	FootprintStepRemovalReason       Footprint = "step.removal-reason"
 	FootprintMatterLocatorRepair     Footprint = "matter.locator-repair"
+	FootprintRepoGateDeclarations    Footprint = "repo.gate-declarations"
+	FootprintGateOrder               Footprint = "gate.order"
+	FootprintGateExemptionSnapshot   Footprint = "gate.exemption-snapshot"
+	FootprintGateDeclaration         Footprint = "gate.declaration"
+	FootprintGateOwner               Footprint = "gate.owner"
+	FootprintGateState               Footprint = "gate.state"
+	FootprintGateSubject             Footprint = "gate.subject"
+	FootprintGateDismissalReason     Footprint = "gate.dismissal-reason"
+	FootprintTrackerCandidates       Footprint = "tracker.candidates"
 )
 
 // BlobSpec statically names one accepted staged blob input.

@@ -77,6 +77,9 @@ func checkStep13State(db *sql.DB) error {
 	if !sameStep13Projection(got, want) {
 		return fmt.Errorf("%w: Step 7 projections differ from the event fold", ErrInvalidStore)
 	}
+	if err := checkStep13GateCommands(db); err != nil {
+		return err
+	}
 	return nil
 }
 
