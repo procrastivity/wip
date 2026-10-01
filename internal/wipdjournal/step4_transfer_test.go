@@ -64,6 +64,64 @@ func TestVerifyTransferRejectsMalformedStep4EventPayloads(t *testing.T) {
 	}
 }
 
+func TestValidAuthorityEventPinsM6LifecyclePayloadShapes(t *testing.T) {
+	const subject = testCommandPrefix + "50"
+	for _, test := range []struct {
+		name    string
+		kind    string
+		payload map[string]any
+	}{
+		{"standalone Matter start", "matter.started", map[string]any{"from": "planned", "to": "in-progress"}},
+		{"cascade Matter start", "matter.started", map[string]any{"from": "planned", "to": "in-progress", "cascade": true}},
+		{"causal Stage ancestor", "stage.started", map[string]any{"from": "planned", "to": "in-progress", "cascade": true, "cause_event_id": testCommandPrefix + "60"}},
+		{"causal Step target", "step.started", map[string]any{"from": "planned", "to": "in-progress", "cause_event_id": testCommandPrefix + "61"}},
+		{"Matter canceled without reason", "matter.canceled", map[string]any{"from": "in-progress", "to": "canceled"}},
+		{"Stage canceled with reason", "stage.canceled", map[string]any{"from": "in-progress", "to": "canceled", "reason": "superseded"}},
+		{"Step paused", "step.paused", map[string]any{"from": "in-progress", "to": "paused"}},
+		{"Stage resumed", "stage.resumed", map[string]any{"from": "paused", "to": "in-progress"}},
+		{"Matter finished", "matter.finished", map[string]any{"from": "in-progress", "to": "done"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !validAuthorityEvent(m6LifecycleEventRecord(t, test.kind, subject, test.payload), testIdentity.DomainID, testCommandPrefix+"70") {
+				t.Fatal("rejected a valid M6 lifecycle payload shape")
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		kind    string
+		payload map[string]any
+	}{
+		{"unknown lifecycle kind", "stage.started.extra", map[string]any{"from": "planned", "to": "in-progress"}},
+		{"wrong transition", "step.paused", map[string]any{"from": "planned", "to": "paused"}},
+		{"unexpected field", "matter.resumed", map[string]any{"from": "paused", "to": "in-progress", "raw_sql": "UPDATE matters"}},
+		{"Matter start cannot have causal child fields", "matter.started", map[string]any{"from": "planned", "to": "in-progress", "cause_event_id": testCommandPrefix + "61"}},
+		{"empty cancellation reason", "step.canceled", map[string]any{"from": "in-progress", "to": "canceled", "reason": " "}},
+		{"non-Boolean cascade", "stage.started", map[string]any{"from": "planned", "to": "in-progress", "cascade": "true"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if validAuthorityEvent(m6LifecycleEventRecord(t, test.kind, subject, test.payload), testIdentity.DomainID, testCommandPrefix+"70") {
+				t.Fatal("accepted a malformed M6 lifecycle payload shape")
+			}
+		})
+	}
+}
+
+func m6LifecycleEventRecord(t *testing.T, kind, subject string, payload map[string]any) []byte {
+	t.Helper()
+	record, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": testCommandPrefix + "70", "domain_id": testIdentity.DomainID,
+		"command_id": testCommandPrefix + "90", "request_hash": hydrationDigest([]byte("M6 lifecycle event")),
+		"environment": map[string]any{"id": testIdentity.EnvironmentID, "sequence": uint64(1)},
+		"acted_at":    "2026-09-29T00:00:00Z", "occurred_at": "2026-09-29T00:00:00Z",
+		"kind": kind, "subject_id": subject, "repo_id": testIdentity.RepoID, "payload": payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
 func step4TransferRecords(t *testing.T) []wipdwire.EventRecord {
 	t.Helper()
 	const (

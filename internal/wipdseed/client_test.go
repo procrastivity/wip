@@ -718,6 +718,290 @@ func TestClaimGrantManifestPinsOnlyAcquiredMatterContent(t *testing.T) {
 	}
 }
 
+func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
+	fixture := newClientFixture(t)
+	artifactSigner := registerClientFixtureArtifactKey(t, fixture)
+	directory := t.TempDir()
+	state := enrollFixtureClient(t, fixture, directory)
+	peer := peerStateFromClient(t, state)
+	ctx := context.Background()
+	const (
+		matterA        = "01KZ7XHAQT1S46NYPN1PW1DX90"
+		matterB        = "01KZ7XHAQT1S46NYPN1PW1DX91"
+		stageB         = "01KZ7XHAQT1S46NYPN1PW1DX92"
+		stepB          = "01KZ7XHAQT1S46NYPN1PW1DX93"
+		claimA         = "01KZ7XHAQT1S46NYPN1PW1DX94"
+		claimB         = "01KZ7XHAQT1S46NYPN1PW1DX95"
+		batchA         = "01KZ7XHAQT1S46NYPN1PW1DX96"
+		batchB         = "01KZ7XHAQT1S46NYPN1PW1DX97"
+		grantA         = "01KZ7XHAQT1S46NYPN1PW1DX98"
+		grantB         = "01KZ7XHAQT1S46NYPN1PW1DX99"
+		snapshotA      = "01KZ7XHAQT1S46NYPN1PW1DYA0"
+		snapshotB      = "01KZ7XHAQT1S46NYPN1PW1DYA1"
+		journalA       = "01KZ7XHAQT1S46NYPN1PW1DYA2"
+		journalB       = "01KZ7XHAQT1S46NYPN1PW1DYA3"
+		worktreeA      = "01KZ7XHAQT1S46NYPN1PW1DYA4"
+		worktreeB      = "01KZ7XHAQT1S46NYPN1PW1DYA5"
+		cloneID        = "01KZ7XHAQT1S46NYPN1PW1DYA6"
+		dispatchA      = "01KZ7XHAQT1S46NYPN1PW1DYA7"
+		dispatchB      = "01KZ7XHAQT1S46NYPN1PW1DYA8"
+		matterACommand = "01KZ7XHAQT1S46NYPN1PW1DYA9"
+		matterBCommand = "01KZ7XHAQT1S46NYPN1PW1WY00"
+		stageCommand   = "01KZ7XHAQT1S46NYPN1PW1WY01"
+		stepCommand    = "01KZ7XHAQT1S46NYPN1PW1WY02"
+	)
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state,
+		"01KZ7XHAQT1S46NYPN1PW1WY10", matterA, "01KZ7XHAQT1S46NYPN1PW1WY20", "Standalone", "standalone", 1)
+	createFixtureMatter(t, fixture.store, peer, artifactSigner, state,
+		"01KZ7XHAQT1S46NYPN1PW1WY11", matterB, "01KZ7XHAQT1S46NYPN1PW1WY21", "Nested", "nested", 2)
+	state, err := PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 2 {
+		t.Fatalf("install initial M6 Matter identities: prefix=%+v err=%v", state.Prefix, err)
+	}
+
+	completeM6ClaimForPull(t, fixture, state, peer, artifactSigner, matterA, claimA, batchA, grantA, snapshotA, journalA, worktreeA, dispatchA, 3, 22)
+	completeM6ClaimForPull(t, fixture, state, peer, artifactSigner, matterB, claimB, batchB, grantB, snapshotB, journalB, worktreeB, dispatchB, 4, 25)
+	state, err = PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil || state.Prefix.EventCount != 8 {
+		t.Fatalf("install both acquired claim grants before lifecycle commands: prefix=%+v err=%v", state.Prefix, err)
+	}
+	claimContextA := &operation.ClaimContext{ID: claimA, Epoch: "1"}
+	claimContextB := &operation.ClaimContext{ID: claimB, Epoch: "1"}
+	signer := func(_ context.Context, message []byte) ([]byte, error) {
+		return ed25519.Sign(artifactSigner, message), nil
+	}
+
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 1, matterACommand, 5, cloneID, worktreeA, claimContextA,
+		operation.MatterStartV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(28))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 2, "01KZ7XHAQT1S46NYPN1PW1WY03", 6, cloneID, worktreeA, claimContextA,
+		operation.MatterPauseV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(29))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 3, "01KZ7XHAQT1S46NYPN1PW1WY04", 7, cloneID, worktreeA, claimContextA,
+		operation.MatterResumeV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(30))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalA, 4, "01KZ7XHAQT1S46NYPN1PW1WY05", 8, cloneID, worktreeA, claimContextA,
+		operation.MatterCancelV1, operation.NodeLifecycleInput{NodeID: matterA}, m6PullEventID(31))
+
+	stageDefinition := operation.StageCreateV1
+	stageCreate := m6PullCommand(state, stageCommand, 9, cloneID, worktreeB, claimContextB, stageDefinition,
+		operation.StageCreateInput{MatterID: matterB, Title: "Track"})
+	stagePending := submitM6PullCommand(t, fixture.store, peer, stageCreate)
+	stageResult := operation.Result{Code: operation.ResultSucceeded, Output: operation.StageCreateOutput{
+		ID: stageB, MatterID: matterB, Locator: "track", Title: "Track", SortKey: 1000, State: "planned",
+	}}
+	stageStatus, completeErr := fixture.store.CompleteCommand(ctx, stagePending, stageResult, stageB, m6PullEventID(32), time.Now().UTC(), signer)
+	if completeErr != nil {
+		t.Fatalf("complete M6 Stage create: %v", completeErr)
+	}
+	installAndAcknowledgeM6Claim(t, fixture, state, directory, journalB, 1, stageStatus.Receipt)
+	stepCreate := m6PullCommand(state, stepCommand, 10, cloneID, worktreeB, claimContextB, operation.StepCreateV2,
+		operation.StepCreateInput{ParentID: stageB, Title: "Child"})
+	stepPending := submitM6PullCommand(t, fixture.store, peer, stepCreate)
+	stepResult := operation.Result{Code: operation.ResultSucceeded, Output: operation.StepCreateOutput{
+		ID: stepB, ParentID: stageB, MatterID: matterB, Locator: "step-01", Title: "Child", SortKey: 1000, State: "planned",
+	}}
+	stepStatus, completeErr := fixture.store.CompleteCommand(ctx, stepPending, stepResult, stepB, m6PullEventID(33), time.Now().UTC(), signer)
+	if completeErr != nil {
+		t.Fatalf("complete M6 Step create under Stage: %v", completeErr)
+	}
+	installAndAcknowledgeM6Claim(t, fixture, state, directory, journalB, 2, stepStatus.Receipt)
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 3, "01KZ7XHAQT1S46NYPN1PW1WY06", 11, cloneID, worktreeB, claimContextB,
+		operation.StepStartV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(34), m6PullEventID(35), m6PullEventID(36))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 4, "01KZ7XHAQT1S46NYPN1PW1WY07", 12, cloneID, worktreeB, claimContextB,
+		operation.StepPauseV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(37))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 5, "01KZ7XHAQT1S46NYPN1PW1WY08", 13, cloneID, worktreeB, claimContextB,
+		operation.StepResumeV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(38))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 6, "01KZ7XHAQT1S46NYPN1PW1WY09", 14, cloneID, worktreeB, claimContextB,
+		operation.StepFinishV1, operation.StepLifecycleInput{StepID: stepB}, m6PullEventID(39))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 7, "01KZ7XHAQT1S46NYPN1PW1WY12", 15, cloneID, worktreeB, claimContextB,
+		operation.StagePauseV1, operation.NodeLifecycleInput{NodeID: stageB}, m6PullEventID(40))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 8, "01KZ7XHAQT1S46NYPN1PW1WY13", 16, cloneID, worktreeB, claimContextB,
+		operation.StageResumeV1, operation.NodeLifecycleInput{NodeID: stageB}, m6PullEventID(41))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 9, "01KZ7XHAQT1S46NYPN1PW1WY14", 17, cloneID, worktreeB, claimContextB,
+		operation.StageFinishV1, operation.NodeLifecycleInput{NodeID: stageB}, m6PullEventID(42))
+	completeM6LifecycleForPull(t, fixture, peer, artifactSigner, state, directory, journalB, 0, matterBCommand, 18, cloneID, worktreeB, claimContextB,
+		operation.MatterFinishV1, operation.MatterFinishInput{MatterID: matterB}, m6PullEventID(43), m6PullEventID(44))
+
+	installed, err := PullAndInstall(ctx, fixture.profile, fixture.roots, directory)
+	if err != nil {
+		t.Fatalf("pull and install M6 lifecycle event history: %v", err)
+	}
+	if installed.Prefix.EventCount != uint64(len(installed.EventRecords)) || len(installed.Projections) != 2 || len(installed.StepProjections) != 1 {
+		t.Fatalf("installed M6 state counts: prefix=%+v matters=%d steps=%d", installed.Prefix, len(installed.Projections), len(installed.StepProjections))
+	}
+	states := map[string]string{}
+	for _, raw := range installed.Projections {
+		var projection eventProjection
+		if err = json.Unmarshal(raw, &projection); err != nil {
+			t.Fatal(err)
+		}
+		states[projection.ID] = projection.State
+	}
+	var stepProjectionValue stepProjection
+	if err = json.Unmarshal(installed.StepProjections[0], &stepProjectionValue); err != nil {
+		t.Fatal(err)
+	}
+	if states[matterA] != "canceled" || states[matterB] != "done" || stepProjectionValue.State != "done" || stepProjectionValue.MatterID != matterB {
+		t.Fatalf("installed M6 lifecycle states: Matter A=%q Matter B=%q Step=%+v", states[matterA], states[matterB], stepProjectionValue)
+	}
+	var sawStandaloneMatterStart, sawStageFinish, sawMatterSeal bool
+	var cascadeKinds, cascadeSubjects, cascadeEvents []string
+	var cascadeFlags []bool
+	var cascadeCauses []*string
+	for _, event := range installed.EventRecords {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(event.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		payload := fields["payload"].(map[string]any)
+		switch fields["kind"] {
+		case "matter.started":
+			if fields["subject_id"] == matterA && wipdwire.ExactMapKeys(payload, "from", "to") {
+				sawStandaloneMatterStart = true
+			}
+		case "stage.finished":
+			sawStageFinish = true
+		case "batch.swept":
+			sawMatterSeal = true
+		}
+		if fields["command_id"] == "01KZ7XHAQT1S46NYPN1PW1WY06" &&
+			(fields["kind"] == "matter.started" || fields["kind"] == "stage.started" || fields["kind"] == "step.started") {
+			cause, _ := payload["cause_event_id"].(string)
+			var causePointer *string
+			if cause != "" {
+				causePointer = &cause
+			}
+			cascadeKinds = append(cascadeKinds, asString(fields["kind"]))
+			cascadeSubjects = append(cascadeSubjects, asString(fields["subject_id"]))
+			cascadeEvents = append(cascadeEvents, event.EventID)
+			cascadeFlags = append(cascadeFlags, payload["cascade"] == true)
+			cascadeCauses = append(cascadeCauses, causePointer)
+		}
+	}
+	if len(cascadeKinds) != 3 || cascadeKinds[0] != "matter.started" || cascadeKinds[1] != "stage.started" || cascadeKinds[2] != "step.started" ||
+		cascadeSubjects[0] != matterB || cascadeSubjects[1] != stageB || cascadeSubjects[2] != stepB ||
+		!cascadeFlags[0] || !cascadeFlags[1] || cascadeFlags[2] || cascadeCauses[0] != nil ||
+		cascadeCauses[1] == nil || *cascadeCauses[1] != cascadeEvents[0] ||
+		cascadeCauses[2] == nil || *cascadeCauses[2] != cascadeEvents[1] {
+		t.Fatalf("installed Matter→Stage→Step start causation: kinds=%v subjects=%v events=%v cascade=%v causes=%v",
+			cascadeKinds, cascadeSubjects, cascadeEvents, cascadeFlags, cascadeCauses)
+	}
+	if !sawStandaloneMatterStart || !sawStageFinish || !sawMatterSeal {
+		t.Fatalf("installed lifecycle event evidence: standalone-matter-start=%t stage-finish=%t matter-seal=%t",
+			sawStandaloneMatterStart, sawStageFinish, sawMatterSeal)
+	}
+}
+
+func completeM6ClaimForPull(t *testing.T, fixture *clientFixture, state ClientState, peer tls.ConnectionState, signer ed25519.PrivateKey,
+	matter, claim, batch, grant, snapshot, journal, worktree, dispatch string, sequence uint64, firstEvent int,
+) {
+	t.Helper()
+	commandID := fmt.Sprintf("%026d", 200+sequence)
+	cloneID := "01KZ7XHAQT1S46NYPN1PW1DYA6"
+	now := time.Now().UTC().Truncate(time.Second)
+	raw, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.command/1", "command_id": commandID,
+		"authority":   map[string]any{"domain_id": state.DomainID, "expected_epoch": state.Epoch},
+		"environment": map[string]any{"id": state.EnvironmentID, "sequence": sequence},
+		"acted_at":    now.Format(time.RFC3339Nano), "actor": "human",
+		"causation_command_id": nil, "correlation_command_id": commandID,
+		"operation": map[string]any{"name": "claim.acquire", "version": uint64(1)},
+		"context":   map[string]any{"repo_id": state.RepoID, "clone_id": cloneID, "worktree_id": worktree},
+		"claim":     nil,
+		"input":     map[string]any{"matter_id": matter, "worktree_id": worktree, "dispatch_mode": "anonymous-matter", "requested_dispatch_id": dispatch},
+		"blobs":     []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := testDigest(append([]byte("wipd/request-hash/v1\x00"), raw...))
+	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), state.DomainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := fixture.store.SubmitClaimAcquire(context.Background(), raw, hash, anchor, peer, now)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit isolated M6 claim acquisition for %s: %+v %v", matter, pending, err)
+	}
+	ids := []string{m6PullEventID(firstEvent), m6PullEventID(firstEvent + 1), m6PullEventID(firstEvent + 2)}
+	allocation := authoritystore.AcquireAllocation{
+		ClaimID: claim, BatchID: batch, GrantID: grant, SnapshotID: snapshot, JournalID: journal,
+		Installed: anchor, EventIDs: ids,
+	}
+	completed, _, err := fixture.store.CompleteClaimAcquire(context.Background(), pending.Owner, allocation,
+		now, func(_ context.Context, message []byte) ([]byte, error) { return ed25519.Sign(signer, message), nil })
+	if err != nil || completed.Pending || len(completed.Receipt) == 0 {
+		t.Fatalf("complete isolated M6 claim acquisition for %s: allocation=%+v status=%+v err=%v",
+			matter, allocation, completed, err)
+	}
+}
+
+func m6PullCommand(state ClientState, id string, sequence uint64, clone, worktree string, claim *operation.ClaimContext,
+	definition operation.Definition, input operation.Input,
+) operation.Command {
+	return operation.Command{
+		ID: id, AuthorityDomainID: state.DomainID, ExpectedAuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, EnvironmentSequence: sequence, ActedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano),
+		CorrelationCommandID: id,
+		Request: operation.Request{
+			Operation: definition.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: state.RepoID, Clone: clone, Worktree: worktree},
+			Claim:   claim, Input: input, Blobs: []operation.BlobInput{},
+		},
+	}
+}
+
+func submitM6PullCommand(t *testing.T, store *authoritystore.Store, peer tls.ConnectionState, command operation.Command) *authoritystore.Execution {
+	t.Helper()
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.SubmitCommand(context.Background(), command, hash, peer, time.Now().UTC())
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit M6 pull command %s (id=%s sequence=%d): %+v %v", command.Request.Operation, command.ID, command.EnvironmentSequence, pending, err)
+	}
+	return pending.Owner
+}
+
+func completeM6LifecycleForPull(t *testing.T, fixture *clientFixture, peer tls.ConnectionState, signer ed25519.PrivateKey,
+	state ClientState, directory, journal string, journalPosition uint64, id string, sequence uint64, clone, worktree string, claim *operation.ClaimContext,
+	definition operation.Definition, input operation.Input, eventIDs ...string,
+) {
+	t.Helper()
+	command := m6PullCommand(state, id, sequence, clone, worktree, claim, definition, input)
+	owner := submitM6PullCommand(t, fixture.store, peer, command)
+	status, err := fixture.store.CompleteConnectedLifecycle(context.Background(), owner, eventIDs, time.Now().UTC(),
+		func(_ context.Context, message []byte) ([]byte, error) { return ed25519.Sign(signer, message), nil })
+	if err != nil || status.Pending || len(status.Receipt) == 0 {
+		t.Fatalf("complete M6 pull lifecycle %s: %+v %v", definition.Metadata().Operation, status, err)
+	}
+	if definition.Metadata().Delivery == operation.DeliveryClaim {
+		installAndAcknowledgeM6Claim(t, fixture, state, directory, journal, journalPosition, status.Receipt)
+	}
+}
+
+func installAndAcknowledgeM6Claim(t *testing.T, fixture *clientFixture, state ClientState, directory, journal string, position uint64, receipt []byte) {
+	t.Helper()
+	installed, err := PullAndInstall(context.Background(), fixture.profile, fixture.roots, directory)
+	if err != nil {
+		t.Fatalf("install terminal claim event prefix before next command: %v", err)
+	}
+	anchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), state.DomainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Prefix.EventCount != anchor.EventCount || installed.Prefix.Digest != anchor.Digest {
+		t.Fatalf("installed claim receipt prefix differs from authority: client=%+v authority=%+v", installed.Prefix, anchor)
+	}
+	if err = fixture.store.AcknowledgeClaimJournalEntry(context.Background(), state.DomainID, journal, position, receipt, anchor); err != nil {
+		t.Fatalf("acknowledge installed terminal claim receipt at journal position %d: %v", position, err)
+	}
+}
+
+func m6PullEventID(sequence int) string {
+	return fmt.Sprintf("01KZ7XHAQT1S46NYPN1PW1WY%02d", sequence)
+}
+
 func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testing.T) {
 	domainID, repoID, environmentID := testDomainID, testRepoID, "01KZ7XHAQT1S46NYPN1PW1DX3A"
 	matterID, stepID := "01KZ7XHAQT1S46NYPN1PW1DX90", "01KZ7XHAQT1S46NYPN1PW1DX91"

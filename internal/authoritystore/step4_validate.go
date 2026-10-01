@@ -857,7 +857,7 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 }
 
 func matterSubtreeCompleteBefore(db *sql.DB, domain, matter string, before uint64) (bool, error) {
-	rows, err := db.Query(`SELECT node_id,kind FROM m6_nodes WHERE domain_id=? AND matter_id=? AND kind!='matter' AND tombstone_event_id IS NULL ORDER BY node_id`, domain, matter)
+	rows, err := db.Query(`SELECT node_id,kind FROM m6_nodes WHERE domain_id=? AND matter_id=? AND kind!='matter' ORDER BY node_id`, domain, matter)
 	if err != nil {
 		return false, err
 	}
@@ -879,6 +879,12 @@ func matterSubtreeCompleteBefore(db *sql.DB, domain, matter string, before uint6
 		return false, err
 	}
 	for _, node := range descendants {
+		if err = lifecycleNodeLiveForRange(db, domain, node.id, before, before); err != nil {
+			if errors.Is(err, errNodeNotLiveAtLifecycle) {
+				continue
+			}
+			return false, err
+		}
 		state, stateErr := lifecycleStateBefore(db, domain, node.id, node.kind, before)
 		if stateErr != nil {
 			return false, stateErr

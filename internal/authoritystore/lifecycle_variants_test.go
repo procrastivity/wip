@@ -166,6 +166,64 @@ func TestM6StartSkipsStartedAncestorAndSimpleTransitionsUseOneEvent(t *testing.T
 	t.Cleanup(func() { _ = f.s.Close() })
 }
 
+func TestM6LifecycleHistorySurvivesLaterStepReplaceAndRemove(t *testing.T) {
+	f := newClaimTestFixture(t)
+	anchor := f.anchor(t)
+	allocation := claimTestAllocation(1, anchor, 104, 105, 106)
+	f.acquire(t, 11, 2, anchor, allocation)
+	claimID, journalID := allocation.ClaimID, allocation.JournalID
+	stageID, stepID, replacementID := claimTestID(201), claimTestID(202), claimTestID(203)
+
+	stage := step12Command(f, 12, 3, operation.StageCreateV1, operation.StageCreateInput{MatterID: f.matter, Title: "Lifecycle"}, claimID)
+	_, status := completeStep12ClaimCommand(t, f, stage, journalID, 1, 201, 107)
+	claimTestReceipt(t, status, "result.succeeded", map[string]any{
+		"id": stageID, "matter_id": f.matter, "locator": "lifecycle", "title": "Lifecycle", "sort_key": int64(1000), "state": "planned",
+	}, 107)
+	step := step12Command(f, 13, 4, operation.StepCreateV2, operation.StepCreateInput{ParentID: stageID, Title: "Original"}, claimID)
+	_, status = completeStep12ClaimCommand(t, f, step, journalID, 2, 202, 108)
+	claimTestReceipt(t, status, "result.succeeded", map[string]any{
+		"id": stepID, "parent_id": stageID, "matter_id": f.matter, "locator": "step-01", "title": "Original", "sort_key": int64(1000), "state": "planned",
+	}, 108)
+
+	start := step12Command(f, 14, 5, operation.StepStartV1, operation.StepLifecycleInput{StepID: stepID}, claimID)
+	startStatus := completeLifecycleCommand(t, f, start, []string{claimTestID(109), claimTestID(110), claimTestID(111)})
+	claimTestAcknowledge(t, f, journalID, 3, startStatus)
+	finish := step12Command(f, 15, 6, operation.StepFinishV1, operation.StepLifecycleInput{StepID: stepID}, claimID)
+	finishStatus := completeLifecycleCommand(t, f, finish, []string{claimTestID(112)})
+	claimTestAcknowledge(t, f, journalID, 4, finishStatus)
+
+	replace := step12Command(f, 16, 7, operation.StepReplaceV1,
+		operation.StepReplaceInput{StepID: stepID, Title: "Replacement"}, claimID)
+	_, replaceStatus := completeStep12ClaimCommand(t, f, replace, journalID, 5, 203, 113)
+	claimTestReceipt(t, replaceStatus, "result.succeeded", map[string]any{
+		"removed_step_id": stepID,
+		"replacement": map[string]any{
+			"id": replacementID, "parent_id": stageID, "matter_id": f.matter, "locator": "step-02",
+			"title": "Replacement", "sort_key": int64(1000), "state": "planned",
+		},
+	}, 113)
+	remove := step12Command(f, 17, 8, operation.StepRemoveV1,
+		operation.StepRemoveInput{StepID: replacementID, Reason: "superseded"}, claimID)
+	_, removeStatus := completeStep12ClaimCommand(t, f, remove, journalID, 6, 204, 114)
+	claimTestReceipt(t, removeStatus, "result.succeeded", map[string]any{"step_id": replacementID}, 114)
+
+	if err := f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen lifecycle history after later tombstones: %v", err)
+	}
+	f.s = reopened
+	t.Cleanup(func() { _ = f.s.Close() })
+	for _, node := range []string{stepID, replacementID} {
+		var tombstone, last string
+		if err = reopened.db.QueryRow(`SELECT tombstone_event_id,last_event_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, domainA, node).Scan(&tombstone, &last); err != nil || tombstone == "" || tombstone != last {
+			t.Fatalf("folded tombstone projection for Step %s = tombstone:%q last:%q err:%v", node, tombstone, last, err)
+		}
+	}
+}
+
 func completeLifecycleCommand(t *testing.T, f *claimTestFixture, command operation.Command, eventIDs []string) CommandStatus {
 	t.Helper()
 	hash := hashCommand(t, command)

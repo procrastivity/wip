@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
@@ -160,6 +161,7 @@ type lifecycleFoldState struct {
 	command     foldedLifecycleEvent
 	matter      string
 	lastEventID string
+	lastNodeID  string
 }
 
 type claimReleaseFoldState struct {
@@ -553,6 +555,11 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 	matterRepos := make(map[string]string)
 	matterStates := make(map[string]string)
 	matterEnvironments := make(map[string]string)
+	stageStates := make(map[string]string)
+	stageMatters := make(map[string]string)
+	stageRepos := make(map[string]string)
+	nodeParents := make(map[string]string)
+	childCounts := make(map[string]int)
 	birthJournalEntries := make(map[string][]wipdwire.JournalBarrierEntry)
 	birthJournalCommands := make(map[string]map[string]struct{})
 	releasedBirthClaims := make(map[string]struct{})
@@ -565,6 +572,45 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 	var pendingAcquisition *acquisitionFoldState
 	var pendingLifecycle *lifecycleFoldState
 	var pendingClaimRelease *claimReleaseFoldState
+	nodeState := func(id string) string {
+		if state, exists := matterStates[id]; exists {
+			return state
+		}
+		if state, exists := stageStates[id]; exists {
+			return state
+		}
+		return stepStates[id]
+	}
+	nodeMatter := func(id string) string {
+		if matterRepos[id] != "" {
+			return id
+		}
+		if matter := stageMatters[id]; matter != "" {
+			return matter
+		}
+		return stepMatterID(stepProjections, id)
+	}
+	nodeRepo := func(id string) string {
+		if repo := matterRepos[id]; repo != "" {
+			return repo
+		}
+		if repo := stageRepos[id]; repo != "" {
+			return repo
+		}
+		for _, step := range stepProjections {
+			if step.ID == id {
+				return step.RepoID
+			}
+		}
+		return ""
+	}
+	ancestors := func(id string) []string {
+		var result []string
+		for parent := nodeParents[id]; parent != ""; parent = nodeParents[parent] {
+			result = append(result, parent)
+		}
+		return result
+	}
 	previousEventID := ""
 	for _, record := range records {
 		if !clientULIDPattern.MatchString(record.EventID) || previousEventID != "" && record.EventID <= previousEventID {
@@ -583,7 +629,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			(pendingAcquisition.stage == "claim" && kind != "claim.acquired" || pendingAcquisition.stage == "dispatch" && kind != "dispatch.opened") {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
-		if pendingLifecycle != nil && (pendingLifecycle.stage == "step-start-target" && kind != "step.started" ||
+		if pendingLifecycle != nil && (pendingLifecycle.stage == "start-cascade" && !foldedStartEventKind(kind) ||
 			pendingLifecycle.stage == "matter-sweep" && kind != "batch.swept") {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
@@ -611,6 +657,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			seenLocators[locatorKey] = struct{}{}
 			matterRepos[event.Payload.ID] = event.RepoID
 			matterStates[event.Payload.ID] = "planned"
+			nodeParents[event.Payload.ID] = ""
 			matterEnvironments[event.Payload.ID] = event.Environment.ID
 			birthJournalEntries[event.Payload.ID] = []wipdwire.JournalBarrierEntry{{
 				Position: event.Environment.Sequence, CommandID: event.CommandID, RequestHash: event.Hash, ResultCode: string(operation.ResultSucceeded),
@@ -621,6 +668,34 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 				ID: event.Payload.ID, RepoID: event.RepoID, Locator: event.Payload.Locator,
 				Title: event.Payload.Title, BirthEventID: event.EventID,
 			})
+		case "stage.created":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			stageID := asString(fields["subject_id"])
+			matterID := asString(payload["matter_id"])
+			sortKey, sortKeyOK := payload["sort_key"].(uint64)
+			locator, locatorOK := payload["locator"].(string)
+			title, titleOK := payload["title"].(string)
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "matter_id", "locator", "title", "sort_key") ||
+				!clientULIDPattern.MatchString(stageID) || !clientULIDPattern.MatchString(matterID) ||
+				matterRepos[matterID] != lifecycle.repoID || !locatorOK || locator == "" || !titleOK || strings.TrimSpace(title) == "" ||
+				!sortKeyOK || sortKey == 0 || sortKey != uint64(childCounts[matterID]+1)*1000 {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := seenIDs[stageID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			locatorKey := matterID + "\x00stage\x00" + locator
+			if _, exists := seenLocators[locatorKey]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			seenIDs[stageID] = struct{}{}
+			seenLocators[locatorKey] = struct{}{}
+			stageStates[stageID] = "planned"
+			stageMatters[stageID] = matterID
+			stageRepos[stageID] = lifecycle.repoID
+			nodeParents[stageID] = matterID
+			childCounts[matterID]++
 		case "step.created":
 			var event stepCreatedEvent
 			if decodeStepEvent(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
@@ -631,26 +706,33 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 				event.Payload.Locator == "" || event.Payload.SortKey <= 0 {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			repo, parentExists := matterRepos[event.Payload.Parent]
-			if !parentExists || repo != event.RepoID {
+			matterID := event.Payload.Parent
+			if stageMatters[event.Payload.Parent] != "" {
+				matterID = stageMatters[event.Payload.Parent]
+			}
+			repo := matterRepos[matterID]
+			if repo == "" || repo != event.RepoID || nodeState(event.Payload.Parent) == "" {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
 			if _, exists := seenIDs[event.SubjectID]; exists {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			count := stepCounts[event.Payload.Parent] + 1
-			if event.Payload.Locator != fmt.Sprintf("step-%02d", count) || event.Payload.SortKey != int64(count)*1000 {
+			stepCount := stepCounts[matterID] + 1
+			childCount := childCounts[event.Payload.Parent] + 1
+			if event.Payload.Locator != fmt.Sprintf("step-%02d", stepCount) || event.Payload.SortKey != int64(childCount)*1000 {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			stepCounts[event.Payload.Parent] = count
+			stepCounts[matterID] = stepCount
+			childCounts[event.Payload.Parent] = childCount
 			seenIDs[event.SubjectID] = struct{}{}
 			stepStates[event.SubjectID] = "planned"
-			if _, released := releasedBirthClaims[event.Payload.Parent]; !released && event.Environment.ID == matterEnvironments[event.Payload.Parent] {
-				commands := birthJournalCommands[event.Payload.Parent]
+			nodeParents[event.SubjectID] = event.Payload.Parent
+			if _, released := releasedBirthClaims[matterID]; !released && event.Environment.ID == matterEnvironments[matterID] {
+				commands := birthJournalCommands[matterID]
 				if _, duplicate := commands[event.CommandID]; duplicate {
 					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 				}
-				entries := birthJournalEntries[event.Payload.Parent]
+				entries := birthJournalEntries[matterID]
 				if event.Environment.Sequence <= entries[0].Position {
 					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 				}
@@ -660,14 +742,14 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 					}
 				}
 				commands[event.CommandID] = struct{}{}
-				birthJournalEntries[event.Payload.Parent] = append(entries, wipdwire.JournalBarrierEntry{
+				birthJournalEntries[matterID] = append(entries, wipdwire.JournalBarrierEntry{
 					Position: event.Environment.Sequence, CommandID: event.CommandID, RequestHash: event.Hash,
 					ResultCode: string(operation.ResultSucceeded),
 					Range:      &wipdwire.JournalBarrierRange{First: event.EventID, Last: event.EventID, Count: 1},
 				})
 			}
 			stepProjections = append(stepProjections, stepProjection{
-				ID: event.SubjectID, RepoID: event.RepoID, MatterID: event.Payload.Parent,
+				ID: event.SubjectID, RepoID: event.RepoID, MatterID: matterID,
 				Locator: event.Payload.Locator, Title: event.Payload.Title, SortKey: event.Payload.SortKey,
 				State: "planned", BirthEventID: event.EventID,
 			})
@@ -751,106 +833,75 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
 			pendingAcquisition = nil
-		case "matter.started":
+		case "matter.started", "stage.started", "step.started":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
-			matterID := asString(fields["subject_id"])
+			nodeID := asString(fields["subject_id"])
+			matterID := nodeMatter(nodeID)
 			claim, claimed := activeClaims[matterID]
-			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "from", "to", "cascade") ||
-				payload["from"] != "planned" || payload["to"] != "in-progress" || payload["cascade"] != true ||
-				!clientULIDPattern.MatchString(matterID) || matterRepos[matterID] != lifecycle.repoID ||
-				matterStates[matterID] != "planned" || !claimed || claim.OwnerEnvironmentID != lifecycle.environmentID ||
-				anonymousBatches[matterID] != claim.BatchID {
+			cascade := payloadOK && payload["cascade"] == true
+			causeID, hasCause := "", false
+			if payloadOK {
+				causeID, hasCause = payload["cause_event_id"].(string)
+			}
+			validPayload := payloadOK && payload["from"] == "planned" && payload["to"] == "in-progress" &&
+				(validLifecycleStartPayload(payload, strings.HasPrefix(kind, "matter.")))
+			if !valid || !validPayload || !clientULIDPattern.MatchString(nodeID) || matterID == "" ||
+				nodeRepo(nodeID) != lifecycle.repoID || nodeState(nodeID) != "planned" || !claimed ||
+				claim.OwnerEnvironmentID != lifecycle.environmentID || anonymousBatches[matterID] != claim.BatchID {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			matterStates[matterID] = "in-progress"
-			for index := range projections {
-				if projections[index].ID == matterID {
-					projections[index].State = "in-progress"
-					break
+			if pendingLifecycle == nil {
+				if hasCause {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				for _, ancestor := range ancestors(nodeID) {
+					if nodeState(ancestor) == "planned" {
+						return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+					}
+				}
+			} else {
+				if pendingLifecycle.stage != "start-cascade" || !hasCause ||
+					!sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) || pendingLifecycle.matter != matterID ||
+					causeID != pendingLifecycle.lastEventID || !nodeDescendsFrom(nodeID, pendingLifecycle.lastNodeID, nodeParents) {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				for _, ancestor := range ancestors(nodeID) {
+					if nodeState(ancestor) == "planned" {
+						return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+					}
 				}
 			}
-			pendingLifecycle = &lifecycleFoldState{stage: "step-start-target", command: lifecycle, matter: matterID, lastEventID: record.EventID}
-		case "step.started":
-			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
-			payload, payloadOK := fields["payload"].(map[string]any)
-			stepID := asString(fields["subject_id"])
-			matterID := stepMatterID(stepProjections, stepID)
-			claim, claimed := activeClaims[matterID]
-			validCascade := pendingLifecycle != nil && pendingLifecycle.stage == "step-start-target" &&
-				sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) && pendingLifecycle.matter == matterID
-			validPayload := payloadOK && (wipdwire.ExactMapKeys(payload, "from", "to") ||
-				wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id")) &&
-				payload["from"] == "planned" && payload["to"] == "in-progress"
-			causeID, hasCause := payload["cause_event_id"].(string)
-			if validPayload && validCascade && hasCause {
-				validPayload = causeID == pendingLifecycle.lastEventID
-			} else if validPayload && hasCause {
-				validPayload = false
-			}
-			if !valid || !validPayload ||
-				payload["from"] != "planned" || payload["to"] != "in-progress" || !clientULIDPattern.MatchString(stepID) ||
-				matterID == "" || matterRepos[matterID] != lifecycle.repoID || stepStates[stepID] != "planned" ||
-				!claimed || claim.OwnerEnvironmentID != lifecycle.environmentID ||
-				(!validCascade && (pendingLifecycle != nil || (matterStates[matterID] != "in-progress" && matterStates[matterID] != "done"))) {
-				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
-			}
-			stepStates[stepID] = "in-progress"
-			for index := range stepProjections {
-				if stepProjections[index].ID == stepID {
-					stepProjections[index].State = "in-progress"
-					break
+			setFoldedNodeState(nodeID, "in-progress", &matterStates, &stageStates, &stepStates, projections, stepProjections)
+			if cascade {
+				pendingLifecycle = &lifecycleFoldState{
+					stage: "start-cascade", command: lifecycle, matter: matterID,
+					lastEventID: record.EventID, lastNodeID: nodeID,
 				}
-			}
-			if validCascade {
+			} else if pendingLifecycle != nil {
 				pendingLifecycle = nil
 			}
-		case "step.finished":
+		case "matter.finished", "matter.paused", "matter.resumed", "matter.canceled",
+			"stage.finished", "stage.paused", "stage.resumed", "stage.canceled",
+			"step.finished", "step.paused", "step.resumed", "step.canceled":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
-			stepID := asString(fields["subject_id"])
-			matterID := stepMatterID(stepProjections, stepID)
+			nodeID := asString(fields["subject_id"])
+			scale, verb, _ := strings.Cut(kind, ".")
+			matterID := nodeMatter(nodeID)
 			claim, claimed := activeClaims[matterID]
-			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "from", "to") ||
-				payload["from"] != "in-progress" || payload["to"] != "done" || !clientULIDPattern.MatchString(stepID) ||
-				matterID == "" || matterRepos[matterID] != lifecycle.repoID || stepStates[stepID] != "in-progress" ||
-				!claimed || claim.OwnerEnvironmentID != lifecycle.environmentID || pendingLifecycle != nil {
+			from, to, stateOK := lifecycleTransition(kind)
+			if !valid || !payloadOK || !validFoldedLifecyclePayload(kind, payload) || !stateOK ||
+				!clientULIDPattern.MatchString(nodeID) || nodeMatter(nodeID) != matterID || matterID == "" ||
+				nodeRepo(nodeID) != lifecycle.repoID || nodeState(nodeID) != from || !claimed ||
+				claim.OwnerEnvironmentID != lifecycle.environmentID || pendingLifecycle != nil {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			stepStates[stepID] = "done"
-			for index := range stepProjections {
-				if stepProjections[index].ID == stepID {
-					stepProjections[index].State = "done"
-					break
-				}
-			}
-		case "matter.finished":
-			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
-			payload, payloadOK := fields["payload"].(map[string]any)
-			matterID := asString(fields["subject_id"])
-			claim, claimed := activeClaims[matterID]
-			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "from", "to") ||
-				payload["from"] != "in-progress" || payload["to"] != "done" ||
-				!clientULIDPattern.MatchString(matterID) || matterRepos[matterID] != lifecycle.repoID ||
-				matterStates[matterID] != "in-progress" || !claimed || claim.OwnerEnvironmentID != lifecycle.environmentID ||
-				anonymousBatches[matterID] != claim.BatchID || sweptBatches[claim.BatchID] || pendingLifecycle != nil {
+			if scale == "matter" && verb == "finished" && (anonymousBatches[matterID] != claim.BatchID || sweptBatches[claim.BatchID]) {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			matterStates[matterID] = "done"
-			for index := range projections {
-				if projections[index].ID == matterID {
-					projections[index].State = "done"
-					break
-				}
-			}
-			willSeal := true
-			for _, step := range stepProjections {
-				if step.MatterID == matterID && step.State != "done" {
-					willSeal = false
-					break
-				}
-			}
-			if willSeal {
+			setFoldedNodeState(nodeID, to, &matterStates, &stageStates, &stepStates, projections, stepProjections)
+			if scale == "matter" && verb == "finished" && foldedMatterSubtreeDone(matterID, stageStates, stageMatters, stepStates, stepProjections) {
 				pendingLifecycle = &lifecycleFoldState{stage: "matter-sweep", command: lifecycle, matter: matterID}
 			}
 		case "batch.swept":
@@ -1071,10 +1122,20 @@ func foldContentEvents(records []wipdwire.EventRecord, domainID string) ([]json.
 			parent, _ := payload["parent"].(string)
 			repo, _ := fields["repo_id"].(string)
 			matter, ok := subjects[parent]
-			if !ok || matter.matter != parent || matter.repo != repo || id == "" {
+			if !ok || matter.matter == "" || matter.repo != repo || id == "" {
 				return nil, ErrInvalidClientState
 			}
-			subjects[id] = subject{matter: parent, repo: repo}
+			subjects[id] = subject{matter: matter.matter, repo: repo}
+		case "stage.created":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			stageID := asString(fields["subject_id"])
+			matterID, matterOK := payload["matter_id"].(string)
+			if !valid || !wipdwire.ExactMapKeys(payload, "matter_id", "locator", "title", "sort_key") ||
+				!clientULIDPattern.MatchString(stageID) || !matterOK || !clientULIDPattern.MatchString(matterID) ||
+				fields["repo_id"] != lifecycle.repoID || subjects[matterID] != (subject{matter: matterID, repo: lifecycle.repoID}) {
+				return nil, ErrInvalidClientState
+			}
+			subjects[stageID] = subject{matter: matterID, repo: lifecycle.repoID}
 		case "content.created", "content.appended":
 			_, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			contentPayload := payload
@@ -1240,6 +1301,111 @@ func stepMatterID(steps []stepProjection, stepID string) string {
 		}
 	}
 	return ""
+}
+
+func foldedStartEventKind(kind string) bool {
+	return kind == "matter.started" || kind == "stage.started" || kind == "step.started"
+}
+
+func validLifecycleStartPayload(payload map[string]any, matter bool) bool {
+	if wipdwire.ExactMapKeys(payload, "from", "to") {
+		return true
+	}
+	if wipdwire.ExactMapKeys(payload, "from", "to", "cascade") {
+		return payload["cascade"] == true
+	}
+	if matter {
+		return false
+	}
+	if wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id") {
+		return clientULIDPattern.MatchString(asString(payload["cause_event_id"]))
+	}
+	return wipdwire.ExactMapKeys(payload, "from", "to", "cascade", "cause_event_id") &&
+		payload["cascade"] == true && clientULIDPattern.MatchString(asString(payload["cause_event_id"]))
+}
+
+func nodeDescendsFrom(node, ancestor string, parents map[string]string) bool {
+	for parent := parents[node]; parent != ""; parent = parents[parent] {
+		if parent == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+func setFoldedNodeState(node, state string, matters, stages, steps *map[string]string,
+	projections []eventProjection, stepProjections []stepProjection,
+) {
+	switch {
+	case (*matters)[node] != "":
+		(*matters)[node] = state
+		for index := range projections {
+			if projections[index].ID == node {
+				projections[index].State = state
+				break
+			}
+		}
+	case (*stages)[node] != "":
+		(*stages)[node] = state
+	default:
+		(*steps)[node] = state
+		for index := range stepProjections {
+			if stepProjections[index].ID == node {
+				stepProjections[index].State = state
+				break
+			}
+		}
+	}
+}
+
+func lifecycleTransition(kind string) (from, to string, ok bool) {
+	_, verb, found := strings.Cut(kind, ".")
+	if !found {
+		return "", "", false
+	}
+	switch verb {
+	case "finished":
+		return "in-progress", "done", true
+	case "paused":
+		return "in-progress", "paused", true
+	case "resumed":
+		return "paused", "in-progress", true
+	case "canceled":
+		return "in-progress", "canceled", true
+	default:
+		return "", "", false
+	}
+}
+
+func validFoldedLifecyclePayload(kind string, payload map[string]any) bool {
+	from, to, ok := lifecycleTransition(kind)
+	if !ok || payload["from"] != from || payload["to"] != to {
+		return false
+	}
+	keys := []string{"from", "to"}
+	if strings.HasSuffix(kind, ".canceled") {
+		if reason, exists := payload["reason"]; exists {
+			if strings.TrimSpace(asString(reason)) == "" {
+				return false
+			}
+			keys = append(keys, "reason")
+		}
+	}
+	return wipdwire.ExactMapKeys(payload, keys...)
+}
+
+func foldedMatterSubtreeDone(matter string, stages, stageMatters, steps map[string]string, stepProjections []stepProjection) bool {
+	for stageID, state := range stages {
+		if stageMatters[stageID] == matter && state != "done" {
+			return false
+		}
+	}
+	for stepID, state := range steps {
+		if stepMatterID(stepProjections, stepID) == matter && state != "done" {
+			return false
+		}
+	}
+	return true
 }
 
 func activeMatterForClaim(active map[string]acquiredClaimProjection, claimID string) (string, acquiredClaimProjection) {

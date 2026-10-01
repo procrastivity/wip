@@ -24,11 +24,13 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 	if target == "" {
 		target = c.matter
 	}
-	var kind, matter, parent string
-	var tombstone sql.NullString
-	if err := db.QueryRow(`SELECT kind,matter_id,coalesce(parent_id,''),tombstone_event_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, c.domain, target).
-		Scan(&kind, &matter, &parent, &tombstone); err != nil || tombstone.Valid || matter != c.matter || kind != strings.SplitN(c.name, ".", 2)[0] {
+	var kind, matter string
+	if err := db.QueryRow(`SELECT kind,matter_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, c.domain, target).
+		Scan(&kind, &matter); err != nil || matter != c.matter || kind != strings.SplitN(c.name, ".", 2)[0] {
 		return fmt.Errorf("lifecycle target projection mismatch: %w", ErrInvalidStore)
+	}
+	if err := lifecycleNodeLiveForRange(db, c.domain, target, events[0].position, events[len(events)-1].position); err != nil {
+		return err
 	}
 	verb := strings.SplitN(c.name, ".", 2)[1]
 	from, to := map[string]string{"start": "planned", "finish": "in-progress", "pause": "in-progress", "cancel": "in-progress", "resume": "paused"}[verb],
@@ -45,8 +47,11 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 		for {
 			var currentKind string
 			var currentParent sql.NullString
-			if err = db.QueryRow(`SELECT kind,parent_id FROM m6_nodes WHERE domain_id=? AND node_id=? AND tombstone_event_id IS NULL`, c.domain, current).Scan(&currentKind, &currentParent); err != nil {
+			if err = db.QueryRow(`SELECT kind,parent_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, c.domain, current).Scan(&currentKind, &currentParent); err != nil {
 				return ErrInvalidStore
+			}
+			if err = lifecycleNodeLiveForRange(db, c.domain, current, events[0].position, events[len(events)-1].position); err != nil {
+				return err
 			}
 			if current != target {
 				ancestorState, stateErr := lifecycleStateBefore(db, c.domain, current, currentKind, events[0].position)
@@ -141,6 +146,31 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 		wantBytes, wantErr := artifactEncoder.Marshal(expected.payload)
 		if marshalErr != nil || wantErr != nil || string(got) != string(wantBytes) {
 			return ErrInvalidStore
+		}
+	}
+	return nil
+}
+
+var errNodeNotLiveAtLifecycle = errors.New("authoritystore: node not live at lifecycle event")
+
+func lifecycleNodeLiveForRange(db *sql.DB, domain, node string, first, last uint64) error {
+	var birth string
+	var tombstone sql.NullString
+	if err := db.QueryRow(`SELECT birth_event_id,tombstone_event_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, domain, node).
+		Scan(&birth, &tombstone); err != nil {
+		return fmt.Errorf("lifecycle node membership: %w", ErrInvalidStore)
+	}
+	var birthPosition uint64
+	if err := db.QueryRow(`SELECT position FROM authority_events WHERE domain_id=? AND event_id=?`, domain, birth).Scan(&birthPosition); err != nil || birthPosition > first {
+		return fmt.Errorf("lifecycle node birth position: %w", ErrInvalidStore)
+	}
+	if tombstone.Valid {
+		var tombstonePosition uint64
+		if err := db.QueryRow(`SELECT position FROM authority_events WHERE domain_id=? AND event_id=?`, domain, tombstone.String).Scan(&tombstonePosition); err != nil {
+			return fmt.Errorf("lifecycle node tombstone position: %w", ErrInvalidStore)
+		}
+		if tombstonePosition <= last {
+			return errNodeNotLiveAtLifecycle
 		}
 	}
 	return nil

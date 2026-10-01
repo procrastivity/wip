@@ -187,7 +187,8 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended" &&
 			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
-			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired") ||
+			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" &&
+			!transferLifecycleEventKind(asString(fields["kind"]))) ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
@@ -204,23 +205,11 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	if !ok {
 		return false
 	}
-	switch fields["kind"] {
-	case "matter.started", "step.started", "step.finished", "matter.finished":
-		from, to := "planned", "in-progress"
-		if fields["kind"] == "step.finished" || fields["kind"] == "matter.finished" {
-			from, to = "in-progress", "done"
-		}
-		if fields["kind"] == "matter.started" {
-			return wipdwire.ExactMapKeys(payload, "from", "to", "cascade") &&
-				payload["from"] == from && payload["to"] == to && payload["cascade"] == true &&
-				transferULID.MatchString(asString(fields["subject_id"]))
-		}
-		if fields["kind"] == "step.started" && wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id") {
-			return payload["from"] == from && payload["to"] == to && transferULID.MatchString(asString(payload["cause_event_id"])) &&
-				transferULID.MatchString(asString(fields["subject_id"]))
-		}
-		return wipdwire.ExactMapKeys(payload, "from", "to") && payload["from"] == from && payload["to"] == to &&
-			transferULID.MatchString(asString(fields["subject_id"]))
+	kind := asString(fields["kind"])
+	if transferLifecycleEventKind(kind) {
+		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
+	}
+	switch kind {
 	case "batch.swept":
 		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
 	case "batch.anonymous-created":
@@ -338,6 +327,61 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	default:
 		return false
 	}
+}
+
+func transferLifecycleEventKind(kind string) bool {
+	scale, verb, ok := strings.Cut(kind, ".")
+	if !ok || (scale != "matter" && scale != "stage" && scale != "step") {
+		return false
+	}
+	switch verb {
+	case "started", "finished", "paused", "resumed", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func validTransferLifecycleEvent(kind, subject string, payload map[string]any) bool {
+	if !transferULID.MatchString(subject) {
+		return false
+	}
+	scale, verb, _ := strings.Cut(kind, ".")
+	if verb == "started" {
+		if payload["from"] != "planned" || payload["to"] != "in-progress" {
+			return false
+		}
+		keys := wipdwire.ExactMapKeys(payload, "from", "to")
+		cascade := payload["cascade"] == true && (wipdwire.ExactMapKeys(payload, "from", "to", "cascade") ||
+			wipdwire.ExactMapKeys(payload, "from", "to", "cascade", "cause_event_id"))
+		cause, hasCause := payload["cause_event_id"]
+		causalTarget := scale != "matter" && hasCause && transferULID.MatchString(asString(cause)) &&
+			wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id")
+		causalAncestor := scale != "matter" && cascade && hasCause && transferULID.MatchString(asString(cause)) &&
+			wipdwire.ExactMapKeys(payload, "from", "to", "cascade", "cause_event_id")
+		standaloneAncestor := cascade && wipdwire.ExactMapKeys(payload, "from", "to", "cascade")
+		return keys || cascade && !hasCause && standaloneAncestor || causalTarget || causalAncestor ||
+			cascade && !hasCause && standaloneAncestor && scale == "matter"
+	}
+	from, to := "in-progress", map[string]string{
+		"finished": "done", "paused": "paused", "resumed": "in-progress", "canceled": "canceled",
+	}[verb]
+	if verb == "resumed" {
+		from = "paused"
+	}
+	if payload["from"] != from || payload["to"] != to {
+		return false
+	}
+	keys := []string{"from", "to"}
+	if verb == "canceled" {
+		if reason, exists := payload["reason"]; exists {
+			if strings.TrimSpace(asString(reason)) == "" {
+				return false
+			}
+			keys = append(keys, "reason")
+		}
+	}
+	return wipdwire.ExactMapKeys(payload, keys...)
 }
 
 func canonicalUTC(value any) bool {
