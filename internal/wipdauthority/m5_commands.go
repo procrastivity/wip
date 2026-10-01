@@ -374,7 +374,13 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 	}
 	switch command.Request.Operation {
 	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
-		operation.MatterFinishV1.Metadata().Operation:
+		operation.MatterFinishV1.Metadata().Operation,
+		operation.MatterStartV1.Metadata().Operation, operation.StageStartV1.Metadata().Operation,
+		operation.MatterPauseV1.Metadata().Operation, operation.StagePauseV1.Metadata().Operation,
+		operation.StepPauseV1.Metadata().Operation, operation.MatterResumeV1.Metadata().Operation,
+		operation.StageResumeV1.Metadata().Operation, operation.StepResumeV1.Metadata().Operation,
+		operation.MatterCancelV1.Metadata().Operation, operation.StageCancelV1.Metadata().Operation,
+		operation.StepCancelV1.Metadata().Operation, operation.StageFinishV1.Metadata().Operation:
 		now := time.Now().UTC()
 		first, err := randomULID(now)
 		if err != nil {
@@ -384,7 +390,11 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 		if err != nil {
 			return nil, err
 		}
-		status, err := app.store.CompleteConnectedLifecycle(context.Background(), owner, []string{first, second}, now, app.sign)
+		third, err := randomULID(now.Add(2 * time.Millisecond))
+		if err != nil {
+			return nil, err
+		}
+		status, err := app.store.CompleteConnectedLifecycle(context.Background(), owner, []string{first, second, third}, now, app.sign)
 		if err != nil {
 			return nil, err
 		}

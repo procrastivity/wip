@@ -38,7 +38,7 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 15 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+	if len(Catalogue()) != 27 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
 		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
 		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
 		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation ||
@@ -51,7 +51,10 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 		Catalogue()[11].Metadata().Operation != StepReorderV1.Metadata().Operation ||
 		Catalogue()[12].Metadata().Operation != StepReplaceV1.Metadata().Operation ||
 		Catalogue()[13].Metadata().Operation != StepRemoveV1.Metadata().Operation ||
-		Catalogue()[14].Metadata().Operation != MatterLocatorRepairV1.Metadata().Operation {
+		Catalogue()[14].Metadata().Operation != MatterLocatorRepairV1.Metadata().Operation ||
+		Catalogue()[15].Metadata().Operation != MatterStartV1.Metadata().Operation ||
+		Catalogue()[16].Metadata().Operation != StageStartV1.Metadata().Operation ||
+		Catalogue()[26].Metadata().Operation != StageFinishV1.Metadata().Operation {
 		t.Fatalf("catalogue = %+v, want M5 operations followed by the complete Step 4 set", Catalogue())
 	}
 }
@@ -317,4 +320,45 @@ func TestDefinitionRejectsTransportAndRuntimeCoupling(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestM6LifecycleDeliveryAndFootprintsArePinned(t *testing.T) {
+	tests := []struct {
+		definition Definition
+		delivery   DeliveryClass
+		guards     []Footprint
+		writes     []Footprint
+	}{
+		{StepStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintStepLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintStepLifecycle}},
+		{StepFinishV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle}, []Footprint{FootprintStepLifecycle}},
+		{MatterFinishV1, DeliveryAuthority, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle}},
+		{MatterStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle}, []Footprint{FootprintMatterLifecycle}},
+		{StageStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle, FootprintAncestorLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintStageLifecycle}},
+		{StepPauseV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle}, []Footprint{FootprintStepLifecycle}},
+		{StagePauseV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle}, []Footprint{FootprintStageLifecycle}},
+		{MatterPauseV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle}, []Footprint{FootprintMatterLifecycle}},
+		{StepResumeV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle}, []Footprint{FootprintStepLifecycle}},
+		{StageResumeV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle}, []Footprint{FootprintStageLifecycle}},
+		{MatterResumeV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle}, []Footprint{FootprintMatterLifecycle}},
+		{StepCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle, FootprintCancelReason}, []Footprint{FootprintStepLifecycle}},
+		{StageCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle, FootprintCancelReason}, []Footprint{FootprintStageLifecycle}},
+		{MatterCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintCancelReason}, []Footprint{FootprintMatterLifecycle}},
+		{StageFinishV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle}, []Footprint{FootprintStageLifecycle}},
+	}
+	for _, test := range tests {
+		metadata := test.definition.Metadata()
+		if metadata.Delivery != test.delivery || strings.Join(footprintNames(metadata.Guards), ";") != strings.Join(footprintNames(test.guards), ";") ||
+			strings.Join(footprintNames(metadata.Writes), ";") != strings.Join(footprintNames(test.writes), ";") {
+			t.Errorf("%s metadata delivery/guards/writes = %s/%v/%v, want %s/%v/%v", metadata.Operation, metadata.Delivery,
+				metadata.Guards, metadata.Writes, test.delivery, test.guards, test.writes)
+		}
+	}
+}
+
+func footprintNames(footprints []Footprint) []string {
+	names := make([]string, len(footprints))
+	for index, footprint := range footprints {
+		names[index] = string(footprint)
+	}
+	return names
 }

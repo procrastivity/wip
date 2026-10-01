@@ -24,6 +24,16 @@ func NewM5BirthRegistry() (*operation.Registry, error) {
 // Every M6 mutation is completed by one authority transaction, not by the
 // transport-neutral placeholder handler registered here.
 func NewM6Step4Registry() (*operation.Registry, error) {
+	return newM6Registry(false)
+}
+
+// NewM6Step5Registry returns the full M6 acceptance capability set through
+// Step 5, including the authority-bound lifecycle variants.
+func NewM6Step5Registry() (*operation.Registry, error) {
+	return newM6Registry(true)
+}
+
+func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {
 		return nil, err
@@ -35,6 +45,17 @@ func NewM6Step4Registry() (*operation.Registry, error) {
 			}}
 		}); err != nil {
 			return nil, err
+		}
+	}
+	if step5 {
+		for _, definition := range operation.Step5Catalogue() {
+			if err := registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+				return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+					Code: operation.ProblemExecutionFailed, Message: "Step 5 operation requires an authority transaction",
+				}}
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return registry, nil

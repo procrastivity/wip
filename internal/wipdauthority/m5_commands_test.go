@@ -826,7 +826,7 @@ func testM5OpenBodyCancellation(t *testing.T, mode string) {
 
 func TestM6MatterCreateV2AuthenticatedCollisionReplayAndReopen(t *testing.T) {
 	fixture := newM5CommandFixture(t)
-	registry, err := NewM6Step4Registry()
+	registry, err := NewM6Step5Registry()
 	if err != nil {
 		t.Fatal(err)
 	}

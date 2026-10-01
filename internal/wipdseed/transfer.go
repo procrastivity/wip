@@ -156,9 +156,10 @@ type acquiredClaimProjection struct {
 }
 
 type lifecycleFoldState struct {
-	stage   string
-	command foldedLifecycleEvent
-	matter  string
+	stage       string
+	command     foldedLifecycleEvent
+	matter      string
+	lastEventID string
 }
 
 type claimReleaseFoldState struct {
@@ -769,7 +770,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 					break
 				}
 			}
-			pendingLifecycle = &lifecycleFoldState{stage: "step-start-target", command: lifecycle, matter: matterID}
+			pendingLifecycle = &lifecycleFoldState{stage: "step-start-target", command: lifecycle, matter: matterID, lastEventID: record.EventID}
 		case "step.started":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
@@ -778,7 +779,16 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			claim, claimed := activeClaims[matterID]
 			validCascade := pendingLifecycle != nil && pendingLifecycle.stage == "step-start-target" &&
 				sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) && pendingLifecycle.matter == matterID
-			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "from", "to") ||
+			validPayload := payloadOK && (wipdwire.ExactMapKeys(payload, "from", "to") ||
+				wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id")) &&
+				payload["from"] == "planned" && payload["to"] == "in-progress"
+			causeID, hasCause := payload["cause_event_id"].(string)
+			if validPayload && validCascade && hasCause {
+				validPayload = causeID == pendingLifecycle.lastEventID
+			} else if validPayload && hasCause {
+				validPayload = false
+			}
+			if !valid || !validPayload ||
 				payload["from"] != "planned" || payload["to"] != "in-progress" || !clientULIDPattern.MatchString(stepID) ||
 				matterID == "" || matterRepos[matterID] != lifecycle.repoID || stepStates[stepID] != "planned" ||
 				!claimed || claim.OwnerEnvironmentID != lifecycle.environmentID ||

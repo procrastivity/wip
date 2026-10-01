@@ -73,7 +73,7 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 
 // NewM6LabServer creates the explicit M6 acceptance path. It preserves the
 // closed M5 compatibility set and additionally requires the complete Step 4
-// operation catalogue; the M5 lab allowlist itself remains unchanged.
+// and Step 5 catalogues; the M5 lab allowlist itself remains unchanged.
 func NewM6LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
 	return newLabServer(profile, certificate, config, true)
 }
@@ -111,7 +111,7 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		operations = config.Registry.Definitions()
 		maxOperations := 7
 		if m6 {
-			maxOperations += len(operation.Step4Catalogue())
+			maxOperations += len(operation.Step4Catalogue()) + len(operation.Step5Catalogue())
 		}
 		if len(operations) == 0 || len(operations) > maxOperations || m6 && len(operations) != maxOperations ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
@@ -119,12 +119,17 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		}
 		matterRegistered := false
 		step4Registered := make(map[operation.ID]bool)
+		step5Registered := make(map[operation.ID]bool)
 		registered := make(map[operation.ID]bool, len(operations))
 		for _, definition := range operations {
 			id := definition.Metadata().Operation
 			registered[id] = true
 			if m6 && operation.Step4Operation(id) {
 				step4Registered[id] = true
+				continue
+			}
+			if m6 && operation.Step5Operation(id) {
+				step5Registered[id] = true
 				continue
 			}
 			switch id {
@@ -154,6 +159,11 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			}
 			for _, definition := range operation.Step4Catalogue() {
 				if !step4Registered[definition.Metadata().Operation] {
+					return nil, ErrInvalidLabConfig
+				}
+			}
+			for _, definition := range operation.Step5Catalogue() {
+				if !step5Registered[definition.Metadata().Operation] {
 					return nil, ErrInvalidLabConfig
 				}
 			}

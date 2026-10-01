@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
@@ -14,7 +15,13 @@ import (
 func connectedLifecycleOperation(id operation.ID) bool {
 	switch id {
 	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
-		operation.MatterFinishV1.Metadata().Operation:
+		operation.MatterFinishV1.Metadata().Operation, operation.MatterStartV1.Metadata().Operation,
+		operation.StageStartV1.Metadata().Operation, operation.MatterPauseV1.Metadata().Operation,
+		operation.StagePauseV1.Metadata().Operation, operation.StepPauseV1.Metadata().Operation,
+		operation.MatterResumeV1.Metadata().Operation, operation.StageResumeV1.Metadata().Operation,
+		operation.StepResumeV1.Metadata().Operation, operation.MatterCancelV1.Metadata().Operation,
+		operation.StageCancelV1.Metadata().Operation, operation.StepCancelV1.Metadata().Operation,
+		operation.StageFinishV1.Metadata().Operation:
 		return true
 	default:
 		return false
@@ -123,22 +130,27 @@ func resolveConnectedLifecycleMatter(ctx context.Context, tx *sql.Tx, command *l
 	if command == nil {
 		return ErrInvalidProof
 	}
-	switch command.name {
-	case "step.start", "step.finish":
-		var matter, repo string
-		if err := tx.QueryRowContext(ctx, `SELECT matter_id,repo_id FROM steps WHERE domain_id=? AND step_id=?`, command.domain, command.stepID).Scan(&matter, &repo); err != nil ||
-			repo != command.repo || command.matter != "" && command.matter != matter {
-			return ErrFenced
-		}
-		command.matter = matter
-	case "matter.finish":
-	default:
+	name := command.name
+	if !connectedLifecycleOperation(operation.ID{Name: name, Version: 1}) {
 		return ErrInvalidProof
 	}
-	var repo string
-	if err := tx.QueryRowContext(ctx, `SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, command.domain, command.matter).Scan(&repo); err != nil || repo != command.repo {
+	target := command.nodeID
+	if command.stepID != "" {
+		target = command.stepID
+	}
+	if target == "" {
+		target = command.matter
+	}
+	var kind, matter, repo string
+	var tombstone sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT kind,matter_id,repo_id,tombstone_event_id FROM m6_nodes WHERE domain_id=? AND node_id=?`, command.domain, target).
+		Scan(&kind, &matter, &repo, &tombstone); err != nil || tombstone.Valid || repo != command.repo ||
+		(strings.HasPrefix(name, "matter.") && kind != "matter") || (strings.HasPrefix(name, "stage.") && kind != "stage") ||
+		(strings.HasPrefix(name, "step.") && kind != "step") || (command.matter != "" && command.matter != matter) {
 		return ErrFenced
 	}
+	command.matter = matter
+	command.nodeID = target
 	return nil
 }
 
@@ -150,6 +162,30 @@ func connectedLifecycleDefinition(id operation.ID) (operation.Definition, bool) 
 		return operation.StepFinishV1, true
 	case operation.MatterFinishV1.Metadata().Operation:
 		return operation.MatterFinishV1, true
+	case operation.MatterStartV1.Metadata().Operation:
+		return operation.MatterStartV1, true
+	case operation.StageStartV1.Metadata().Operation:
+		return operation.StageStartV1, true
+	case operation.MatterPauseV1.Metadata().Operation:
+		return operation.MatterPauseV1, true
+	case operation.StagePauseV1.Metadata().Operation:
+		return operation.StagePauseV1, true
+	case operation.StepPauseV1.Metadata().Operation:
+		return operation.StepPauseV1, true
+	case operation.MatterResumeV1.Metadata().Operation:
+		return operation.MatterResumeV1, true
+	case operation.StageResumeV1.Metadata().Operation:
+		return operation.StageResumeV1, true
+	case operation.StepResumeV1.Metadata().Operation:
+		return operation.StepResumeV1, true
+	case operation.MatterCancelV1.Metadata().Operation:
+		return operation.MatterCancelV1, true
+	case operation.StageCancelV1.Metadata().Operation:
+		return operation.StageCancelV1, true
+	case operation.StepCancelV1.Metadata().Operation:
+		return operation.StepCancelV1, true
+	case operation.StageFinishV1.Metadata().Operation:
+		return operation.StageFinishV1, true
 	default:
 		return operation.Definition{}, false
 	}
@@ -160,7 +196,7 @@ func (s *Store) CompleteConnectedLifecycle(ctx context.Context, owner *Execution
 	var empty CommandStatus
 	if owner == nil || owner.store != s || owner.lifecycle == nil || !connectedLifecycleOperation(operation.ID{
 		Name: owner.lifecycle.name, Version: uint16(owner.lifecycle.version),
-	}) || sign == nil || occurred.IsZero() || len(eventIDs) != 2 {
+	}) || sign == nil || occurred.IsZero() || len(eventIDs) == 0 {
 		return empty, ErrInvalidProof
 	}
 	c := owner.lifecycle
@@ -194,36 +230,41 @@ func (s *Store) CompleteConnectedLifecycle(ctx context.Context, owner *Execution
 	if claimErr != nil && !errors.Is(claimErr, ErrFenced) {
 		return empty, claimErr
 	}
+	return s.completeM6LifecycleTx(ctx, tx, c, head, claim, claimErr, eventIDs, occurred, sign)
+}
+
+func (s *Store) completeM6LifecycleTx(ctx context.Context, tx *sql.Tx, c *lifecycleCommand, head uint64,
+	claim claimState, claimErr error, eventIDs []string, occurred time.Time, sign Signer,
+) (CommandStatus, error) {
+	var empty CommandStatus
 	problem := ""
 	if errors.Is(claimErr, ErrFenced) || claim.closed.Valid || claim.authority != c.epoch || claim.epoch != c.claimEpoch ||
 		claim.owner != c.environment || claim.repo != c.repo || claim.worktree != c.worktree || claim.matter != c.matter {
 		problem = "refusal.claim-fenced"
 	}
-	matterState, stepState := "", ""
+	target := c.nodeID
+	if c.stepID != "" {
+		target = c.stepID
+	}
+	if target == "" {
+		target = c.matter
+	}
+	scale, _, ok := strings.Cut(c.name, ".")
+	if !ok {
+		return empty, ErrInvalidProof
+	}
+	verb := strings.TrimPrefix(c.name, scale+".")
+	from := map[string]string{"start": "planned", "finish": "in-progress", "pause": "in-progress", "cancel": "in-progress", "resume": "paused"}[verb]
+	to := map[string]string{"start": "in-progress", "finish": "done", "pause": "paused", "cancel": "canceled", "resume": "in-progress"}[verb]
+	state := ""
 	if problem == "" {
-		matterState, err = lifecycleStateTx(ctx, tx, c.domain, c.matter, "matter")
+		var err error
+		state, err = lifecycleStateTx(ctx, tx, c.domain, target, scale)
 		if err != nil {
 			return empty, err
 		}
-		if c.stepID != "" {
-			stepState, err = lifecycleStateTx(ctx, tx, c.domain, c.stepID, "step")
-			if err != nil {
-				return empty, err
-			}
-		}
-		switch c.name {
-		case "step.start":
-			if stepState != "planned" {
-				problem = "refusal.invalid-transition"
-			}
-		case "step.finish":
-			if stepState != "in-progress" {
-				problem = "refusal.invalid-transition"
-			}
-		case "matter.finish":
-			if matterState != "in-progress" {
-				problem = "refusal.invalid-transition"
-			}
+		if state != from {
+			problem = "refusal.invalid-transition"
 		}
 	}
 	if problem != "" {
@@ -232,105 +273,164 @@ func (s *Store) CompleteConnectedLifecycle(ctx context.Context, owner *Execution
 	}
 	identity := eventIdentity{c.domain, c.id, c.hash, c.environment, c.sequence, c.actedAt, c.repo}
 	var first, last any
-	var count uint64
-	appendEvent := func(id, kind, subject string, payload map[string]any) error {
-		position, appendErr := appendCommandEvent(ctx, tx, identity, occurred, id, kind, subject, payload)
-		if appendErr != nil {
-			return appendErr
+	used := 0
+	appendEvent := func(kind, subject string, payload map[string]any) error {
+		if used >= len(eventIDs) {
+			return ErrInvalidProof
 		}
-		if count == 0 {
+		id := eventIDs[used]
+		position, err := appendCommandEvent(ctx, tx, identity, occurred, id, kind, subject, payload)
+		if err != nil {
+			return err
+		}
+		if kind != "batch.swept" {
+			result, updateErr := tx.ExecContext(ctx, `UPDATE m6_nodes SET last_event_id=? WHERE domain_id=? AND node_id=? AND tombstone_event_id IS NULL`, id, c.domain, subject)
+			if updateErr != nil {
+				return updateErr
+			}
+			if affected, _ := result.RowsAffected(); affected != 1 {
+				return ErrFenced
+			}
+		}
+		if used == 0 {
 			first = position
 		}
 		last = position
-		count++
+		used++
 		return nil
 	}
 	var output operation.Output
-	switch c.name {
-	case "step.start":
-		if matterState == "planned" {
-			if err = appendEvent(eventIDs[0], "matter.started", c.matter, map[string]any{"from": "planned", "to": "in-progress", "cascade": true}); err != nil {
-				return empty, err
+	if verb == "start" {
+		type ancestor struct{ id, kind string }
+		var planned []ancestor
+		current := target
+		for {
+			var kind string
+			var parent sql.NullString
+			if err := tx.QueryRowContext(ctx, `SELECT kind,parent_id FROM m6_nodes WHERE domain_id=? AND node_id=? AND tombstone_event_id IS NULL`, c.domain, current).Scan(&kind, &parent); err != nil {
+				return empty, ErrFenced
 			}
-			if err = appendEvent(eventIDs[1], "step.started", c.stepID, map[string]any{"from": "planned", "to": "in-progress"}); err != nil {
-				return empty, err
+			if current != target {
+				ancestorState, err := lifecycleStateTx(ctx, tx, c.domain, current, kind)
+				if err != nil {
+					return empty, err
+				}
+				if ancestorState == "planned" {
+					planned = append(planned, ancestor{current, kind})
+				}
 			}
-		} else {
-			if err = appendEvent(eventIDs[0], "step.started", c.stepID, map[string]any{"from": "planned", "to": "in-progress"}); err != nil {
-				return empty, err
+			if !parent.Valid {
+				break
 			}
+			current = parent.String
 		}
-		output = operation.StepLifecycleOutput{StepID: c.stepID, MatterID: c.matter, State: "in-progress"}
-	case "step.finish":
-		if err = appendEvent(eventIDs[0], "step.finished", c.stepID, map[string]any{"from": "in-progress", "to": "done"}); err != nil {
+		for left, right := 0, len(planned)-1; left < right; left, right = left+1, right-1 {
+			planned[left], planned[right] = planned[right], planned[left]
+		}
+		planned = append(planned, ancestor{target, scale})
+		var cause string
+		for _, node := range planned {
+			payload := map[string]any{"from": "planned", "to": "in-progress"}
+			if node.id != target {
+				payload["cascade"] = true
+			}
+			if cause != "" {
+				payload["cause_event_id"] = cause
+			}
+			if err := appendEvent(node.kind+".started", node.id, payload); err != nil {
+				return empty, err
+			}
+			cause = eventIDs[used-1]
+		}
+		switch scale {
+		case "step":
+			output = operation.StepLifecycleOutput{StepID: target, MatterID: c.matter, State: to}
+		case "stage":
+			output = operation.NodeLifecycleOutput{NodeID: target, MatterID: c.matter, State: to}
+		case "matter":
+			output = operation.MatterLifecycleOutput{MatterID: c.matter, State: to}
+		}
+	} else if c.name == "matter.finish" {
+		sealed, err := matterSubtreeCompleteTx(ctx, tx, c.domain, c.matter)
+		if err != nil {
 			return empty, err
 		}
-		output = operation.StepLifecycleOutput{StepID: c.stepID, MatterID: c.matter, State: "done"}
-	case "matter.finish":
+		if err = appendEvent("matter.finished", c.matter, map[string]any{"from": "in-progress", "to": "done"}); err != nil {
+			return empty, err
+		}
 		var batch string
 		batchErr := tx.QueryRowContext(ctx, `SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&batch)
 		if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
 			return empty, batchErr
 		}
-		becameSealed, sealErr := matterSubtreeCompleteTx(ctx, tx, c.domain, c.matter)
-		if sealErr != nil {
-			return empty, sealErr
-		}
-		if err = appendEvent(eventIDs[0], "matter.finished", c.matter, map[string]any{"from": "in-progress", "to": "done"}); err != nil {
-			return empty, err
-		}
-		if becameSealed && !errors.Is(batchErr, sql.ErrNoRows) {
-			if err = appendEvent(eventIDs[1], "batch.swept", batch, map[string]any{}); err != nil {
+		if sealed && !errors.Is(batchErr, sql.ErrNoRows) {
+			if err = appendEvent("batch.swept", batch, map[string]any{}); err != nil {
 				return empty, err
 			}
 		}
-		output = operation.MatterFinishOutput{MatterID: c.matter, State: "done", BecameSealed: becameSealed}
+		output = operation.MatterFinishOutput{MatterID: c.matter, State: "done", BecameSealed: sealed}
+	} else {
+		kind := scale + "." + map[string]string{"finish": "finished", "pause": "paused", "resume": "resumed", "cancel": "canceled"}[verb]
+		payload := map[string]any{"from": state, "to": to}
+		if verb == "cancel" && c.reason != "" {
+			payload["reason"] = c.reason
+		}
+		if err := appendEvent(kind, target, payload); err != nil {
+			return empty, err
+		}
+		switch scale {
+		case "step":
+			output = operation.StepLifecycleOutput{StepID: target, MatterID: c.matter, State: to}
+		case "stage":
+			output = operation.NodeLifecycleOutput{NodeID: target, MatterID: c.matter, State: to}
+		case "matter":
+			output = operation.MatterLifecycleOutput{MatterID: c.matter, State: to}
+		}
 	}
 	definition, ok := connectedLifecycleDefinition(operation.ID{Name: c.name, Version: 1})
 	result := operation.Result{Code: operation.ResultSucceeded, Output: output}
-	if !ok || definition.ValidateResult(result) != nil {
+	if !ok || definition.ValidateResult(result) != nil || used == 0 {
 		return empty, ErrInvalidProof
 	}
-	var encoded []byte
-	switch value := output.(type) {
-	case operation.StepLifecycleOutput:
-		encoded, err = artifactEncoder.Marshal(map[string]any{
-			"step_id": value.StepID, "matter_id": value.MatterID, "state": value.State,
-		})
-	case operation.MatterFinishOutput:
-		encoded, err = artifactEncoder.Marshal(map[string]any{
-			"matter_id": value.MatterID, "state": value.State, "became_sealed": value.BecameSealed,
-		})
-	default:
-		return empty, ErrInvalidProof
-	}
+	encoded, err := lifecycleOutputBytes(output)
 	if err != nil {
 		return empty, err
 	}
-	if count == 0 {
-		return empty, ErrInvalidProof
-	}
-	rangeValue := map[string]any{"first_event_id": eventIDs[0], "last_event_id": eventIDs[count-1], "event_count": count}
+	rangeValue := map[string]any{"first_event_id": eventIDs[0], "last_event_id": eventIDs[used-1], "event_count": uint64(used)}
 	return s.finishCommandTx(ctx, tx, c.commandIdentity, head, string(result.Code), encoded, nil, rangeValue, first, last, occurred, sign, nil)
 }
 
-// matterSubtreeCompleteTx evaluates the M5 seal predicate from the Matter's
-// authority-folded child Steps. Gate declarations are not modeled in this
-// authority schema; every Step that is modeled must be Done before completion
-// crosses the seal boundary.
+func lifecycleOutputBytes(output operation.Output) ([]byte, error) {
+	switch value := output.(type) {
+	case operation.StepLifecycleOutput:
+		return artifactEncoder.Marshal(map[string]any{"step_id": value.StepID, "matter_id": value.MatterID, "state": value.State})
+	case operation.NodeLifecycleOutput:
+		return artifactEncoder.Marshal(map[string]any{"node_id": value.NodeID, "matter_id": value.MatterID, "state": value.State})
+	case operation.MatterLifecycleOutput:
+		return artifactEncoder.Marshal(map[string]any{"matter_id": value.MatterID, "state": value.State})
+	case operation.MatterFinishOutput:
+		return artifactEncoder.Marshal(map[string]any{"matter_id": value.MatterID, "state": value.State, "became_sealed": value.BecameSealed})
+	default:
+		return nil, ErrInvalidProof
+	}
+}
+
+// matterSubtreeCompleteTx checks every live M6 descendant. Gate semantics are
+// intentionally not part of this step's modeled seal predicate.
 func matterSubtreeCompleteTx(ctx context.Context, tx *sql.Tx, domain, matter string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT step_id FROM steps WHERE domain_id=? AND matter_id=? ORDER BY step_id`, domain, matter)
+	rows, err := tx.QueryContext(ctx, `SELECT node_id,kind FROM m6_nodes WHERE domain_id=? AND matter_id=? AND kind!='matter' AND tombstone_event_id IS NULL ORDER BY node_id`, domain, matter)
 	if err != nil {
 		return false, err
 	}
-	var steps []string
+	type node struct{ id, kind string }
+	var nodes []node
 	for rows.Next() {
-		var step string
-		if err = rows.Scan(&step); err != nil {
+		var item node
+		if err = rows.Scan(&item.id, &item.kind); err != nil {
 			_ = rows.Close()
 			return false, err
 		}
-		steps = append(steps, step)
+		nodes = append(nodes, item)
 	}
 	if err = rows.Err(); err != nil {
 		_ = rows.Close()
@@ -339,8 +439,8 @@ func matterSubtreeCompleteTx(ctx context.Context, tx *sql.Tx, domain, matter str
 	if err = rows.Close(); err != nil {
 		return false, err
 	}
-	for _, step := range steps {
-		state, stateErr := lifecycleStateTx(ctx, tx, domain, step, "step")
+	for _, item := range nodes {
+		state, stateErr := lifecycleStateTx(ctx, tx, domain, item.id, item.kind)
 		if stateErr != nil {
 			return false, stateErr
 		}
@@ -374,8 +474,9 @@ func lifecycleStateTx(ctx context.Context, tx *sql.Tx, domain, subject, scale st
 		if event.Subject != subject {
 			continue
 		}
-		if scale == "matter" && (event.Kind == "matter.started" || event.Kind == "matter.finished") ||
-			scale == "step" && (event.Kind == "step.started" || event.Kind == "step.finished") {
+		if scale == "matter" && lifecycleEventKind(scale, event.Kind) ||
+			scale == "stage" && lifecycleEventKind(scale, event.Kind) ||
+			scale == "step" && lifecycleEventKind(scale, event.Kind) {
 			to, ok := event.Payload["to"].(string)
 			if !ok {
 				return "", ErrInvalidStore
@@ -384,4 +485,13 @@ func lifecycleStateTx(ctx context.Context, tx *sql.Tx, domain, subject, scale st
 		}
 	}
 	return state, rows.Err()
+}
+
+func lifecycleEventKind(scale, kind string) bool {
+	for _, verb := range []string{"started", "finished", "paused", "resumed", "canceled"} {
+		if kind == scale+"."+verb {
+			return true
+		}
+	}
+	return false
 }

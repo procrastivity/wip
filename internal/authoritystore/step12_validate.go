@@ -83,6 +83,21 @@ func checkStep12State(db *sql.DB) error {
 			command.Request.Operation.Name != submission.operation || uint64(command.Request.Operation.Version) != submission.version {
 			return ErrInvalidStore
 		}
+		if connectedLifecycleOperation(id) {
+			for _, event := range group {
+				if event.kind == "batch.swept" {
+					continue
+				}
+				node, exists := nodes[ownerKey(event.domain, event.subject)]
+				scale, _, validKind := strings.Cut(event.kind, ".")
+				if !exists || node.tombstone != "" || !validKind || scale != node.kind {
+					return ErrInvalidStore
+				}
+				node.last = event.id
+				nodes[ownerKey(node.domain, node.id)] = node
+			}
+			return nil
+		}
 		for _, event := range group {
 			if err := validateStep12Event(event, submission, command); err != nil {
 				return err
@@ -227,7 +242,7 @@ func checkStep12State(db *sql.DB) error {
 }
 
 func step12Relevant(id operation.ID) bool {
-	return id == operation.MatterCreateV1.Metadata().Operation || id == operation.StepCreateV1.Metadata().Operation || operation.Step4Operation(id)
+	return id == operation.MatterCreateV1.Metadata().Operation || id == operation.StepCreateV1.Metadata().Operation || operation.Step4Operation(id) || connectedLifecycleOperation(id)
 }
 
 func step12Definition(id operation.ID) (operation.Definition, bool) {

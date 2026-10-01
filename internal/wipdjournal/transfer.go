@@ -215,6 +215,10 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 				payload["from"] == from && payload["to"] == to && payload["cascade"] == true &&
 				transferULID.MatchString(asString(fields["subject_id"]))
 		}
+		if fields["kind"] == "step.started" && wipdwire.ExactMapKeys(payload, "from", "to", "cause_event_id") {
+			return payload["from"] == from && payload["to"] == to && transferULID.MatchString(asString(payload["cause_event_id"])) &&
+				transferULID.MatchString(asString(fields["subject_id"]))
+		}
 		return wipdwire.ExactMapKeys(payload, "from", "to") && payload["from"] == from && payload["to"] == to &&
 			transferULID.MatchString(asString(fields["subject_id"]))
 	case "batch.swept":

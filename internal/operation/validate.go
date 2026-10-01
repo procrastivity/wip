@@ -53,6 +53,17 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("Step ID", input.StepID); err != nil {
 			return err
 		}
+	case StepCancelInput:
+		if err := validateULID("Step ID", input.StepID); err != nil {
+			return err
+		}
+	case NodeLifecycleInput:
+		if err := validateULID("node ID", input.NodeID); err != nil {
+			return err
+		}
+		if d.metadata.Operation.Name != "matter.cancel" && d.metadata.Operation.Name != "stage.cancel" && input.Reason != "" {
+			return fmt.Errorf("lifecycle reason is only accepted for cancel")
+		}
 	case MatterFinishInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
@@ -192,8 +203,16 @@ func (d Definition) ValidateResult(result Result) error {
 		switch output := result.Output.(type) {
 		case StepLifecycleOutput:
 			if validateULID("Step output ID", output.StepID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
-				(output.State != "in-progress" && output.State != "done") {
+				!validLifecycleState(output.State) {
 				return fmt.Errorf("step lifecycle output has invalid identity or state")
+			}
+		case NodeLifecycleOutput:
+			if validateULID("node output ID", output.NodeID) != nil || validateULID("Matter output ID", output.MatterID) != nil || !validLifecycleState(output.State) {
+				return fmt.Errorf("node lifecycle output has invalid identity or state")
+			}
+		case MatterLifecycleOutput:
+			if validateULID("Matter output ID", output.MatterID) != nil || !validLifecycleState(output.State) {
+				return fmt.Errorf("matter lifecycle output has invalid identity or state")
 			}
 		case MatterFinishOutput:
 			if validateULID("Matter output ID", output.MatterID) != nil || output.State != "done" {
@@ -290,6 +309,15 @@ func (d Definition) ValidateResult(result Result) error {
 		}
 	}
 	return nil
+}
+
+func validLifecycleState(state string) bool {
+	switch state {
+	case "in-progress", "done", "paused", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func problemPrefix(code ProblemCode) string {

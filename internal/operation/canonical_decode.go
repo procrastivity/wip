@@ -373,6 +373,47 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return MatterFinishInput{MatterID: matterID}, nil
+	case MatterStartV1.Metadata().Operation, MatterPauseV1.Metadata().Operation,
+		MatterResumeV1.Metadata().Operation, MatterCancelV1.Metadata().Operation,
+		StageStartV1.Metadata().Operation, StagePauseV1.Metadata().Operation,
+		StageResumeV1.Metadata().Operation, StageCancelV1.Metadata().Operation, StageFinishV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "node_id", "reason")
+		if err != nil {
+			return nil, err
+		}
+		nodeID, err := commandString(fields, "node_id")
+		if err != nil {
+			return nil, err
+		}
+		reason, err := commandString(fields, "reason")
+		if err != nil {
+			return nil, err
+		}
+		return NodeLifecycleInput{NodeID: nodeID, Reason: reason}, nil
+	case StepPauseV1.Metadata().Operation, StepResumeV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "step_id")
+		if err != nil {
+			return nil, err
+		}
+		stepID, err := commandString(fields, "step_id")
+		if err != nil {
+			return nil, err
+		}
+		return StepLifecycleInput{StepID: stepID}, nil
+	case StepCancelV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "step_id", "reason")
+		if err != nil {
+			return nil, err
+		}
+		stepID, err := commandString(fields, "step_id")
+		if err != nil {
+			return nil, err
+		}
+		reason, err := commandString(fields, "reason")
+		if err != nil {
+			return nil, err
+		}
+		return StepCancelInput{StepID: stepID, Reason: reason}, nil
 	case ContentWriteOnceV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "subject_id", "kind")
 		if err != nil {

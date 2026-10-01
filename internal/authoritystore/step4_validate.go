@@ -249,7 +249,9 @@ func validResultProblem(code, problem string) bool {
 func lifecycleOperation(name string) bool {
 	switch name {
 	case "claim.acquire", "claim.journal-repair", "claim.release", "claim.stand-down",
-		"step.start", "step.finish", "matter.finish":
+		"step.start", "step.finish", "matter.finish", "matter.start", "stage.start",
+		"matter.pause", "stage.pause", "step.pause", "matter.resume", "stage.resume", "step.resume",
+		"matter.cancel", "stage.cancel", "step.cancel", "stage.finish":
 		return true
 	}
 	return false
@@ -588,8 +590,11 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 		if e != nil {
 			return ErrInvalidStore
 		}
-		if r.Result.Code == "result.succeeded" && checkLifecycleEvents(db, s, r, lifecycleEvents[ownerKey(s.domain, s.id)]) != nil {
-			return fmt.Errorf("%w: lifecycle events %s", ErrInvalidStore, s.operation)
+		operationID := operation.ID{Name: s.operation, Version: uint16(s.version)}
+		if r.Result.Code == "result.succeeded" || connectedLifecycleOperation(operationID) && r.Result.Code == string(operation.ResultRefused) {
+			if lifecycleErr := checkLifecycleEvents(db, s, r, lifecycleEvents[ownerKey(s.domain, s.id)]); lifecycleErr != nil {
+				return fmt.Errorf("%w: lifecycle events %s: %v", ErrInvalidStore, s.operation, lifecycleErr)
+			}
 		}
 	}
 	var n int
@@ -679,7 +684,14 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 // receipt independently bind their exact event sequence and closed maps.
 func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, events []lifecycleEvent) error {
 	c, err := parseLifecycle(s.command, s.hash)
-	if err != nil || r.Range == nil || len(events) != int(r.Range.Count) || len(events) == 0 {
+	if err != nil {
+		return ErrInvalidStore
+	}
+	if connectedLifecycleOperation(operation.ID{Name: c.name, Version: uint16(c.version)}) && r.Result.Code == string(operation.ResultRefused) &&
+		r.Range == nil && len(events) == 0 && len(r.Result.Output) == 0 && r.Result.Problem != nil {
+		return nil
+	}
+	if r.Range == nil || len(events) != int(r.Range.Count) || len(events) == 0 {
 		return ErrInvalidStore
 	}
 	if c.name == "claim.release" && c.worktree == "" {
@@ -710,6 +722,10 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 	var repo string
 	if db.QueryRow(`SELECT repo_id FROM matters WHERE domain_id=? AND matter_id=?`, c.domain, matter).Scan(&repo) != nil || repo != c.repo {
 		return ErrInvalidStore
+	}
+	c.matter = matter
+	if connectedLifecycleOperation(operation.ID{Name: c.name, Version: 1}) {
+		return checkM6LifecycleEvents(db, c, r, events)
 	}
 	add := func(kind, subject string, payload map[string]any) {
 		want = append(want, expectedEvent{kind, subject, payload})
@@ -841,18 +857,19 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 }
 
 func matterSubtreeCompleteBefore(db *sql.DB, domain, matter string, before uint64) (bool, error) {
-	rows, err := db.Query(`SELECT step_id FROM steps WHERE domain_id=? AND matter_id=? ORDER BY step_id`, domain, matter)
+	rows, err := db.Query(`SELECT node_id,kind FROM m6_nodes WHERE domain_id=? AND matter_id=? AND kind!='matter' AND tombstone_event_id IS NULL ORDER BY node_id`, domain, matter)
 	if err != nil {
 		return false, err
 	}
-	var steps []string
+	type descendant struct{ id, kind string }
+	var descendants []descendant
 	for rows.Next() {
-		var step string
-		if err = rows.Scan(&step); err != nil {
+		var node descendant
+		if err = rows.Scan(&node.id, &node.kind); err != nil {
 			_ = rows.Close()
 			return false, err
 		}
-		steps = append(steps, step)
+		descendants = append(descendants, node)
 	}
 	if err = rows.Err(); err != nil {
 		_ = rows.Close()
@@ -861,8 +878,8 @@ func matterSubtreeCompleteBefore(db *sql.DB, domain, matter string, before uint6
 	if err = rows.Close(); err != nil {
 		return false, err
 	}
-	for _, step := range steps {
-		state, stateErr := lifecycleStateBefore(db, domain, step, "step", before)
+	for _, node := range descendants {
+		state, stateErr := lifecycleStateBefore(db, domain, node.id, node.kind, before)
 		if stateErr != nil {
 			return false, stateErr
 		}
@@ -896,8 +913,7 @@ func lifecycleStateBefore(db *sql.DB, domain, subject, scale string, before uint
 		if event.Subject != subject {
 			continue
 		}
-		if scale == "matter" && (event.Kind == "matter.started" || event.Kind == "matter.finished") ||
-			scale == "step" && (event.Kind == "step.started" || event.Kind == "step.finished") {
+		if lifecycleEventKind(scale, event.Kind) {
 			to, ok := event.Payload["to"].(string)
 			if !ok {
 				return "", ErrInvalidStore

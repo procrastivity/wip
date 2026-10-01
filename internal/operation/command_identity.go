@@ -231,6 +231,10 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"matter_id": input.MatterID, "action": input.Action, "assigned_locator": input.AssignedLocator}, nil
 	case StepLifecycleInput:
 		return canonicalMap{"step_id": input.StepID}, nil
+	case StepCancelInput:
+		return canonicalMap{"step_id": input.StepID, "reason": input.Reason}, nil
+	case NodeLifecycleInput:
+		return canonicalMap{"node_id": input.NodeID, "reason": input.Reason}, nil
 	case MatterFinishInput:
 		return canonicalMap{"matter_id": input.MatterID}, nil
 	case ContentWriteInput:

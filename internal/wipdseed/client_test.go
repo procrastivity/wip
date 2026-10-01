@@ -754,12 +754,21 @@ func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testin
 			"claim_id": claimID, "worktree_id": worktreeID,
 		}),
 		event(505, 403, 4, "matter.started", matterID, map[string]any{"from": "planned", "to": "in-progress", "cascade": true}),
-		event(506, 403, 4, "step.started", stepID, map[string]any{"from": "planned", "to": "in-progress"}),
+		event(506, 403, 4, "step.started", stepID, map[string]any{
+			"from": "planned", "to": "in-progress", "cause_event_id": fmt.Sprintf("%026d", 505),
+		}),
 		event(507, 404, 5, "matter.finished", matterID, map[string]any{"from": "in-progress", "to": "done"}),
 	}
 	_, projections, steps, err := foldEventRecords(records, domainID)
 	if err != nil || len(projections) != 1 || len(steps) != 1 {
 		t.Fatalf("fold incomplete Matter finish: matters=%d steps=%d err=%v", len(projections), len(steps), err)
+	}
+	wrongCause := append([]wipdwire.EventRecord(nil), records...)
+	wrongCause[6] = event(506, 403, 4, "step.started", stepID, map[string]any{
+		"from": "planned", "to": "in-progress", "cause_event_id": fmt.Sprintf("%026d", 499),
+	})
+	if _, _, _, err = foldEventRecords(wrongCause, domainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("Step start with a cause unrelated to the preceding cascade event folded: %v", err)
 	}
 	var matter eventProjection
 	var step stepProjection

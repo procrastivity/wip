@@ -333,6 +333,11 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 	m6Operations := map[string]bool{
 		"matter.create@v2": true, "stage.create@v1": true, "step.create@v2": true, "step.insert@v1": true,
 		"step.reorder@v1": true, "step.replace@v1": true, "step.remove@v1": true, "matter.locator-repair@v1": true,
+		"matter.start@v1": true, "stage.start@v1": true,
+		"matter.pause@v1": true, "stage.pause@v1": true, "step.pause@v1": true,
+		"matter.resume@v1": true, "stage.resume@v1": true, "step.resume@v1": true,
+		"matter.cancel@v1": true, "stage.cancel@v1": true, "step.cancel@v1": true,
+		"stage.finish@v1": true,
 	}
 	definitions := make(map[string]map[string]string, len(rows))
 	registered := make(map[string]map[string]string)

@@ -380,7 +380,7 @@ func TestConnectedStepStartRecoversAfterStoreReopen(t *testing.T) {
 	claimTestEvent(t, f, 6, 107, 12, hash, "matter.started", f.matter, 4,
 		map[string]any{"from": "planned", "to": "in-progress", "cascade": true})
 	claimTestEvent(t, f, 7, 108, 12, hash, "step.started", stepID, 4,
-		map[string]any{"from": "planned", "to": "in-progress"})
+		map[string]any{"from": "planned", "to": "in-progress", "cause_event_id": claimTestID(107)})
 }
 
 func TestConnectedStepFinishRecoversAfterStoreReopen(t *testing.T) {
