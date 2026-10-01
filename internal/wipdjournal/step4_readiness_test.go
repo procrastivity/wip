@@ -23,11 +23,13 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		t.Fatalf("install the exact signed grant and Matter prefix: %v", err)
 	}
 	const (
-		stage        = "01KZ7XHAQT1S46NYPN1PW1DX70"
-		stepRemoved  = "01KZ7XHAQT1S46NYPN1PW1DX71"
-		stepInserted = "01KZ7XHAQT1S46NYPN1PW1DX72"
-		stepLive     = "01KZ7XHAQT1S46NYPN1PW1DX73"
-		otherMatter  = "01KZ7XHAQT1S46NYPN1PW1DX74"
+		stage               = "01KZ7XHAQT1S46NYPN1PW1DX70"
+		stepRemoved         = "01KZ7XHAQT1S46NYPN1PW1DX71"
+		stepInserted        = "01KZ7XHAQT1S46NYPN1PW1DX72"
+		stepLive            = "01KZ7XHAQT1S46NYPN1PW1DX73"
+		otherMatter         = "01KZ7XHAQT1S46NYPN1PW1DX74"
+		otherMatterSameRepo = "01KZ7XHAQT1S46NYPN1PW1DX75"
+		otherStepSameRepo   = "01KZ7XHAQT1S46NYPN1PW1DX76"
 	)
 	matter := fixture.grant.matterID
 	start := installed.Anchor
@@ -56,6 +58,14 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		{
 			"matter.created", otherMatter, testCommandPrefix + "99",
 			map[string]any{"id": otherMatter, "locator": "other", "title": "Other repo"},
+		},
+		{
+			"matter.created", otherMatterSameRepo, fixture.identity.RepoID,
+			map[string]any{"id": otherMatterSameRepo, "locator": "other-in-repo", "title": "Other Matter"},
+		},
+		{
+			"step.created", otherStepSameRepo, fixture.identity.RepoID,
+			map[string]any{"parent": otherMatterSameRepo, "locator": "step-01", "title": "Other Step", "sort_key": uint64(1000)},
 		},
 	}
 	records := make([]wipdwire.EventRecord, 0, len(specs))
@@ -96,6 +106,7 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		{"Step insert under Stage", operation.StepInsertInput{ParentID: stage, Title: "Next"}, matter},
 		{"Step reorder under Stage", operation.StepReorderInput{ParentID: stage, Order: []string{stepLive}}, matter},
 		{"Step lifecycle resolves Stage ancestry", operation.StepLifecycleInput{StepID: stepLive}, matter},
+		{"Step cancel resolves Stage ancestry", operation.StepCancelInput{StepID: stepLive, Reason: "obsolete"}, matter},
 		{"Matter lifecycle target", operation.NodeLifecycleInput{NodeID: matter}, matter},
 		{"Stage lifecycle target resolves Matter ancestry", operation.NodeLifecycleInput{NodeID: stage}, matter},
 		{"Step replacement target", operation.StepReplaceInput{StepID: stepLive, Title: "Again"}, matter},
@@ -121,10 +132,12 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		})
 	}
 	for name, invalid := range map[string]operation.Request{
-		"wrong Repo":     {Context: operation.Context{Repo: testCommandPrefix + "99", Clone: testCommandPrefix + "95", Worktree: fixture.grant.WorktreeID()}, Claim: claim, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
-		"wrong Worktree": {Context: operation.Context{Repo: fixture.identity.RepoID, Clone: testCommandPrefix + "95", Worktree: testCommandPrefix + "96"}, Claim: claim, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
-		"wrong Claim":    {Context: operation.Context{Repo: fixture.identity.RepoID, Clone: testCommandPrefix + "95", Worktree: fixture.grant.WorktreeID()}, Claim: &operation.ClaimContext{ID: testCommandPrefix + "97", Epoch: "1"}, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
-		"removed Step":   request(operation.StepLifecycleInput{StepID: stepInserted}),
+		"wrong Repo":                   {Context: operation.Context{Repo: testCommandPrefix + "99", Clone: testCommandPrefix + "95", Worktree: fixture.grant.WorktreeID()}, Claim: claim, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
+		"wrong Worktree":               {Context: operation.Context{Repo: fixture.identity.RepoID, Clone: testCommandPrefix + "95", Worktree: testCommandPrefix + "96"}, Claim: claim, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
+		"wrong Claim":                  {Context: operation.Context{Repo: fixture.identity.RepoID, Clone: testCommandPrefix + "95", Worktree: fixture.grant.WorktreeID()}, Claim: &operation.ClaimContext{ID: testCommandPrefix + "97", Epoch: "1"}, Input: operation.StageCreateInput{MatterID: matter, Title: "No"}},
+		"removed Step":                 request(operation.StepLifecycleInput{StepID: stepInserted}),
+		"removed Step cancel":          request(operation.StepCancelInput{StepID: stepInserted, Reason: "obsolete"}),
+		"different Matter Step cancel": request(operation.StepCancelInput{StepID: otherStepSameRepo, Reason: "wrong claim scope"}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err = journal.ValidateCommandClaimReadiness(ctx, invalid); err == nil {

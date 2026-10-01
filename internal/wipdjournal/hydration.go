@@ -454,6 +454,8 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.StepLifecycleInput:
 		targetID, targetKinds[value.StepID] = value.StepID, true
+	case operation.StepCancelInput:
+		targetID, targetKinds[value.StepID] = value.StepID, true
 	case operation.StepCreateInput:
 		targetID, parentKinds[value.ParentID] = value.ParentID, true
 	case operation.StepInsertInput:

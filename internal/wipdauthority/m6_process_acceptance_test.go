@@ -207,6 +207,17 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	if paused.Output != (operation.StepLifecycleOutput{StepID: step.ID, MatterID: matter.ID, State: "paused"}) {
 		t.Fatalf("Step pause output = %#v", paused.Output)
 	}
+	resumed := submit(m5TwoEnvironmentID(49), operation.StepResumeV1.Metadata().Operation,
+		operation.StepLifecycleInput{StepID: step.ID})
+	if resumed.Output != (operation.StepLifecycleOutput{StepID: step.ID, MatterID: matter.ID, State: "in-progress"}) {
+		t.Fatalf("Step resume output = %#v", resumed.Output)
+	}
+	stepCancelReason := "superseded after resume"
+	stepCanceled := submit(m5TwoEnvironmentID(50), operation.StepCancelV1.Metadata().Operation,
+		operation.StepCancelInput{StepID: step.ID, Reason: stepCancelReason})
+	if stepCanceled.Output != (operation.StepLifecycleOutput{StepID: step.ID, MatterID: matter.ID, State: "canceled"}) {
+		t.Fatalf("Step cancel output = %#v", stepCanceled.Output)
+	}
 
 	if err = client.Close(); err != nil {
 		t.Fatalf("close M6 IPC client before independent journal inspection: %v", err)
@@ -237,6 +248,7 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	var cascade []map[string]any
 	var standaloneStart map[string]any
 	var matterCancel map[string]any
+	var stepCancel map[string]any
 	for _, record := range records {
 		fields, decodeErr := wipdwire.DecodeCanonicalMap(record.Record,
 			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
@@ -252,12 +264,22 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 		if fields["command_id"] == m5TwoEnvironmentID(48) {
 			matterCancel = fields
 		}
+		if fields["command_id"] == m5TwoEnvironmentID(50) {
+			stepCancel = fields
+		}
 	}
 	if standaloneStart == nil || standaloneStart["kind"] != "matter.started" || standaloneStart["subject_id"] != secondMatter.ID {
 		t.Fatalf("installed standalone Matter start event = %#v", standaloneStart)
 	}
 	if matterCancel == nil || matterCancel["kind"] != "matter.canceled" || matterCancel["subject_id"] != secondMatter.ID {
 		t.Fatalf("installed Matter cancel event = %#v", matterCancel)
+	}
+	if stepCancel == nil || stepCancel["kind"] != "step.canceled" || stepCancel["subject_id"] != step.ID {
+		t.Fatalf("installed Step cancel event = %#v", stepCancel)
+	}
+	stepCancelPayload, ok := stepCancel["payload"].(map[string]any)
+	if !ok || stepCancelPayload["reason"] != stepCancelReason || stepCancelPayload["from"] != "in-progress" || stepCancelPayload["to"] != "canceled" {
+		t.Fatalf("installed Step cancel event payload = %#v", stepCancel["payload"])
 	}
 	standalonePayload, ok := standaloneStart["payload"].(map[string]any)
 	if !ok || standalonePayload["cascade"] != nil || standalonePayload["cause_event_id"] != nil {
@@ -277,7 +299,8 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	}
 	for _, terminal := range []struct {
 		id string
-	}{{m5TwoEnvironmentID(47)}, {m5TwoEnvironmentID(48)}, {m5TwoEnvironmentID(39)}, {m5TwoEnvironmentID(40)}} {
+	}{{m5TwoEnvironmentID(47)}, {m5TwoEnvironmentID(48)}, {m5TwoEnvironmentID(39)}, {m5TwoEnvironmentID(40)},
+		{m5TwoEnvironmentID(49)}, {m5TwoEnvironmentID(50)}} {
 		receipt, found := installed.Receipts[terminal.id]
 		if !found || receipt.ResultCode != operation.ResultSucceeded || len(receipt.CanonicalReceipt) == 0 {
 			t.Fatalf("installed terminal receipt for %s = %+v (found=%v)", terminal.id, receipt, found)
@@ -306,6 +329,15 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 			if !resultOK || result["code"] != string(operation.ResultSucceeded) || !outputBytesOK || outputErr != nil ||
 				output["matter_id"] != secondMatter.ID || output["state"] != "canceled" {
 				t.Fatalf("installed Matter cancel receipt result = %#v", fields)
+			}
+		}
+		if terminal.id == m5TwoEnvironmentID(50) {
+			result, resultOK := fields["result"].(map[string]any)
+			outputBytes, outputBytesOK := result["output"].([]byte)
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "step_id", "matter_id", "state")
+			if !resultOK || result["code"] != string(operation.ResultSucceeded) || !outputBytesOK || outputErr != nil ||
+				output["step_id"] != step.ID || output["matter_id"] != matter.ID || output["state"] != "canceled" {
+				t.Fatalf("installed Step cancel receipt result = %#v", fields)
 			}
 		}
 		accepted, acceptedOK := fields["accepted_events"].(map[string]any)
