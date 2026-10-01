@@ -108,6 +108,10 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 	if !hasCommand(m6, operation.StepCancelV1.Metadata().Operation) {
 		t.Fatal("explicit M6 connected profile omitted step.cancel")
 	}
+	if !hasCommand(m6, operation.ContentWriteOnceV1.Metadata().Operation) ||
+		!hasCommand(m6, operation.FindingAppendV1.Metadata().Operation) {
+		t.Fatal("explicit M6 connected profile omitted content.write-once or finding.append")
+	}
 	if err = validateConfig(Config{Schema: "wipd.connected-authority-profile/2", CommandCatalogue: "m6-step4"}); err == nil {
 		t.Fatal("accepted an unrecognized connected command catalogue")
 	}

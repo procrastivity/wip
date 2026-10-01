@@ -147,6 +147,12 @@ func TestContentWritePromotesOnlySuccessfulTerminalFold(t *testing.T) {
 		snapshot.Manifest.Entries[0].ByteLength != uint64(len(acceptedBytes)) {
 		t.Fatalf("only accepted content is in the promoted manifest: %+v, %v", snapshot.Manifest, err)
 	}
+	readback, readbackDigest, err := f.s.BlobRange(ctx, domainA, 7, snapshot.ID, snapshot.Manifest.Digest,
+		acceptedDigest, uint64(len(acceptedBytes)), 0, uint64(len(acceptedBytes)), f.now)
+	if err != nil || !bytes.Equal(readback, acceptedBytes) || readbackDigest != acceptedDigest {
+		t.Fatalf("verified brief content readback = %q (%s), want %q (%s), err=%v",
+			readback, readbackDigest, acceptedBytes, acceptedDigest, err)
+	}
 	if err = f.s.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -99,6 +99,17 @@ func TestContentAndFindingDefinitionsRequireClaimAndStagedContent(t *testing.T) 
 	if err := ContentWriteOnceV1.ValidateRequest(valid); err != nil {
 		t.Fatalf("valid claim-scoped content request: %v", err)
 	}
+	for _, kind := range []string{"brief", "body", "workplan"} {
+		valid.Input = ContentWriteInput{SubjectID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", Kind: kind}
+		if err := ContentWriteOnceV1.ValidateRequest(valid); err != nil {
+			t.Errorf("content.write-once kind %q rejected: %v", kind, err)
+		}
+	}
+	valid.Input = ContentWriteInput{SubjectID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", Kind: "finding"}
+	if err := ContentWriteOnceV1.ValidateRequest(valid); err == nil {
+		t.Fatal("content.write-once accepted a kind outside brief/body/workplan")
+	}
+	valid.Input = ContentWriteInput{SubjectID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", Kind: "brief"}
 	valid.Blobs = []BlobInput{}
 	if err := ContentWriteOnceV1.ValidateRequest(valid); err == nil || !strings.Contains(err.Error(), "required blob input") {
 		t.Fatalf("missing content blob error = %v, want required blob rejection", err)
