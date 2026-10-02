@@ -3,6 +3,7 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -310,6 +311,7 @@ func downgradeStep14ToV12(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dropStep17BoundarySchemaForTest(t, db)
 	for index := len(step15Schema) - 1; index >= 0; index-- {
 		object := step15Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
@@ -371,6 +373,7 @@ func downgradeStep15ToV13(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dropStep17BoundarySchemaForTest(t, db)
 	for index := len(step15Schema) - 1; index >= 0; index-- {
 		object := step15Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
@@ -428,6 +431,26 @@ func downgradeStep15ToV13(t *testing.T, root string) {
 	}
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func dropStep17BoundarySchemaForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for index := len(step17Schema) - 1; index >= 1; index-- {
+		object := step17Schema[index]
+		if object.kind == "trigger" {
+			if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + object.name); err != nil {
+				t.Fatalf("drop v16 journal-state trigger %s: %v", object.name, err)
+			}
+		}
+	}
+	for index := len(step17Schema) - 1; index >= 1; index-- {
+		object := step17Schema[index]
+		if object.kind == "table" {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS ` + object.name); err != nil {
+				t.Fatalf("drop v16 boundary table %s: %v", object.name, err)
+			}
+		}
 	}
 }
 

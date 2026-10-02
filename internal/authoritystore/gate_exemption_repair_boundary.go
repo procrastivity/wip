@@ -1,6 +1,7 @@
 package authoritystore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -12,53 +13,55 @@ import (
 const gateRepairBoundaryWitnessSchema = "wipd.gate-exemption-repair-terminal-boundary/1"
 
 type gateRepairBoundaryWitness struct {
-	Schema              string `cbor:"schema"`
-	DomainID            string `cbor:"domain_id"`
-	CommandID           string `cbor:"command_id"`
-	RequestHash         string `cbor:"request_hash"`
-	Position            uint64 `cbor:"event_count"`
-	EventID             string `cbor:"high_water_event_id"`
-	PrefixDigest        string `cbor:"prefix_digest"`
-	ResultCode          string `cbor:"result_code"`
-	RefusalCode         string `cbor:"refusal_code"`
-	RefusalMessage      string `cbor:"refusal_message"`
-	TerminalEventID     string `cbor:"terminal_event_id"`
-	OccurredAt          string `cbor:"occurred_at"`
-	Fence               string `cbor:"fence"`
-	ActiveEpoch         uint64 `cbor:"active_epoch"`
-	ClaimID             string `cbor:"claim_id"`
-	ClaimAuthorityEpoch uint64 `cbor:"claim_authority_epoch"`
-	ClaimEpoch          uint64 `cbor:"claim_epoch"`
-	OwnerEnvironmentID  string `cbor:"owner_environment_id"`
-	RepoID              string `cbor:"repo_id"`
-	WorktreeID          string `cbor:"worktree_id"`
-	MatterID            string `cbor:"matter_id"`
-	CloseCommandID      string `cbor:"close_command_id"`
-	ClosePosition       uint64 `cbor:"close_position"`
-	JournalID           string `cbor:"journal_id"`
-	JournalGeneration   uint64 `cbor:"journal_generation"`
-	JournalState        string `cbor:"journal_state"`
-	MatterLive          bool   `cbor:"matter_live"`
-	MatterLifecycle     string `cbor:"matter_lifecycle"`
+	Schema               string `cbor:"schema"`
+	DomainID             string `cbor:"domain_id"`
+	CommandID            string `cbor:"command_id"`
+	RequestHash          string `cbor:"request_hash"`
+	Position             uint64 `cbor:"event_count"`
+	EventID              string `cbor:"high_water_event_id"`
+	PrefixDigest         string `cbor:"prefix_digest"`
+	ResultCode           string `cbor:"result_code"`
+	RefusalCode          string `cbor:"refusal_code"`
+	RefusalMessage       string `cbor:"refusal_message"`
+	TerminalEventID      string `cbor:"terminal_event_id"`
+	OccurredAt           string `cbor:"occurred_at"`
+	Fence                string `cbor:"fence"`
+	ActiveEpoch          uint64 `cbor:"active_epoch"`
+	ClaimID              string `cbor:"claim_id"`
+	ClaimAuthorityEpoch  uint64 `cbor:"claim_authority_epoch"`
+	ClaimEpoch           uint64 `cbor:"claim_epoch"`
+	OwnerEnvironmentID   string `cbor:"owner_environment_id"`
+	RepoID               string `cbor:"repo_id"`
+	WorktreeID           string `cbor:"worktree_id"`
+	MatterID             string `cbor:"matter_id"`
+	CloseCommandID       string `cbor:"close_command_id"`
+	ClosePosition        uint64 `cbor:"close_position"`
+	JournalID            string `cbor:"journal_id"`
+	JournalGeneration    uint64 `cbor:"journal_generation"`
+	JournalState         string `cbor:"journal_state"`
+	JournalStateSequence uint64 `cbor:"journal_state_sequence"`
+	MatterLive           bool   `cbor:"matter_live"`
+	MatterLifecycle      string `cbor:"matter_lifecycle"`
 }
 
 type gateRepairFenceSnapshot struct {
-	activeEpoch         uint64
-	claimID             string
-	claimAuthorityEpoch uint64
-	claimEpoch          uint64
-	ownerEnvironmentID  string
-	repoID              string
-	worktreeID          string
-	matterID            string
-	closeCommandID      string
-	closePosition       uint64
-	journalID           string
-	journalGeneration   uint64
-	journalState        string
-	matterLive          bool
-	matterLifecycle     string
-	fence               string
+	activeEpoch          uint64
+	claimID              string
+	claimAuthorityEpoch  uint64
+	claimEpoch           uint64
+	ownerEnvironmentID   string
+	repoID               string
+	worktreeID           string
+	matterID             string
+	closeCommandID       string
+	closePosition        uint64
+	journalID            string
+	journalGeneration    uint64
+	journalState         string
+	journalStateSequence uint64
+	matterLive           bool
+	matterLifecycle      string
+	fence                string
 }
 
 func (snapshot gateRepairFenceSnapshot) witness(terminal gateExemptionRepairTerminal) gateRepairBoundaryWitness {
@@ -72,7 +75,8 @@ func (snapshot gateRepairFenceSnapshot) witness(terminal gateExemptionRepairTerm
 		OwnerEnvironmentID: snapshot.ownerEnvironmentID, RepoID: snapshot.repoID, WorktreeID: snapshot.worktreeID,
 		MatterID: snapshot.matterID, CloseCommandID: snapshot.closeCommandID, ClosePosition: snapshot.closePosition,
 		JournalID: snapshot.journalID, JournalGeneration: snapshot.journalGeneration, JournalState: snapshot.journalState,
-		MatterLive: snapshot.matterLive, MatterLifecycle: snapshot.matterLifecycle,
+		JournalStateSequence: snapshot.journalStateSequence,
+		MatterLive:           snapshot.matterLive, MatterLifecycle: snapshot.matterLifecycle,
 	}
 }
 
@@ -108,7 +112,8 @@ func migratedGateRepairBoundaryWitness(ctx context.Context, queryer gateRepairQu
 		&journalID, &journalGeneration, &journalState)
 	if err != nil || activeEpoch < command.AuthorityEpoch || claimAuthorityEpoch != command.AuthorityEpoch || claimEpoch != command.ClaimEpoch ||
 		owner != command.EnvironmentID || repo != command.RepoID || worktree != command.WorktreeID || storedClose != closeCommand ||
-		journalGeneration == 0 || !ulid.MatchString(journalID) || (journalState != "sealed" && journalState != "quarantined") {
+		journalGeneration == 0 || !ulid.MatchString(journalID) ||
+		(journalState != "open" && journalState != "sealed" && journalState != "quarantined") {
 		return gateRepairBoundaryWitness{}, fmt.Errorf("%w: v14 claim-close witness does not match immutable claim history", ErrInvalidStore)
 	}
 	return gateRepairBoundaryWitness{
@@ -137,12 +142,20 @@ func decodeGateRepairBoundaryWitness(raw []byte) (gateRepairBoundaryWitness, err
 		return witness, ErrInvalidStore
 	}
 	var fields map[string]cbor.RawMessage
-	if canonicalDecode(raw, &fields) != nil || !exactKeys(fields,
+	if canonicalDecode(raw, &fields) != nil {
+		return gateRepairBoundaryWitness{}, ErrInvalidStore
+	}
+	oldKeys := exactKeys(fields,
 		"schema", "domain_id", "command_id", "request_hash", "event_count", "high_water_event_id", "prefix_digest",
 		"result_code", "refusal_code", "refusal_message", "terminal_event_id", "occurred_at", "fence", "active_epoch",
 		"claim_id", "claim_authority_epoch", "claim_epoch", "owner_environment_id", "repo_id", "worktree_id", "matter_id",
-		"close_command_id", "close_position", "journal_id", "journal_generation", "journal_state", "matter_live", "matter_lifecycle") ||
-		artifactDecoder.Unmarshal(raw, &witness) != nil {
+		"close_command_id", "close_position", "journal_id", "journal_generation", "journal_state", "matter_live", "matter_lifecycle")
+	newKeys := exactKeys(fields,
+		"schema", "domain_id", "command_id", "request_hash", "event_count", "high_water_event_id", "prefix_digest",
+		"result_code", "refusal_code", "refusal_message", "terminal_event_id", "occurred_at", "fence", "active_epoch",
+		"claim_id", "claim_authority_epoch", "claim_epoch", "owner_environment_id", "repo_id", "worktree_id", "matter_id",
+		"close_command_id", "close_position", "journal_id", "journal_generation", "journal_state", "journal_state_sequence", "matter_live", "matter_lifecycle")
+	if (!oldKeys && !newKeys) || artifactDecoder.Unmarshal(raw, &witness) != nil {
 		return gateRepairBoundaryWitness{}, ErrInvalidStore
 	}
 	return witness, nil
@@ -176,12 +189,22 @@ func captureGateRepairFence(ctx context.Context, tx *sql.Tx, command gateExempti
 	if snapshot.journalGeneration == 0 || !ulid.MatchString(snapshot.journalID) {
 		return snapshot, nil, ErrInvalidStore
 	}
+	var err error
+	snapshot.journalStateSequence, err = claimJournalStateWatermark(ctx, tx)
+	if err != nil {
+		return snapshot, nil, err
+	}
 	snapshot.claimID = command.ClaimID
 	closeCommand, closePosition, err := claimCloseAtBoundary(ctx, tx, command.DomainID, command.ClaimID, anchor.EventCount)
 	if err != nil || closeCommand != snapshot.closeCommandID {
 		return snapshot, nil, ErrInvalidStore
 	}
 	snapshot.closePosition = closePosition
+	boundaryState, err := claimJournalStateAtBoundary(ctx, tx, command.DomainID, command.ClaimID, snapshot.journalID,
+		snapshot.journalGeneration, anchor.EventCount, snapshot.journalStateSequence)
+	if err != nil || boundaryState != snapshot.journalState {
+		return snapshot, nil, fmt.Errorf("%w: current claim journal state lacks its retained boundary", ErrInvalidStore)
+	}
 	switch {
 	case snapshot.activeEpoch != command.AuthorityEpoch:
 		snapshot.fence = "authority-epoch"
@@ -230,8 +253,18 @@ func validateGateRepairBoundaryWitness(ctx context.Context, queryer gateRepairQu
 		witness.RequestHash != terminal.RequestHash || witness.Position != terminal.ObservedPosition || witness.EventID != terminal.ObservedEventID ||
 		witness.PrefixDigest != terminal.ObservedPrefixDigest || witness.ResultCode != terminal.ResultCode ||
 		witness.RefusalCode != terminal.RefusalCode || witness.RefusalMessage != terminal.RefusalMessage ||
-		witness.TerminalEventID != terminal.EventID || witness.OccurredAt != terminal.OccurredAt {
+		witness.TerminalEventID != terminal.EventID || witness.OccurredAt != terminal.OccurredAt ||
+		witness.JournalStateSequence != terminal.JournalStateSequence {
 		return fmt.Errorf("%w: private repair terminal does not match its boundary witness", ErrInvalidStore)
+	}
+	var version int
+	if err = queryer.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 16 {
+		if err = validateGateRepairTerminalBoundaryRecord(ctx, queryer, terminal, raw); err != nil {
+			return err
+		}
 	}
 	if terminal.ResultCode == "result.refused" && terminal.RefusalCode == "refusal.claim-fenced" {
 		if terminal.RefusalMessage != gateRepairClaimFencedMessage || witness.Fence == "clear" || witness.Fence == "legacy" {
@@ -269,6 +302,13 @@ func validateGateRepairBoundaryWitness(ctx context.Context, queryer gateRepairQu
 		command.DomainID, command.ClaimID, witness.JournalID).Scan(&journalGeneration, &journalState); err != nil || journalGeneration != witness.JournalGeneration ||
 		!journalStateCanFollow(witness.JournalState, journalState) {
 		return fmt.Errorf("%w: private repair journal witness mismatch", ErrInvalidStore)
+	}
+	if terminal.JournalStateSequence != 0 || witness.Fence == "journal-state" {
+		boundaryState, stateErr := claimJournalStateAtBoundary(ctx, queryer, command.DomainID, command.ClaimID,
+			witness.JournalID, witness.JournalGeneration, witness.Position, terminal.JournalStateSequence)
+		if stateErr != nil || boundaryState != witness.JournalState {
+			return fmt.Errorf("%w: private repair journal-state witness is not true at its boundary", ErrInvalidStore)
+		}
 	}
 	closeCommand, closePosition, err := claimCloseAtBoundary(ctx, queryer, command.DomainID, command.ClaimID, witness.Position)
 	if err != nil {
@@ -327,6 +367,27 @@ func validateGateRepairBoundaryWitness(ctx context.Context, queryer gateRepairQu
 		}
 	default:
 		return fmt.Errorf("%w: unknown private repair terminal fence %q", ErrInvalidStore, witness.Fence)
+	}
+	return nil
+}
+
+func validateGateRepairTerminalBoundaryRecord(ctx context.Context, queryer gateRepairQueryer,
+	terminal gateExemptionRepairTerminal, raw []byte,
+) error {
+	var position, sequence uint64
+	var eventID, digest string
+	var witness []byte
+	if err := queryer.QueryRowContext(ctx, `SELECT event_count,high_water_event_id,prefix_digest,journal_state_sequence,boundary_witness
+		FROM gate_exemption_repair_terminal_boundaries WHERE domain_id=? AND command_id=?`, terminal.DomainID, terminal.CommandID).
+		Scan(&position, &eventID, &digest, &sequence, &witness); err != nil || position != terminal.ObservedPosition ||
+		eventID != terminal.ObservedEventID || digest != terminal.ObservedPrefixDigest || sequence != terminal.JournalStateSequence ||
+		!bytes.Equal(witness, raw) {
+		return fmt.Errorf("%w: private repair terminal boundary differs from its immutable capture", ErrInvalidStore)
+	}
+	var storedEventID, storedDigest string
+	if err := queryer.QueryRowContext(ctx, `SELECT event_id,prefix_digest FROM authority_events WHERE domain_id=? AND position=?`,
+		terminal.DomainID, position).Scan(&storedEventID, &storedDigest); err != nil || storedEventID != eventID || storedDigest != digest {
+		return fmt.Errorf("%w: private repair terminal boundary is not in authority history", ErrInvalidStore)
 	}
 	return nil
 }

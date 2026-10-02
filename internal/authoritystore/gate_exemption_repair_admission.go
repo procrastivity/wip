@@ -235,6 +235,9 @@ func (s *Store) admitGateExemptionRepair(ctx context.Context, command gateExempt
 	if err = checkStep4State(s.db); err != nil {
 		return out, fmt.Errorf("%w: authority history invalid: %v", ErrInvalidStore, err)
 	}
+	if err = checkStep16State(s.db); err != nil {
+		return out, fmt.Errorf("%w: claim journal boundary history invalid: %v", ErrInvalidStore, err)
+	}
 	if err = checkStep13State(s.db); err != nil {
 		return out, fmt.Errorf("%w: signed gate history invalid: %v", ErrInvalidStore, err)
 	}
@@ -352,6 +355,9 @@ func (s *Store) recoverGateExemptionRepair(ctx context.Context, canonical []byte
 	}
 	if err = checkStep4State(s.db); err != nil {
 		return out, fmt.Errorf("%w: authority history invalid: %v", ErrInvalidStore, err)
+	}
+	if err = checkStep16State(s.db); err != nil {
+		return out, fmt.Errorf("%w: claim journal boundary history invalid: %v", ErrInvalidStore, err)
 	}
 	if err = checkStep13State(s.db); err != nil {
 		return out, fmt.Errorf("%w: signed gate history invalid: %v", ErrInvalidStore, err)

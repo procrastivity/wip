@@ -16,6 +16,7 @@ type gateExemptionRepairTerminal struct {
 	ObservedPosition                                           uint64
 	ObservedEventID, ObservedPrefixDigest, EventID, OccurredAt string
 	BoundaryWitness                                            []byte
+	JournalStateSequence                                       uint64
 }
 
 type gateRepairSnapshot struct {
@@ -70,7 +71,15 @@ func readGateExemptionRepairTerminal(ctx context.Context, queryer gateRepairQuer
 		observed_position,observed_event_id,observed_prefix_digest,event_id,occurred_at,boundary_witness
 		FROM gate_exemption_repair_terminals WHERE domain_id=? AND command_id=?`
 	}
-	if schemaVersion >= 15 {
+	if schemaVersion >= 16 {
+		query = `SELECT domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,
+		observed_position,observed_event_id,observed_prefix_digest,event_id,occurred_at,boundary_witness,journal_state_sequence
+		FROM gate_exemption_repair_terminals WHERE domain_id=? AND command_id=?`
+		err = queryer.QueryRowContext(ctx, query, domain, command).Scan(
+			&terminal.DomainID, &terminal.CommandID, &terminal.RequestHash, &terminal.ResultCode, &refusalCode, &refusalMessage,
+			&observed, &terminal.ObservedEventID, &terminal.ObservedPrefixDigest, &eventID, &terminal.OccurredAt,
+			&terminal.BoundaryWitness, &terminal.JournalStateSequence)
+	} else if schemaVersion >= 15 {
 		err = queryer.QueryRowContext(ctx, query, domain, command).Scan(
 			&terminal.DomainID, &terminal.CommandID, &terminal.RequestHash, &terminal.ResultCode, &refusalCode, &refusalMessage,
 			&observed, &terminal.ObservedEventID, &terminal.ObservedPrefixDigest, &eventID, &terminal.OccurredAt, &terminal.BoundaryWitness)
@@ -106,6 +115,9 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	}
 	if err = checkStep4State(s.db); err != nil {
 		return empty, fmt.Errorf("%w: authority history invalid: %v", ErrInvalidStore, err)
+	}
+	if err = checkStep16State(s.db); err != nil {
+		return empty, fmt.Errorf("%w: claim journal boundary history invalid: %v", ErrInvalidStore, err)
 	}
 	if err = checkStep13State(s.db); err != nil {
 		return empty, fmt.Errorf("%w: signed gate history invalid: %v", ErrInvalidStore, err)
@@ -180,17 +192,22 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 		DomainID: stored.DomainID, CommandID: stored.CommandID, RequestHash: stored.RequestHash,
 		ResultCode: resultCode, RefusalCode: refusalCode, RefusalMessage: refusalMessage,
 		ObservedPosition: anchor.EventCount, ObservedEventID: anchor.EventID, ObservedPrefixDigest: anchor.Digest,
-		EventID: terminalEventID, OccurredAt: occurredAt,
+		EventID: terminalEventID, OccurredAt: occurredAt, JournalStateSequence: fenceSnapshot.journalStateSequence,
 	}
 	witness, err := encodeGateRepairBoundaryWitness(fenceSnapshot.witness(terminal))
 	if err != nil {
 		return empty, err
 	}
+	terminal.BoundaryWitness = witness
 	if _, err = tx.ExecContext(ctx, `INSERT INTO gate_exemption_repair_terminals(
 		domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,observed_position,observed_event_id,
-		observed_prefix_digest,event_id,occurred_at,boundary_witness) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		observed_prefix_digest,event_id,occurred_at,boundary_witness,journal_state_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		stored.DomainID, stored.CommandID, stored.RequestHash, resultCode, nullableString(refusalCode), nullableString(refusalMessage),
-		anchor.EventCount, anchor.EventID, anchor.Digest, nullableString(terminalEventID), occurredAt, witness); err != nil {
+		anchor.EventCount, anchor.EventID, anchor.Digest, nullableString(terminalEventID), occurredAt, witness,
+		fenceSnapshot.journalStateSequence); err != nil {
+		return empty, writeError(err)
+	}
+	if err = insertGateRepairTerminalBoundary(ctx, tx, terminal); err != nil {
 		return empty, writeError(err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(

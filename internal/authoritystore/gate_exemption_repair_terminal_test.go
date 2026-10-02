@@ -3,6 +3,8 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ func sameGateExemptionRepairTerminal(left, right gateExemptionRepairTerminal) bo
 		left.ResultCode == right.ResultCode && left.RefusalCode == right.RefusalCode && left.RefusalMessage == right.RefusalMessage &&
 		left.ObservedPosition == right.ObservedPosition && left.ObservedEventID == right.ObservedEventID &&
 		left.ObservedPrefixDigest == right.ObservedPrefixDigest && left.EventID == right.EventID && left.OccurredAt == right.OccurredAt &&
+		left.JournalStateSequence == right.JournalStateSequence &&
 		bytes.Equal(left.BoundaryWitness, right.BoundaryWitness)
 }
 
@@ -255,6 +258,52 @@ func releaseRepairFixtureClaim(t *testing.T, fixture repairTerminalFixture, sequ
 	}
 }
 
+func standDownRepairFixtureClaim(t *testing.T, fixture repairTerminalFixture) {
+	t.Helper()
+	f := fixture.f
+	ctx := context.Background()
+	domain, owner := identity(domainA, 7)
+	ca := key("step4-ca")
+	caDER := caFixture(t, ca, f.now)
+	leafKey := key("repair-stand-down-environment")
+	leaf := leafFixture(t, leafKey, ca, caDER, domainA, envB, domain.OwnerKeyID, 7, f.now, 102)
+	grant := grantFixture(t, owner, domain, "environment-enroll", claimTestID(95), envB, leafKey, 2)
+	if _, err := f.s.IssueEnvironmentCertificate(ctx, domainA, envB, grant,
+		csrFixture(t, leafKey, "Repair stand-down environment"), [][]byte{leaf, caDER}, f.now); err != nil {
+		t.Fatalf("enroll cross-environment stand-down actor: %v", err)
+	}
+	peer := tls.ConnectionState{HandshakeComplete: true, PeerCertificates: []*x509.Certificate{mustCert(t, leaf), mustCert(t, caDER)}}
+	reason := "Owner accepts loss for terminal-boundary recovery test"
+	canonical, hash := f.command(t, 60, 1, "claim.stand-down", nil,
+		map[string]any{"target": map[string]any{
+			"claim_id": fixture.claim.ClaimID, "claim_epoch": uint64(1), "owner_environment_id": envA,
+		}, "reason": reason, "acknowledge_unreturned_work_loss": true}, envB)
+	subject := encodeTest(t, map[string]any{
+		"schema": "wipd.claim-stand-down-subject/1", "command_id": claimTestID(60), "request_hash": hash,
+		"claim_id": fixture.claim.ClaimID, "claim_epoch": uint64(1), "owner_environment_id": envA,
+		"acting_environment_id": envB, "reason_digest": digestBytes([]byte(reason)),
+	})
+	proof := signedTest(t, owner, "owner-attestation", "wipd.owner-attestation/1", domainA, domain.OwnerKeyID, 7, map[string]any{
+		"schema": "wipd.owner-attestation/1", "action": "claim-stand-down", "domain_id": domainA,
+		"current_epoch": uint64(7), "next_epoch": nil, "subject_schema": "wipd.claim-stand-down-subject/1",
+		"subject_digest": digestBytes(subject), "subject": subject, "nonce": bytes.Repeat([]byte{0x5a}, 16),
+		"issued_at": f.now.Add(-time.Minute).Format(time.RFC3339Nano), "expires_at": f.now.Add(time.Minute).Format(time.RFC3339Nano),
+		"loss_accepted": true,
+	})
+	status, err := f.s.SubmitClaimLifecycle(ctx, canonical, hash, peer, f.now, proof)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("admit signed stand-down for repair claim: %+v err=%v", status, err)
+	}
+	if _, err = f.s.CompleteClaimLifecycle(ctx, status.Owner, "",
+		[]string{claimTestID(150), claimTestID(151)}, f.now, signWith(f.key)); err != nil {
+		t.Fatalf("complete signed stand-down for repair claim: %v", err)
+	}
+	var state string
+	if err = f.s.db.QueryRow(`SELECT state FROM claim_journals WHERE domain_id=? AND claim_id=?`, domainA, fixture.claim.ClaimID).Scan(&state); err != nil || state != "open" {
+		t.Fatalf("stand-down changed journal state to %q: %v", state, err)
+	}
+}
+
 func TestGateExemptionRepairTerminalSuccessIsAtomicDetachedAndRecoverable(t *testing.T) {
 	fixture := prepareRepairTerminalFixture(t, "success-missing-snapshot", 0x51)
 	ctx := context.Background()
@@ -388,6 +437,24 @@ func downgradeStep16ForMigrationTest(t *testing.T, db *sql.DB) {
 	if _, err = tx.Exec(`DROP TRIGGER gate_exemption_repair_terminals_immutable`); err != nil {
 		t.Fatal(err)
 	}
+	for _, object := range step17Schema[1:] {
+		if object.kind == "trigger" {
+			if _, err = tx.Exec(`DROP TRIGGER ` + object.name); err != nil {
+				t.Fatalf("drop journal boundary trigger %s: %v", object.name, err)
+			}
+		}
+	}
+	for index := len(step17Schema) - 1; index >= 1; index-- {
+		object := step17Schema[index]
+		if object.kind == "table" {
+			if _, err = tx.Exec(`DROP TABLE ` + object.name); err != nil {
+				t.Fatalf("drop boundary table %s: %v", object.name, err)
+			}
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE gate_exemption_repair_terminals DROP COLUMN journal_state_sequence`); err != nil {
+		t.Fatalf("remove terminal journal-state watermark: %v", err)
+	}
 	if _, err = tx.Exec(`ALTER TABLE gate_exemption_repair_terminals DROP COLUMN boundary_witness`); err != nil {
 		t.Fatalf("remove Step 16 terminal witness column: %v", err)
 	}
@@ -409,6 +476,70 @@ func downgradeStep16ForMigrationTest(t *testing.T, db *sql.DB) {
 	}
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func downgradeStep17ForMigrationTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`DROP TRIGGER gate_exemption_repair_terminals_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	for index := len(step17Schema) - 1; index >= 1; index-- {
+		object := step17Schema[index]
+		if object.kind == "trigger" {
+			if _, err = tx.Exec(`DROP TRIGGER ` + object.name); err != nil {
+				t.Fatalf("drop journal boundary trigger %s: %v", object.name, err)
+			}
+		}
+	}
+	for index := len(step17Schema) - 1; index >= 1; index-- {
+		object := step17Schema[index]
+		if object.kind == "table" {
+			if _, err = tx.Exec(`DROP TABLE ` + object.name); err != nil {
+				t.Fatalf("drop boundary table %s: %v", object.name, err)
+			}
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE gate_exemption_repair_terminals DROP COLUMN journal_state_sequence`); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range step15Schema {
+		if object.name == "gate_exemption_repair_terminals_immutable" {
+			if _, err = tx.Exec(object.sql); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err = tx.Exec(`DROP TABLE schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(step16MigrationMarker.sql); err != nil {
+		t.Fatal(err)
+	}
+	for version, name := range []string{
+		"baseline", "environment-and-artifacts", "submissions-and-receipts", "prefix-snapshot-blob-transfer",
+		"claims-grants-journals-close", "m5-lab-genesis-grant-consumption", "step-8-provisional-birth-projection",
+		"step-9-birth-journal-receipt-barrier", "step-10-content-and-findings", "step-16-claim-journal-sequence-order",
+		"step-4-stage-step-operations", "step-7-authority-gate-config-projections", "step-7-detached-gate-repair-admissions",
+		"step-7-private-gate-repair-terminals", "step-7-terminal-boundary-witnesses",
+	} {
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,name) VALUES(?,?)`, version+1, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec(`PRAGMA user_version=15`); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err = checkSchemaVersion(db, 15); err != nil {
+		t.Fatalf("reconstructed v15 fixture validation: %v", err)
 	}
 }
 
@@ -507,6 +638,146 @@ func TestUpgradeV14RejectsClaimFenceThatOnlyExistsAfterTerminalPrefix(t *testing
 	}
 	if err = UpgradeV14(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("v14 upgrade accepted claim fence lacking evidence at the terminal prefix: %v", err)
+	}
+	persisted, err := connect(filepath.Join(fixture.f.root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatalf("reopen rolled-back v14 database: %v", err)
+	}
+	defer func() { _ = persisted.Close() }()
+	var version, markers int
+	if err = persisted.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("ambiguous v14 upgrade did not roll back user_version: %d err=%v", version, err)
+	}
+	if err = persisted.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&markers); err != nil || markers != 14 {
+		t.Fatalf("ambiguous v14 upgrade changed migration markers: %d err=%v", markers, err)
+	}
+	var witnessColumns int
+	if err = persisted.QueryRow(`SELECT count(*) FROM pragma_table_info('gate_exemption_repair_terminals') WHERE name='boundary_witness'`).Scan(&witnessColumns); err != nil || witnessColumns != 0 {
+		t.Fatalf("ambiguous v14 upgrade left a partial witness column: %d err=%v", witnessColumns, err)
+	}
+}
+
+func TestGateExemptionRepairRejectsRewrittenJournalStateWitness(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "lifecycle-open-at-boundary", 0x98)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.RefusalCode != "refusal.gate-repair-lifecycle" || terminal.ObservedPosition != 7 ||
+		terminal.ObservedEventID != claimTestID(106) || terminal.OccurredAt != "2026-09-23T12:00:00Z" {
+		t.Fatalf("persist prefix-7 lifecycle refusal: %+v err=%v", terminal, err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.f.s, err = OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen prefix-7 lifecycle refusal: %v", err)
+	}
+	releaseRepairFixtureClaim(t, fixture, 7, 30, 140, 141, fixture.f.now.Add(time.Minute))
+	if anchor := fixture.f.anchor(t); anchor.EventCount != 9 {
+		t.Fatalf("later claim release did not reach prefix 9: %+v", anchor)
+	}
+	stored, err := readGateExemptionRepairTerminal(ctx, fixture.f.s.db, domainA, fixture.command.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness, err := decodeGateRepairBoundaryWitness(stored.BoundaryWitness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness.Fence = "journal-state"
+	witness.JournalState = "sealed"
+	witness.JournalStateSequence = 1
+	witness.RefusalCode = "refusal.claim-fenced"
+	witness.RefusalMessage = gateRepairClaimFencedMessage
+	forgedWitness, err := encodeGateRepairBoundaryWitness(witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteGateRepairTerminalForRecoveryTest(t, fixture.f.s.db,
+		`UPDATE gate_exemption_repair_terminals SET refusal_code=?,refusal_message=?,boundary_witness=?,journal_state_sequence=? WHERE domain_id=? AND command_id=?`,
+		"refusal.claim-fenced", gateRepairClaimFencedMessage, forgedWitness, uint64(1), domainA, fixture.command.ID)
+	if _, err = fixture.f.s.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, fixture.proof); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("recovery accepted terminal and witness rewritten to false journal seal: %v", err)
+	} else {
+		t.Logf("false journal-state witness rejected: %v", err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("OpenExisting accepted terminal and witness rewritten to false journal seal: %v", err)
+	}
+}
+
+func TestUpgradeV14AcceptsSignedStandDownWithOpenClaimJournal(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "success-missing-snapshot", 0x99)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	standDownRepairFixtureClaim(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now.Add(time.Minute))
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.claim-fenced" || terminal.ObservedPosition != 11 {
+		t.Fatalf("persist refusal after signed stand-down at prefix 11: %+v err=%v", terminal, err)
+	}
+	var state string
+	if err = fixture.f.s.db.QueryRow(`SELECT state FROM claim_journals WHERE domain_id=? AND claim_id=?`, domainA, fixture.claim.ClaimID).Scan(&state); err != nil || state != "open" {
+		t.Fatalf("pre-migration stand-down journal state=%q err=%v", state, err)
+	}
+	downgradeStep16ForMigrationTest(t, fixture.f.s.db)
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV14(fixture.f.root); err != nil {
+		t.Fatalf("migrate signed claim close with open journal: %v", err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen migrated signed stand-down terminal: %v", err)
+	}
+	fixture.f.s = reopened
+	defer func() { _ = reopened.Close() }()
+	var postMigration string
+	if err = reopened.db.QueryRow(`SELECT state FROM claim_journals WHERE domain_id=? AND claim_id=?`, domainA, fixture.claim.ClaimID).Scan(&postMigration); err != nil || postMigration != "open" {
+		t.Fatalf("migration changed open stand-down journal to %q: %v", postMigration, err)
+	}
+	if err = rebuildStep13Projection(reopened.db); err != nil {
+		t.Fatalf("rebuild Step 13 projection after migration: %v", err)
+	}
+	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) {
+		t.Fatalf("recover signed stand-down terminal with open journal: %+v err=%v", recovered, err)
+	}
+}
+
+func TestUpgradeV15RetainsTerminalAndInstallsJournalStateBoundaries(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "lifecycle-open-at-boundary", 0x9a)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.gate-repair-lifecycle" {
+		t.Fatalf("persist v15-compatible private terminal: %+v err=%v", terminal, err)
+	}
+	downgradeStep17ForMigrationTest(t, fixture.f.s.db)
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV15(fixture.f.root); err != nil {
+		t.Fatalf("upgrade v15 journal-state history: %v", err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen v16 private terminal: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if err = checkStep16State(reopened.db); err != nil {
+		t.Fatalf("validate migrated journal-state boundaries: %v", err)
+	}
+	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) {
+		t.Fatalf("recover v15 terminal after migration: %+v err=%v", recovered, err)
 	}
 }
 

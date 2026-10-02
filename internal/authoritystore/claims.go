@@ -735,9 +735,10 @@ func (s *Store) SealClaimJournal(ctx context.Context, domain, journal string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var state string
+	var state, claim string
 	var closed sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT j.state,c.close_command_id FROM claim_journals j JOIN claims c USING(domain_id,claim_id) JOIN domains d ON d.domain_id=c.domain_id WHERE j.domain_id=? AND j.journal_id=? AND c.authority_epoch=d.active_epoch`, domain, journal).Scan(&state, &closed)
+	var generation uint64
+	err = tx.QueryRowContext(ctx, `SELECT j.state,c.close_command_id,j.claim_id,j.generation FROM claim_journals j JOIN claims c USING(domain_id,claim_id) JOIN domains d ON d.domain_id=c.domain_id WHERE j.domain_id=? AND j.journal_id=? AND c.authority_epoch=d.active_epoch`, domain, journal).Scan(&state, &closed, &claim, &generation)
 	if err != nil {
 		return err
 	}
@@ -748,6 +749,9 @@ func (s *Store) SealClaimJournal(ctx context.Context, domain, journal string) er
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE claim_journals SET state='sealed' WHERE domain_id=? AND journal_id=?`, domain, journal); err != nil {
+		return err
+	}
+	if err = recordClaimJournalStateBoundary(ctx, tx, domain, claim, journal, generation, "sealed"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1431,6 +1435,9 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 	return s.finishCommandTx(ctx, tx, c.commandIdentity, head, "result.succeeded", encoded, nil, rangeValue, first, last, occurred, sign, func(_ []byte, _ []byte, _, _ uint64) error {
 		if c.repair != nil {
 			if _, e = tx.ExecContext(ctx, `UPDATE claim_journals SET state='quarantined',repair_command_id=? WHERE domain_id=? AND journal_id=?`, c.id, c.domain, x.journal); e != nil {
+				return e
+			}
+			if e = recordClaimJournalStateBoundary(ctx, tx, c.domain, id, x.journal, x.generation, "quarantined"); e != nil {
 				return e
 			}
 			if _, e = tx.ExecContext(ctx, `INSERT INTO claim_journals VALUES(?,?,?,?,'open',NULL)`, c.domain, newJournal, id, x.generation+1); e != nil {

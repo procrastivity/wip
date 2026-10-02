@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 15
+const schemaVersion = 16
 
 type schemaObject struct {
 	name string
@@ -152,6 +152,9 @@ func CreateEmpty(root string) (*Store, error) {
 																err = installStep15(db)
 																if err == nil {
 																	err = installStep16(db)
+																	if err == nil {
+																		err = installStep17(db)
+																	}
 																}
 															}
 														}
@@ -644,6 +647,15 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 			return fmt.Errorf("M6 Step 7 terminal boundary witness migration marker: %v", err)
 		}
 	}
+	if expectedVersion >= 16 {
+		expected["schema_migrations"] = step17MigrationMarker
+		for _, object := range step17Schema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 16`).Scan(&name); err != nil || name != "step-7-terminal-and-journal-state-boundaries" {
+			return fmt.Errorf("M6 Step 7 terminal/journal boundary migration marker: %v", err)
+		}
+	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		return err
@@ -809,6 +821,11 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 									}
 									if expectedVersion >= 14 {
 										if err := checkStep15State(db); err != nil {
+											return err
+										}
+									}
+									if expectedVersion >= 16 {
+										if err := checkStep16State(db); err != nil {
 											return err
 										}
 									}

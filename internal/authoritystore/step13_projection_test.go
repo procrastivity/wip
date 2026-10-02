@@ -21,6 +21,7 @@ func downgradeStep13ToV11(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dropStep17BoundarySchemaForTest(t, db)
 	for index := len(step15Schema) - 1; index >= 0; index-- {
 		object := step15Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {

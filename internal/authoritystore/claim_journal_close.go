@@ -166,6 +166,10 @@ func (s *Store) SealOwnedClaimJournal(ctx context.Context, identity CurrentClaim
 		if _, err = tx.ExecContext(ctx, `UPDATE claim_journals SET state='sealed' WHERE domain_id=? AND journal_id=? AND state='open'`, identity.DomainID, identity.JournalID); err != nil {
 			return "", 0, err
 		}
+		if err = recordClaimJournalStateBoundary(ctx, tx, identity.DomainID, identity.ClaimID,
+			identity.JournalID, identity.Generation, "sealed"); err != nil {
+			return "", 0, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return "", 0, err
