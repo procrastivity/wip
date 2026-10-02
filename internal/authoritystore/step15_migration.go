@@ -158,6 +158,9 @@ func upgradeV13(root string) error {
 	if err = installStep15(db); err != nil {
 		return err
 	}
+	if err = installStep16(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}

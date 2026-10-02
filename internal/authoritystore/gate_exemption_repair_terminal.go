@@ -15,6 +15,7 @@ type gateExemptionRepairTerminal struct {
 	ResultCode, RefusalCode, RefusalMessage                    string
 	ObservedPosition                                           uint64
 	ObservedEventID, ObservedPrefixDigest, EventID, OccurredAt string
+	BoundaryWitness                                            []byte
 }
 
 type gateRepairSnapshot struct {
@@ -30,7 +31,7 @@ type gateRepairRefusal struct {
 
 const gateRepairClaimFencedMessage = "the Matter claim, journal generation, or authority epoch is no longer active"
 
-func gateRepairClaimFence(ctx context.Context, tx *sql.Tx, command gateExemptionRepairCommand) (*gateRepairRefusal, error) {
+func gateRepairClaimFenceLegacy(ctx context.Context, tx *sql.Tx, command gateExemptionRepairCommand) (*gateRepairRefusal, error) {
 	domain, err := domainOwner(ctx, tx, command.DomainID)
 	if err != nil {
 		return nil, err
@@ -57,11 +58,27 @@ func readGateExemptionRepairTerminal(ctx context.Context, queryer gateRepairQuer
 	}
 	var observed int64
 	var refusalCode, refusalMessage, eventID sql.NullString
-	err = queryer.QueryRowContext(ctx, `SELECT domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,
+	var schemaVersion int
+	if err = queryer.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&schemaVersion); err != nil {
+		return terminal, err
+	}
+	query := `SELECT domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,
 		observed_position,observed_event_id,observed_prefix_digest,event_id,occurred_at
-		FROM gate_exemption_repair_terminals WHERE domain_id=? AND command_id=?`, domain, command).Scan(
-		&terminal.DomainID, &terminal.CommandID, &terminal.RequestHash, &terminal.ResultCode, &refusalCode, &refusalMessage,
-		&observed, &terminal.ObservedEventID, &terminal.ObservedPrefixDigest, &eventID, &terminal.OccurredAt)
+		FROM gate_exemption_repair_terminals WHERE domain_id=? AND command_id=?`
+	if schemaVersion >= 15 {
+		query = `SELECT domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,
+		observed_position,observed_event_id,observed_prefix_digest,event_id,occurred_at,boundary_witness
+		FROM gate_exemption_repair_terminals WHERE domain_id=? AND command_id=?`
+	}
+	if schemaVersion >= 15 {
+		err = queryer.QueryRowContext(ctx, query, domain, command).Scan(
+			&terminal.DomainID, &terminal.CommandID, &terminal.RequestHash, &terminal.ResultCode, &refusalCode, &refusalMessage,
+			&observed, &terminal.ObservedEventID, &terminal.ObservedPrefixDigest, &eventID, &terminal.OccurredAt, &terminal.BoundaryWitness)
+	} else {
+		err = queryer.QueryRowContext(ctx, query, domain, command).Scan(
+			&terminal.DomainID, &terminal.CommandID, &terminal.RequestHash, &terminal.ResultCode, &refusalCode, &refusalMessage,
+			&observed, &terminal.ObservedEventID, &terminal.ObservedPrefixDigest, &eventID, &terminal.OccurredAt)
+	}
 	if err != nil {
 		return terminal, err
 	}
@@ -86,6 +103,9 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return empty, errors.New("authoritystore: closed")
+	}
+	if err = checkStep4State(s.db); err != nil {
+		return empty, fmt.Errorf("%w: authority history invalid: %v", ErrInvalidStore, err)
 	}
 	if err = checkStep13State(s.db); err != nil {
 		return empty, fmt.Errorf("%w: signed gate history invalid: %v", ErrInvalidStore, err)
@@ -114,11 +134,11 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	if err = validatePendingGateExemptionRepairAdmission(ctx, tx, stored); err != nil {
 		return empty, err
 	}
-	refusal, err := gateRepairClaimFence(ctx, tx, command)
+	anchor, err := currentAnchor(ctx, tx, stored.DomainID)
 	if err != nil {
 		return empty, err
 	}
-	anchor, err := currentAnchor(ctx, tx, stored.DomainID)
+	fenceSnapshot, refusal, err := captureGateRepairFence(ctx, tx, command, anchor)
 	if err != nil {
 		return empty, err
 	}
@@ -156,11 +176,21 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 		terminalEventID = string(eventID)
 	}
 	occurredAt := occurred.UTC().Format(time.RFC3339Nano)
+	terminal := gateExemptionRepairTerminal{
+		DomainID: stored.DomainID, CommandID: stored.CommandID, RequestHash: stored.RequestHash,
+		ResultCode: resultCode, RefusalCode: refusalCode, RefusalMessage: refusalMessage,
+		ObservedPosition: anchor.EventCount, ObservedEventID: anchor.EventID, ObservedPrefixDigest: anchor.Digest,
+		EventID: terminalEventID, OccurredAt: occurredAt,
+	}
+	witness, err := encodeGateRepairBoundaryWitness(fenceSnapshot.witness(terminal))
+	if err != nil {
+		return empty, err
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO gate_exemption_repair_terminals(
 		domain_id,command_id,request_hash,result_code,refusal_code,refusal_message,observed_position,observed_event_id,
-		observed_prefix_digest,event_id,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		observed_prefix_digest,event_id,occurred_at,boundary_witness) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		stored.DomainID, stored.CommandID, stored.RequestHash, resultCode, nullableString(refusalCode), nullableString(refusalMessage),
-		anchor.EventCount, anchor.EventID, anchor.Digest, nullableString(terminalEventID), occurredAt); err != nil {
+		anchor.EventCount, anchor.EventID, anchor.Digest, nullableString(terminalEventID), occurredAt, witness); err != nil {
 		return empty, writeError(err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(
@@ -198,12 +228,12 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	return readGateExemptionRepairTerminal(ctx, s.db, stored.DomainID, stored.CommandID)
 }
 
-func gateRepairSnapshotAt(ctx context.Context, tx *sql.Tx, domain string, position uint64) (gateRepairSnapshot, error) {
-	nodes, err := step13NodesTx(ctx, tx)
+func gateRepairSnapshotAt(ctx context.Context, queryer gateRepairQueryer, domain string, position uint64) (gateRepairSnapshot, error) {
+	nodes, err := step13NodesTx(ctx, queryer)
 	if err != nil {
 		return gateRepairSnapshot{}, err
 	}
-	events, err := step13EventsTx(ctx, tx)
+	events, err := step13EventsTx(ctx, queryer)
 	if err != nil {
 		return gateRepairSnapshot{}, err
 	}
@@ -325,6 +355,16 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 	if err != nil {
 		return ErrInvalidStore
 	}
+	if len(terminal.BoundaryWitness) != 0 {
+		if err = validateGateRepairBoundaryWitness(ctx, tx, command, terminal, terminal.BoundaryWitness); err != nil {
+			return err
+		}
+	} else {
+		var version int
+		if err = tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version >= 15 {
+			return fmt.Errorf("%w: private repair terminal lacks its boundary witness", ErrInvalidStore)
+		}
+	}
 	var storedCommand []byte
 	var storedHash, environment, operationName, state string
 	var epoch, sequence, version uint64
@@ -352,12 +392,14 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 			if terminal.RefusalMessage != gateRepairClaimFencedMessage {
 				return fmt.Errorf("%w: private repair claim-fence witness invalid", ErrInvalidStore)
 			}
-			fence, fenceErr := gateRepairClaimFence(ctx, tx, command)
-			if fenceErr != nil {
-				return fenceErr
-			}
-			if fence == nil {
-				return fmt.Errorf("%w: private repair claim-fence refusal is not factual", ErrInvalidStore)
+			if len(terminal.BoundaryWitness) == 0 {
+				fence, fenceErr := gateRepairClaimFenceLegacy(ctx, tx, command)
+				if fenceErr != nil {
+					return fenceErr
+				}
+				if fence == nil {
+					return fmt.Errorf("%w: private repair claim-fence refusal is not factual", ErrInvalidStore)
+				}
 			}
 			return nil
 		}
@@ -522,7 +564,7 @@ func checkStep15State(db *sql.DB) error {
 		}
 		_ = tx.Rollback()
 		if validationErr != nil {
-			return fmt.Errorf("%w: private repair terminal invalid", ErrInvalidStore)
+			return fmt.Errorf("%w: private repair terminal invalid: %v", ErrInvalidStore, validationErr)
 		}
 	}
 	return nil

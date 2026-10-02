@@ -56,8 +56,8 @@ func step13ProjectionTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func step13NodesTx(ctx context.Context, tx *sql.Tx) (map[string]step13Node, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT n.domain_id,n.node_id,n.kind,n.repo_id,n.matter_id,coalesce(n.parent_id,''),n.locator,n.title,n.sort_key,
+func step13NodesTx(ctx context.Context, queryer step13ProjectionQueryer) (map[string]step13Node, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT n.domain_id,n.node_id,n.kind,n.repo_id,n.matter_id,coalesce(n.parent_id,''),n.locator,n.title,n.sort_key,
 		n.birth_event_id,n.last_event_id,coalesce(n.tombstone_event_id,''),n.repair_required,coalesce(n.requested_locator,''),e.position,t.position
 		FROM m6_nodes n JOIN authority_events e ON e.domain_id=n.domain_id AND e.event_id=n.birth_event_id
 		LEFT JOIN authority_events t ON t.domain_id=n.domain_id AND t.event_id=n.tombstone_event_id`)
@@ -85,8 +85,8 @@ func step13NodesTx(ctx context.Context, tx *sql.Tx) (map[string]step13Node, erro
 	return nodes, rows.Err()
 }
 
-func step13EventsTx(ctx context.Context, tx *sql.Tx) ([]step13Event, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT domain_id,position,event_id,command_id,record FROM authority_events ORDER BY domain_id,position`)
+func step13EventsTx(ctx context.Context, queryer step13ProjectionQueryer) ([]step13Event, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT domain_id,position,event_id,command_id,record FROM authority_events ORDER BY domain_id,position`)
 	if err != nil {
 		return nil, err
 	}

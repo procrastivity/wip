@@ -171,7 +171,7 @@ func checkStep4State(db *sql.DB) error {
 			}
 			_ = tx.Rollback()
 			if validationErr != nil {
-				return ErrInvalidStore
+				return fmt.Errorf("%w: private repair terminal %s: %v", ErrInvalidStore, s.id, validationErr)
 			}
 			continue
 		}

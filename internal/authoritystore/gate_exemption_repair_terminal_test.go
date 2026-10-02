@@ -23,6 +23,14 @@ type repairTerminalFixture struct {
 	proof     []byte
 }
 
+func sameGateExemptionRepairTerminal(left, right gateExemptionRepairTerminal) bool {
+	return left.DomainID == right.DomainID && left.CommandID == right.CommandID && left.RequestHash == right.RequestHash &&
+		left.ResultCode == right.ResultCode && left.RefusalCode == right.RefusalCode && left.RefusalMessage == right.RefusalMessage &&
+		left.ObservedPosition == right.ObservedPosition && left.ObservedEventID == right.ObservedEventID &&
+		left.ObservedPrefixDigest == right.ObservedPrefixDigest && left.EventID == right.EventID && left.OccurredAt == right.OccurredAt &&
+		bytes.Equal(left.BoundaryWitness, right.BoundaryWitness)
+}
+
 func completeRepairGateDeclaration(t *testing.T, f *claimTestFixture, claim AcquireAllocation, id int, sequence uint64, gate, scale string, event, journal int) {
 	t.Helper()
 	command := step12Command(f, id, sequence, operation.GateDeclareV1,
@@ -105,6 +113,13 @@ func prepareRepairTerminalFixture(t *testing.T, scenario string, nonceByte byte)
 			nextSequence = 7
 		}
 		target, commandID = f.matter, 20
+	case "lifecycle-open-at-boundary":
+		completeRepairGateDeclaration(t, f, claim, 12, 3, "own-pre", "matter", 104, 1)
+		completeRepairLifecycle(t, f, claim, 13, 4, operation.MatterStartV1,
+			operation.NodeLifecycleInput{NodeID: f.matter}, []int{105}, 2)
+		completeRepairGateDeclaration(t, f, claim, 14, 5, "repair-target", "matter", 106, 3)
+		boundary = f.anchor(t)
+		target, commandID, nextSequence = f.matter, 20, 6
 	case "two-open-own-gates":
 		completeRepairGateDeclaration(t, f, claim, 12, 3, "own-z", "matter", 104, 1)
 		completeRepairGateDeclaration(t, f, claim, 13, 4, "own-a", "matter", 105, 2)
@@ -197,6 +212,46 @@ func admitRepairTerminalFixture(t *testing.T, fixture repairTerminalFixture) {
 	t.Helper()
 	if _, err := fixture.f.s.admitGateExemptionRepair(context.Background(), fixture.command, fixture.proof, fixture.f.peer, fixture.f.now); err != nil {
 		t.Fatalf("admit private repair proof: %v", err)
+	}
+}
+
+func releaseRepairFixtureClaim(t *testing.T, fixture repairTerminalFixture, sequence uint64, commandID, firstEvent, secondEvent int, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := fixture.f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, fixture.claim.ClaimID, 1,
+		fixture.f.matter, claimTestID(51))
+	if err != nil {
+		t.Fatalf("read claim journal before release: %v", err)
+	}
+	if current.State == "open" {
+		if _, _, err = fixture.f.s.SealOwnedClaimJournal(ctx, current); err != nil {
+			t.Fatalf("seal journal before release: %v", err)
+		}
+	}
+	tx, err := fixture.f.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, count, digestErr := barrierDigest(ctx, tx, domainA, current.JournalID)
+	_ = tx.Rollback()
+	if digestErr != nil {
+		t.Fatalf("compute release barrier: %v", digestErr)
+	}
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": current.JournalID,
+		"claim":       map[string]any{"id": fixture.claim.ClaimID, "epoch": uint64(1)},
+		"entry_count": count, "last_position": count, "terminal_receipt_count": count,
+		"entries_digest": digest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0),
+	}
+	canonical, hash := fixture.f.command(t, commandID, sequence, "claim.release",
+		map[string]any{"id": fixture.claim.ClaimID, "epoch": uint64(1)}, map[string]any{"barrier": barrier})
+	status, err := fixture.f.s.SubmitClaimLifecycle(ctx, canonical, hash, fixture.f.peer, at, nil)
+	if err != nil || status.Owner == nil {
+		t.Fatalf("submit claim release after repair terminal: %+v err=%v", status, err)
+	}
+	if _, err = fixture.f.s.CompleteClaimLifecycle(ctx, status.Owner, "",
+		[]string{claimTestID(firstEvent), claimTestID(secondEvent)}, at, signWith(fixture.f.key)); err != nil {
+		t.Fatalf("complete claim release after repair terminal: %v", err)
 	}
 }
 
@@ -323,6 +378,40 @@ func rewriteGateRepairTerminalForRecoveryTest(t *testing.T, db *sql.DB, statemen
 	}
 }
 
+func downgradeStep16ForMigrationTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`DROP TRIGGER gate_exemption_repair_terminals_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(`ALTER TABLE gate_exemption_repair_terminals DROP COLUMN boundary_witness`); err != nil {
+		t.Fatalf("remove Step 16 terminal witness column: %v", err)
+	}
+	for _, object := range step15Schema {
+		if object.name == "gate_exemption_repair_terminals_immutable" {
+			if _, err = tx.Exec(object.sql); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, statement := range []string{
+		`DROP TABLE schema_migrations`, step15MigrationMarker.sql,
+		`INSERT INTO schema_migrations VALUES (1,'baseline'),(2,'environment-and-artifacts'),(3,'submissions-and-receipts'),(4,'prefix-snapshot-blob-transfer'),(5,'claims-grants-journals-close'),(6,'m5-lab-genesis-grant-consumption'),(7,'step-8-provisional-birth-projection'),(8,'step-9-birth-journal-receipt-barrier'),(9,'step-10-content-and-findings'),(10,'step-16-claim-journal-sequence-order'),(11,'step-4-stage-step-operations'),(12,'step-7-authority-gate-config-projections'),(13,'step-7-detached-gate-repair-admissions'),(14,'step-7-private-gate-repair-terminals')`,
+		`PRAGMA user_version=14`,
+	} {
+		if _, err = tx.Exec(statement); err != nil {
+			t.Fatalf("restore v14 schema marker: %v", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGateExemptionRepairMultiplePrerequisiteRefusalRecoversDeterministically(t *testing.T) {
 	for run := range 16 {
 		t.Run(fmt.Sprintf("run-%02d", run), func(t *testing.T) {
@@ -346,10 +435,78 @@ func TestGateExemptionRepairMultiplePrerequisiteRefusalRecoversDeterministically
 			}
 			defer func() { _ = reopened.Close() }()
 			recovered, err := reopened.recoverGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash, nil)
-			if err != nil || recovered.Terminal == nil || *recovered.Terminal != terminal || !bytes.Equal(recovered.Proof, fixture.proof) {
+			if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) || !bytes.Equal(recovered.Proof, fixture.proof) {
 				t.Fatalf("recover identical deterministic refusal: %+v err=%v", recovered, err)
 			}
 		})
+	}
+}
+
+func TestUpgradeV14BackfillsLegacyRepairTerminalBoundaryWitness(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "lifecycle-open-at-boundary", 0x96)
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" {
+		t.Fatalf("create v14-compatible terminal: %+v err=%v", terminal, err)
+	}
+	downgradeStep16ForMigrationTest(t, fixture.f.s.db)
+	if err = checkSchemaVersion(fixture.f.s.db, 14); err != nil {
+		t.Fatalf("validate reconstructed v14 store: %v", err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV14(fixture.f.root); err != nil {
+		t.Fatalf("upgrade v14 terminal history with boundary backfill: %v", err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("open upgraded v15 terminal history: %v", err)
+	}
+	fixture.f.s = reopened
+	defer func() { _ = reopened.Close() }()
+	stored, err := readGateExemptionRepairTerminal(context.Background(), reopened.db, domainA, fixture.command.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness, err := decodeGateRepairBoundaryWitness(stored.BoundaryWitness)
+	if err != nil || witness.Fence != "legacy" || witness.ResultCode != terminal.ResultCode || witness.RefusalMessage != terminal.RefusalMessage {
+		t.Fatalf("legacy terminal backfill witness=%+v err=%v", witness, err)
+	}
+	recovered, err := reopened.recoverGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || recovered.Terminal.DomainID != terminal.DomainID ||
+		recovered.Terminal.CommandID != terminal.CommandID || recovered.Terminal.RequestHash != terminal.RequestHash ||
+		recovered.Terminal.ResultCode != terminal.ResultCode || recovered.Terminal.RefusalCode != terminal.RefusalCode ||
+		recovered.Terminal.RefusalMessage != terminal.RefusalMessage || recovered.Terminal.ObservedPosition != terminal.ObservedPosition ||
+		recovered.Terminal.ObservedEventID != terminal.ObservedEventID || recovered.Terminal.ObservedPrefixDigest != terminal.ObservedPrefixDigest ||
+		recovered.Terminal.OccurredAt != terminal.OccurredAt || len(recovered.Terminal.BoundaryWitness) == 0 {
+		t.Fatalf("recover terminal after v14 upgrade: %+v err=%v", recovered, err)
+	}
+}
+
+func TestUpgradeV14RejectsClaimFenceThatOnlyExistsAfterTerminalPrefix(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "lifecycle-open-at-boundary", 0x97)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.RefusalCode != "refusal.gate-repair-lifecycle" || terminal.ObservedPosition != 7 {
+		t.Fatalf("create original prefix-7 lifecycle refusal: %+v err=%v", terminal, err)
+	}
+	releaseRepairFixtureClaim(t, fixture, 7, 32, 144, 145, fixture.f.now.Add(time.Minute))
+	downgradeStep16ForMigrationTest(t, fixture.f.s.db)
+	rewriteGateRepairTerminalForRecoveryTest(t, fixture.f.s.db,
+		`UPDATE gate_exemption_repair_terminals SET refusal_code=?,refusal_message=? WHERE domain_id=? AND command_id=?`,
+		"refusal.claim-fenced", gateRepairClaimFencedMessage, domainA, fixture.command.ID)
+	if err = checkSchemaVersion(fixture.f.s.db, 14); err != nil {
+		t.Fatalf("v14 legacy validator control no longer reproduces old claim-fence interpretation: %v", err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV14(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("v14 upgrade accepted claim fence lacking evidence at the terminal prefix: %v", err)
 	}
 }
 
@@ -405,8 +562,105 @@ func TestGateExemptionRepairGenuineClaimFenceRefusalRecovers(t *testing.T) {
 	}
 	defer func() { _ = reopened.Close() }()
 	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
-	if err != nil || recovered.Terminal == nil || *recovered.Terminal != terminal || !bytes.Equal(recovered.Proof, fixture.proof) {
+	if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) || !bytes.Equal(recovered.Proof, fixture.proof) {
 		t.Fatalf("recover factual claim-fenced refusal: %+v err=%v", recovered, err)
+	}
+}
+
+func TestGateExemptionRepairClaimFenceForgeryIsBoundToTerminalPrefix(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "lifecycle-open-at-boundary", 0x94)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.gate-repair-lifecycle" ||
+		terminal.ObservedPosition != 7 || terminal.ObservedEventID != claimTestID(106) || terminal.OccurredAt != "2026-09-23T12:00:00Z" {
+		t.Fatalf("record exact prefix-7 lifecycle refusal: %+v err=%v", terminal, err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.f.s, err = OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen prefix-7 lifecycle refusal: %v", err)
+	}
+	if _, err = fixture.f.s.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil); err != nil {
+		t.Fatalf("recover genuine refusal before later claim close: %v", err)
+	}
+	releaseRepairFixtureClaim(t, fixture, 7, 30, 140, 141, fixture.f.now.Add(time.Minute))
+	postRelease := fixture.f.anchor(t)
+	if postRelease.EventCount != 9 || postRelease.EventID != claimTestID(141) {
+		t.Fatalf("release did not grow history from terminal prefix 7 to 9: %+v", postRelease)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen unchanged prefix-7 refusal after prefix-9 release: %v", err)
+	}
+	fixture.f.s = reopened
+	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) {
+		t.Fatalf("later release changed original terminal result: %+v err=%v", recovered, err)
+	}
+	rewriteGateRepairTerminalForRecoveryTest(t, reopened.db,
+		`UPDATE gate_exemption_repair_terminals SET refusal_code=?,refusal_message=? WHERE domain_id=? AND command_id=?`,
+		"refusal.claim-fenced", gateRepairClaimFencedMessage, domainA, fixture.command.ID)
+	if _, err = reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, fixture.proof); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("recovery accepted invented earlier claim-fence refusal after later release: %v", err)
+	}
+	if err = checkStep15State(reopened.db); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("terminal validator accepted forged prefix-7 claim fence: %v", err)
+	}
+	if err = reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("OpenExisting accepted forged prefix-7 claim fence after prefix-9 release: %v", err)
+	}
+}
+
+func TestGateExemptionRepairGenuineClaimFenceSurvivesLaterClaimRelease(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "success-missing-snapshot", 0x95)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	current, err := fixture.f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, fixture.claim.ClaimID, 1,
+		fixture.f.matter, claimTestID(51))
+	if err != nil {
+		t.Fatalf("read claim journal before terminal refusal: %v", err)
+	}
+	if _, _, err = fixture.f.s.SealOwnedClaimJournal(ctx, current); err != nil {
+		t.Fatalf("seal journal before factual fence: %v", err)
+	}
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.claim-fenced" || terminal.ObservedPosition == 0 {
+		t.Fatalf("record factual journal-fenced refusal: %+v err=%v", terminal, err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.f.s, err = OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen factual journal-fenced terminal: %v", err)
+	}
+	releaseRepairFixtureClaim(t, fixture, 9, 31, 142, 143, fixture.f.now.Add(time.Minute))
+	postRelease := fixture.f.anchor(t)
+	if postRelease.EventCount != terminal.ObservedPosition+2 {
+		t.Fatalf("claim release did not append two events after the terminal boundary: terminal=%d high-water=%d", terminal.ObservedPosition, postRelease.EventCount)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen genuine journal fence after later claim release: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || !sameGateExemptionRepairTerminal(*recovered.Terminal, terminal) {
+		t.Fatalf("later release invalidated genuine earlier journal fence: %+v err=%v", recovered, err)
 	}
 }
 
