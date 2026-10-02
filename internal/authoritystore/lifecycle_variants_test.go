@@ -64,26 +64,43 @@ func TestM6NestedLifecycleCascadeAndAuthoritySealBoundary(t *testing.T) {
 	if operation.MatterFinishV1.Metadata().Delivery != operation.DeliveryAuthority {
 		t.Fatal("Matter finish must remain authority delivered")
 	}
-	finishStatus := completeLifecycleCommand(t, f, finish, []string{claimTestID(114), claimTestID(115)})
-	claimTestReceipt(t, finishStatus, "result.succeeded", map[string]any{"matter_id": f.matter, "state": "done", "became_sealed": true}, 114, 115)
+	finishStatus := completeLifecycleCommand(t, f, finish, []string{claimTestID(114)})
+	claimTestReceipt(t, finishStatus, "result.succeeded", map[string]any{"matter_id": f.matter, "state": "done", "became_sealed": true}, 114)
 	var after int
 	if err := f.s.db.QueryRow(`SELECT count(*) FROM claim_journal_entries WHERE domain_id=? AND journal_id=?`, domainA, journalID).Scan(&after); err != nil || after != before {
 		t.Fatalf("authority Matter finish changed claim journal count %d -> %d, %v", before, after, err)
 	}
+	rows, err := f.s.db.Query(`SELECT record FROM authority_events WHERE domain_id=?`, domainA)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var sweeps int
-	var record []byte
-	if err := f.s.db.QueryRow(`SELECT record FROM authority_events WHERE domain_id=? AND command_id=? AND event_id=?`, domainA, finish.ID, claimTestID(115)).Scan(&record); err == nil {
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
 		var event struct {
 			Kind string `cbor:"kind"`
 		}
-		if artifactDecoder.Unmarshal(record, &event) == nil && event.Kind == "batch.swept" {
-			sweeps = 1
+		if err = artifactDecoder.Unmarshal(raw, &event); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
 		}
-	} else {
-		t.Fatalf("read aggregate seal event: %v", err)
+		if event.Kind == "batch.swept" {
+			sweeps++
+		}
 	}
-	if sweeps != 1 {
-		t.Fatalf("sealing Matter finish batch sweep count = %d; want 1", sweeps)
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err = rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sweeps != 0 {
+		t.Fatalf("Matter finish batch sweep count = %d; want 0", sweeps)
 	}
 	if err := f.s.Close(); err != nil {
 		t.Fatal(err)

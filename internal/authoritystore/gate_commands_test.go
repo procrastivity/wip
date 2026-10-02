@@ -104,10 +104,10 @@ func TestGateCloseAndDismissAllowDoneMatterWithOpenExactClaim(t *testing.T) {
 			claimTestAcknowledge(t, f, allocation.JournalID, 2, started)
 			finish := step12Command(f, 14, 5, operation.MatterFinishV1,
 				operation.MatterFinishInput{MatterID: f.matter}, allocation.ClaimID)
-			finished := completeLifecycleCommand(t, f, finish, []string{claimTestID(106), claimTestID(107)})
+			finished := completeLifecycleCommand(t, f, finish, []string{claimTestID(106)})
 			claimTestReceipt(t, finished, "result.succeeded", map[string]any{
-				"matter_id": f.matter, "state": "done", "became_sealed": true,
-			}, 106, 107)
+				"matter_id": f.matter, "state": "done", "became_sealed": false,
+			}, 106)
 			var journalState string
 			var closeCommand sql.NullString
 			if err = f.s.db.QueryRow(`SELECT j.state,c.close_command_id FROM claim_journals j JOIN claims c USING(domain_id,claim_id) WHERE j.domain_id=? AND j.journal_id=?`,
@@ -149,7 +149,231 @@ func TestGateCloseAndDismissAllowDoneMatterWithOpenExactClaim(t *testing.T) {
 				"gate": "reviewed-local", "node_id": f.matter, "scale": "matter",
 			}, 108)
 			claimTestAcknowledge(t, f, allocation.JournalID, 3, completed)
+			var lastPosition uint64
+			if err = f.s.db.QueryRow(`SELECT max(position) FROM authority_events WHERE domain_id=?`, domainA).Scan(&lastPosition); err != nil {
+				t.Fatal(err)
+			}
+			nodes, err := step13Nodes(f.s.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sealed, err := step13ProjectedSealed(ctx, f.s.db, nodes, domainA, f.matter, lastPosition+1)
+			if err != nil || !sealed {
+				t.Fatalf("Matter did not become sealed after post-finish gate satisfaction: sealed=%t err=%v", sealed, err)
+			}
 		})
+	}
+}
+
+func TestMatterFinishAfterGateCloseSealsDespiteUnfinishedDescendant(t *testing.T) {
+	f, allocation := gateClaimedFixture(t)
+	ctx := context.Background()
+
+	for index, gate := range []struct{ name, scale string }{
+		{name: "matter-review", scale: "matter"},
+		{name: "stage-review", scale: "stage"},
+	} {
+		command := step12Command(f, 12+index, uint64(3+index), operation.GateDeclareV1,
+			operation.GateDeclareInput{Gate: gate.name, Scale: gate.scale}, allocation.ClaimID)
+		owner := submitGateOperation(t, f, command)
+		declared, err := f.s.CompleteCommand(ctx, owner, operation.Result{Code: operation.ResultSucceeded}, repoA,
+			claimTestID(104+index), f.now, signWith(f.key))
+		if err != nil {
+			t.Fatalf("declare %s gate: %v", gate.scale, err)
+		}
+		claimTestAcknowledge(t, f, allocation.JournalID, uint64(index+1), declared)
+	}
+
+	start := step12Command(f, 14, 5, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
+	started := completeLifecycleCommand(t, f, start, []string{claimTestID(106)})
+	claimTestReceipt(t, started, "result.succeeded", map[string]any{
+		"matter_id": f.matter, "state": "in-progress",
+	}, 106)
+	claimTestAcknowledge(t, f, allocation.JournalID, 3, started)
+
+	stageID := claimTestID(201)
+	createStage := step12Command(f, 15, 6, operation.StageCreateV1,
+		operation.StageCreateInput{MatterID: f.matter, Title: "Still unfinished"}, allocation.ClaimID)
+	_, created := completeStep12ClaimCommand(t, f, createStage, allocation.JournalID, 4, 201, 107)
+	claimTestReceipt(t, created, "result.succeeded", map[string]any{
+		"id": stageID, "matter_id": f.matter, "locator": "still-unfinished", "title": "Still unfinished", "sort_key": int64(1000), "state": "planned",
+	}, 107)
+
+	close := step12Command(f, 16, 7, operation.GateCloseV1,
+		operation.GateCloseInput{Gate: "matter-review", NodeID: f.matter}, allocation.ClaimID)
+	closeOwner := submitGateOperation(t, f, close)
+	closed, err := f.s.CompleteCommand(ctx, closeOwner, operation.Result{Code: operation.ResultSucceeded}, f.matter, claimTestID(108), f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("close Matter gate before finish: %v", err)
+	}
+	claimTestAcknowledge(t, f, allocation.JournalID, 5, closed)
+
+	finish := step12Command(f, 17, 8, operation.MatterFinishV1,
+		operation.MatterFinishInput{MatterID: f.matter}, allocation.ClaimID)
+	finished := completeLifecycleCommand(t, f, finish, []string{claimTestID(109)})
+	claimTestReceipt(t, finished, "result.succeeded", map[string]any{
+		"matter_id": f.matter, "state": "done", "became_sealed": true,
+	}, 109)
+	receipt, err := readReceipt(finished.Receipt)
+	if err != nil || receipt.Operation.Name != "matter.finish" || receipt.Operation.Version != 1 || receipt.Range == nil || receipt.Range.Count != 1 {
+		t.Fatalf("Matter finish operation/receipt shape changed: %+v, %v", receipt, err)
+	}
+	if operation.MatterFinishV1.Metadata().Operation != (operation.ID{Name: "matter.finish", Version: 1}) {
+		t.Fatalf("Matter finish registration changed: %+v", operation.MatterFinishV1.Metadata())
+	}
+
+	var stageState string
+	if err = f.s.db.QueryRow(`SELECT state FROM m6_gate_states WHERE domain_id=? AND node_id=? AND gate=?`,
+		domainA, f.matter, "matter-review").Scan(&stageState); err != nil || stageState != "closed" {
+		t.Fatalf("Matter gate state=%q err=%v", stageState, err)
+	}
+	var descendantGateStateCount int
+	if err = f.s.db.QueryRow(`SELECT count(*) FROM m6_gate_states WHERE domain_id=? AND node_id=? AND gate=?`,
+		domainA, stageID, "stage-review").Scan(&descendantGateStateCount); err != nil || descendantGateStateCount != 0 {
+		t.Fatalf("unfinished descendant gate state count=%d err=%v", descendantGateStateCount, err)
+	}
+	rows, err := f.s.db.Query(`SELECT record FROM authority_events WHERE domain_id=?`, domainA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sweepCount int
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		var event struct {
+			Kind string `cbor:"kind"`
+		}
+		if err = artifactDecoder.Unmarshal(raw, &event); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		if event.Kind == "batch.swept" {
+			sweepCount++
+		}
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err = rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sweepCount != 0 {
+		t.Fatalf("Matter finish emitted a Batch sweep: count=%d", sweepCount)
+	}
+	var finishRecord []byte
+	if err = f.s.db.QueryRow(`SELECT record FROM authority_events WHERE domain_id=? AND command_id=?`, domainA, finish.ID).Scan(&finishRecord); err != nil {
+		t.Fatalf("read Matter finish event: %v", err)
+	}
+	var finishEvent struct {
+		Kind string `cbor:"kind"`
+	}
+	if err = artifactDecoder.Unmarshal(finishRecord, &finishEvent); err != nil || finishEvent.Kind != "matter.finished" {
+		t.Fatalf("Matter finish event kind=%q err=%v", finishEvent.Kind, err)
+	}
+	var finishEventCount int
+	if err = f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, domainA, finish.ID).Scan(&finishEventCount); err != nil || finishEventCount != 1 {
+		t.Fatalf("Matter finish event count=%d err=%v; want one matter.finished event", finishEventCount, err)
+	}
+	var lastPosition uint64
+	if err = f.s.db.QueryRow(`SELECT max(position) FROM authority_events WHERE domain_id=?`, domainA).Scan(&lastPosition); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := step13Nodes(f.s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := step13ProjectedSealed(ctx, f.s.db, nodes, domainA, f.matter, lastPosition+1)
+	if err != nil || !sealed {
+		t.Fatalf("satisfied Matter with unfinished descendant is not sealed: sealed=%t err=%v", sealed, err)
+	}
+	if err = checkStep13State(f.s.db); err != nil {
+		t.Fatalf("Step 13 projections after Matter finish: %v", err)
+	}
+}
+
+func TestMatterFinishValidatorAcceptsLegacyInlineSweepHistory(t *testing.T) {
+	f, allocation := gateClaimedFixture(t)
+	ctx := context.Background()
+	declare := step12Command(f, 12, 3, operation.GateDeclareV1,
+		operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
+	declareOwner := submitGateOperation(t, f, declare)
+	declared, err := f.s.CompleteCommand(ctx, declareOwner, operation.Result{Code: operation.ResultSucceeded}, repoA,
+		claimTestID(104), f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("declare Matter gate: %v", err)
+	}
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, declared)
+	start := step12Command(f, 13, 4, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
+	started := completeLifecycleCommand(t, f, start, []string{claimTestID(105)})
+	claimTestAcknowledge(t, f, allocation.JournalID, 2, started)
+	finish := step12Command(f, 14, 5, operation.MatterFinishV1,
+		operation.MatterFinishInput{MatterID: f.matter}, allocation.ClaimID)
+	finished := completeLifecycleCommand(t, f, finish, []string{claimTestID(106)})
+	currentReceipt, err := readReceipt(finished.Receipt)
+	if err != nil || currentReceipt.Range == nil || currentReceipt.Range.Count != 1 {
+		t.Fatalf("new Matter finish receipt shape = %+v, %v", currentReceipt, err)
+	}
+	var canonical []byte
+	var hash string
+	if err = f.s.db.QueryRow(`SELECT command,request_hash FROM submissions WHERE domain_id=? AND command_id=?`, domainA, finish.ID).
+		Scan(&canonical, &hash); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseLifecycle(canonical, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var position uint64
+	var raw []byte
+	if err = f.s.db.QueryRow(`SELECT position,record FROM authority_events WHERE domain_id=? AND command_id=?`, domainA, finish.ID).
+		Scan(&position, &raw); err != nil {
+		t.Fatal(err)
+	}
+	finishEvent := lifecycleEvent{position: position, id: currentReceipt.Range.First, raw: raw}
+	var batch string
+	if err = f.s.db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, domainA, f.matter).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	legacySweepID := claimTestID(107)
+	sweepRaw, err := artifactEncoder.Marshal(map[string]any{
+		"kind": "batch.swept", "subject_id": batch, "payload": map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyReceipt := currentReceipt
+	legacyReceipt.Range = &struct {
+		First string `cbor:"first_event_id"`
+		Last  string `cbor:"last_event_id"`
+		Count uint64 `cbor:"event_count"`
+	}{First: finishEvent.id, Last: legacySweepID, Count: 2}
+	legacyReceipt.Result.Output, err = artifactEncoder.Marshal(map[string]any{
+		"matter_id": f.matter, "state": "done", "became_sealed": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEvents := []lifecycleEvent{
+		finishEvent,
+		{position: position + 1, id: legacySweepID, raw: sweepRaw},
+	}
+	if err = checkM6LifecycleEvents(f.s.db, parsed, legacyReceipt, legacyEvents); err != nil {
+		t.Fatalf("compatible old Matter finish receipt/history rejected: %v", err)
+	}
+
+	legacyReceipt.Range = &struct {
+		First string `cbor:"first_event_id"`
+		Last  string `cbor:"last_event_id"`
+		Count uint64 `cbor:"event_count"`
+	}{First: finishEvent.id, Last: finishEvent.id, Count: 1}
+	if err = checkM6LifecycleEvents(f.s.db, parsed, legacyReceipt, []lifecycleEvent{finishEvent}); err == nil {
+		t.Fatal("legacy sealed receipt without its required inline Batch sweep was accepted")
 	}
 }
 

@@ -2,6 +2,7 @@ package authoritystore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -55,6 +56,10 @@ type step13Node struct {
 	node         step12Node
 	birthPos     uint64
 	tombstonePos int64
+}
+
+type step13ProjectionQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 func checkStep13State(db *sql.DB) error {
@@ -635,6 +640,56 @@ func step13Sealed(domain, id string, nodes map[string]step13Node, lifecycle map[
 			return false
 		}
 	}
+}
+
+func step13ProjectedSealed(ctx context.Context, queryer step13ProjectionQueryer, nodes map[string]step13Node,
+	domain, id string, before uint64,
+) (bool, error) {
+	declarations := make(map[string]step13Declaration)
+	rows, err := queryer.QueryContext(ctx, `SELECT d.domain_id,d.repo_id,d.gate,d.scale,d.declaration_event_id
+		FROM m6_gate_declarations d JOIN authority_events e ON e.domain_id=d.domain_id AND e.event_id=d.declaration_event_id
+		WHERE d.domain_id=? AND e.position<?`, domain, before)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var declaration step13Declaration
+		if err = rows.Scan(&declaration.domain, &declaration.repo, &declaration.gate, &declaration.scale, &declaration.event); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		declarations[ownerKey(declaration.domain, declaration.repo)+"/"+declaration.gate] = declaration
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err = rows.Close(); err != nil {
+		return false, err
+	}
+	states := make(map[string]step13GateState)
+	rows, err = queryer.QueryContext(ctx, `SELECT g.domain_id,g.repo_id,g.node_id,g.gate,g.scale,g.state,coalesce(g.reason,''),g.source_event_id
+		FROM m6_gate_states g JOIN authority_events e ON e.domain_id=g.domain_id AND e.event_id=g.source_event_id
+		WHERE g.domain_id=? AND e.position<?`, domain, before)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var state step13GateState
+		if err = rows.Scan(&state.domain, &state.repo, &state.node, &state.gate, &state.scale, &state.state, &state.reason, &state.event); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		states[ownerKey(state.domain, state.node)+"/"+state.gate] = state
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err = rows.Close(); err != nil {
+		return false, err
+	}
+	return step13Sealed(domain, id, nodes, map[string]string{ownerKey(domain, id): "done"}, declarations, states, before), nil
 }
 
 func step13RefsForMatter(domain, matter string, references map[string]step13Reference) []string {

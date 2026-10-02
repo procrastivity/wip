@@ -221,7 +221,7 @@ func claimTestBirthStep(t *testing.T, f *claimTestFixture, id, event int) ([]byt
 	return raw, hash, status
 }
 
-func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
+func TestMatterFinishSealsWithUnfinishedChildWithoutSweeping(t *testing.T) {
 	f := newClaimTestFixture(t)
 	ctx := context.Background()
 	_, _, birthStep := claimTestBirthStep(t, f, 31, 101)
@@ -273,15 +273,15 @@ func TestMatterFinishDoesNotSweepUntilChildStepCompletes(t *testing.T) {
 	finishedMatter := submitLifecycle(13, 5, operation.MatterFinishV1.Metadata().Operation,
 		operation.MatterFinishInput{MatterID: f.matter}, 109, 110)
 	claimTestReceipt(t, finishedMatter, "result.succeeded", map[string]any{
-		"matter_id": f.matter, "state": "done", "became_sealed": false,
+		"matter_id": f.matter, "state": "done", "became_sealed": true,
 	}, 109)
 	matterReceipt, err := readReceipt(finishedMatter.Receipt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	output, err := wipdwire.DecodeCanonicalMap(matterReceipt.Result.Output, "matter_id", "state", "became_sealed")
-	if err != nil || output["became_sealed"] != false {
-		t.Fatalf("incomplete subtree Matter-finish result = %+v, %v; want became_sealed=false", output, err)
+	if err != nil || output["became_sealed"] != true {
+		t.Fatalf("Matter finish with unfinished child = %+v, %v; want became_sealed=true", output, err)
 	}
 
 	finishedStep := submitLifecycle(14, 6, operation.StepFinishV1.Metadata().Operation,

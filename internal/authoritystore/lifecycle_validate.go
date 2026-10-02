@@ -1,6 +1,8 @@
 package authoritystore
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -38,6 +40,9 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 	state, err := lifecycleStateBefore(db, c.domain, target, kind, events[0].position)
 	if err != nil || state != from {
 		return fmt.Errorf("lifecycle target pre-state %q want %q: %w", state, from, ErrInvalidStore)
+	}
+	if c.name == "matter.finish" {
+		return checkMatterFinishHistory(db, c, receipt, events)
 	}
 	want := make([]expectedLifecycleEvent, 0, len(events))
 	if verb == "start" {
@@ -85,20 +90,6 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 				cause = events[len(want)-1].id
 			}
 		}
-	} else if c.name == "matter.finish" {
-		sealed, sealErr := matterSubtreeCompleteBefore(db, c.domain, c.matter, events[0].position)
-		if sealErr != nil {
-			return sealErr
-		}
-		want = append(want, expectedLifecycleEvent{"matter.finished", target, map[string]any{"from": "in-progress", "to": "done"}})
-		var batch string
-		batchErr := db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&batch)
-		if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
-			return batchErr
-		}
-		if sealed && !errors.Is(batchErr, sql.ErrNoRows) {
-			want = append(want, expectedLifecycleEvent{"batch.swept", batch, map[string]any{}})
-		}
 	} else {
 		payload := map[string]any{"from": from, "to": to}
 		if verb == "cancel" && c.reason != "" {
@@ -112,12 +103,6 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 	}
 	var output map[string]any
 	switch c.name {
-	case "matter.finish":
-		sealed, err := matterSubtreeCompleteBefore(db, c.domain, c.matter, events[0].position)
-		if err != nil {
-			return err
-		}
-		output = map[string]any{"matter_id": c.matter, "state": "done", "became_sealed": sealed}
 	case "step.start", "step.finish", "step.pause", "step.resume", "step.cancel":
 		output = map[string]any{"step_id": target, "matter_id": matter, "state": to}
 	case "stage.start", "stage.finish", "stage.pause", "stage.resume", "stage.cancel":
@@ -149,6 +134,83 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 		}
 	}
 	return nil
+}
+
+func checkMatterFinishHistory(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent) error {
+	legacySealed, err := matterSubtreeCompleteBefore(db, c.domain, c.matter, events[0].position)
+	if err != nil {
+		return err
+	}
+	nodes, err := step13Nodes(db)
+	if err != nil {
+		return err
+	}
+	sealed, err := step13ProjectedSealed(context.Background(), db, nodes, c.domain, c.matter, events[0].position)
+	if err != nil {
+		return err
+	}
+	var batch string
+	batchErr := db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&batch)
+	if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
+		return batchErr
+	}
+
+	type expectation struct {
+		sealed bool
+		swept  bool
+	}
+	expectations := []expectation{{sealed: sealed}}
+	legacy := expectation{sealed: legacySealed, swept: legacySealed && !errors.Is(batchErr, sql.ErrNoRows)}
+	expectations = append(expectations, legacy)
+	for _, expected := range expectations {
+		if !matterFinishHistoryMatches(receipt, events, c.matter, batch, expected) {
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("Matter finish history matches neither current nor legacy contract: %w", ErrInvalidStore)
+}
+
+func matterFinishHistoryMatches(receipt receiptRecord, events []lifecycleEvent, matter, batch string, expected struct {
+	sealed bool
+	swept  bool
+}) bool {
+	expectedCount := 1
+	if expected.swept {
+		expectedCount++
+	}
+	if len(events) != expectedCount {
+		return false
+	}
+	output, err := artifactEncoder.Marshal(map[string]any{
+		"matter_id": matter, "state": "done", "became_sealed": expected.sealed,
+	})
+	if err != nil || !bytes.Equal(output, receipt.Result.Output) {
+		return false
+	}
+	want := []expectedLifecycleEvent{{"matter.finished", matter, map[string]any{"from": "in-progress", "to": "done"}}}
+	if expected.swept {
+		want = append(want, expectedLifecycleEvent{"batch.swept", batch, map[string]any{}})
+	}
+	for index, event := range events {
+		if index > 0 && event.position != events[index-1].position+1 {
+			return false
+		}
+		var got struct {
+			Kind    string         `cbor:"kind"`
+			Subject string         `cbor:"subject_id"`
+			Payload map[string]any `cbor:"payload"`
+		}
+		if artifactDecoder.Unmarshal(event.raw, &got) != nil || got.Kind != want[index].kind || got.Subject != want[index].subject {
+			return false
+		}
+		gotPayload, gotErr := artifactEncoder.Marshal(got.Payload)
+		wantPayload, wantErr := artifactEncoder.Marshal(want[index].payload)
+		if gotErr != nil || wantErr != nil || !bytes.Equal(gotPayload, wantPayload) {
+			return false
+		}
+	}
+	return true
 }
 
 var errNodeNotLiveAtLifecycle = errors.New("authoritystore: node not live at lifecycle event")

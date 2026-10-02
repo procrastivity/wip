@@ -273,6 +273,7 @@ func (s *Store) completeM6LifecycleTx(ctx context.Context, tx *sql.Tx, c *lifecy
 	}
 	identity := eventIdentity{c.domain, c.id, c.hash, c.environment, c.sequence, c.actedAt, c.repo}
 	var first, last any
+	var lastPosition uint64
 	used := 0
 	appendEvent := func(kind, subject string, payload map[string]any) error {
 		if used >= len(eventIDs) {
@@ -296,6 +297,7 @@ func (s *Store) completeM6LifecycleTx(ctx context.Context, tx *sql.Tx, c *lifecy
 			first = position
 		}
 		last = position
+		lastPosition = position
 		used++
 		return nil
 	}
@@ -351,22 +353,19 @@ func (s *Store) completeM6LifecycleTx(ctx context.Context, tx *sql.Tx, c *lifecy
 			output = operation.MatterLifecycleOutput{MatterID: c.matter, State: to}
 		}
 	} else if c.name == "matter.finish" {
-		sealed, err := matterSubtreeCompleteTx(ctx, tx, c.domain, c.matter)
-		if err != nil {
+		if err := appendEvent("matter.finished", c.matter, map[string]any{"from": "in-progress", "to": "done"}); err != nil {
 			return empty, err
 		}
-		if err = appendEvent("matter.finished", c.matter, map[string]any{"from": "in-progress", "to": "done"}); err != nil {
+		if err := step13ProjectionTx(ctx, tx); err != nil {
 			return empty, err
 		}
-		var batch string
-		batchErr := tx.QueryRowContext(ctx, `SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&batch)
-		if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
-			return empty, batchErr
+		nodes, nodesErr := step13NodesTx(ctx, tx)
+		if nodesErr != nil {
+			return empty, nodesErr
 		}
-		if sealed && !errors.Is(batchErr, sql.ErrNoRows) {
-			if err = appendEvent("batch.swept", batch, map[string]any{}); err != nil {
-				return empty, err
-			}
+		sealed, sealErr := step13ProjectedSealed(ctx, tx, nodes, c.domain, c.matter, lastPosition)
+		if sealErr != nil {
+			return empty, sealErr
 		}
 		output = operation.MatterFinishOutput{MatterID: c.matter, State: "done", BecameSealed: sealed}
 	} else {
@@ -413,42 +412,6 @@ func lifecycleOutputBytes(output operation.Output) ([]byte, error) {
 	default:
 		return nil, ErrInvalidProof
 	}
-}
-
-// matterSubtreeCompleteTx checks every live M6 descendant. Gate semantics are
-// intentionally not part of this step's modeled seal predicate.
-func matterSubtreeCompleteTx(ctx context.Context, tx *sql.Tx, domain, matter string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT node_id,kind FROM m6_nodes WHERE domain_id=? AND matter_id=? AND kind!='matter' AND tombstone_event_id IS NULL ORDER BY node_id`, domain, matter)
-	if err != nil {
-		return false, err
-	}
-	type node struct{ id, kind string }
-	var nodes []node
-	for rows.Next() {
-		var item node
-		if err = rows.Scan(&item.id, &item.kind); err != nil {
-			_ = rows.Close()
-			return false, err
-		}
-		nodes = append(nodes, item)
-	}
-	if err = rows.Err(); err != nil {
-		_ = rows.Close()
-		return false, err
-	}
-	if err = rows.Close(); err != nil {
-		return false, err
-	}
-	for _, item := range nodes {
-		state, stateErr := lifecycleStateTx(ctx, tx, domain, item.id, item.kind)
-		if stateErr != nil {
-			return false, stateErr
-		}
-		if state != "done" {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func lifecycleStateTx(ctx context.Context, tx *sql.Tx, domain, subject, scale string) (string, error) {

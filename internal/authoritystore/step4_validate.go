@@ -766,20 +766,7 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 		if stateErr != nil || matterState != "in-progress" {
 			return ErrInvalidStore
 		}
-		add("matter.finished", matter, map[string]any{"from": "in-progress", "to": "done"})
-		var anonymousBatch string
-		batchErr := db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, matter).Scan(&anonymousBatch)
-		if batchErr != nil && !errors.Is(batchErr, sql.ErrNoRows) {
-			return batchErr
-		}
-		sealed, sealErr := matterSubtreeCompleteBefore(db, c.domain, matter, events[0].position)
-		if sealErr != nil {
-			return sealErr
-		}
-		if sealed && !errors.Is(batchErr, sql.ErrNoRows) {
-			add("batch.swept", anonymousBatch, map[string]any{})
-		}
-		output = map[string]any{"matter_id": matter, "state": "done", "became_sealed": sealed}
+		return checkMatterFinishHistory(db, c, r, events)
 	case "claim.acquire":
 		var prior int
 		if db.QueryRow(`SELECT count(*) FROM claims p JOIN terminal_receipts t ON t.domain_id=p.domain_id AND t.command_id=p.acquire_command_id WHERE p.domain_id=? AND p.matter_id=? AND t.first_position<?`, c.domain, matter, events[0].position).Scan(&prior) != nil || (prior == 0) != (len(events) == 3) {

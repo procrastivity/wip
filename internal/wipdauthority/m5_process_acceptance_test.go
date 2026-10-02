@@ -645,8 +645,8 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	_ = recoveredClient.Close()
 	stopRecoveredDaemon()
 	anchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || anchor.EventCount != 13 {
-		t.Fatalf("authority event range after content/lifecycle completion = %+v, %v; want thirteen events", anchor, err)
+	if err != nil || anchor.EventCount != 12 {
+		t.Fatalf("authority event range after content/lifecycle completion = %+v, %v; want twelve events without an inline sweep", anchor, err)
 	}
 	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), wipdjournal.Identity{
 		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv,
@@ -657,7 +657,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 	}
 	defer func() { _ = journal.Close() }()
 	snapshot, err := journal.InstallSnapshot(context.Background())
-	if err != nil || snapshot.Anchor.EventCount != 13 || len(snapshot.Receipts) != 7 {
+	if err != nil || snapshot.Anchor.EventCount != 12 || len(snapshot.Receipts) != 7 {
 		t.Fatalf("durable Environment authority fold/replay state = %+v, %v", snapshot, err)
 	}
 	for _, command := range []operation.Command{briefCommand, findingCommand} {
@@ -670,7 +670,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		}
 	}
 	installedEvents, err := journal.EventRecords(context.Background())
-	if err != nil || len(installedEvents) != 13 {
+	if err != nil || len(installedEvents) != 12 {
 		t.Fatalf("installed event lineage after content fold = %d records, %v", len(installedEvents), err)
 	}
 	wantContentEvents := map[string]struct {
@@ -793,7 +793,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable installed grant identity/as-of = %+v, %v", installedGrant, err)
 	}
 	records, err := journal.EventRecords(context.Background())
-	if err != nil || len(records) != 13 {
+	if err != nil || len(records) != 12 {
 		t.Fatalf("durable installed event records = %d, %v", len(records), err)
 	}
 	if records[0].EventID == records[1].EventID {
@@ -908,8 +908,8 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("durable acquired-claim close receipt output = %#v, %v", releaseResult, outputErr)
 	}
 	closedAnchor, err := fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || closedAnchor.EventCount != 15 {
-		t.Fatalf("authority prefix after lost close response = %+v, %v; want fifteen committed events", closedAnchor, err)
+	if err != nil || closedAnchor.EventCount != 14 {
+		t.Fatalf("authority prefix after lost close response = %+v, %v; want fourteen committed events", closedAnchor, err)
 	}
 	closeAttempt, err := closedJournal.ClaimJournalReleaseAttempt(claimReleaseID)
 	if err != nil || closeAttempt.Returned || len(closeAttempt.Receipt) != 0 || closeAttempt.ResultCode != "" ||
@@ -932,7 +932,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatal("reopened Environment silently advanced its pinned claim-journal generation")
 	}
 	closedRecords, err := closedJournal.EventRecords(context.Background())
-	if err != nil || len(closedRecords) != 13 {
+	if err != nil || len(closedRecords) != 12 {
 		_ = closedJournal.Close()
 		t.Fatalf("lost response leaked an uninstalled acquired-claim event tail = %d, %v", len(closedRecords), err)
 	}
@@ -947,7 +947,7 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		t.Fatalf("same-ID acquired-claim close recovery after daemon/journal reopen = %+v, %v; daemon=%s", closeReplay, err, closeReplayOutput.String())
 	}
 	closedAnchor, err = fixture.store.CurrentPrefixAnchor(context.Background(), m5TestDomain)
-	if err != nil || closedAnchor.EventCount != 15 {
+	if err != nil || closedAnchor.EventCount != 14 {
 		t.Fatalf("exact close replay changed authority event tail = %+v, %v", closedAnchor, err)
 	}
 	claimJournalQueries.reset()

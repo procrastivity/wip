@@ -882,7 +882,7 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 	if states[matterA] != "canceled" || states[matterB] != "done" || stepProjectionValue.State != "done" || stepProjectionValue.MatterID != matterB {
 		t.Fatalf("installed M6 lifecycle states: Matter A=%q Matter B=%q Step=%+v", states[matterA], states[matterB], stepProjectionValue)
 	}
-	var sawStandaloneMatterStart, sawStageFinish, sawMatterSeal bool
+	var sawStandaloneMatterStart, sawStageFinish, sawInlineBatchSweep bool
 	var cascadeKinds, cascadeSubjects, cascadeEvents []string
 	var cascadeFlags []bool
 	var cascadeCauses []*string
@@ -901,7 +901,7 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 		case "stage.finished":
 			sawStageFinish = true
 		case "batch.swept":
-			sawMatterSeal = true
+			sawInlineBatchSweep = true
 		}
 		if fields["command_id"] == "01KZ7XHAQT1S46NYPN1PW1WY06" &&
 			(fields["kind"] == "matter.started" || fields["kind"] == "stage.started" || fields["kind"] == "step.started") {
@@ -925,9 +925,9 @@ func TestPullAndInstallM6LifecycleEventSet(t *testing.T) {
 		t.Fatalf("installed Matter→Stage→Step start causation: kinds=%v subjects=%v events=%v cascade=%v causes=%v",
 			cascadeKinds, cascadeSubjects, cascadeEvents, cascadeFlags, cascadeCauses)
 	}
-	if !sawStandaloneMatterStart || !sawStageFinish || !sawMatterSeal {
-		t.Fatalf("installed lifecycle event evidence: standalone-matter-start=%t stage-finish=%t matter-seal=%t",
-			sawStandaloneMatterStart, sawStageFinish, sawMatterSeal)
+	if !sawStandaloneMatterStart || !sawStageFinish || sawInlineBatchSweep {
+		t.Fatalf("installed lifecycle event evidence: standalone-matter-start=%t stage-finish=%t inline-batch-sweep=%t",
+			sawStandaloneMatterStart, sawStageFinish, sawInlineBatchSweep)
 	}
 }
 
@@ -1132,6 +1132,18 @@ func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testin
 	if _, _, _, err := foldEventRecords(append(append([]wipdwire.EventRecord(nil), records...),
 		event(509, 404, 5, "batch.swept", batchID, map[string]any{})), domainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("sweep after a Matter finish with an incomplete child folded: %v", err)
+	}
+	legacyFinishPrefix := append([]wipdwire.EventRecord(nil), records[:7]...)
+	legacyFinishPrefix = append(legacyFinishPrefix,
+		event(507, 405, 5, "step.finished", stepID, map[string]any{"from": "in-progress", "to": "done"}),
+		event(508, 406, 6, "matter.finished", matterID, map[string]any{"from": "in-progress", "to": "done"}))
+	if _, _, _, err = foldEventRecords(legacyFinishPrefix, domainID); err != nil {
+		t.Fatalf("fold completed Matter finish without legacy inline sweep: %v", err)
+	}
+	legacyInlineSweep := append(append([]wipdwire.EventRecord(nil), legacyFinishPrefix...),
+		event(509, 406, 6, "batch.swept", batchID, map[string]any{}))
+	if _, _, _, err = foldEventRecords(legacyInlineSweep, domainID); err != nil {
+		t.Fatalf("fold compatible historical inline-sweep Matter finish: %v", err)
 	}
 
 	barrierDigest := testDigest([]byte("acquired claim close barrier"))

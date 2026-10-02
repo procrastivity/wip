@@ -651,6 +651,9 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		if !ok {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
+		if pendingLifecycle != nil && pendingLifecycle.stage == "matter-sweep-optional" && kind != "batch.swept" {
+			pendingLifecycle = nil
+		}
 		if pendingAcquisition != nil &&
 			(pendingAcquisition.stage == "claim" && kind != "claim.acquired" || pendingAcquisition.stage == "dispatch" && kind != "dispatch.opened") {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
@@ -928,12 +931,12 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			setFoldedNodeState(nodeID, to, &matterStates, &stageStates, &stepStates, projections, stepProjections)
 			if scale == "matter" && verb == "finished" && foldedMatterSubtreeDone(matterID, stageStates, stageMatters, stepStates, stepProjections) {
-				pendingLifecycle = &lifecycleFoldState{stage: "matter-sweep", command: lifecycle, matter: matterID}
+				pendingLifecycle = &lifecycleFoldState{stage: "matter-sweep-optional", command: lifecycle, matter: matterID}
 			}
 		case "batch.swept":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			batchID := asString(fields["subject_id"])
-			if !valid || pendingLifecycle == nil || pendingLifecycle.stage != "matter-sweep" ||
+			if !valid || pendingLifecycle == nil || pendingLifecycle.stage != "matter-sweep-optional" ||
 				!sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) ||
 				!clientULIDPattern.MatchString(batchID) || anonymousBatches[pendingLifecycle.matter] != batchID || sweptBatches[batchID] {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
@@ -1039,7 +1042,7 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		copy(chain[:], hash.Sum(nil))
 		previousEventID = record.EventID
 	}
-	if pendingAcquisition != nil || pendingLifecycle != nil || pendingClaimRelease != nil {
+	if pendingAcquisition != nil || pendingLifecycle != nil && pendingLifecycle.stage != "matter-sweep-optional" || pendingClaimRelease != nil {
 		return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 	}
 	sort.Slice(projections, func(i, j int) bool {

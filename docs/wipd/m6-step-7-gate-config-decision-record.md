@@ -135,27 +135,27 @@ adding them to that identity. A repair must fail closed if either hop lacks v2;
 it must never downgrade to v1. Non-repair v1 clients and peers retain existing
 behavior.
 
-## Versioning question still open
+## Owner-ratified Matter finish compatibility (FINISH-A)
 
-The implementation draft introduced `matter.finish@v2`, but this was not
-owner-ratified. The planner's best-supported reading is to correct
-`matter.finish@v1` to implement D55's already-settled gate-aware seal predicate;
-the Step 5 gate-free calculation is an implementation limitation, not a
-separately approved meaning of “sealed.” The operation compatibility contract
-requires a version bump for an incompatible contract change. Our recommendation
-is to retain `@v1`: its `BecameSealed` result keeps the D55 meaning and the
-change corrects an incomplete predicate. The owner has not explicitly
-ratified this versioning conclusion, so record it as open until confirmed. Do
-not treat the draft's v2 definition as authoritative.
+Retain and correct `matter.finish@v1` to implement D55's already-settled,
+gate-aware seal predicate. The Step 5 descendant-completion calculation was an
+implementation limitation, not a separately approved meaning of “sealed.”
+Preserve validation of compatible old `matter.finish@v1` receipts and histories,
+including historical command effects that appended inline `batch.swept`; new
+finish executions append no sweep event. Do not introduce `matter.finish@v2`.
+The separately contracted post-claim-close sweep remains future work, and this
+decision does not alter the M2 claim release or stand-down `@v1` maps.
 
 ## Implementation and archive status
 
-At base `a54e75563e27233013b319c2b0c344c2a02098f2`, the M6 Step 7 gate/config
-authority projections, command handlers, and v2 submit path are not
-implemented. The Step 7 implementer thread reported no edits or commits; its
-checkout was clean at that base. This design record preserves the settled
-decisions independently of that thread, while the versioning question remains
-visible rather than being silently decided.
+Implementation remains partial: the ordinary gate declaration/close/dismiss
+foundation and the FINISH-A correction are present on the accepted M6 Step 7
+feature branch, but Step 7 is not complete. Exemption repair/proof,
+role projection, the Step 17/18 public config/provider APIs, and detached
+command-submit v2 transport remain outside this implementation slice. The
+earlier implementer-thread status at base
+`a54e75563e27233013b319c2b0c344c2a02098f2` is historical context, not current
+implementation status.
 
 Relevant source contracts: `operation-contract.md`,
 `frame-security-execution-contract.md`, `conformance-schemas.cddl`,
