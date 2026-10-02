@@ -113,6 +113,9 @@ func validateGateCommandEffects(db *sql.DB, command operation.Command, events []
 	}
 	switch input := command.Request.Input.(type) {
 	case operation.GateDeclareInput:
+		if string(command.Request.Actor) != "human" {
+			return ErrInvalidStore
+		}
 		if err := expectOutput(map[string]any{"gate": input.Gate, "scale": input.Scale}); err != nil {
 			return err
 		}
@@ -141,9 +144,6 @@ func validateGateCommandEffects(db *sql.DB, command operation.Command, events []
 		}
 		if artifactDecoder.Unmarshal(event.payload["gate"], &payload.Gate) != nil || artifactDecoder.Unmarshal(event.payload["scale"], &payload.Scale) != nil ||
 			payload.Gate != input.Gate || payload.Scale != input.Scale {
-			return ErrInvalidStore
-		}
-		if string(command.Request.Actor) != "human" {
 			return ErrInvalidStore
 		}
 		return expectRange()

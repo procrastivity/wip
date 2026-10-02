@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ func (s *Store) submitGateCommand(ctx context.Context, command operation.Command
 		return empty, ErrInvalidProof
 	}
 	before := func(tx *sql.Tx) error {
-		return validateStep4ClaimTx(ctx, tx, command)
+		return validateGateClaimTx(ctx, tx, command)
 	}
 	var beforeCommit func() error
 	if checkContext {
@@ -57,6 +58,54 @@ func (s *Store) submitGateCommand(ctx context.Context, command operation.Command
 	})
 }
 
+// validateGateClaimTx mirrors the exact Step 4 identity fences but permits a
+// live Matter in Done state. Gate close/dismiss can intentionally follow
+// Matter finish while its current claim journal remains open.
+func validateGateClaimTx(ctx context.Context, tx *sql.Tx, command operation.Command) error {
+	claim := command.Request.Claim
+	if claim == nil || !ulid.MatchString(claim.ID) {
+		return ErrFenced
+	}
+	epoch, err := strconv.ParseUint(claim.Epoch, 10, 64)
+	if err != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != claim.Epoch {
+		return ErrFenced
+	}
+	var matter, owner, repo, worktree, journalState string
+	var storedEpoch, authorityEpoch, activeEpoch, generation uint64
+	var closed sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT c.matter_id,c.owner_environment_id,c.worktree_id,c.claim_epoch,c.authority_epoch,c.close_command_id,
+		m.repo_id,j.state,j.generation,d.active_epoch
+		FROM claims c JOIN matters m ON m.domain_id=c.domain_id AND m.matter_id=c.matter_id
+		JOIN claim_journals j ON j.domain_id=c.domain_id AND j.claim_id=c.claim_id
+		JOIN domains d ON d.domain_id=c.domain_id
+		WHERE c.domain_id=? AND c.claim_id=? AND j.generation=(SELECT max(current.generation) FROM claim_journals current WHERE current.domain_id=c.domain_id AND current.claim_id=c.claim_id)`,
+		command.AuthorityDomainID, claim.ID).Scan(&matter, &owner, &worktree, &storedEpoch, &authorityEpoch, &closed, &repo, &journalState, &generation, &activeEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFenced
+	}
+	if err != nil {
+		return err
+	}
+	if closed.Valid || journalState != "open" || generation == 0 || storedEpoch != epoch ||
+		authorityEpoch != command.ExpectedAuthorityEpoch || activeEpoch != command.ExpectedAuthorityEpoch ||
+		owner != command.EnvironmentID || repo != command.Request.Context.Repo || worktree != command.Request.Context.Worktree {
+		return ErrFenced
+	}
+	var liveMatter string
+	if err = tx.QueryRowContext(ctx, `SELECT node_id FROM m6_nodes WHERE domain_id=? AND node_id=? AND kind='matter' AND repo_id=? AND tombstone_event_id IS NULL`,
+		command.AuthorityDomainID, matter, repo).Scan(&liveMatter); err != nil || liveMatter != matter {
+		return ErrFenced
+	}
+	state, err := lifecycleStateTx(ctx, tx, command.AuthorityDomainID, matter, "matter")
+	if err != nil {
+		return err
+	}
+	if state != "planned" && state != "in-progress" && state != "done" {
+		return ErrFenced
+	}
+	return nil
+}
+
 func appendNonemptyEventIDs(first string, rest []string) []string {
 	if first == "" {
 		return append([]string(nil), rest...)
@@ -73,7 +122,7 @@ func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, 
 		fold.subject, fold.eventIDs = "", nil
 		return fold, nil
 	}
-	if err := validateStep4ClaimTx(ctx, tx, command); err != nil {
+	if err := validateGateClaimTx(ctx, tx, command); err != nil {
 		if errors.Is(err, ErrFenced) {
 			return refuse("refusal.claim-fenced", "the Matter claim or current journal generation is no longer active")
 		}

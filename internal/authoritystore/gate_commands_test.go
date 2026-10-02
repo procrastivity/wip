@@ -3,6 +3,7 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -74,6 +75,81 @@ func TestGateDeclareAndCloseUseAuthorityProjectionAndExactReplay(t *testing.T) {
 	replayed, err := f.s.SubmitCommand(ctx, close, closeHash, f.peer, f.now)
 	if err != nil || replayed.Pending || !bytes.Equal(replayed.Receipt, closed.Receipt) {
 		t.Fatalf("exact close replay changed receipt: status=%+v err=%v", replayed, err)
+	}
+}
+
+func TestGateCloseAndDismissAllowDoneMatterWithOpenExactClaim(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		close bool
+	}{
+		{name: "close after finish", close: true},
+		{name: "dismiss after finish", close: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, allocation := gateClaimedFixture(t)
+			ctx := context.Background()
+			declare := step12Command(f, 12, 3, operation.GateDeclareV1,
+				operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
+			declareOwner := submitGateOperation(t, f, declare)
+			declared, err := f.s.CompleteCommand(ctx, declareOwner, operation.Result{Code: operation.ResultSucceeded}, repoA, claimTestID(104), f.now, signWith(f.key))
+			if err != nil {
+				t.Fatalf("declare Matter gate: %v", err)
+			}
+			claimTestAcknowledge(t, f, allocation.JournalID, 1, declared)
+
+			start := step12Command(f, 13, 4, operation.MatterStartV1,
+				operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
+			started := completeLifecycleCommand(t, f, start, []string{claimTestID(105)})
+			claimTestAcknowledge(t, f, allocation.JournalID, 2, started)
+			finish := step12Command(f, 14, 5, operation.MatterFinishV1,
+				operation.MatterFinishInput{MatterID: f.matter}, allocation.ClaimID)
+			finished := completeLifecycleCommand(t, f, finish, []string{claimTestID(106), claimTestID(107)})
+			claimTestReceipt(t, finished, "result.succeeded", map[string]any{
+				"matter_id": f.matter, "state": "done", "became_sealed": true,
+			}, 106, 107)
+			var journalState string
+			var closeCommand sql.NullString
+			if err = f.s.db.QueryRow(`SELECT j.state,c.close_command_id FROM claim_journals j JOIN claims c USING(domain_id,claim_id) WHERE j.domain_id=? AND j.journal_id=?`,
+				domainA, allocation.JournalID).Scan(&journalState, &closeCommand); err != nil || journalState != "open" || closeCommand.Valid {
+				t.Fatalf("Matter finish changed current claim/journal state to %q/%v, err %v", journalState, closeCommand, err)
+			}
+
+			var command operation.Command
+			var eventID string
+			if test.close {
+				command = step12Command(f, 15, 6, operation.GateCloseV1,
+					operation.GateCloseInput{Gate: "reviewed-local", NodeID: f.matter}, allocation.ClaimID)
+				eventID = claimTestID(108)
+			} else {
+				command = step12Command(f, 15, 6, operation.GateDismissV1,
+					operation.GateDismissInput{Gate: "reviewed-local", NodeID: f.matter, Reason: "emergency closeout"}, allocation.ClaimID)
+				eventID = claimTestID(108)
+			}
+			wrongClaim := command
+			wrongClaim.ID = claimTestID(16)
+			wrongClaim.CorrelationCommandID = wrongClaim.ID
+			wrongClaim.Request.Claim = &operation.ClaimContext{ID: claimTestID(999), Epoch: "1"}
+			if _, err = f.s.SubmitCommand(ctx, wrongClaim, hashCommand(t, wrongClaim), f.peer, f.now); !errors.Is(err, ErrFenced) {
+				t.Fatalf("Done-Matter command with wrong claim error = %v, want ErrFenced", err)
+			}
+			wrongEpoch := command
+			wrongEpoch.ID = claimTestID(17)
+			wrongEpoch.CorrelationCommandID = wrongEpoch.ID
+			wrongEpoch.Request.Claim = &operation.ClaimContext{ID: allocation.ClaimID, Epoch: "2"}
+			if _, err = f.s.SubmitCommand(ctx, wrongEpoch, hashCommand(t, wrongEpoch), f.peer, f.now); !errors.Is(err, ErrFenced) {
+				t.Fatalf("Done-Matter command with wrong claim epoch error = %v, want ErrFenced", err)
+			}
+			owner := submitGateOperation(t, f, command)
+			completed, err := f.s.CompleteCommand(ctx, owner, operation.Result{Code: operation.ResultSucceeded}, f.matter, eventID, f.now, signWith(f.key))
+			if err != nil {
+				t.Fatalf("complete gate operation against Done Matter: %v", err)
+			}
+			claimTestReceipt(t, completed, "result.succeeded", map[string]any{
+				"gate": "reviewed-local", "node_id": f.matter, "scale": "matter",
+			}, 108)
+			claimTestAcknowledge(t, f, allocation.JournalID, 3, completed)
+		})
 	}
 }
 
@@ -473,5 +549,80 @@ func TestGateHistoryValidationRejectsSuccessfulRoleOwnedEffects(t *testing.T) {
 				t.Fatalf("successful role-owned event/receipt validation = %v, want ErrInvalidStore", err)
 			}
 		})
+	}
+}
+
+func TestGateStoreValidationRejectsRoleAuthoredSuccessfulNoopDeclaration(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`CREATE TABLE submissions(domain_id TEXT,command_id TEXT,request_hash TEXT,command BLOB,operation_name TEXT,operation_version INTEGER,state TEXT)`,
+		`CREATE TABLE authority_events(domain_id TEXT,command_id TEXT,position INTEGER,event_id TEXT,record BLOB)`,
+		`CREATE TABLE terminal_receipts(domain_id TEXT,command_id TEXT,receipt BLOB)`,
+		`CREATE TABLE m6_gate_declarations(domain_id TEXT,repo_id TEXT,gate TEXT,scale TEXT)`,
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO m6_gate_declarations VALUES(?,?,?,?)`, domainA, repoA, "reviewed-local", "matter"); err != nil {
+		t.Fatal(err)
+	}
+	command := operation.Command{
+		ID: claimTestID(401), AuthorityDomainID: domainA, ExpectedAuthorityEpoch: 7,
+		EnvironmentID: envA, EnvironmentSequence: 3, ActedAt: "2026-09-23T11:59:00Z",
+		CorrelationCommandID: claimTestID(401),
+		Request: operation.Request{
+			Operation: operation.GateDeclareV1.Metadata().Operation, Actor: "role:verifier",
+			Context: operation.Context{Repo: repoA, Clone: claimTestID(402), Worktree: claimTestID(403)},
+			Claim:   &operation.ClaimContext{ID: claimTestID(404), Epoch: "1"},
+			Input:   operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"},
+		},
+	}
+	canonical, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := artifactEncoder.Marshal(map[string]any{"gate": "reviewed-local", "scale": "matter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := receiptRecord{
+		Schema: "wipd.terminal-receipt/1", Domain: domainA, Epoch: 7, Identity: "wipd.command/1",
+		ID: command.ID, Hash: hash,
+		Operation: struct {
+			Name    string `cbor:"name"`
+			Version uint64 `cbor:"version"`
+		}{Name: "gate.declare", Version: 1},
+		Environment: struct {
+			ID       string `cbor:"id"`
+			Sequence uint64 `cbor:"sequence"`
+		}{ID: envA, Sequence: 3},
+		Result: struct {
+			Code    string  `cbor:"code"`
+			Output  []byte  `cbor:"output"`
+			Problem *string `cbor:"problem_code"`
+		}{Code: string(operation.ResultSucceeded), Output: output},
+	}
+	receiptBytes, err := artifactEncoder.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO submissions VALUES(?,?,?,?,?,?,?)`, domainA, command.ID, hash, canonical, "gate.declare", 1, "terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO terminal_receipts VALUES(?,?,?)`, domainA, command.ID, receiptBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err = checkStep13GateCommands(db); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("store validation accepted role-authored successful no-op declaration: %v", err)
 	}
 }
