@@ -123,8 +123,17 @@ func validateGateCommandEffects(db *sql.DB, command operation.Command, events []
 			if receipt.Range != nil {
 				return ErrInvalidStore
 			}
-			var scale string
-			if err := db.QueryRow(`SELECT scale FROM m6_gate_declarations WHERE domain_id=? AND repo_id=? AND gate=?`, command.AuthorityDomainID, command.Request.Context.Repo, input.Gate).Scan(&scale); err != nil || scale != input.Scale {
+			var priorDeclaration int
+			if err := db.QueryRow(`SELECT count(*)
+				FROM m6_gate_declarations d
+				JOIN authority_events e ON e.domain_id=d.domain_id AND e.event_id=d.declaration_event_id
+				JOIN terminal_receipts declared ON declared.domain_id=e.domain_id AND declared.command_id=e.command_id
+				JOIN terminal_receipts noop ON noop.domain_id=d.domain_id AND noop.command_id=?
+				WHERE d.domain_id=? AND d.repo_id=? AND d.gate=? AND d.scale=? AND (
+					declared.artifact_epoch<noop.artifact_epoch OR
+					(declared.artifact_epoch=noop.artifact_epoch AND declared.artifact_generation<noop.artifact_generation) OR
+					(declared.artifact_epoch=noop.artifact_epoch AND declared.artifact_generation=noop.artifact_generation AND declared.artifact_sequence<noop.artifact_sequence)
+				)`, command.ID, command.AuthorityDomainID, command.Request.Context.Repo, input.Gate, input.Scale).Scan(&priorDeclaration); err != nil || priorDeclaration != 1 {
 				return ErrInvalidStore
 			}
 			return nil

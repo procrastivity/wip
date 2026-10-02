@@ -363,7 +363,10 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 		}
 		if version >= 12 {
 			if _, ok := gateDefinition(operation.ID{Name: s.operation, Version: uint16(s.version)}); ok {
-				if _, parseErr := parseStep12Event(raw, d, pos, id, cmd); parseErr != nil {
+				event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
+				command, commandErr := operation.DecodeCanonicalCommand(s.command)
+				if parseErr != nil || commandErr != nil || event.hash != s.hash || event.environment != s.env ||
+					event.sequence != s.seq || event.acted != command.ActedAt {
 					err = ErrInvalidStore
 					break
 				}

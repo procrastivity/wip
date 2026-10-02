@@ -3,10 +3,14 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
+	"path/filepath"
 	"testing"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/procrastivity/wip/internal/operation"
 )
 
@@ -31,6 +35,169 @@ func submitGateOperation(t *testing.T, f *claimTestFixture, command operation.Co
 		t.Fatalf("submit %s: status=%+v err=%v", command.Request.Operation, status, err)
 	}
 	return status.Owner
+}
+
+func rewriteGateAuthorityEvent(t *testing.T, root, eventID string, mutate func(map[string]cbor.RawMessage) error) {
+	t.Helper()
+	db, err := connect(filepath.Join(root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var domain string
+	var position uint64
+	var record []byte
+	if err = db.QueryRow(`SELECT domain_id,position,record FROM authority_events WHERE event_id=?`, eventID).Scan(&domain, &position, &record); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]cbor.RawMessage
+	if err = canonicalDecode(record, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if err = mutate(fields); err != nil {
+		t.Fatal(err)
+	}
+	record, err = artifactEncoder.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
+	if position > 1 {
+		var previous string
+		if err = db.QueryRow(`SELECT prefix_digest FROM authority_events WHERE domain_id=? AND position=?`, domain, position-1).Scan(&previous); err != nil {
+			t.Fatal(err)
+		}
+		previousBytes, decodeErr := digestRaw(previous)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		copy(prefix[:], previousBytes)
+	}
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(record)))
+	h := sha256.New()
+	_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+	_, _ = h.Write(prefix[:])
+	_, _ = h.Write(length[:])
+	_, _ = h.Write(record)
+	if _, err = db.Exec(`DROP TRIGGER authority_events_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	triggerRestored := false
+	defer func() {
+		if !triggerRestored {
+			for _, object := range step4Schema {
+				if object.name == "authority_events_immutable" {
+					_, _ = db.Exec(object.sql)
+					break
+				}
+			}
+		}
+	}()
+	if _, err = db.Exec(`UPDATE authority_events SET record=?,prefix_digest=? WHERE domain_id=? AND position=?`, record, digestRawBytes(h.Sum(nil)), domain, position); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range step4Schema {
+		if object.name == "authority_events_immutable" {
+			if _, err = db.Exec(object.sql); err != nil {
+				t.Fatal(err)
+			}
+			triggerRestored = true
+			break
+		}
+	}
+	if !triggerRestored {
+		t.Fatal("authority_events_immutable trigger definition not found")
+	}
+}
+
+func setGateEventField(fields map[string]cbor.RawMessage, key string, value any) error {
+	encoded, err := artifactEncoder.Marshal(value)
+	if err == nil {
+		fields[key] = encoded
+	}
+	return err
+}
+
+func TestOpenExistingRejectsGateEventsNotBoundToCanonicalCommand(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]cbor.RawMessage) error
+	}{
+		{name: "request hash", mutate: func(fields map[string]cbor.RawMessage) error {
+			return setGateEventField(fields, "request_hash", digestBytes([]byte("different request")))
+		}},
+		{name: "environment ID", mutate: func(fields map[string]cbor.RawMessage) error {
+			var environment struct {
+				ID       string `cbor:"id"`
+				Sequence uint64 `cbor:"sequence"`
+			}
+			if err := artifactDecoder.Unmarshal(fields["environment"], &environment); err != nil {
+				return err
+			}
+			environment.ID = claimTestID(501)
+			encoded, err := artifactEncoder.Marshal(environment)
+			if err == nil {
+				fields["environment"] = encoded
+			}
+			return err
+		}},
+		{name: "environment sequence", mutate: func(fields map[string]cbor.RawMessage) error {
+			var environment struct {
+				ID       string `cbor:"id"`
+				Sequence uint64 `cbor:"sequence"`
+			}
+			if err := artifactDecoder.Unmarshal(fields["environment"], &environment); err != nil {
+				return err
+			}
+			environment.Sequence++
+			encoded, err := artifactEncoder.Marshal(environment)
+			if err == nil {
+				fields["environment"] = encoded
+			}
+			return err
+		}},
+		{name: "acted at", mutate: func(fields map[string]cbor.RawMessage) error {
+			return setGateEventField(fields, "acted_at", "2026-09-23T12:00:01Z")
+		}},
+		{name: "payload gate", mutate: func(fields map[string]cbor.RawMessage) error {
+			var payload map[string]cbor.RawMessage
+			if err := canonicalDecode(fields["payload"], &payload); err != nil {
+				return err
+			}
+			if err := setGateEventField(payload, "gate", "different"); err != nil {
+				return err
+			}
+			encoded, err := artifactEncoder.Marshal(payload)
+			if err == nil {
+				fields["payload"] = encoded
+			}
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, allocation := gateClaimedFixture(t)
+			command := step12Command(f, 12, 3, operation.GateDeclareV1,
+				operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
+			owner := submitGateOperation(t, f, command)
+			completed, err := f.s.CompleteCommand(context.Background(), owner, operation.Result{Code: operation.ResultSucceeded}, repoA, claimTestID(104), f.now, signWith(f.key))
+			if err != nil {
+				t.Fatalf("complete gate declaration: %v", err)
+			}
+			claimTestAcknowledge(t, f, allocation.JournalID, 1, completed)
+			if err = f.s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			rewriteGateAuthorityEvent(t, f.root, claimTestID(104), test.mutate)
+			if reopened, openErr := OpenExisting(f.root); !errors.Is(openErr, ErrInvalidStore) {
+				if reopened != nil {
+					_ = reopened.Close()
+				}
+				t.Fatalf("OpenExisting accepted mismatched signed-history event: %v", openErr)
+			}
+		})
+	}
 }
 
 func TestGateDeclareAndCloseUseAuthorityProjectionAndExactReplay(t *testing.T) {
@@ -403,6 +570,54 @@ func TestMatterFinishValidatorAcceptsLegacyInlineSweepHistory(t *testing.T) {
 	}{First: finishEvent.id, Last: finishEvent.id, Count: 1}
 	if err = checkM6LifecycleEvents(f.s.db, parsed, legacyReceipt, []lifecycleEvent{finishEvent}); err == nil {
 		t.Fatal("legacy sealed receipt without its required inline Batch sweep was accepted")
+	}
+}
+
+func TestOpenExistingRejectsGateNoopBeforeFirstDeclaration(t *testing.T) {
+	f, allocation := gateClaimedFixture(t)
+	ctx := context.Background()
+	noop := step12Command(f, 12, 3, operation.GateDeclareV1,
+		operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
+	noopOwner := submitGateOperation(t, f, noop)
+	canonical, err := noop.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := artifactEncoder.Marshal(map[string]any{"gate": "reviewed-local", "scale": "matter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noopReceipt, err := f.s.finishCommandTx(ctx, tx, commandIdentity{
+		domain: domainA, epoch: noop.ExpectedAuthorityEpoch, environment: noop.EnvironmentID,
+		sequence: noop.EnvironmentSequence, id: noop.ID, name: noop.Request.Operation.Name,
+		version: uint64(noop.Request.Operation.Version), repo: repoA, encoded: canonical,
+		hash: hashCommand(t, noop), m1: &noop,
+	}, noop.EnvironmentSequence-1, string(operation.ResultSucceeded), output, nil, nil, nil, nil, f.now, signWith(f.key), nil)
+	if err != nil || len(noopReceipt.Receipt) == 0 || noopOwner == nil {
+		t.Fatalf("persist pre-declaration signed no-op receipt: receipt=%t err=%v", len(noopReceipt.Receipt) != 0, err)
+	}
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, noopReceipt)
+
+	declare := step12Command(f, 13, 4, operation.GateDeclareV1,
+		operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
+	declareOwner := submitGateOperation(t, f, declare)
+	declared, err := f.s.CompleteCommand(ctx, declareOwner, operation.Result{Code: operation.ResultSucceeded}, repoA, claimTestID(104), f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("declare gate after earlier no-op: %v", err)
+	}
+	claimTestAcknowledge(t, f, allocation.JournalID, 2, declared)
+	if err = f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, openErr := OpenExisting(f.root); !errors.Is(openErr, ErrInvalidStore) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("OpenExisting accepted a no-op before the first matching declaration: %v", openErr)
 	}
 }
 
