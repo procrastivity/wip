@@ -154,11 +154,20 @@ decision does not alter the M2 claim release or stand-down `@v1` maps.
 ## Implementation and archive status
 
 Implementation remains partial: the ordinary gate declaration/close/dismiss
-foundation and the FINISH-A correction are present on the accepted M6 Step 7
-feature branch, but Step 7 is not complete. Exemption repair/proof,
-role projection, the Step 17/18 public config/provider APIs, and detached
-command-submit v2 transport remain outside this implementation slice. The
-earlier implementer-thread status at base
+foundation, FINISH-A correction, pure detached-proof validation, and private
+repair admission/terminal path are present on the M6 Step 7 feature branch, but
+Step 7 is not complete. Seed/pull history remains the authority event prefix;
+client-state/1 rebuilds and validates its gate projection from that history,
+while detached repair proof/nonce state remains private to the authority store.
+Client-state/1 does not represent Repo config, shared-reference/aggregate, or
+tracker-candidate/outbox projections. Its transfer fold therefore fails closed
+on `config.set`, shared-reference events, and narrated/boundary tracker effects
+instead of silently claiming parity. Those client projection consequences are
+deferred and must be represented before such transfer histories are accepted.
+Role projection, the Step 17/18 public config/provider APIs, and detached
+command-submit v2 transport remain separately sequenced; no repair operation
+is registered or exposed through command-submit/1. The earlier
+implementer-thread status at base
 `a54e75563e27233013b319c2b0c344c2a02098f2` is historical context, not current
 implementation status.
 

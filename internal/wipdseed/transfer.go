@@ -526,7 +526,7 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 			return zero, ErrInvalidClientState
 		}
 	}
-	anchor, projections, stepProjections, err := foldEventRecords(records, domainID)
+	anchor, projections, stepProjections, gateProjection, err := foldEventRecordsWithGateProjection(records, domainID)
 	if err != nil {
 		return zero, fmt.Errorf("verify transferred event prefix: %w", err)
 	}
@@ -542,7 +542,7 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 		EnvironmentID: environmentID, OwnerKeyID: profile.OwnerRootSPKI(), SPKIDigest: spkiDigest,
 		Prefix: endAnchor, EventRecords: records, ManifestDigest: manifest.Digest,
 		ManifestEntries: append([]wipdwire.BlobManifestEntry{}, manifest.Entries...), Projections: projections,
-		StepProjections: stepProjections, ContentProjections: contentProjections,
+		StepProjections: stepProjections, ContentProjections: contentProjections, GateProjection: gateProjection,
 	}, nil
 }
 
@@ -573,6 +573,25 @@ func decodeManifest(payload []byte) (wipdwire.BlobManifest, error) {
 }
 
 func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire.PrefixAnchor, []json.RawMessage, []json.RawMessage, error) {
+	anchor, projections, steps, _, err := foldEventRecordsWithGateProjection(records, domainID)
+	return anchor, projections, steps, err
+}
+
+func foldEventRecordsWithGateProjection(records []wipdwire.EventRecord, domainID string) (
+	wipdwire.PrefixAnchor, []json.RawMessage, []json.RawMessage, *step7GateProjection, error,
+) {
+	anchor, projections, steps, err := foldEventRecordsCore(records, domainID)
+	if err != nil {
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, err
+	}
+	gates, err := foldStep7GateProjection(records, domainID)
+	if err != nil {
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, err
+	}
+	return anchor, projections, steps, gates, nil
+}
+
+func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipdwire.PrefixAnchor, []json.RawMessage, []json.RawMessage, error) {
 	chain := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
 	projections := make([]eventProjection, 0, len(records))
 	stepProjections := make([]stepProjection, 0, len(records))
@@ -650,6 +669,9 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 		kind, ok := fields["kind"].(string)
 		if !ok {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+		}
+		if err := step7ClientTransferBoundary(kind, fields); err != nil {
+			return wipdwire.PrefixAnchor{}, nil, nil, err
 		}
 		if pendingLifecycle != nil && pendingLifecycle.stage == "matter-sweep-optional" && kind != "batch.swept" {
 			pendingLifecycle = nil
@@ -943,6 +965,10 @@ func foldEventRecords(records []wipdwire.EventRecord, domainID string) (wipdwire
 			}
 			sweptBatches[batchID] = true
 			pendingLifecycle = nil
+		case "gate.declared", "gate.closed", "gate.dismissed", "gate.exemption-repaired":
+			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
 		case "dispatch.closed":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
@@ -1550,13 +1576,15 @@ func validateInstalledState(state ClientState, profile wipdauthority.Profile) er
 		!validDigest(state.ManifestDigest) || state.Projections == nil {
 		return ErrInvalidClientState
 	}
-	anchor, projections, stepProjections, err := foldEventRecords(state.EventRecords, state.DomainID)
+	anchor, projections, stepProjections, gateProjection, err := foldEventRecordsWithGateProjection(state.EventRecords, state.DomainID)
 	contentProjections, contentErr := foldContentEvents(state.EventRecords, state.DomainID)
-	// Step projections are derived entirely from retained event records. Missing
-	// data is a pre-Step-8 client-state shape and is rebuilt on the next pull.
+	// Step and gate projections are derived from retained event records. A
+	// missing cached projection is rebuilt on the next pull rather than making
+	// an older client state unreadable.
 	if err != nil || contentErr != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
 		state.StepProjections != nil && !equalJSONRaw(stepProjections, state.StepProjections) ||
-		state.ContentProjections != nil && !equalJSONRaw(contentProjections, state.ContentProjections) {
+		state.ContentProjections != nil && !equalJSONRaw(contentProjections, state.ContentProjections) ||
+		state.GateProjection != nil && !reflect.DeepEqual(gateProjection, state.GateProjection) {
 		return ErrInvalidClientState
 	}
 	digest, err := clientManifestChain(state.ManifestEntries)

@@ -285,7 +285,19 @@ func matterSnapshotItemsAt(db *sql.DB, domain string, count uint64) ([]SnapshotI
 		definition, defined := step12Definition(id)
 		event, parseErr := parseStep12Event(record, domain, position, eventID, eventCommand)
 		if decodeErr != nil || !defined || definition.ValidateRequest(command.Request) != nil || parseErr != nil ||
-			validateStep12Event(event, submission, command) != nil {
+			event.domain != submission.domain || event.command != submission.id || event.hash != submission.hash ||
+			event.repo != command.Request.Context.Repo || event.environment != submission.env || event.sequence != submission.seq ||
+			event.acted != command.ActedAt {
+			err = ErrInvalidStore
+			break
+		}
+		// Lifecycle events do not change the Matter list fields reconstructed
+		// below. Their operation-specific history is validated by Step 4; do
+		// not route their effects through Step 12's structural-event validator.
+		if connectedLifecycleOperation(id) {
+			continue
+		}
+		if validateStep12Event(event, submission, command) != nil {
 			err = ErrInvalidStore
 			break
 		}

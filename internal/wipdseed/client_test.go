@@ -2154,3 +2154,228 @@ func cloneFrames(frames []wipdwire.Frame) []wipdwire.Frame {
 	}
 	return result
 }
+
+func step7ClientTestEvent(t *testing.T, eventNumber, commandNumber int, sequence uint64, kind, subject string, payload map[string]any) wipdwire.EventRecord {
+	t.Helper()
+	eventID := fmt.Sprintf("%026d", eventNumber)
+	commandID := fmt.Sprintf("%026d", commandNumber)
+	actedAt := "2026-09-23T11:59:00Z"
+	record, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": testDomainID,
+		"command_id": commandID, "request_hash": testDigest([]byte("client-step7:" + commandID)),
+		"environment": map[string]any{"id": "01KZ7XHAQT1S46NYPN1PW1DX3A", "sequence": sequence},
+		"acted_at":    actedAt, "occurred_at": actedAt, "kind": kind,
+		"subject_id": subject, "repo_id": testRepoID, "payload": payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wipdwire.EventRecord{EventID: eventID, Record: record}
+}
+
+func step7ClientGateHistory(t *testing.T) []wipdwire.EventRecord {
+	t.Helper()
+	matterID := "00000000000000000000000041"
+	batchID := "00000000000000000000000042"
+	claimID := "00000000000000000000000043"
+	dispatchID := "00000000000000000000000044"
+	return []wipdwire.EventRecord{
+		step7ClientTestEvent(t, 500, 400, 1, "matter.created", matterID, map[string]any{
+			"id": matterID, "locator": "gate-client", "title": "Gate client",
+		}),
+		step7ClientTestEvent(t, 501, 401, 2, "batch.anonymous-created", batchID, map[string]any{
+			"batch_id": batchID, "matter_id": matterID,
+		}),
+		step7ClientTestEvent(t, 502, 401, 2, "claim.acquired", claimID, map[string]any{
+			"claim_id": claimID, "claim_epoch": uint64(1), "matter_id": matterID,
+			"batch_id": batchID, "dispatch_id": dispatchID,
+			"owner_environment_id": "01KZ7XHAQT1S46NYPN1PW1DX3A", "worktree_id": "00000000000000000000000045",
+		}),
+		step7ClientTestEvent(t, 503, 401, 2, "dispatch.opened", dispatchID, map[string]any{
+			"dispatch_id": dispatchID, "matter_id": matterID, "batch_id": batchID,
+			"claim_id": claimID, "worktree_id": "00000000000000000000000045",
+		}),
+		step7ClientTestEvent(t, 504, 402, 3, "matter.started", matterID, map[string]any{
+			"from": "planned", "to": "in-progress",
+		}),
+		step7ClientTestEvent(t, 505, 403, 4, "matter.finished", matterID, map[string]any{
+			"from": "in-progress", "to": "done",
+		}),
+		step7ClientTestEvent(t, 506, 404, 5, "gate.declared", testRepoID, map[string]any{
+			"gate": "snapshot", "scale": "matter", "exempt": []any{matterID},
+		}),
+		step7ClientTestEvent(t, 507, 405, 6, "gate.declared", testRepoID, map[string]any{
+			"gate": "reviewed", "scale": "matter",
+		}),
+		step7ClientTestEvent(t, 508, 406, 7, "gate.closed", matterID, map[string]any{
+			"gate": "reviewed", "scale": "matter", "tracker_push_level": "off",
+		}),
+		step7ClientTestEvent(t, 509, 407, 8, "gate.declared", testRepoID, map[string]any{
+			"gate": "waived", "scale": "matter",
+		}),
+		step7ClientTestEvent(t, 510, 408, 9, "gate.dismissed", matterID, map[string]any{
+			"gate": "waived", "scale": "matter", "reason": "accepted exception", "tracker_push_level": "off",
+		}),
+		step7ClientTestEvent(t, 511, 409, 10, "gate.declared", testRepoID, map[string]any{
+			"gate": "restored", "scale": "matter",
+		}),
+		step7ClientTestEvent(t, 512, 410, 11, "gate.exemption-repaired", matterID, map[string]any{
+			"gate": "restored",
+		}),
+	}
+}
+
+func TestClientSeedFoldPersistsStrictGateProjectionAndFinishOrdering(t *testing.T) {
+	records := step7ClientGateHistory(t)
+	anchor, projections, stepProjections, gates, err := foldEventRecordsWithGateProjection(records, testDomainID)
+	if err != nil || anchor.EventCount != uint64(len(records)) || gates == nil || len(gates.Declarations) != 4 || len(gates.States) != 4 {
+		t.Fatalf("fold ordinary gate/FINISH-A history: anchor=%+v gates=%+v err=%v", anchor, gates, err)
+	}
+	states := make(map[string]step7GateState)
+	for _, state := range gates.States {
+		states[state.Gate] = state
+	}
+	if states["snapshot"].State != "exempt" || states["snapshot"].SourceEventID != records[6].EventID ||
+		states["reviewed"].State != "closed" || states["reviewed"].SourceEventID != records[8].EventID ||
+		states["waived"].State != "dismissed" || states["waived"].Reason != "accepted exception" ||
+		states["restored"].State != "exempt" || states["restored"].SourceEventID != records[12].EventID {
+		t.Fatalf("client gate projection lost snapshot/close/dismiss/repair distinction: %+v", states)
+	}
+	fixture := newClientFixture(t)
+	if fixture.profile.DomainID() != testDomainID || fixture.profile.M5LabRepoID() != testRepoID {
+		t.Fatalf("client fixture identity does not match transfer history: domain=%s repo=%s", fixture.profile.DomainID(), fixture.profile.M5LabRepoID())
+	}
+	contentProjections, err := foldContentEvents(records, testDomainID)
+	if err != nil {
+		t.Fatalf("fold client-state content projection: %v", err)
+	}
+	state := ClientState{
+		Schema: "wipd.m5-client-state/1", DomainID: testDomainID, Epoch: fixture.profile.Epoch(), RepoID: testRepoID,
+		EnvironmentID: "01KZ7XHAQT1S46NYPN1PW1DX3A", OwnerKeyID: fixture.profile.OwnerRootSPKI(),
+		SPKIDigest:   testDigest([]byte("client-state-spki")),
+		Prefix:       anchor,
+		EventRecords: cloneEventRecords(records), Projections: projections, StepProjections: stepProjections,
+		ContentProjections: contentProjections, GateProjection: gates, ManifestDigest: emptyManifestDigest(),
+	}
+	if err = validateInstalledState(state, fixture.profile); err != nil {
+		t.Fatalf("validate client state with persisted gate projection: %v", err)
+	}
+	legacyState := state
+	legacyState.GateProjection = nil
+	if err = validateInstalledState(legacyState, fixture.profile); err != nil {
+		t.Fatalf("validate pre-slice client state with absent derived gate cache: %v", err)
+	}
+	directory := t.TempDir()
+	if err = installState(directory, state); err != nil {
+		t.Fatalf("install client state with gate projection: %v", err)
+	}
+	restored, raw, err := loadInstalledState(directory)
+	if err != nil {
+		t.Fatalf("reload client state with gate projection: %v", err)
+	}
+	defer clear(raw)
+	if !reflect.DeepEqual(restored.GateProjection, state.GateProjection) ||
+		!reflect.DeepEqual(restored.EventRecords, state.EventRecords) || !anchorEqual(restored.Prefix, state.Prefix) {
+		t.Fatalf("seed/pull client-state persistence changed gate projection or exact event prefix: restored=%+v", restored)
+	}
+	if bytes.Contains(bytes.Join(func() [][]byte {
+		out := make([][]byte, len(records))
+		for index := range records {
+			out[index] = records[index].Record
+		}
+		return out
+	}(), nil), []byte("detached-owner-proof")) {
+		t.Fatal("private repair proof bytes were folded into transferred event history")
+	}
+
+	closeBeforeFinish := step7ClientGateHistory(t)[:5]
+	closeBeforeFinish = append(closeBeforeFinish,
+		step7ClientTestEvent(t, 520, 420, 5, "gate.declared", testRepoID, map[string]any{"gate": "early", "scale": "matter"}),
+		step7ClientTestEvent(t, 521, 421, 6, "gate.closed", "00000000000000000000000041", map[string]any{
+			"gate": "early", "scale": "matter",
+		}),
+		step7ClientTestEvent(t, 522, 422, 7, "matter.finished", "00000000000000000000000041", map[string]any{
+			"from": "in-progress", "to": "done",
+		}))
+	if _, _, _, gates, err = foldEventRecordsWithGateProjection(closeBeforeFinish, testDomainID); err != nil || gates == nil ||
+		len(gates.States) != 1 || gates.States[0].Gate != "early" || gates.States[0].State != "closed" {
+		t.Fatalf("fold close-before-finish history: gates=%+v err=%v", gates, err)
+	}
+}
+
+func TestClientSeedFoldFailsClosedForUnrepresentedStep13Effects(t *testing.T) {
+	records := step7ClientGateHistory(t)
+	deferred := []struct {
+		name    string
+		record  wipdwire.EventRecord
+		message string
+	}{
+		{
+			name:    "Repo config",
+			record:  step7ClientTestEvent(t, 513, 411, 12, "config.set", testRepoID, map[string]any{"key": "tracker.push-level", "value": "narrated"}),
+			message: "Repo config projection is deferred",
+		},
+		{
+			name:    "shared reference",
+			record:  step7ClientTestEvent(t, 513, 411, 12, "reference.added", "00000000000000000000000041", map[string]any{"ref": "TRACKER-17"}),
+			message: "shared-reference, aggregate, and candidate projections are deferred",
+		},
+	}
+	for _, test := range deferred {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := append(cloneEventRecords(records), test.record)
+			if _, _, _, err := foldEventRecords(candidate, testDomainID); !errors.Is(err, ErrInvalidClientState) || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("unsupported Step 13 effect was not explicitly refused: %v", err)
+			}
+		})
+	}
+	trackerCandidate := append(cloneEventRecords(records[:8]), step7ClientTestEvent(t, 508, 406, 7, "gate.closed",
+		"00000000000000000000000041", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "narrated"}))
+	if _, _, _, err := foldEventRecords(trackerCandidate, testDomainID); !errors.Is(err, ErrInvalidClientState) ||
+		!strings.Contains(err.Error(), "tracker candidate projection is deferred") {
+		t.Fatalf("gate tracker candidate effect was silently accepted: %v", err)
+	}
+}
+
+func TestClientGateRepairUsesNodeLivenessAtItsEventBoundary(t *testing.T) {
+	matterID := "00000000000000000000000041"
+	stageID := "00000000000000000000000042"
+	stepID := "00000000000000000000000043"
+	base := []wipdwire.EventRecord{
+		step7ClientTestEvent(t, 600, 500, 1, "matter.created", matterID, map[string]any{
+			"id": matterID, "locator": "repair-live", "title": "Repair liveness",
+		}),
+		step7ClientTestEvent(t, 601, 501, 2, "stage.created", stageID, map[string]any{
+			"matter_id": matterID, "locator": "stage", "title": "Stage", "sort_key": int64(0),
+		}),
+		step7ClientTestEvent(t, 602, 502, 3, "step.created", stepID, map[string]any{
+			"parent": stageID, "title": "Step",
+		}),
+		step7ClientTestEvent(t, 603, 503, 4, "gate.declared", testRepoID, map[string]any{
+			"gate": "repair-target", "scale": "step",
+		}),
+		step7ClientTestEvent(t, 604, 504, 5, "step.started", stepID, map[string]any{
+			"from": "planned", "to": "in-progress",
+		}),
+		step7ClientTestEvent(t, 605, 505, 6, "step.finished", stepID, map[string]any{
+			"from": "in-progress", "to": "done",
+		}),
+	}
+	closeBeforeRemoval := cloneEventRecords(base)
+	closeBeforeRemoval = append(closeBeforeRemoval,
+		step7ClientTestEvent(t, 606, 506, 7, "gate.exemption-repaired", stepID, map[string]any{"gate": "repair-target"}),
+		step7ClientTestEvent(t, 607, 507, 8, "step.removed", stepID, map[string]any{"reason": "no longer needed"}),
+	)
+	projection, err := foldStep7GateProjection(closeBeforeRemoval, testDomainID)
+	if err != nil || projection == nil || len(projection.States) != 1 || projection.States[0].State != "exempt" {
+		t.Fatalf("valid repair before later node removal did not remain in history: projection=%+v err=%v", projection, err)
+	}
+	removalBeforeRepair := cloneEventRecords(base)
+	removalBeforeRepair = append(removalBeforeRepair,
+		step7ClientTestEvent(t, 608, 506, 7, "step.removed", stepID, map[string]any{"reason": "no longer needed"}),
+		step7ClientTestEvent(t, 609, 507, 8, "gate.exemption-repaired", stepID, map[string]any{"gate": "repair-target"}),
+	)
+	if _, err = foldStep7GateProjection(removalBeforeRepair, testDomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("repair after target removal was accepted: %v", err)
+	}
+}

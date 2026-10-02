@@ -591,6 +591,100 @@ func TestStep13ReferenceReboundCarriesLevelAndProjectsBothCandidates(t *testing.
 	}
 }
 
+func TestStep13SharedReferenceAndNarratedStageCandidateReplayParity(t *testing.T) {
+	matterA, matterB, stage := claimTestID(61), claimTestID(62), claimTestID(63)
+	ref := "TRACKER-17"
+	nodes := map[string]step13Node{
+		ownerKey(domainA, matterA): {node: step12Node{domain: domainA, id: matterA, kind: "matter", repo: repoA, matter: matterA}, birthPos: 1},
+		ownerKey(domainA, matterB): {node: step12Node{domain: domainA, id: matterB, kind: "matter", repo: repoA, matter: matterB}, birthPos: 1},
+		ownerKey(domainA, stage):   {node: step12Node{domain: domainA, id: stage, kind: "stage", repo: repoA, matter: matterA, parent: matterA, title: "Implementation"}, birthPos: 2},
+	}
+	events := []step13Event{
+		step13TestEvent(3, "config.set", repoA, map[string]any{"key": "tracker.push-level", "value": "boundary"}),
+		step13TestEvent(4, "config.set", repoA, map[string]any{"key": "tracker.push-level", "value": "narrated"}),
+		step13TestEvent(5, "reference.added", matterA, map[string]any{"ref": ref}),
+		step13TestEvent(6, "reference.added", matterB, map[string]any{"ref": ref}),
+		step13TestEvent(7, "gate.declared", repoA, map[string]any{
+			"gate": "matter-reviewed", "scale": "matter", "exempt": []string{matterA, matterB},
+		}),
+		step13TestEvent(8, "gate.declared", repoA, map[string]any{
+			"gate": "stage-snapshot", "scale": "stage", "exempt": []string{stage},
+		}),
+		step13TestEvent(9, "matter.started", matterA, map[string]any{"from": "planned", "to": "in-progress"}),
+		step13TestEvent(10, "matter.finished", matterA, map[string]any{"from": "in-progress", "to": "done", "tracker_push_level": "narrated"}),
+		step13TestEvent(11, "matter.started", matterB, map[string]any{"from": "planned", "to": "in-progress"}),
+		step13TestEvent(12, "matter.finished", matterB, map[string]any{"from": "in-progress", "to": "done", "tracker_push_level": "narrated"}),
+		step13TestEvent(13, "stage.started", stage, map[string]any{"from": "planned", "to": "in-progress"}),
+		step13TestEvent(14, "stage.finished", stage, map[string]any{
+			"from": "in-progress", "to": "done", "tracker_push_level": "narrated",
+		}),
+		step13TestEvent(15, "gate.declared", repoA, map[string]any{"gate": "stage-late", "scale": "stage"}),
+		step13TestEvent(16, "gate.closed", stage, map[string]any{
+			"gate": "stage-late", "scale": "stage", "tracker_push_level": "narrated",
+		}),
+	}
+	projection, err := deriveStep13Projection(nodes, events)
+	if err != nil {
+		t.Fatalf("derive shared-reference and narrated Stage projection: %v", err)
+	}
+	rebuilt, err := deriveStep13Projection(nodes, events)
+	if err != nil || !sameStep13Projection(projection, rebuilt) {
+		t.Fatalf("Step 13 transfer/rebuild fold is not deterministic: err=%v equal=%t", err, sameStep13Projection(projection, rebuilt))
+	}
+	if len(projection.config) != 1 || projection.config[0].value != "narrated" || projection.config[0].event != claimTestID(304) {
+		t.Fatalf("Repo config last-write-wins projection changed: %+v", projection.config)
+	}
+	if len(projection.references) != 2 || len(projection.aggregates) != 1 || projection.aggregates[0].ref != ref ||
+		projection.aggregates[0].disposition != "completed" || projection.aggregates[0].members != 2 {
+		t.Fatalf("shared legacy tracker-reference aggregate changed: references=%+v aggregates=%+v", projection.references, projection.aggregates)
+	}
+	var stageComments []step13Candidate
+	var sharedStateCandidates []step13Candidate
+	seenIDs := make(map[string]bool)
+	seenKeys := make(map[string]bool)
+	for _, candidate := range projection.candidates {
+		if seenIDs[candidate.id] || seenKeys[candidate.key] {
+			t.Fatalf("candidate identity duplicated during replay: %+v", candidate)
+		}
+		seenIDs[candidate.id] = true
+		seenKeys[candidate.key] = true
+		if candidate.kind == "comment" {
+			stageComments = append(stageComments, candidate)
+		} else if candidate.kind == "state" {
+			sharedStateCandidates = append(sharedStateCandidates, candidate)
+		}
+	}
+	wantKey := "tracker:" + claimTestID(314) + ":comment:" + ref + ":" + stage
+	if len(stageComments) != 1 || stageComments[0].key != wantKey || stageComments[0].event != claimTestID(314) ||
+		stageComments[0].repo != repoA || stageComments[0].subject != matterA || stageComments[0].payload !=
+		`{"stage":"`+stage+`","title":"Implementation","action":"closed"}` {
+		t.Fatalf("narrated Stage candidate differs from legacy queueStageComments: %+v", stageComments)
+	}
+	if stageComments[0].id != "16CQXACTMV06QPQ54MQ0W1SKEX" {
+		t.Fatalf("narrated Stage candidate ID=%q, want the independent legacy SHA-256/ULID vector", stageComments[0].id)
+	}
+	if len(sharedStateCandidates) != 2 {
+		t.Fatalf("shared-reference state candidates were lost or duplicated: %+v", sharedStateCandidates)
+	}
+	wantSharedCandidates := map[string]struct {
+		id, event, subject, disposition string
+	}{
+		"tracker:" + claimTestID(310) + ":state:" + ref: {"5K7BZTHH296B0K6VAJ8NRGYDWM", claimTestID(310), matterA, "active"},
+		"tracker:" + claimTestID(312) + ":state:" + ref: {"3KYZ58VY73NKJES2THXZ8MK399", claimTestID(312), matterB, "completed"},
+	}
+	for _, candidate := range sharedStateCandidates {
+		want, ok := wantSharedCandidates[candidate.key]
+		if !ok || candidate.id != want.id || candidate.event != want.event || candidate.repo != repoA ||
+			candidate.subject != want.subject || candidate.ref != ref || candidate.payload != `{"disposition":"`+want.disposition+`"}` {
+			t.Fatalf("shared-reference candidate differs from legacy tracker transition: %+v want=%+v", candidate, want)
+		}
+		delete(wantSharedCandidates, candidate.key)
+	}
+	if len(wantSharedCandidates) != 0 {
+		t.Fatalf("shared-reference state candidates missing after replay: %+v", wantSharedCandidates)
+	}
+}
+
 func TestStep13FoldRejectsExplicitZeroOptionalFields(t *testing.T) {
 	tests := []struct {
 		name, kind, key string

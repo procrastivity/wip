@@ -68,6 +68,7 @@ type ClientState struct {
 	Projections        []json.RawMessage            `json:"projections"`
 	StepProjections    []json.RawMessage            `json:"step_projections"`
 	ContentProjections []json.RawMessage            `json:"content_projections,omitempty"`
+	GateProjection     *step7GateProjection         `json:"step7_gate_projection,omitempty"`
 }
 
 // PrepareIdentity creates a private Environment key and CSR. The caller keeps
