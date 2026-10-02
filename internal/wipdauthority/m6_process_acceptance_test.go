@@ -54,7 +54,12 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 		}
 	})
 
-	root := t.TempDir()
+	// Keep the Unix socket path short regardless of TMPDIR or the test name.
+	root, err := os.MkdirTemp("/tmp", "w6-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "m6-environment", m5TestEnv,
 		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step5")
 	if err != nil {
