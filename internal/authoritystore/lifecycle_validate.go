@@ -15,6 +15,10 @@ type expectedLifecycleEvent struct {
 }
 
 func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent) error {
+	return checkM6LifecycleEventsForSchema(db, c, receipt, events, true)
+}
+
+func checkM6LifecycleEventsForSchema(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent, step13 bool) error {
 	if receipt.Range == nil || len(events) == 0 || uint64(len(events)) != receipt.Range.Count ||
 		events[0].id != receipt.Range.First || events[len(events)-1].id != receipt.Range.Last {
 		return fmt.Errorf("lifecycle receipt range mismatch: %w", ErrInvalidStore)
@@ -42,7 +46,7 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 		return fmt.Errorf("lifecycle target pre-state %q want %q: %w", state, from, ErrInvalidStore)
 	}
 	if c.name == "matter.finish" {
-		return checkMatterFinishHistory(db, c, receipt, events)
+		return checkMatterFinishHistory(db, c, receipt, events, step13)
 	}
 	want := make([]expectedLifecycleEvent, 0, len(events))
 	if verb == "start" {
@@ -136,18 +140,21 @@ func checkM6LifecycleEvents(db *sql.DB, c *lifecycleCommand, receipt receiptReco
 	return nil
 }
 
-func checkMatterFinishHistory(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent) error {
+func checkMatterFinishHistory(db *sql.DB, c *lifecycleCommand, receipt receiptRecord, events []lifecycleEvent, step13 bool) error {
 	legacySealed, err := matterSubtreeCompleteBefore(db, c.domain, c.matter, events[0].position)
 	if err != nil {
 		return err
 	}
-	nodes, err := step13Nodes(db)
-	if err != nil {
-		return err
-	}
-	sealed, err := step13ProjectedSealed(context.Background(), db, nodes, c.domain, c.matter, events[0].position)
-	if err != nil {
-		return err
+	var sealed bool
+	if step13 {
+		nodes, nodesErr := step13Nodes(db)
+		if nodesErr != nil {
+			return nodesErr
+		}
+		sealed, err = step13ProjectedSealed(context.Background(), db, nodes, c.domain, c.matter, events[0].position)
+		if err != nil {
+			return err
+		}
 	}
 	var batch string
 	batchErr := db.QueryRow(`SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, c.domain, c.matter).Scan(&batch)
@@ -159,9 +166,11 @@ func checkMatterFinishHistory(db *sql.DB, c *lifecycleCommand, receipt receiptRe
 		sealed bool
 		swept  bool
 	}
-	expectations := []expectation{{sealed: sealed}}
 	legacy := expectation{sealed: legacySealed, swept: legacySealed && !errors.Is(batchErr, sql.ErrNoRows)}
-	expectations = append(expectations, legacy)
+	expectations := []expectation{legacy}
+	if step13 {
+		expectations = append([]expectation{{sealed: sealed}}, expectations...)
+	}
 	for _, expected := range expectations {
 		if !matterFinishHistoryMatches(receipt, events, c.matter, batch, expected) {
 			continue

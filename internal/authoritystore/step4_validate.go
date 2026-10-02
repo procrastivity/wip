@@ -78,6 +78,10 @@ func readReceipt(raw []byte) (receiptRecord, error) {
 // checkStep4State rederives range, prefix and materialized projection and
 // links every artifact row to one exact signed terminal payload on reopen.
 func checkStep4State(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
 	rows, err := db.Query(`SELECT domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state FROM submissions ORDER BY domain_id,environment_id,environment_sequence`)
 	if err != nil {
 		return err
@@ -105,9 +109,11 @@ func checkStep4State(db *sql.DB) error {
 	for _, s := range all {
 		id := operation.ID{Name: s.operation, Version: uint16(s.version)}
 		step4 := operation.Step4Operation(id)
+		_, knownGate := gateDefinition(id)
+		step13Gate := version >= 12 && knownGate
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 {
 			return ErrInvalidStore
@@ -169,10 +175,15 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		if code == "result.succeeded" {
-			if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
+			gateNoop := step13Gate && s.operation == "gate.declare" && !first.Valid && !last.Valid && r.Range == nil
+			if gateNoop {
+				if r.Result.Problem != nil || len(r.Result.Output) == 0 {
+					return ErrInvalidStore
+				}
+			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || step13Gate && !gateNoop {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -182,6 +193,8 @@ func checkStep4State(db *sql.DB) error {
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
 					return ErrInvalidStore
 				}
+			} else if gateNoop {
+				// Gate command validation below binds no-op output to the current projection.
 			} else if s.operation == "matter.create" || s.operation == "step.create" {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
@@ -199,7 +212,11 @@ func checkStep4State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		var eventCount int
-		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil || (code == "result.succeeded" && legacyBirth && eventCount != 1) || (code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4) && eventCount != int(r.Range.Count)) || (code != "result.succeeded" && eventCount != 0) {
+		gateNoop := step13Gate && s.operation == "gate.declare" && code == "result.succeeded" && r.Range == nil
+		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
+			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -216,12 +233,13 @@ func checkStep4State(db *sql.DB) error {
 	if terminals+grants != count {
 		return ErrInvalidStore
 	}
-	if err = checkStep4Events(db, all); err != nil {
+	if err = checkStep4Events(db, all, version); err != nil {
 		return err
 	}
-	var version int
-	if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		return err
+	if version >= 12 {
+		if err = checkStep13GateCommands(db); err != nil {
+			return err
+		}
 	}
 	if version >= 7 {
 		if err = checkStep8State(db, all); err != nil {
@@ -263,7 +281,7 @@ type lifecycleEvent struct {
 	raw      []byte
 }
 
-func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
+func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) error {
 	byID := make(map[string]storedSubmission, len(submissions))
 	for _, s := range submissions {
 		byID[ownerKey(s.domain, s.id)] = s
@@ -342,6 +360,28 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 			}
 			previousID = id
 			continue
+		}
+		if version >= 12 {
+			if _, ok := gateDefinition(operation.ID{Name: s.operation, Version: uint16(s.version)}); ok {
+				if _, parseErr := parseStep12Event(raw, d, pos, id, cmd); parseErr != nil {
+					err = ErrInvalidStore
+					break
+				}
+				var length [8]byte
+				binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+				h := sha256.New()
+				_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+				_, _ = h.Write(prefix[:])
+				_, _ = h.Write(length[:])
+				_, _ = h.Write(raw)
+				copy(prefix[:], h.Sum(nil))
+				if digest != digestRawBytes(prefix[:]) {
+					err = ErrInvalidStore
+					break
+				}
+				previousID = id
+				continue
+			}
 		}
 		if contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
 			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {
@@ -592,7 +632,7 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 		}
 		operationID := operation.ID{Name: s.operation, Version: uint16(s.version)}
 		if r.Result.Code == "result.succeeded" || connectedLifecycleOperation(operationID) && r.Result.Code == string(operation.ResultRefused) {
-			if lifecycleErr := checkLifecycleEvents(db, s, r, lifecycleEvents[ownerKey(s.domain, s.id)]); lifecycleErr != nil {
+			if lifecycleErr := checkLifecycleEvents(db, s, r, lifecycleEvents[ownerKey(s.domain, s.id)], version >= 12); lifecycleErr != nil {
 				return fmt.Errorf("%w: lifecycle events %s: %v", ErrInvalidStore, s.operation, lifecycleErr)
 			}
 		}
@@ -682,7 +722,7 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission) error {
 
 // The lifecycle projection supplies authority-assigned IDs; the command and
 // receipt independently bind their exact event sequence and closed maps.
-func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, events []lifecycleEvent) error {
+func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, events []lifecycleEvent, step13 bool) error {
 	c, err := parseLifecycle(s.command, s.hash)
 	if err != nil {
 		return ErrInvalidStore
@@ -725,7 +765,7 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 	}
 	c.matter = matter
 	if connectedLifecycleOperation(operation.ID{Name: c.name, Version: 1}) {
-		return checkM6LifecycleEvents(db, c, r, events)
+		return checkM6LifecycleEventsForSchema(db, c, r, events, step13)
 	}
 	add := func(kind, subject string, payload map[string]any) {
 		want = append(want, expectedEvent{kind, subject, payload})
@@ -766,7 +806,7 @@ func checkLifecycleEvents(db *sql.DB, s storedSubmission, r receiptRecord, event
 		if stateErr != nil || matterState != "in-progress" {
 			return ErrInvalidStore
 		}
-		return checkMatterFinishHistory(db, c, r, events)
+		return checkMatterFinishHistory(db, c, r, events, step13)
 	case "claim.acquire":
 		var prior int
 		if db.QueryRow(`SELECT count(*) FROM claims p JOIN terminal_receipts t ON t.domain_id=p.domain_id AND t.command_id=p.acquire_command_id WHERE p.domain_id=? AND p.matter_id=? AND t.first_position<?`, c.domain, matter, events[0].position).Scan(&prior) != nil || (prior == 0) != (len(events) == 3) {

@@ -2,12 +2,17 @@ package authoritystore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/procrastivity/wip/internal/operation"
 )
 
 func downgradeStep13ToV11(t *testing.T, root string) {
@@ -53,6 +58,153 @@ func downgradeStep13ToV11(t *testing.T, root string) {
 	}
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func createLegacyInlineSweepFinish(t *testing.T, f *claimTestFixture, allocation AcquireAllocation) (operation.Command, string, CommandStatus) {
+	t.Helper()
+	ctx := context.Background()
+	start := step12Command(f, 12, 3, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
+	started := completeLifecycleCommand(t, f, start, []string{claimTestID(105)})
+	claimTestAcknowledge(t, f, allocation.JournalID, 1, started)
+	finish := step12Command(f, 13, 4, operation.MatterFinishV1,
+		operation.MatterFinishInput{MatterID: f.matter}, allocation.ClaimID)
+	hash := hashCommand(t, finish)
+	pending, err := f.s.SubmitCommand(ctx, finish, hash, f.peer, f.now)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit historical Matter finish: status=%+v err=%v", pending, err)
+	}
+	canonical, err := finish.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("encode historical Matter finish: %v", err)
+	}
+	parsed, err := parseLifecycle(canonical, hash)
+	if err != nil {
+		t.Fatalf("parse historical Matter finish: %v", err)
+	}
+	tx, err := f.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch string
+	if err = tx.QueryRowContext(ctx, `SELECT batch_id FROM anonymous_batches WHERE domain_id=? AND matter_id=?`, domainA, f.matter).Scan(&batch); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	identity := eventIdentity{parsed.domain, parsed.id, parsed.hash, parsed.environment, parsed.sequence, parsed.actedAt, parsed.repo}
+	firstID, sweepID := claimTestID(106), claimTestID(107)
+	first, err := appendCommandEvent(ctx, tx, identity, f.now, firstID, "matter.finished", f.matter,
+		map[string]any{"from": "in-progress", "to": "done"})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	last, err := appendCommandEvent(ctx, tx, identity, f.now, sweepID, "batch.swept", batch, map[string]any{})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE m6_nodes SET last_event_id=? WHERE domain_id=? AND node_id=?`, firstID, domainA, f.matter); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	output, err := artifactEncoder.Marshal(map[string]any{
+		"matter_id": f.matter, "state": "done", "became_sealed": true,
+	})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	rangeValue := map[string]any{"first_event_id": firstID, "last_event_id": sweepID, "event_count": uint64(2)}
+	completed, err := f.s.finishCommandTx(ctx, tx, parsed.commandIdentity, finish.EnvironmentSequence-1,
+		string(operation.ResultSucceeded), output, nil, rangeValue, first, last, f.now, signWith(f.key), nil)
+	if err != nil {
+		t.Fatalf("record historical inline-sweep finish receipt: %v", err)
+	}
+	return finish, hash, completed
+}
+
+func corruptAuthorityEventSubject(t *testing.T, root, eventID, subject string) {
+	t.Helper()
+	db, err := connect(filepath.Join(root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var domain string
+	var position uint64
+	var record []byte
+	if err = db.QueryRow(`SELECT domain_id,position,record FROM authority_events WHERE event_id=?`, eventID).Scan(&domain, &position, &record); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err = artifactDecoder.Unmarshal(record, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["subject_id"] = subject
+	record, err = artifactEncoder.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous string
+	if err = db.QueryRow(`SELECT prefix_digest FROM authority_events WHERE domain_id=? AND position=?`, domain, position-1).Scan(&previous); err != nil {
+		t.Fatal(err)
+	}
+	previousBytes, err := hex.DecodeString(strings.TrimPrefix(previous, "sha256:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(record)))
+	h := sha256.New()
+	_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+	_, _ = h.Write(previousBytes)
+	_, _ = h.Write(length[:])
+	_, _ = h.Write(record)
+	if _, err = db.Exec(`DROP TRIGGER authority_events_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE authority_events SET record=?,prefix_digest=? WHERE domain_id=? AND position=?`, record, digestRawBytes(h.Sum(nil)), domain, position); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStep13UpgradeV11AcceptsHistoricalInlineSweepFinishAndReopens(t *testing.T) {
+	f, allocation := gateClaimedFixture(t)
+	finish, hash, historical := createLegacyInlineSweepFinish(t, f, allocation)
+	if err := f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeStep13ToV11(t, f.root)
+	if err := UpgradeV11(f.root); err != nil {
+		t.Fatalf("upgrade valid v11 inline-sweep history: %v", err)
+	}
+	reopened, err := OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("open upgraded v12 history: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	replay, err := reopened.SubmitCommand(context.Background(), finish, hash, f.peer, f.now)
+	if err != nil || replay.Pending || !reflect.DeepEqual(replay.Receipt, historical.Receipt) {
+		t.Fatalf("historical finish receipt replay: pending=%t same=%t err=%v", replay.Pending, reflect.DeepEqual(replay.Receipt, historical.Receipt), err)
+	}
+	receipt, err := readReceipt(replay.Receipt)
+	if err != nil || receipt.Range == nil || receipt.Range.Count != 2 {
+		t.Fatalf("historical inline-sweep receipt = %+v, %v", receipt.Range, err)
+	}
+}
+
+func TestStep13UpgradeV11RejectsMalformedHistoricalInlineSweepFinish(t *testing.T) {
+	f, allocation := gateClaimedFixture(t)
+	_, _, _ = createLegacyInlineSweepFinish(t, f, allocation)
+	if err := f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeStep13ToV11(t, f.root)
+	corruptAuthorityEventSubject(t, f.root, claimTestID(107), claimTestID(999))
+	if err := UpgradeV11(f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("upgrade accepted malformed inline-sweep history: %v", err)
 	}
 }
 

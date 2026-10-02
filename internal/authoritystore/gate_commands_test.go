@@ -46,6 +46,14 @@ func TestGateDeclareAndCloseUseAuthorityProjectionAndExactReplay(t *testing.T) {
 	}
 	claimTestReceipt(t, declared, "result.succeeded", map[string]any{"gate": "reviewed-local", "scale": "matter"}, 104)
 	claimTestAcknowledge(t, f, allocation.JournalID, 1, declared)
+	if err = f.s.Close(); err != nil {
+		t.Fatalf("close store after gate declaration: %v", err)
+	}
+	reopened, err := OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen store after gate declaration: %v", err)
+	}
+	f.s = reopened
 	var declarationCount int
 	if err = f.s.db.QueryRow(`SELECT count(*) FROM m6_gate_declarations WHERE domain_id=? AND repo_id=? AND gate=? AND scale=?`, domainA, repoA, "reviewed-local", "matter").Scan(&declarationCount); err != nil || declarationCount != 1 {
 		t.Fatalf("authority gate declaration projection count=%d err=%v", declarationCount, err)
@@ -160,6 +168,27 @@ func TestGateCloseAndDismissAllowDoneMatterWithOpenExactClaim(t *testing.T) {
 			sealed, err := step13ProjectedSealed(ctx, f.s.db, nodes, domainA, f.matter, lastPosition+1)
 			if err != nil || !sealed {
 				t.Fatalf("Matter did not become sealed after post-finish gate satisfaction: sealed=%t err=%v", sealed, err)
+			}
+			finishHash := hashCommand(t, finish)
+			gateHash := hashCommand(t, command)
+			if err = f.s.Close(); err != nil {
+				t.Fatalf("close store after finish-before-gate history: %v", err)
+			}
+			reopened, err := OpenExisting(f.root)
+			if err != nil {
+				t.Fatalf("reopen finish-before-gate history: %v", err)
+			}
+			f.s = reopened
+			for _, replay := range []struct {
+				command operation.Command
+				hash    string
+				want    []byte
+			}{{finish, finishHash, finished.Receipt}, {command, gateHash, completed.Receipt}} {
+				status, replayErr := f.s.SubmitCommand(ctx, replay.command, replay.hash, f.peer, f.now)
+				if replayErr != nil || status.Pending || !bytes.Equal(status.Receipt, replay.want) {
+					t.Fatalf("replay %s after reopening: pending=%t same=%t err=%v", replay.command.Request.Operation,
+						status.Pending, bytes.Equal(status.Receipt, replay.want), replayErr)
+				}
 			}
 		})
 	}
@@ -402,6 +431,24 @@ func TestGateDeclareNoopAndCloseRefusalDoNotAppendEvents(t *testing.T) {
 		t.Fatalf("same-scale declaration did not produce success/no-event receipt: %+v err=%v", noEventReceipt, err)
 	}
 	claimTestAcknowledge(t, f, allocation.JournalID, 2, noEvent)
+	if err = f.s.Close(); err != nil {
+		t.Fatalf("close store after successful gate no-op: %v", err)
+	}
+	reopened, err := OpenExisting(f.root)
+	if err != nil {
+		t.Fatalf("reopen store after successful gate no-op: %v", err)
+	}
+	f.s = reopened
+	for _, replay := range []struct {
+		command operation.Command
+		want    []byte
+	}{{declare, declared.Receipt}, {noop, noEvent.Receipt}} {
+		status, replayErr := f.s.SubmitCommand(ctx, replay.command, hashCommand(t, replay.command), f.peer, f.now)
+		if replayErr != nil || status.Pending || !bytes.Equal(status.Receipt, replay.want) {
+			t.Fatalf("replay %s across persisted no-op: pending=%t same=%t err=%v", replay.command.Request.Operation,
+				status.Pending, bytes.Equal(status.Receipt, replay.want), replayErr)
+		}
+	}
 	if err = checkStep13State(f.s.db); err != nil {
 		t.Fatalf("projection after declaration no-op: %v", err)
 	}
