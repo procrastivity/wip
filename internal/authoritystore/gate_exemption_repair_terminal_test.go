@@ -3,7 +3,9 @@ package authoritystore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -103,6 +105,16 @@ func prepareRepairTerminalFixture(t *testing.T, scenario string, nonceByte byte)
 			nextSequence = 7
 		}
 		target, commandID = f.matter, 20
+	case "two-open-own-gates":
+		completeRepairGateDeclaration(t, f, claim, 12, 3, "own-z", "matter", 104, 1)
+		completeRepairGateDeclaration(t, f, claim, 13, 4, "own-a", "matter", 105, 2)
+		completeRepairLifecycle(t, f, claim, 14, 5, operation.MatterStartV1,
+			operation.NodeLifecycleInput{NodeID: f.matter}, []int{106}, 3)
+		completeRepairLifecycle(t, f, claim, 15, 6, operation.MatterFinishV1,
+			operation.MatterFinishInput{MatterID: f.matter}, []int{107}, 4)
+		completeRepairGateDeclaration(t, f, claim, 16, 7, "repair-target", "matter", 108, 4)
+		boundary = f.anchor(t)
+		target, commandID, nextSequence = f.matter, 20, 8
 	case "enclosing-open-at-boundary":
 		completeRepairGateDeclaration(t, f, claim, 12, 3, "parent-pre", "matter", 104, 1)
 		completeRepairLifecycle(t, f, claim, 13, 4, operation.MatterStartV1,
@@ -233,7 +245,7 @@ func TestGateExemptionRepairTerminalSuccessIsAtomicDetachedAndRecoverable(t *tes
 	if err != nil || terminal.ResultCode != "result.succeeded" || terminal.EventID != claimTestID(130) || terminal.RefusalCode != "" {
 		t.Fatalf("complete eligible private repair: %+v err=%v", terminal, err)
 	}
-	if err = validatePrivateGateRepairEvent(ctx, fixture.f.s.db, fixture.command, terminal.EventID, terminal.ObservedPosition+1); err != nil {
+	if err = validatePrivateGateRepairEvent(ctx, fixture.f.s.db, fixture.command, terminal.EventID, terminal.ObservedPosition+1, terminal.OccurredAt); err != nil {
 		t.Fatalf("validate exact legacy repair effect: %v", err)
 	}
 	var state string
@@ -248,6 +260,9 @@ func TestGateExemptionRepairTerminalSuccessIsAtomicDetachedAndRecoverable(t *tes
 	var repairEvent step12Event
 	if repairEvent, err = parseStep12Event(repairRecord, domainA, terminal.ObservedPosition+1, terminal.EventID, fixture.command.ID); err != nil || repairEvent.kind != "gate.exemption-repaired" {
 		t.Fatalf("repair emitted non-repair or inline sweep event: kind=%q err=%v", repairEvent.kind, err)
+	}
+	if repairEvent.occurred != terminal.OccurredAt {
+		t.Fatalf("terminal time %q differs from repair event time %q", terminal.OccurredAt, repairEvent.occurred)
 	}
 	if _, err = fixture.f.s.QueryCommand(ctx, domainA, fixture.command.ID, fixture.hash, 7, fixture.f.peer, envA, fixture.f.now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("private terminal appeared on public receipt query: %v", err)
@@ -282,6 +297,150 @@ func TestGateExemptionRepairTerminalSuccessIsAtomicDetachedAndRecoverable(t *tes
 	if _, err = reopened.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil,
 		[]byte(claimTestID(131)), fixture.f.now.Add(time.Minute)); err != nil {
 		t.Fatalf("idempotent terminal retry with omitted proof: %v", err)
+	}
+}
+
+func rewriteGateRepairTerminalForRecoveryTest(t *testing.T, db *sql.DB, statement string, args ...any) {
+	t.Helper()
+	var immutableTrigger string
+	for _, object := range step15Schema {
+		if object.name == "gate_exemption_repair_terminals_immutable" {
+			immutableTrigger = object.sql
+			break
+		}
+	}
+	if immutableTrigger == "" {
+		t.Fatal("immutable private repair terminal trigger missing from schema")
+	}
+	if _, err := db.Exec(`DROP TRIGGER gate_exemption_repair_terminals_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(statement, args...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(immutableTrigger); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGateExemptionRepairMultiplePrerequisiteRefusalRecoversDeterministically(t *testing.T) {
+	for run := range 16 {
+		t.Run(fmt.Sprintf("run-%02d", run), func(t *testing.T) {
+			fixture := prepareRepairTerminalFixture(t, "two-open-own-gates", byte(0x80+run))
+			admitRepairTerminalFixture(t, fixture)
+			terminal, err := fixture.f.s.completeGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash,
+				fixture.proof, nil, fixture.f.now)
+			if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.gate-repair-prerequisite" {
+				t.Fatalf("persist deterministic prerequisite refusal: %+v err=%v", terminal, err)
+			}
+			want := fmt.Sprintf("%s was not sealed before repair-target became operative: own-a is open on %s", fixture.command.NodeID, fixture.command.NodeID)
+			if terminal.RefusalMessage != want {
+				t.Fatalf("refusal witness=%q, want stable lexical witness %q", terminal.RefusalMessage, want)
+			}
+			if err = fixture.f.s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenExisting(fixture.f.root)
+			if err != nil {
+				t.Fatalf("reopen deterministic refusal: %v", err)
+			}
+			defer func() { _ = reopened.Close() }()
+			recovered, err := reopened.recoverGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash, nil)
+			if err != nil || recovered.Terminal == nil || *recovered.Terminal != terminal || !bytes.Equal(recovered.Proof, fixture.proof) {
+				t.Fatalf("recover identical deterministic refusal: %+v err=%v", recovered, err)
+			}
+		})
+	}
+}
+
+func TestGateExemptionRepairRecoveryRejectsClaimFenceStatusForgery(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "own-open-current", 0x91)
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.gate-repair-prerequisite" {
+		t.Fatalf("create genuine lifecycle refusal: %+v err=%v", terminal, err)
+	}
+	rewriteGateRepairTerminalForRecoveryTest(t, fixture.f.s.db,
+		`UPDATE gate_exemption_repair_terminals SET refusal_code=?,refusal_message=? WHERE domain_id=? AND command_id=?`,
+		"refusal.claim-fenced", gateRepairClaimFencedMessage, domainA, fixture.command.ID)
+	if _, err = fixture.f.s.recoverGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash, fixture.proof); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("recovery accepted invented claim-fenced refusal with active claim/journal: %v", err)
+	}
+	if err = checkStep15State(fixture.f.s.db); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("terminal history validator accepted invented claim-fenced refusal: %v", err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("OpenExisting accepted invented claim-fenced terminal: %v", err)
+	}
+}
+
+func TestGateExemptionRepairGenuineClaimFenceRefusalRecovers(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "success-missing-snapshot", 0x93)
+	ctx := context.Background()
+	admitRepairTerminalFixture(t, fixture)
+	current, err := fixture.f.s.GetCurrentClaimJournal(ctx, domainA, 7, envA, fixture.claim.ClaimID, 1,
+		fixture.f.matter, claimTestID(51))
+	if err != nil {
+		t.Fatalf("read current Matter claim journal: %v", err)
+	}
+	if _, _, err = fixture.f.s.SealOwnedClaimJournal(ctx, current); err != nil {
+		t.Fatalf("seal claim journal after repair admission: %v", err)
+	}
+	terminal, err := fixture.f.s.completeGateExemptionRepair(ctx, fixture.canonical, fixture.hash,
+		fixture.proof, nil, fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.refused" || terminal.RefusalCode != "refusal.claim-fenced" ||
+		terminal.RefusalMessage != gateRepairClaimFencedMessage || terminal.EventID != "" {
+		t.Fatalf("persist factual claim-fenced refusal: %+v err=%v", terminal, err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenExisting(fixture.f.root)
+	if err != nil {
+		t.Fatalf("reopen factual claim-fenced refusal: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	recovered, err := reopened.recoverGateExemptionRepair(ctx, fixture.canonical, fixture.hash, nil)
+	if err != nil || recovered.Terminal == nil || *recovered.Terminal != terminal || !bytes.Equal(recovered.Proof, fixture.proof) {
+		t.Fatalf("recover factual claim-fenced refusal: %+v err=%v", recovered, err)
+	}
+}
+
+func TestGateExemptionRepairRecoveryRejectsTerminalEventTimeMismatch(t *testing.T) {
+	fixture := prepareRepairTerminalFixture(t, "success-missing-snapshot", 0x92)
+	admitRepairTerminalFixture(t, fixture)
+	terminal, err := fixture.f.s.completeGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash,
+		fixture.proof, []byte(claimTestID(130)), fixture.f.now)
+	if err != nil || terminal.ResultCode != "result.succeeded" {
+		t.Fatalf("complete repair with event time: %+v err=%v", terminal, err)
+	}
+	var eventRecord []byte
+	if err = fixture.f.s.db.QueryRow(`SELECT record FROM authority_events WHERE domain_id=? AND event_id=?`, domainA, terminal.EventID).Scan(&eventRecord); err != nil {
+		t.Fatal(err)
+	}
+	event, err := parseStep12Event(eventRecord, domainA, terminal.ObservedPosition+1, terminal.EventID, fixture.command.ID)
+	if err != nil || event.occurred != terminal.OccurredAt {
+		t.Fatalf("normal terminal/event times differ: terminal=%q event=%q err=%v", terminal.OccurredAt, event.occurred, err)
+	}
+	wrongTime := "2099-01-01T00:00:00Z"
+	rewriteGateRepairTerminalForRecoveryTest(t, fixture.f.s.db,
+		`UPDATE gate_exemption_repair_terminals SET occurred_at=? WHERE domain_id=? AND command_id=?`,
+		wrongTime, domainA, fixture.command.ID)
+	if _, err = fixture.f.s.recoverGateExemptionRepair(context.Background(), fixture.canonical, fixture.hash, fixture.proof); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("recovery accepted terminal time %q distinct from event time %q: %v", wrongTime, event.occurred, err)
+	}
+	if err = checkStep15State(fixture.f.s.db); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("terminal history validator accepted event-time mismatch: %v", err)
+	}
+	if err = fixture.f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenExisting(fixture.f.root); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("OpenExisting accepted terminal/event time mismatch: %v", err)
 	}
 }
 

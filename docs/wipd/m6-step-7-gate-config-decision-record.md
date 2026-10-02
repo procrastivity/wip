@@ -99,6 +99,11 @@ present-day Done or satisfied state. Preserve D121's transactional claim/epoch
 fences. The proof does not authorize normal close, dismissal, or Batch sweep,
 and cannot replace factual guard checks.
 
+If several prerequisite failures apply, choose the witness deterministically:
+check the target node and then each enclosing node outward, selecting the
+unsatisfied applicable gate in ascending bytewise gate-ID order at each node.
+Execution and recovery must validate the same witness.
+
 Accepted reference and freshness rules:
 
 - `gate`: NFC, control-free, 1–256 UTF-8 bytes. `reason`: exact NFC bytes,

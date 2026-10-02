@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -25,6 +26,23 @@ type gateRepairSnapshot struct {
 
 type gateRepairRefusal struct {
 	code, message string
+}
+
+const gateRepairClaimFencedMessage = "the Matter claim, journal generation, or authority epoch is no longer active"
+
+func gateRepairClaimFence(ctx context.Context, tx *sql.Tx, command gateExemptionRepairCommand) (*gateRepairRefusal, error) {
+	domain, err := domainOwner(ctx, tx, command.DomainID)
+	if err != nil {
+		return nil, err
+	}
+	if domain.ActiveEpoch != command.AuthorityEpoch {
+		return &gateRepairRefusal{"refusal.claim-fenced", gateRepairClaimFencedMessage}, nil
+	}
+	err = validateGateClaimTx(ctx, tx, command.claimCommand())
+	if errors.Is(err, ErrFenced) {
+		return &gateRepairRefusal{"refusal.claim-fenced", gateRepairClaimFencedMessage}, nil
+	}
+	return nil, err
 }
 
 func readGateExemptionRepairTerminal(ctx context.Context, queryer gateRepairQueryer, domain, command string) (gateExemptionRepairTerminal, error) {
@@ -96,19 +114,9 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	if err = validatePendingGateExemptionRepairAdmission(ctx, tx, stored); err != nil {
 		return empty, err
 	}
-	domain, err := domainOwner(ctx, tx, stored.DomainID)
+	refusal, err := gateRepairClaimFence(ctx, tx, command)
 	if err != nil {
 		return empty, err
-	}
-	refusal := (*gateRepairRefusal)(nil)
-	if domain.ActiveEpoch != stored.AuthorityEpoch {
-		refusal = &gateRepairRefusal{"refusal.claim-fenced", "the Matter authority epoch is no longer active"}
-	} else if err = validateGateClaimTx(ctx, tx, command.claimCommand()); err != nil {
-		if errors.Is(err, ErrFenced) {
-			refusal = &gateRepairRefusal{"refusal.claim-fenced", "the Matter claim or current journal generation is no longer active"}
-		} else {
-			return empty, err
-		}
 	}
 	anchor, err := currentAnchor(ctx, tx, stored.DomainID)
 	if err != nil {
@@ -258,11 +266,24 @@ func assessGateExemptionRepair(snapshot gateRepairSnapshot, command gateExemptio
 	if targetState != "" {
 		return &gateRepairRefusal{"refusal.gate-already-satisfied", fmt.Sprintf("%s is already satisfied on %s", command.Gate, command.NodeID)}
 	}
+	declarations := make([]step13Declaration, 0, len(snapshot.declarations))
+	for _, declaration := range snapshot.declarations {
+		declarations = append(declarations, declaration)
+	}
+	sort.Slice(declarations, func(i, j int) bool {
+		if declarations[i].domain != declarations[j].domain {
+			return declarations[i].domain < declarations[j].domain
+		}
+		if declarations[i].repo != declarations[j].repo {
+			return declarations[i].repo < declarations[j].repo
+		}
+		return declarations[i].gate < declarations[j].gate
+	})
 	for current := target; ; {
 		if !step13NodeLiveAt(current, position) || current.node.repo != command.RepoID {
 			return &gateRepairRefusal{"refusal.gate-repair-subject", fmt.Sprintf("ancestor %s is not live in Repo %s", current.node.id, command.RepoID)}
 		}
-		for _, requirement := range snapshot.declarations {
+		for _, requirement := range declarations {
 			if requirement.domain != command.DomainID || requirement.repo != command.RepoID || requirement.scale != current.node.kind {
 				continue
 			}
@@ -327,22 +348,33 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 		if terminal.RefusalCode == "" || terminal.RefusalMessage == "" || terminal.EventID != "" || ownedEvents != 0 {
 			return fmt.Errorf("%w: private repair refusal has effects or no status", ErrInvalidStore)
 		}
-		if terminal.RefusalCode != "refusal.claim-fenced" {
-			snapshot, snapshotErr := gateRepairSnapshotAt(ctx, tx, admission.DomainID, terminal.ObservedPosition)
-			if snapshotErr != nil {
-				return snapshotErr
+		if terminal.RefusalCode == "refusal.claim-fenced" {
+			if terminal.RefusalMessage != gateRepairClaimFencedMessage {
+				return fmt.Errorf("%w: private repair claim-fence witness invalid", ErrInvalidStore)
 			}
-			guard := assessGateExemptionRepair(snapshot, command, terminal.ObservedPosition, true)
-			if guard == nil {
-				historical, historyErr := gateRepairSnapshotAt(ctx, tx, admission.DomainID, command.Boundary.EventCount)
-				if historyErr != nil {
-					return historyErr
-				}
-				guard = assessGateExemptionRepair(historical, command, command.Boundary.EventCount, false)
+			fence, fenceErr := gateRepairClaimFence(ctx, tx, command)
+			if fenceErr != nil {
+				return fenceErr
 			}
-			if guard == nil || guard.code != terminal.RefusalCode || guard.message != terminal.RefusalMessage {
-				return fmt.Errorf("%w: private repair refusal does not match terminal history", ErrInvalidStore)
+			if fence == nil {
+				return fmt.Errorf("%w: private repair claim-fence refusal is not factual", ErrInvalidStore)
 			}
+			return nil
+		}
+		snapshot, snapshotErr := gateRepairSnapshotAt(ctx, tx, admission.DomainID, terminal.ObservedPosition)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		guard := assessGateExemptionRepair(snapshot, command, terminal.ObservedPosition, true)
+		if guard == nil {
+			historical, historyErr := gateRepairSnapshotAt(ctx, tx, admission.DomainID, command.Boundary.EventCount)
+			if historyErr != nil {
+				return historyErr
+			}
+			guard = assessGateExemptionRepair(historical, command, command.Boundary.EventCount, false)
+		}
+		if guard == nil || guard.code != terminal.RefusalCode || guard.message != terminal.RefusalMessage {
+			return fmt.Errorf("%w: private repair refusal does not match terminal history", ErrInvalidStore)
 		}
 		return nil
 	}
@@ -372,7 +404,7 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 		admission.DomainID, terminal.EventID, admission.CommandID).Scan(&position, &storedEventID); err != nil || position != terminal.ObservedPosition+1 || storedEventID != terminal.EventID {
 		return fmt.Errorf("%w: successful repair event position invalid", ErrInvalidStore)
 	}
-	if err = validatePrivateGateRepairEvent(ctx, tx, command, terminal.EventID, position); err != nil {
+	if err = validatePrivateGateRepairEvent(ctx, tx, command, terminal.EventID, position, terminal.OccurredAt); err != nil {
 		return err
 	}
 	snapshot, snapshotErr := gateRepairSnapshotAt(ctx, tx, admission.DomainID, terminal.ObservedPosition)
@@ -392,21 +424,22 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 	return nil
 }
 
-func validatePrivateGateRepairEvent(ctx context.Context, queryer gateRepairQueryer, command gateExemptionRepairCommand, id string, position uint64) error {
+func validatePrivateGateRepairEvent(ctx context.Context, queryer gateRepairQueryer, command gateExemptionRepairCommand, id string, position uint64, expectedOccurred string) error {
 	var raw []byte
 	var storedID, storedCommand string
 	if err := queryer.QueryRowContext(ctx, `SELECT record,event_id,command_id FROM authority_events WHERE domain_id=? AND position=?`,
 		command.DomainID, position).Scan(&raw, &storedID, &storedCommand); err != nil {
 		return ErrInvalidStore
 	}
-	return validatePrivateGateRepairEventRecord(command, id, position, raw, storedID, storedCommand)
+	return validatePrivateGateRepairEventRecord(command, id, position, raw, storedID, storedCommand, expectedOccurred)
 }
 
-func validatePrivateGateRepairEventRecord(command gateExemptionRepairCommand, id string, position uint64, raw []byte, storedID, storedCommand string) error {
+func validatePrivateGateRepairEventRecord(command gateExemptionRepairCommand, id string, position uint64, raw []byte, storedID, storedCommand string, expectedOccurred ...string) error {
 	event, err := parseStep12Event(raw, command.DomainID, position, storedID, storedCommand)
 	if err != nil || event.id != id || event.command != command.ID || event.hash != gateRepairRequestHash(commandBytes(command)) ||
 		event.environment != command.EnvironmentID || event.sequence != command.EnvironmentSequence || event.acted != command.ActedAt ||
 		event.repo != command.RepoID || event.kind != "gate.exemption-repaired" || event.subject != command.NodeID ||
+		len(expectedOccurred) > 1 || len(expectedOccurred) == 1 && event.occurred != expectedOccurred[0] ||
 		!step13ClosedPayload(event.payload, &struct {
 			Gate string `cbor:"gate"`
 		}{}, []string{"gate"}) {
