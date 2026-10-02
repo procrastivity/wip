@@ -21,6 +21,21 @@ func downgradeStep13ToV11(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for index := len(step15Schema) - 1; index >= 0; index-- {
+		object := step15Schema[index]
+		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
+			_ = db.Close()
+			t.Fatalf("drop v14 object %s: %v", object.name, err)
+		}
+	}
+	for _, object := range step4Schema {
+		if object.name == "environment_sequence_terminal" {
+			if _, err = db.Exec(object.sql); err != nil {
+				_ = db.Close()
+				t.Fatalf("restore v13 sequence trigger: %v", err)
+			}
+		}
+	}
 	for index := len(step14Schema) - 1; index >= 0; index-- {
 		object := step14Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {

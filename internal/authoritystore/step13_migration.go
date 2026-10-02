@@ -199,11 +199,17 @@ func UpgradeV11(root string) error {
 	if err = installStep14(db); err != nil {
 		return err
 	}
+	if err = installStep15(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}
 	if err = checkStep13State(db); err != nil {
 		return err
 	}
-	return checkStep14State(db)
+	if err = checkStep14State(db); err != nil {
+		return err
+	}
+	return checkStep15State(db)
 }

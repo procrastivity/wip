@@ -2,6 +2,7 @@ package authoritystore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -111,9 +112,10 @@ func checkStep4State(db *sql.DB) error {
 		step4 := operation.Step4Operation(id)
 		_, knownGate := gateDefinition(id)
 		step13Gate := version >= 12 && knownGate
+		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 {
 			return ErrInvalidStore
@@ -146,6 +148,32 @@ func checkStep4State(db *sql.DB) error {
 		}
 		if err = artifactDecoder.Unmarshal(s.command, &identity); err != nil || identity.Schema != "wipd.command/1" || identity.ID != s.id || identity.Authority.Domain != s.domain || identity.Authority.Epoch != s.epoch || identity.Environment.ID != s.env || identity.Environment.Sequence != s.seq || identity.Operation.Name != s.operation || identity.Operation.Version != s.version {
 			return ErrInvalidStore
+		}
+		if privateGateRepair {
+			if s.state != "terminal" {
+				return ErrInvalidStore
+			}
+			tx, txErr := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+			if txErr != nil {
+				return txErr
+			}
+			admission, admissionErr := readGateExemptionRepairAdmission(context.Background(), tx, s.domain, s.id)
+			terminal, terminalErr := readGateExemptionRepairTerminal(context.Background(), tx, s.domain, s.id)
+			validationErr := terminalErr
+			if validationErr == nil {
+				validationErr = admissionErr
+			}
+			if validationErr == nil {
+				validationErr = validateStoredGateExemptionRepairAdmissionCore(context.Background(), tx, admission)
+			}
+			if validationErr == nil {
+				validationErr = validateGateExemptionRepairTerminal(context.Background(), tx, admission, terminal)
+			}
+			_ = tx.Rollback()
+			if validationErr != nil {
+				return ErrInvalidStore
+			}
+			continue
 		}
 		var receipt, wrapper []byte
 		var epoch, gen, seq uint64
@@ -346,6 +374,27 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 				break
 			}
 			lifecycleEvents[ownerKey(d, cmd)] = append(lifecycleEvents[ownerKey(d, cmd)], lifecycleEvent{pos, id, raw})
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1 {
+			command, commandErr := decodeGateExemptionRepairCommand(s.command, s.hash)
+			if commandErr != nil || validatePrivateGateRepairEventRecord(command, id, pos, raw, id, cmd) != nil {
+				err = ErrInvalidStore
+				break
+			}
 			var length [8]byte
 			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
 			h := sha256.New()

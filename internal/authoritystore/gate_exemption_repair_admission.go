@@ -38,6 +38,7 @@ type gateExemptionRepairAdmission struct {
 	Boundary                            gateExemptionRepairBoundary
 	Nonce                               []byte
 	VerifiedAt                          string
+	Terminal                            *gateExemptionRepairTerminal
 }
 
 type gateRepairQueryer interface {
@@ -257,6 +258,17 @@ func (s *Store) admitGateExemptionRepair(ctx context.Context, command gateExempt
 		if stored.RequestHash != hash || !bytes.Equal(stored.Command, canonical) || len(proof) != 0 && !bytes.Equal(stored.Proof, proof) {
 			return out, ErrConflict
 		}
+		if terminal, terminalErr := readGateExemptionRepairTerminal(ctx, tx, command.DomainID, command.ID); terminalErr == nil {
+			if err = validateStoredGateExemptionRepairAdmissionCore(ctx, tx, stored); err != nil {
+				return out, err
+			}
+			if err = validateGateExemptionRepairTerminal(ctx, tx, stored, terminal); err != nil {
+				return out, err
+			}
+			stored.Terminal = &terminal
+		} else if !errors.Is(terminalErr, sql.ErrNoRows) {
+			return out, terminalErr
+		}
 		return stored, nil
 	}
 	if len(proof) == 0 {
@@ -351,8 +363,20 @@ func (s *Store) recoverGateExemptionRepair(ctx context.Context, canonical []byte
 		len(suppliedProof) != 0 && !bytes.Equal(stored.Proof, suppliedProof) {
 		return out, ErrConflict
 	}
-	if err = validateStoredGateExemptionRepairAdmission(ctx, tx, stored); err != nil {
+	if err = validateStoredGateExemptionRepairAdmissionCore(ctx, tx, stored); err != nil {
 		return out, err
+	}
+	if terminal, terminalErr := readGateExemptionRepairTerminal(ctx, tx, stored.DomainID, stored.CommandID); terminalErr == nil {
+		if err = validateGateExemptionRepairTerminal(ctx, tx, stored, terminal); err != nil {
+			return out, err
+		}
+		stored.Terminal = &terminal
+	} else if errors.Is(terminalErr, sql.ErrNoRows) {
+		if err = validatePendingGateExemptionRepairAdmission(ctx, tx, stored); err != nil {
+			return out, err
+		}
+	} else {
+		return out, terminalErr
 	}
 	return stored, nil
 }
@@ -380,6 +404,13 @@ func readGateExemptionRepairAdmission(ctx context.Context, queryer gateRepairQue
 }
 
 func validateStoredGateExemptionRepairAdmission(ctx context.Context, queryer gateRepairQueryer, stored gateExemptionRepairAdmission) error {
+	if err := validateStoredGateExemptionRepairAdmissionCore(ctx, queryer, stored); err != nil {
+		return err
+	}
+	return validatePendingGateExemptionRepairAdmission(ctx, queryer, stored)
+}
+
+func validateStoredGateExemptionRepairAdmissionCore(ctx context.Context, queryer gateRepairQueryer, stored gateExemptionRepairAdmission) error {
 	command, err := decodeGateExemptionRepairCommand(stored.Command, stored.RequestHash)
 	if err != nil || command.ID != stored.CommandID || command.DomainID != stored.DomainID ||
 		command.AuthorityEpoch != stored.AuthorityEpoch || command.EnvironmentID != stored.EnvironmentID ||
@@ -403,12 +434,16 @@ func validateStoredGateExemptionRepairAdmission(ctx context.Context, queryer gat
 	if err = verifyGateExemptionRepairBoundary(ctx, queryer, command, false); err != nil {
 		return fmt.Errorf("%w: retained repair declaration boundary invalid: %v", ErrInvalidStore, err)
 	}
+	return nil
+}
+
+func validatePendingGateExemptionRepairAdmission(ctx context.Context, queryer gateRepairQueryer, stored gateExemptionRepairAdmission) error {
 	var head uint64
-	if err = queryer.QueryRowContext(ctx, `SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, stored.DomainID, stored.EnvironmentID).Scan(&head); err != nil || stored.EnvironmentSequence != head+1 {
+	if err := queryer.QueryRowContext(ctx, `SELECT sequence_head FROM environments WHERE domain_id=? AND environment_id=?`, stored.DomainID, stored.EnvironmentID).Scan(&head); err != nil || stored.EnvironmentSequence != head+1 {
 		return fmt.Errorf("%w: repair admission sequence is not pending", ErrInvalidStore)
 	}
 	var collision int
-	if err = queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM submissions WHERE domain_id=? AND (command_id=? OR (environment_id=? AND environment_sequence=?)))`,
+	if err := queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM submissions WHERE domain_id=? AND (command_id=? OR (environment_id=? AND environment_sequence=?)))`,
 		stored.DomainID, stored.CommandID, stored.EnvironmentID, stored.EnvironmentSequence).Scan(&collision); err != nil || collision != 0 {
 		return fmt.Errorf("%w: repair admission conflicts with submission", ErrInvalidStore)
 	}
@@ -486,9 +521,13 @@ func verifyGateExemptionRepairBoundary(ctx context.Context, queryer gateRepairQu
 		}
 	}
 	if requireMissing {
-		var satisfied int
-		if err = queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM m6_gate_states WHERE domain_id=? AND node_id=? AND gate=?)`,
-			command.DomainID, command.NodeID, command.Gate).Scan(&satisfied); err != nil || satisfied != 0 {
+		var state sql.NullString
+		err = queryer.QueryRowContext(ctx, `SELECT state FROM m6_gate_states WHERE domain_id=? AND node_id=? AND gate=?`,
+			command.DomainID, command.NodeID, command.Gate).Scan(&state)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if state.Valid && state.String != "exempt" {
 			return ErrInvalidProof
 		}
 	}
@@ -538,8 +577,20 @@ func checkStep14State(db *sql.DB) error {
 		return fmt.Errorf("%w: orphaned repair nonce reservation", ErrInvalidStore)
 	}
 	for _, stored := range admissions {
-		if err = validateStoredGateExemptionRepairAdmission(context.Background(), tx, stored); err != nil {
-			return err
+		terminal, terminalErr := readGateExemptionRepairTerminal(context.Background(), tx, stored.DomainID, stored.CommandID)
+		if terminalErr == nil {
+			if err = validateStoredGateExemptionRepairAdmissionCore(context.Background(), tx, stored); err != nil {
+				return err
+			}
+			if err = validateGateExemptionRepairTerminal(context.Background(), tx, stored, terminal); err != nil {
+				return err
+			}
+		} else if errors.Is(terminalErr, sql.ErrNoRows) {
+			if err = validateStoredGateExemptionRepairAdmission(context.Background(), tx, stored); err != nil {
+				return err
+			}
+		} else {
+			return terminalErr
 		}
 	}
 	return tx.Commit()

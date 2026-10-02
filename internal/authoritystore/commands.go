@@ -260,7 +260,7 @@ func (s *Store) QueryCommand(ctx context.Context, domain, id, hash string, epoch
 		return out, err
 	}
 	var stored, env string
-	err = tx.QueryRowContext(ctx, `SELECT request_hash,environment_id FROM submissions WHERE domain_id=? AND command_id=?`, domain, id).Scan(&stored, &env)
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,environment_id FROM submissions WHERE domain_id=? AND command_id=? AND operation_name!='gate.exemption.repair'`, domain, id).Scan(&stored, &env)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}

@@ -310,6 +310,21 @@ func downgradeStep14ToV12(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for index := len(step15Schema) - 1; index >= 0; index-- {
+		object := step15Schema[index]
+		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
+			_ = db.Close()
+			t.Fatalf("drop v14 object %s: %v", object.name, err)
+		}
+	}
+	for _, object := range step4Schema {
+		if object.name == "environment_sequence_terminal" {
+			if _, err = db.Exec(object.sql); err != nil {
+				_ = db.Close()
+				t.Fatalf("restore v13 sequence trigger: %v", err)
+			}
+		}
+	}
 	for index := len(step14Schema) - 1; index >= 0; index-- {
 		object := step14Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
@@ -347,6 +362,107 @@ func downgradeStep14ToV12(t *testing.T, root string) {
 	}
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func downgradeStep15ToV13(t *testing.T, root string) {
+	t.Helper()
+	db, err := connect(filepath.Join(root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := len(step15Schema) - 1; index >= 0; index-- {
+		object := step15Schema[index]
+		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
+			_ = db.Close()
+			t.Fatalf("drop v14 object %s: %v", object.name, err)
+		}
+	}
+	for _, object := range step4Schema {
+		if object.name == "environment_sequence_terminal" {
+			if _, err = db.Exec(object.sql); err != nil {
+				_ = db.Close()
+				t.Fatalf("restore v13 sequence trigger: %v", err)
+			}
+		}
+	}
+	for _, object := range step14Schema {
+		if object.name == "submissions_no_repair_admission_collision" {
+			if _, err = db.Exec(object.sql); err != nil {
+				_ = db.Close()
+				t.Fatalf("restore v13 admission collision trigger: %v", err)
+			}
+		}
+	}
+	if _, err = db.Exec(`DROP TABLE schema_migrations`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(step14MigrationMarker.sql); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	markers := []string{
+		"baseline", "environment-and-artifacts", "submissions-and-receipts", "prefix-snapshot-blob-transfer",
+		"claims-grants-journals-close", "m5-lab-genesis-grant-consumption", "step-8-provisional-birth-projection",
+		"step-9-birth-journal-receipt-barrier", "step-10-content-and-findings", "step-16-claim-journal-sequence-order",
+		"step-4-stage-step-operations", "step-7-authority-gate-config-projections", "step-7-detached-gate-repair-admissions",
+	}
+	for index, marker := range markers {
+		if _, err = db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(?,?)`, index+1, marker); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`PRAGMA user_version=13`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err = checkSchemaVersion(db, 13); err != nil {
+		_ = db.Close()
+		t.Fatalf("downgraded v13 fixture validation: %v", err)
+	}
+	if err = checkStep14State(db); err != nil {
+		_ = db.Close()
+		t.Fatalf("v13 pending admission validation: %v", err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpgradeV13PreservesPendingDetachedRepairAdmission(t *testing.T) {
+	fixture := newGateRepairAdmissionFixture(t)
+	canonical, hash, proof := signRepairAdmissionProof(t, fixture.command, false,
+		fixture.store.now, fixture.store.now.Add(10*time.Minute), repairNonce(), nil)
+	admitted, err := fixture.store.s.admitGateExemptionRepair(context.Background(), fixture.command, proof, fixture.store.peer, fixture.store.now)
+	if err != nil {
+		t.Fatalf("admit proof before v13 migration: %v", err)
+	}
+	root := fixture.store.root
+	if err = fixture.store.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downgradeStep15ToV13(t, root)
+	if err = UpgradeV13(root); err != nil {
+		t.Fatalf("explicit v13-to-v14 migration: %v", err)
+	}
+	backup, err := connect(filepath.Join(root, "authority-v13.backup.db"), "rw", true)
+	if err != nil {
+		t.Fatalf("open retained v13 backup: %v", err)
+	}
+	if err = errors.Join(checkSchemaVersion(backup, 13), backup.Close()); err != nil {
+		t.Fatalf("validate exact retained v13 backup: %v", err)
+	}
+	reopened, err := OpenExisting(root)
+	if err != nil {
+		t.Fatalf("open v14 after explicit upgrade: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	recovered, err := reopened.recoverGateExemptionRepair(context.Background(), canonical, hash, nil)
+	if err != nil || !bytes.Equal(recovered.Proof, proof) || recovered.VerifiedAt != admitted.VerifiedAt {
+		t.Fatalf("v13 upgrade changed stored proof/time: proofEqual=%t verifiedAt=%q want %q err=%v",
+			bytes.Equal(recovered.Proof, proof), recovered.VerifiedAt, admitted.VerifiedAt, err)
 	}
 }
 
