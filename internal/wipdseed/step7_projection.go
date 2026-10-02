@@ -37,7 +37,8 @@ type step7GateNode struct {
 
 type step7GateDeclarationAt struct {
 	step7GateDeclaration
-	position uint64
+	position      uint64
+	eligibleNodes map[string]bool
 }
 
 func step7ClientTransferBoundary(kind string, fields map[string]any) error {
@@ -139,6 +140,25 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 		return nil, nil
 	}
 
+	repairTargets := make(map[string]map[string]struct{})
+	for _, fields := range events {
+		if fields["kind"] != "gate.exemption-repaired" {
+			continue
+		}
+		payload, payloadOK := fields["payload"].(map[string]any)
+		gate, gateOK := payload["gate"].(string)
+		repo, repoOK := fields["repo_id"].(string)
+		nodeID, nodeOK := fields["subject_id"].(string)
+		if !payloadOK || !wipdwire.ExactMapKeys(payload, "gate") || !gateOK || gate == "" || !repoOK || !nodeOK {
+			continue
+		}
+		key := repo + "\x00" + gate
+		if repairTargets[key] == nil {
+			repairTargets[key] = make(map[string]struct{})
+		}
+		repairTargets[key][nodeID] = struct{}{}
+	}
+
 	declarations := make(map[string]step7GateDeclarationAt)
 	states := make(map[string]step7GateState)
 	lifecycle := make(map[string]string, len(nodes))
@@ -197,6 +217,13 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 					projection.States = append(projection.States, states[key])
 				}
 			}
+			declaration.eligibleNodes = make(map[string]bool)
+			for nodeID := range repairTargets[declarationKey] {
+				if step7ClientRepairEligibleAtDeclaration(nodeID, repo, scale, gate, position, nodes, declarations, states, lifecycle) {
+					declaration.eligibleNodes[nodeID] = true
+				}
+			}
+			declarations[declarationKey] = declaration
 		case "gate.closed", "gate.dismissed":
 			gate, _ := payload["gate"].(string)
 			scale, _ := payload["scale"].(string)
@@ -237,7 +264,7 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 			key := subject + "\x00" + gate
 			if !wipdwire.ExactMapKeys(payload, "gate") || gate == "" || !found || node.repo != repo || node.birth >= position ||
 				!step7ClientNodeLiveAt(node, position) ||
-				!declared || declaration.Scale != node.kind || lifecycle[subject] != "done" {
+				!declared || declaration.Scale != node.kind || !declaration.eligibleNodes[subject] || lifecycle[subject] != "done" {
 				return nil, ErrInvalidClientState
 			}
 			if _, duplicate := states[key]; duplicate || !step7ClientGateSealed(subject, gate, position, nodes, declarations, states, lifecycle) {
@@ -295,6 +322,15 @@ func step7ClientGateSealed(nodeID, targetGate string, position uint64, nodes map
 		currentID = current.parent
 	}
 	return true
+}
+
+func step7ClientRepairEligibleAtDeclaration(nodeID, repo, scale, gate string, position uint64, nodes map[string]step7GateNode,
+	declarations map[string]step7GateDeclarationAt, states map[string]step7GateState, lifecycle map[string]string,
+) bool {
+	node, found := nodes[nodeID]
+	return found && node.repo == repo && node.kind == scale && node.birth < position &&
+		step7ClientNodeLiveAt(node, position) && lifecycle[nodeID] == "done" &&
+		step7ClientGateSealed(nodeID, gate, position, nodes, declarations, states, lifecycle)
 }
 
 func step7ClientNodeLiveAt(node step7GateNode, position uint64) bool {

@@ -2346,19 +2346,19 @@ func TestClientGateRepairUsesNodeLivenessAtItsEventBoundary(t *testing.T) {
 			"id": matterID, "locator": "repair-live", "title": "Repair liveness",
 		}),
 		step7ClientTestEvent(t, 601, 501, 2, "stage.created", stageID, map[string]any{
-			"matter_id": matterID, "locator": "stage", "title": "Stage", "sort_key": int64(0),
+			"matter_id": matterID, "locator": "stage", "title": "Stage", "sort_key": uint64(1000),
 		}),
 		step7ClientTestEvent(t, 602, 502, 3, "step.created", stepID, map[string]any{
 			"parent": stageID, "title": "Step",
 		}),
-		step7ClientTestEvent(t, 603, 503, 4, "gate.declared", testRepoID, map[string]any{
-			"gate": "repair-target", "scale": "step",
-		}),
-		step7ClientTestEvent(t, 604, 504, 5, "step.started", stepID, map[string]any{
+		step7ClientTestEvent(t, 603, 503, 4, "step.started", stepID, map[string]any{
 			"from": "planned", "to": "in-progress",
 		}),
-		step7ClientTestEvent(t, 605, 505, 6, "step.finished", stepID, map[string]any{
+		step7ClientTestEvent(t, 604, 504, 5, "step.finished", stepID, map[string]any{
 			"from": "in-progress", "to": "done",
+		}),
+		step7ClientTestEvent(t, 605, 505, 6, "gate.declared", testRepoID, map[string]any{
+			"gate": "repair-target", "scale": "step",
 		}),
 	}
 	closeBeforeRemoval := cloneEventRecords(base)
@@ -2378,4 +2378,227 @@ func TestClientGateRepairUsesNodeLivenessAtItsEventBoundary(t *testing.T) {
 	if _, err = foldStep7GateProjection(removalBeforeRepair, testDomainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("repair after target removal was accepted: %v", err)
 	}
+}
+
+func TestClientGateRepairRequiresEligibilityAtDeclarationBoundaryInCompleteTransfers(t *testing.T) {
+	fixture := newClientFixture(t)
+	tests := []struct {
+		name          string
+		makeRecords   func(*testing.T) []wipdwire.EventRecord
+		pullPrefixLen int
+		wantAccepted  bool
+	}{
+		{
+			name: "done only after declaration",
+			makeRecords: func(t *testing.T) []wipdwire.EventRecord {
+				return step7ClientRepairEligibilityHistory(t, "late-done")
+			},
+			pullPrefixLen: 6,
+		},
+		{
+			name: "own prerequisite closed only after declaration",
+			makeRecords: func(t *testing.T) []wipdwire.EventRecord {
+				return step7ClientRepairEligibilityHistory(t, "late-own-close")
+			},
+			pullPrefixLen: 8,
+		},
+		{
+			name: "enclosing prerequisite closed only after declaration",
+			makeRecords: func(t *testing.T) []wipdwire.EventRecord {
+				return step7ClientEnclosingRepairEligibilityHistory(t)
+			},
+			pullPrefixLen: 10,
+		},
+		{
+			name: "done and own prerequisite satisfied at declaration",
+			makeRecords: func(t *testing.T) []wipdwire.EventRecord {
+				return step7ClientRepairEligibilityHistory(t, "eligible")
+			},
+			pullPrefixLen: 9,
+			wantAccepted:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			records := test.makeRecords(t)
+			for _, kind := range []string{"seed", "pull"} {
+				t.Run(kind, func(t *testing.T) {
+					prior := []wipdwire.EventRecord(nil)
+					if kind == "pull" {
+						prior = cloneEventRecords(records[:test.pullPrefixLen])
+					}
+					frames, installed := step7ClientRepairTransferFrames(t, kind, records, prior)
+					state, err := verifyTransferFrames(frames, kind, fixture.profile, testRepoID,
+						"01KZ7XHAQT1S46NYPN1PW1DX3A", "sha256:"+strings.Repeat("a", 64), installed, prior)
+					if test.wantAccepted {
+						if err != nil || state.GateProjection == nil || !anchorEqual(state.Prefix, step7IndependentPrefixAnchor(records)) {
+							t.Fatalf("eligible complete %s was refused or partially folded: state=%+v err=%v", kind, state, err)
+						}
+						for _, gateState := range state.GateProjection.States {
+							if gateState.Gate == "repair-target" && gateState.State == "exempt" && gateState.SourceEventID == records[len(records)-1].EventID {
+								return
+							}
+						}
+						t.Fatalf("eligible %s omitted the repaired projection: %+v", kind, state.GateProjection)
+					}
+					if !errors.Is(err, ErrInvalidClientState) || state.Prefix.EventCount != 0 || state.EventRecords != nil || state.GateProjection != nil {
+						t.Fatalf("ineligible complete %s did not fail closed without partial state: state=%+v err=%v", kind, state, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func step7ClientRepairEligibilityHistory(t *testing.T, scenario string) []wipdwire.EventRecord {
+	t.Helper()
+	matterID := "00000000000000000000000041"
+	records := cloneEventRecords(step7ClientGateHistory(t)[:5])
+	appendEvent := func(eventNumber, commandNumber int, sequence uint64, kind, subject string, payload map[string]any) {
+		records = append(records, step7ClientTestEvent(t, eventNumber, commandNumber, sequence, kind, subject, payload))
+	}
+	sequence := uint64(4)
+	eventNumber, commandNumber := 520, 420
+	appendEventAt := func(kind, subject string, payload map[string]any) {
+		appendEvent(eventNumber, commandNumber, sequence, kind, subject, payload)
+		eventNumber++
+		commandNumber++
+		sequence++
+	}
+	finish := func() {
+		appendEventAt("matter.finished", matterID, map[string]any{"from": "in-progress", "to": "done"})
+	}
+	declare := func(gate string, scale string) {
+		appendEventAt("gate.declared", testRepoID, map[string]any{"gate": gate, "scale": scale})
+	}
+	closeGate := func(gate, node, scale string) {
+		appendEventAt("gate.closed", node, map[string]any{"gate": gate, "scale": scale, "tracker_push_level": "off"})
+	}
+	switch scenario {
+	case "late-done":
+		declare("repair-target", "matter")
+		finish()
+	case "late-own-close":
+		finish()
+		declare("other-own", "matter")
+		declare("repair-target", "matter")
+		closeGate("other-own", matterID, "matter")
+	case "eligible":
+		finish()
+		declare("other-own", "matter")
+		closeGate("other-own", matterID, "matter")
+		declare("repair-target", "matter")
+	default:
+		t.Fatalf("unknown repair eligibility scenario %q", scenario)
+	}
+	appendEventAt("gate.exemption-repaired", matterID, map[string]any{"gate": "repair-target"})
+	return records
+}
+
+func step7ClientEnclosingRepairEligibilityHistory(t *testing.T) []wipdwire.EventRecord {
+	t.Helper()
+	matterID := "00000000000000000000000041"
+	stageID := "00000000000000000000000046"
+	records := cloneEventRecords(step7ClientGateHistory(t)[:5])
+	eventNumber, commandNumber := 540, 440
+	sequence := uint64(4)
+	appendEvent := func(kind, subject string, payload map[string]any) {
+		records = append(records, step7ClientTestEvent(t, eventNumber, commandNumber, sequence, kind, subject, payload))
+		eventNumber++
+		commandNumber++
+		sequence++
+	}
+	appendEvent("stage.created", stageID, map[string]any{
+		"matter_id": matterID, "locator": "repair-stage", "title": "Repair stage", "sort_key": uint64(1000),
+	})
+	appendEvent("stage.started", stageID, map[string]any{"from": "planned", "to": "in-progress"})
+	appendEvent("stage.finished", stageID, map[string]any{"from": "in-progress", "to": "done"})
+	appendEvent("gate.declared", testRepoID, map[string]any{"gate": "enclosing-open", "scale": "matter"})
+	appendEvent("gate.declared", testRepoID, map[string]any{"gate": "repair-target", "scale": "stage"})
+	appendEvent("gate.closed", matterID, map[string]any{
+		"gate": "enclosing-open", "scale": "matter", "tracker_push_level": "off",
+	})
+	appendEvent("gate.exemption-repaired", stageID, map[string]any{"gate": "repair-target"})
+	return records
+}
+
+func step7ClientRepairTransferFrames(t *testing.T, kind string, all, prior []wipdwire.EventRecord) ([]wipdwire.Frame, wipdwire.PrefixAnchor) {
+	t.Helper()
+	if kind != "seed" && kind != "pull" || kind == "seed" && len(prior) != 0 || len(prior) > len(all) {
+		t.Fatalf("invalid %s test transfer prefix: prior=%d records=%d", kind, len(prior), len(all))
+	}
+	startAnchor := step7IndependentPrefixAnchor(prior)
+	endAnchor := step7IndependentPrefixAnchor(all)
+	delta := all[len(prior):]
+	var eventBytes uint64
+	for _, record := range delta {
+		eventBytes += uint64(len(record.Record))
+	}
+	const requestID = "01KZ7XHAQT1S46NYPN1PW1DX3D"
+	const transferID = "01KZ7XHAQT1S46NYPN1PW1DX3E"
+	const snapshotID = "01KZ7XHAQT1S46NYPN1PW1DX3F"
+	manifestDigest := emptyManifestDigest()
+	frames := []wipdwire.Frame{}
+	if kind == "seed" {
+		start := wipdwire.SeedStart{
+			Schema: "wipd.seed-start/1", TransferID: transferID, DomainID: testDomainID, Epoch: 1,
+			StoreSchema: "wipd.store/1", SnapshotID: snapshotID,
+			Prefix: struct {
+				Start wipdwire.PrefixAnchor `cbor:"start"`
+				End   wipdwire.PrefixAnchor `cbor:"end"`
+			}{Start: startAnchor, End: endAnchor},
+			EventCount: uint64(len(delta)), EventByteLength: eventBytes, ManifestDigest: manifestDigest,
+		}
+		frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: 0, Kind: "seed.start", Payload: mustEncode(t, start)})
+	} else {
+		start := wipdwire.PullStart{
+			Schema: "wipd.pull-start/1", TransferID: transferID, DomainID: testDomainID, Epoch: 1,
+			Prefix: struct {
+				Start wipdwire.PrefixAnchor `cbor:"start"`
+				End   wipdwire.PrefixAnchor `cbor:"end"`
+			}{Start: startAnchor, End: endAnchor},
+			EventCount: uint64(len(delta)), EventByteLength: eventBytes, ManifestDigest: manifestDigest,
+		}
+		frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: 0, Kind: "pull.start", Payload: mustEncode(t, start)})
+	}
+	for index, record := range delta {
+		frames = append(frames, wipdwire.Frame{
+			RequestID: requestID, Sequence: uint64(index + 1), Kind: "event.record",
+			Payload: mustEncode(t, record),
+		})
+	}
+	manifest := wipdwire.BlobManifest{
+		Schema: "wipd.blob-manifest/1", DomainID: testDomainID, Epoch: 1, AsOf: endAnchor,
+		Entries: []wipdwire.BlobManifestEntry{}, Digest: manifestDigest,
+	}
+	frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: uint64(len(frames)), Kind: "blob.manifest", Payload: mustEncode(t, manifest)})
+	if kind == "seed" {
+		end := wipdwire.SeedEnd{Schema: "wipd.seed-end/1", TransferID: transferID,
+			VerifiedPrefix: endAnchor, ManifestDigest: manifestDigest, Complete: true}
+		frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: uint64(len(frames)), Kind: "seed.end", Payload: mustEncode(t, end)})
+	} else {
+		end := wipdwire.PullEnd{TransferID: transferID, VerifiedPrefix: endAnchor, ManifestDigest: manifestDigest, Complete: true}
+		frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: uint64(len(frames)), Kind: "pull.end", Payload: mustEncode(t, end)})
+	}
+	return frames, startAnchor
+}
+
+func step7IndependentPrefixAnchor(records []wipdwire.EventRecord) wipdwire.PrefixAnchor {
+	chain := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
+	for _, record := range records {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(record.Record)))
+		hash := sha256.New()
+		_, _ = hash.Write([]byte("wipd/event-prefix-step/v1\x00"))
+		_, _ = hash.Write(chain[:])
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(record.Record)
+		copy(chain[:], hash.Sum(nil))
+	}
+	anchor := wipdwire.PrefixAnchor{EventCount: uint64(len(records)), Digest: "sha256:" + hex.EncodeToString(chain[:])}
+	if len(records) > 0 {
+		last := records[len(records)-1].EventID
+		anchor.EventID = &last
+	}
+	return anchor
 }
