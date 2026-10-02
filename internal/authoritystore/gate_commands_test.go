@@ -426,3 +426,52 @@ func TestGateReceiptOutputIsRevalidatedAgainstCommandAndProjection(t *testing.T)
 		t.Fatalf("altered gate receipt output validation error = %v, want ErrInvalidStore", err)
 	}
 }
+
+func TestGateHistoryValidationRejectsSuccessfulRoleOwnedEffects(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation operation.Definition
+		input     operation.Input
+		kind      string
+		payload   map[string]any
+		output    map[string]any
+	}{
+		{
+			name: "role-owned close", operation: operation.GateCloseV1,
+			input: operation.GateCloseInput{Gate: "verified", NodeID: claimTestID(301)}, kind: "gate.closed",
+			payload: map[string]any{"gate": "verified", "scale": "matter", "tracker_push_level": "off"},
+			output:  map[string]any{"gate": "verified", "node_id": claimTestID(301), "scale": "matter"},
+		},
+		{
+			name: "role-owned dismissal", operation: operation.GateDismissV1,
+			input: operation.GateDismissInput{Gate: "verified", NodeID: claimTestID(301), Reason: "reason"}, kind: "gate.dismissed",
+			payload: map[string]any{"gate": "verified", "scale": "matter", "reason": "reason", "tracker_push_level": "off"},
+			output:  map[string]any{"gate": "verified", "node_id": claimTestID(301), "scale": "matter"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := step13TestEvent(1, test.kind, claimTestID(301), test.payload).step12Event
+			command := operation.Command{Request: operation.Request{
+				Operation: test.operation.Metadata().Operation, Actor: "role:verifier",
+				Context: operation.Context{Repo: repoA}, Input: test.input,
+			}}
+			output, err := artifactEncoder.Marshal(test.output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt := receiptRecord{Result: struct {
+				Code    string  `cbor:"code"`
+				Output  []byte  `cbor:"output"`
+				Problem *string `cbor:"problem_code"`
+			}{Code: string(operation.ResultSucceeded), Output: output}}
+			receipt.Range = &struct {
+				First string `cbor:"first_event_id"`
+				Last  string `cbor:"last_event_id"`
+				Count uint64 `cbor:"event_count"`
+			}{First: event.id, Last: event.id, Count: 1}
+			if err = validateGateCommandEffects(nil, command, []step12Event{event}, receipt); !errors.Is(err, ErrInvalidStore) {
+				t.Fatalf("successful role-owned event/receipt validation = %v, want ErrInvalidStore", err)
+			}
+		})
+	}
+}

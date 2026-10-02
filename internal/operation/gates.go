@@ -62,16 +62,22 @@ var GateDeclareV1 = mustDefine[GateDeclareInput, GateDeclareOutput](Metadata{
 var GateCloseV1 = mustDefine[GateCloseInput, GateCloseOutput](Metadata{
 	Operation: ID{Name: "gate.close", Version: 1}, Access: AccessMutation,
 	Delivery: DeliveryClaim, RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
-	Guards: []Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject},
-	Writes: []Footprint{FootprintGateState, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
+	Guards: []Footprint{
+		FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+		FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates,
+	},
+	Writes: []Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
 	Claim: ClaimExact, ExternalEffects: []ExternalEffect{},
 })
 
 var GateDismissV1 = mustDefine[GateDismissInput, GateDismissOutput](Metadata{
 	Operation: ID{Name: "gate.dismiss", Version: 1}, Access: AccessMutation,
 	Delivery: DeliveryClaim, RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
-	Guards: []Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject, FootprintGateDismissalReason},
-	Writes: []Footprint{FootprintGateState, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
+	Guards: []Footprint{
+		FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+		FootprintGateDismissalReason, FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates,
+	},
+	Writes: []Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
 	Claim: ClaimExact, ExternalEffects: []ExternalEffect{},
 })
 

@@ -358,6 +358,17 @@ func TestM6LifecycleDeliveryAndFootprintsArePinned(t *testing.T) {
 		{StageCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle, FootprintCancelReason}, []Footprint{FootprintStageLifecycle}},
 		{MatterCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintCancelReason}, []Footprint{FootprintMatterLifecycle}},
 		{StageFinishV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle}, []Footprint{FootprintStageLifecycle}},
+		{GateDeclareV1, DeliveryClaim,
+			[]Footprint{FootprintMatterActiveClaim, FootprintRepoGateDeclarations, FootprintGateOrder, FootprintGateExemptionSnapshot},
+			[]Footprint{FootprintRepoGateDeclarations, FootprintGateExemptionSnapshot}},
+		{GateCloseV1, DeliveryClaim,
+			[]Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+				FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates},
+			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}},
+		{GateDismissV1, DeliveryClaim,
+			[]Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+				FootprintGateDismissalReason, FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates},
+			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}},
 	}
 	for _, test := range tests {
 		metadata := test.definition.Metadata()

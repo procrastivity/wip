@@ -89,13 +89,24 @@ const (
 	FootprintMatterLocatorRepair     Footprint = "matter.locator-repair"
 	FootprintRepoGateDeclarations    Footprint = "repo.gate-declarations"
 	FootprintGateOrder               Footprint = "gate.order"
-	FootprintGateExemptionSnapshot   Footprint = "gate.exemption-snapshot"
-	FootprintGateDeclaration         Footprint = "gate.declaration"
-	FootprintGateOwner               Footprint = "gate.owner"
-	FootprintGateState               Footprint = "gate.state"
-	FootprintGateSubject             Footprint = "gate.subject"
-	FootprintGateDismissalReason     Footprint = "gate.dismissal-reason"
-	FootprintTrackerCandidates       Footprint = "tracker.candidates"
+	// GateExemptionSnapshot reads eligible live-Done subjects, ancestor lifecycle,
+	// declarations, and effective gate state at the declaration boundary.
+	FootprintGateExemptionSnapshot Footprint = "gate.exemption-snapshot"
+	FootprintGateDeclaration       Footprint = "gate.declaration"
+	FootprintGateOwner             Footprint = "gate.owner"
+	FootprintGateState             Footprint = "gate.state"
+	// GateSubject covers exact node/Repo/kind identity, Matter-claim relation,
+	// live/tombstone status, and lifecycle/ancestry needed by gate eligibility.
+	FootprintGateSubject         Footprint = "gate.subject"
+	FootprintGateDismissalReason Footprint = "gate.dismissal-reason"
+	// TrackerCandidates writes the durable candidate/outbox rows emitted by a gate event.
+	FootprintTrackerCandidates Footprint = "tracker.candidates"
+	// RepoTrackerPushConfig reads the Repo's effective tracker backend and push level.
+	FootprintRepoTrackerPushConfig Footprint = "repo.tracker-push-config"
+	// TrackerReferences reads active shared references when deriving candidate effects.
+	FootprintTrackerReferences Footprint = "tracker.references"
+	// TrackerSharedAggregates reads and updates cross-Matter membership/disposition for candidates.
+	FootprintTrackerSharedAggregates Footprint = "tracker.shared-aggregates"
 )
 
 // BlobSpec statically names one accepted staged blob input.

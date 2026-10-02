@@ -190,8 +190,11 @@ func validateGateCommandEffects(db *sql.DB, command operation.Command, events []
 
 func gateEventActorAllowed(actor, gate string, dismissal bool) bool {
 	owner := map[string]string{"verified": "verifier", "reviewed": "warden", "ci-green": "warden"}[gate]
-	if dismissal {
-		return actor == "human"
+	if actor != "human" {
+		return false
 	}
-	return actor == "human" && owner == "" || owner != "" && actor == "role:"+owner
+	if dismissal {
+		return true
+	}
+	return owner == ""
 }
