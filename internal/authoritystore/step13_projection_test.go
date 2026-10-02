@@ -21,6 +21,13 @@ func downgradeStep13ToV11(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for index := len(step14Schema) - 1; index >= 0; index-- {
+		object := step14Schema[index]
+		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
+			_ = db.Close()
+			t.Fatalf("drop v13 object %s: %v", object.name, err)
+		}
+	}
 	for index := len(step13Schema) - 1; index >= 0; index-- {
 		object := step13Schema[index]
 		if _, err = db.Exec("DROP " + object.kind + " IF EXISTS " + object.name); err != nil {
@@ -182,7 +189,7 @@ func TestStep13UpgradeV11AcceptsHistoricalInlineSweepFinishAndReopens(t *testing
 	}
 	reopened, err := OpenExisting(f.root)
 	if err != nil {
-		t.Fatalf("open upgraded v12 history: %v", err)
+		t.Fatalf("open upgraded v13 history: %v", err)
 	}
 	defer func() { _ = reopened.Close() }()
 	replay, err := reopened.SubmitCommand(context.Background(), finish, hash, f.peer, f.now)

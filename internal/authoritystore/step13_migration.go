@@ -196,8 +196,14 @@ func UpgradeV11(root string) error {
 	if err = rebuildStep13Projection(db); err != nil {
 		return err
 	}
+	if err = installStep14(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}
-	return checkStep13State(db)
+	if err = checkStep13State(db); err != nil {
+		return err
+	}
+	return checkStep14State(db)
 }

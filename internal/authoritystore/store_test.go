@@ -385,7 +385,7 @@ func TestOpeningRefusesMissingPartialNewerAndLegacy(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, sql string }{
 		{"legacy", `CREATE TABLE events (id TEXT)`},
-		{"newer", `PRAGMA user_version = 13`},
+		{"newer", fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion+1)},
 		{"unversioned-new-schema", `CREATE TABLE future_records (id INTEGER)`},
 		{"missing-table", `DROP TABLE repo_memberships`},
 		{"missing-marker", `DELETE FROM schema_migrations`},
