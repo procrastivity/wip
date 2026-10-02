@@ -155,6 +155,11 @@ type Runtime struct {
 	journal *wipdjournal.Journal
 }
 
+// SupportsCommandSubmitV2 exposes only the authority session's selection.
+func (runtime *Runtime) SupportsCommandSubmitV2() bool {
+	return runtime != nil && runtime.client.SupportsCommandSubmitV2()
+}
+
 // SupportsClaimAcquisition reports whether this profile has the additional
 // owner and artifact-signing trust required to verify and install grants.
 func (runtime *Runtime) SupportsClaimAcquisition() bool {
@@ -255,6 +260,13 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 	if len(canonical) == 0 {
 		return empty, wipd.ErrCommandStartIdentity
 	}
+	submit, err := entry.SubmissionPayload()
+	if err != nil {
+		return empty, err
+	}
+	if entry.SubmissionSchema == wipdwire.CommandSubmitV2Feature && !runtime.SupportsCommandSubmitV2() {
+		return empty, errors.New("protocol.unsupported-extension")
+	}
 	for _, blob := range entry.Command.Request.Blobs {
 		reader, size, openErr := runtime.journal.OpenBlob(blob.Digest)
 		if openErr != nil || size < 0 || size != blob.Size {
@@ -269,7 +281,6 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 			return empty, uploadErr
 		}
 	}
-	submit := wipdwire.CommandSubmit{Schema: "wipd.command-submit/1", CanonicalCommand: canonical, RequestHash: entry.RequestHash}
 	frames, err := runtime.client.Exchange(ctx, "command.submit", submit)
 	if err != nil {
 		return empty, err

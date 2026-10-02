@@ -13,6 +13,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
+	"github.com/procrastivity/wip/internal/wipdwire"
 	"golang.org/x/net/http2"
 )
 
@@ -258,7 +259,7 @@ func (s *Server) serveNegotiate(writer http.ResponseWriter, request *http.Reques
 		}
 		abortHTTP2Stream()
 	}
-	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease(), s.supportsClaimAcquire(), s.supportsClaimJournalClose())
+	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease(), s.supportsClaimAcquire(), s.supportsClaimJournalClose(), s.supportsCommandSubmitV2())
 	if err != nil {
 		if errors.Is(err, errInvalidCapabilities) || errors.Is(err, errIncompatibleVersion) || errors.Is(err, errUnsupportedExtension) {
 			s.writeProblem(writer, frame.requestID, 0, err.Error(), bootstrapFrameBodyLimit)
@@ -369,9 +370,14 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		}
 	}()
 
-	command, deadline, err := decodeCommandSubmit(frame.payload)
+	command, deadline, submit, err := decodeNegotiatedCommandSubmit(frame.payload,
+		containsString(hello.features, wipdwire.CommandSubmitV2Feature), s.supportsCommandSubmitV2())
 	if err != nil {
-		s.writeProblem(writer, frame.requestID, 0, errMalformedMessage.Error(), uint32(parameters.maxFrameBody))
+		code := errMalformedMessage.Error()
+		if errors.Is(err, errUnsupportedExtension) {
+			code = errUnsupportedExtension.Error()
+		}
+		s.writeProblem(writer, frame.requestID, 0, code, uint32(parameters.maxFrameBody))
 		return
 	}
 	if deadline != nil && !deadline.After(time.Now()) {
@@ -402,11 +408,14 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 				if !gate.begin(request.Context()) {
 					return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
 				}
-				connected, err := coordinator.RunConnectedCanonicalTerminal(state.ctx, command,
+				connected, err := coordinator.RunConnectedCanonicalSubmission(state.ctx, command, submit,
 					func(context.Context, CommandStartSnapshot, operation.Command) error { return nil })
 				if err != nil {
 					if errors.Is(err, wipdjournal.ErrCommandIDConflict) {
 						return dispatchOutcome{problemCode: "command.id-conflict"}
+					}
+					if errors.Is(err, errUnsupportedExtension) {
+						return dispatchOutcome{problemCode: errUnsupportedExtension.Error()}
 					}
 					if errors.Is(err, ErrOutcomeUnknown) {
 						return dispatchOutcome{problemCode: "transport.outcome-unknown"}

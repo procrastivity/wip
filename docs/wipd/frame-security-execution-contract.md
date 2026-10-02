@@ -286,6 +286,50 @@ query version's fields, consistency/snapshot policy, and output. Unknown fields
 in either outer message reject under the negotiated protocol rather than being
 silently copied into the semantic payload.
 
+M6 Step 7 adds the independently negotiated feature `wipd.command-submit/2`
+on local IPC and authority submission. Its separate closed map is:
+
+```text
+CommandSubmitV2 {
+  "schema": "wipd.command-submit/2",
+  "canonical_command": byte string,
+  "request_hash": canonical sha256 text,
+  "deadline": canonical UTC RFC3339Nano text or null,
+  "detached_proof": nonempty byte string of at most 1 MiB or null
+}
+```
+
+Every field is present, including `detached_proof`; null means omitted proof,
+not an empty byte string. This adds no field to `CommandSubmit` v1. Existing
+frame/session limits still bound the complete envelope, so a proof within its
+1 MiB authorization limit can exceed the selected frame budget and be refused.
+The proof is opaque to transport and never enters canonical command bytes,
+the request hash, command ID, or blobs. The Environment journal atomically
+retains the selected envelope version and exact proof bytes with the immutable
+retry identity. An exact retry may omit proof, but any supplied proof must
+byte-match the retained bytes; the retained version cannot change. Every
+authority retry reconstructs that stored envelope, including after restart or
+authenticated receipt absence.
+
+The connected daemon advertises v2 only if its authority session independently
+selected v2. It rejects v2 before local durable preparation unless both hops
+still support it. The authority rejects a v2 envelope on an unselected session
+before admission. Partial/invalid negotiation, protocol problems, and ambiguous
+send errors never cause v1 fallback, even with omitted proof on replay.
+Ordinary non-repair commands can continue to use v1 regardless of v2 support.
+Default M5 local clients keep their original capability offer; isolated M6
+clients offer v2 and call `ExecuteCommandV2` explicitly.
+
+This transport-only slice does not register `gate.exemption.repair@v1`.
+No public operation currently consumes a detached proof. Local and authority
+ingress therefore refuse proof-bearing ordinary commands instead of ignoring
+authorization. Repair remains absent from canonical public decoding and the
+operation capability sets; there is no repair admission on either v1 or v2.
+Its existing private parser, nonce/proof admission, original verification time,
+and private terminal/recovery contracts are unchanged. Public repair admission
+must wait for a reviewed bridge from that private terminal to the existing
+closed receipt/query/install contracts.
+
 The Step 9 local birth-claim release feature is negotiated only by a daemon
 whose connected command-start coordinator has an authority-backed release
 adapter. Its request is the closed map

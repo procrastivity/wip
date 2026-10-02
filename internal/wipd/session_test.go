@@ -29,7 +29,7 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 		features:     []string{frameSchema},
 	}
 
-	selected, parameters, err := negotiateCapabilities(client, registry, false, false, false)
+	selected, parameters, err := negotiateCapabilities(client, registry, false, false, false, false)
 	if err != nil {
 		t.Fatalf("negotiateCapabilities() error = %v", err)
 	}
@@ -47,26 +47,26 @@ func TestCapabilitySelectionRequiresExactM2FeaturesAndVersionIntersection(t *tes
 
 	withoutFrame := client
 	withoutFrame.features = nil
-	if _, _, err := negotiateCapabilities(withoutFrame, registry, false, false, false); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutFrame, registry, false, false, false, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.frame/1 error = %v, want unsupported extension", err)
 	}
 
 	withoutIdentity := client
 	withoutIdentity.identitySchemas = nil
-	if _, _, err := negotiateCapabilities(withoutIdentity, registry, false, false, false); !errors.Is(err, errUnsupportedExtension) {
+	if _, _, err := negotiateCapabilities(withoutIdentity, registry, false, false, false, false); !errors.Is(err, errUnsupportedExtension) {
 		t.Fatalf("missing required wipd.command/1 error = %v, want unsupported extension", err)
 	}
 
 	noCommonMinor := client
 	noCommonMinor.protocolMin = protocolVersion{major: 1, minor: 1}
-	if _, _, err := negotiateCapabilities(noCommonMinor, registry, false, false, false); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(noCommonMinor, registry, false, false, false, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("no common protocol minor error = %v, want incompatible version", err)
 	}
 
 	wrongMajor := client
 	wrongMajor.protocolMin = protocolVersion{major: 2, minor: 0}
 	wrongMajor.protocolMax = protocolVersion{major: 2, minor: 2}
-	if _, _, err := negotiateCapabilities(wrongMajor, registry, false, false, false); !errors.Is(err, errIncompatibleVersion) {
+	if _, _, err := negotiateCapabilities(wrongMajor, registry, false, false, false, false); !errors.Is(err, errIncompatibleVersion) {
 		t.Fatalf("incompatible protocol major error = %v, want incompatible version", err)
 	}
 }
@@ -77,23 +77,23 @@ func TestLifecycleFeaturesAreAdvertisedOnlyWhenConfigured(t *testing.T) {
 		identitySchemas: []string{identitySchemaV1}, storeSchemas: []string{storeSchemaV1},
 		features: []string{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema},
 	}
-	withoutLifecycle, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, false, false)
+	withoutLifecycle, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, false, false, false)
 	if err != nil || !equalStrings(withoutLifecycle.features, []string{frameSchema}) {
 		t.Fatalf("unconfigured lifecycle features = %v, %v; want frame-only", withoutLifecycle.features, err)
 	}
-	withRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, false, false)
+	withRelease, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, false, false, false)
 	if err != nil || !equalStrings(withRelease.features, []string{birthReleaseFeature, frameSchema}) {
 		t.Fatalf("configured release feature = %v, %v; want release only", withRelease.features, err)
 	}
-	withAcquire, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, true, false)
+	withAcquire, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, true, false, false)
 	if err != nil || !equalStrings(withAcquire.features, []string{claimAcquireFeature, frameSchema}) {
 		t.Fatalf("configured acquisition feature = %v, %v; want acquisition only", withAcquire.features, err)
 	}
-	withClose, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, false, true)
+	withClose, _, err := negotiateCapabilities(client, operation.NewRegistry(), false, false, true, false)
 	if err != nil || !equalStrings(withClose.features, []string{claimJournalCloseFeature, frameSchema}) {
 		t.Fatalf("configured claim-journal close feature = %v, %v; want close only", withClose.features, err)
 	}
-	withBoth, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, true, true)
+	withBoth, _, err := negotiateCapabilities(client, operation.NewRegistry(), true, true, true, false)
 	if err != nil || !equalStrings(withBoth.features, []string{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema}) {
 		t.Fatalf("configured lifecycle features = %v, %v; want all advertised", withBoth.features, err)
 	}

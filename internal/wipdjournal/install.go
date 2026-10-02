@@ -1093,7 +1093,24 @@ func lookupTx(tx *sql.Tx, commandID string) (Entry, error) {
 	if !identityPattern.MatchString(commandID) {
 		return Entry{}, ErrNotFound
 	}
-	return scanEntry(tx.QueryRow(`SELECT `+commandColumns+` FROM commands WHERE command_id=?`, commandID))
+	columns, err := commandColumnsTx(tx)
+	if err != nil {
+		return Entry{}, err
+	}
+	return scanEntry(tx.QueryRow(`SELECT `+columns+` FROM commands WHERE command_id=?`, commandID))
+}
+
+// Earlier migrations validate installed receipts before v10 adds detached
+// transport columns. Those rows are necessarily closed v1 submissions.
+func commandColumnsTx(tx *sql.Tx) (string, error) {
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return "", err
+	}
+	if version < 10 {
+		return `command_id,environment_sequence,journal_position,request_hash,canonical_bytes,delivery,state,'wipd.command-submit/1',NULL`, nil
+	}
+	return commandColumns, nil
 }
 
 func checkInstallationDatabase(db *sql.DB, identity Identity) error {
@@ -1294,7 +1311,11 @@ func checkInstalledReceipts(tx *sql.Tx, identity Identity) error {
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	entries, err := listEntries(tx, `SELECT `+commandColumns+` FROM commands WHERE state='returned'`)
+	columns, err := commandColumnsTx(tx)
+	if err != nil {
+		return err
+	}
+	entries, err := listEntries(tx, `SELECT `+columns+` FROM commands WHERE state='returned'`)
 	if err != nil {
 		return err
 	}

@@ -119,10 +119,33 @@ func (arbiter *labExchangeArbiter) writeFinal(ctx context.Context, allowInvalid 
 }
 
 func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request *http.Request, body io.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {
-	var submit wipdwire.CommandSubmit
-	if err := wipdwire.DecodeCanonical(frame.Payload, &submit,
-		"schema", "canonical_command", "request_hash", "deadline"); err != nil || submit.Schema != "wipd.command-submit/1" || len(submit.CanonicalCommand) == 0 {
+	submit, version2, err := wipdwire.DecodeCommandSubmit(frame.Payload)
+	if err != nil {
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	session := connectionSession(request)
+	if session == nil {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	session.mu.Lock()
+	negotiated := session.negotiated && !session.failed && !session.negotiating
+	supportsV2 := session.commandSubmitV2
+	session.mu.Unlock()
+	if !negotiated {
+		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	if version2 && !supportsV2 {
+		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
+		return
+	}
+	// No public operation consumes an owner repair proof yet. Never ignore a
+	// supplied authorization or send it through ordinary v1 admission. The
+	// existing private repair admission/terminal contract remains unchanged.
+	if submit.DetachedProof != nil {
+		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
 		return
 	}
 	var deadline time.Time
@@ -143,19 +166,9 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
 		return
 	}
-	session := connectionSession(request)
-	if session == nil {
-		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
-		return
-	}
 	session.mu.Lock()
-	negotiated := session.negotiated && !session.failed && !session.negotiating
 	_, supportsOperation := session.operations[command.Request.Operation]
 	session.mu.Unlock()
-	if !negotiated {
-		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
-		return
-	}
 	if !supportsOperation {
 		writeLabProblem(writer, frame.RequestID, "operation.unknown")
 		return

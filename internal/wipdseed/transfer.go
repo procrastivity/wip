@@ -35,9 +35,10 @@ const (
 )
 
 type sessionLimits struct {
-	frameBody   int
-	chunkData   int
-	streamBytes int
+	frameBody       int
+	chunkData       int
+	streamBytes     int
+	commandSubmitV2 bool
 }
 
 type eventProjection struct {
@@ -260,13 +261,17 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	sort.Slice(capabilities, func(i, j int) bool {
 		return capabilities[i].(map[string]any)["name"].(string) < capabilities[j].(map[string]any)["name"].(string)
 	})
+	features := []any{"wipd.frame/1"}
+	if len(operations) != 0 {
+		features = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+	}
 	hello := map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
 		"protocol_max":     []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{"wipd.command/1"},
 		"operations":       capabilities,
 		"store_schemas":    []any{"wipd.store/1"},
-		"features":         []any{"wipd.frame/1"},
+		"features":         features,
 	}
 	requestFrame, requestID, err := encodeRequestFrame("client.hello", hello)
 	if err != nil {
@@ -287,7 +292,11 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 		"selected_protocol", "identity_schemas", "operations", "store_schemas", "features")
 	if err != nil || !equalVersion(selection["selected_protocol"], 1, 0) ||
 		!equalStringsValue(selection["identity_schemas"], "wipd.command/1") || !equalNegotiatedOperations(selection["operations"], operations) ||
-		!equalStringsValue(selection["store_schemas"], "wipd.store/1") || !equalStringsValue(selection["features"], "wipd.frame/1") {
+		!equalStringsValue(selection["store_schemas"], "wipd.store/1") {
+		return limits, ErrInvalidClientState
+	}
+	selectedV2 := equalStringsValue(selection["features"], wipdwire.CommandSubmitV2Feature, "wipd.frame/1")
+	if !equalStringsValue(selection["features"], "wipd.frame/1") && !selectedV2 || selectedV2 && len(operations) == 0 {
 		return limits, ErrInvalidClientState
 	}
 	parameters, err := wipdwire.DecodeCanonicalMap(frames[1].Payload,
@@ -312,7 +321,7 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	if chunkData > wipdwire.FrameLimit {
 		chunkData = wipdwire.FrameLimit
 	}
-	limits = sessionLimits{frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes)}
+	limits = sessionLimits{frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes), commandSubmitV2: selectedV2}
 	return limits, nil
 }
 
@@ -415,9 +424,17 @@ func equalVersion(value any, major, minor uint64) bool {
 	return ok && len(parts) == 2 && parts[0] == major && parts[1] == minor
 }
 
-func equalStringsValue(value any, expected string) bool {
+func equalStringsValue(value any, expected ...string) bool {
 	values, ok := value.([]any)
-	return ok && len(values) == 1 && values[0] == expected
+	if !ok || len(values) != len(expected) {
+		return false
+	}
+	for index, text := range expected {
+		if values[index] != text {
+			return false
+		}
+	}
+	return true
 }
 
 func boundedUint(value any, minimum, maximum uint64) bool {

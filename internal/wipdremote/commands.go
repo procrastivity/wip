@@ -11,7 +11,10 @@ import (
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
-func terminalFromSubmit(ctx context.Context, client *wipdseed.CommandExchangeClient, domain string, entry wipdjournal.Entry, frames []wipdwire.Frame) ([]byte, error) {
+func terminalFromSubmit(ctx context.Context, client interface {
+	Exchange(context.Context, string, any) ([]wipdwire.Frame, error)
+}, domain string, entry wipdjournal.Entry, frames []wipdwire.Frame,
+) ([]byte, error) {
 	if len(frames) == 0 {
 		return nil, errors.New("wipdremote: empty command submission response")
 	}
@@ -64,8 +67,9 @@ func terminalFromSubmit(ctx context.Context, client *wipdseed.CommandExchangeCli
 				missing.CommandID != entry.Command.ID || missing.RequestHash != entry.RequestHash {
 				return nil, errors.New("wipdremote: receipt absence is not bound to the pending command")
 			}
-			retry := wipdwire.CommandSubmit{
-				Schema: "wipd.command-submit/1", CanonicalCommand: entry.CanonicalBytes, RequestHash: entry.RequestHash,
+			retry, err := entry.SubmissionPayload()
+			if err != nil {
+				return nil, err
 			}
 			frames, err = client.Exchange(ctx, "command.submit", retry)
 			if err != nil {

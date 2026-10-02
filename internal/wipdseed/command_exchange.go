@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -23,6 +24,12 @@ type CommandExchangeClient struct {
 	client  *http.Client
 	limits  sessionLimits
 	state   ClientState
+}
+
+// SupportsCommandSubmitV2 reports the feature selected by this authority
+// session. Local support alone never authorizes sending a v2 envelope.
+func (client *CommandExchangeClient) SupportsCommandSubmitV2() bool {
+	return client != nil && client.client != nil && client.limits.commandSubmitV2
 }
 
 // OpenCommandExchangeClient validates the installed Environment identity,
@@ -115,6 +122,19 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 1
 	default:
 		return nil, ErrInvalidClientState
+	}
+	if kind == "command.submit" {
+		encoded, err := wipdwire.EncodeCanonical(payload)
+		if err != nil {
+			return nil, ErrInvalidClientState
+		}
+		_, version2, err := wipdwire.DecodeCommandSubmit(encoded)
+		if err != nil {
+			return nil, ErrInvalidClientState
+		}
+		if version2 && !client.SupportsCommandSubmitV2() {
+			return nil, errors.New("protocol.unsupported-extension")
+		}
 	}
 	requestFrame, requestID, err := encodeRequestFrame(kind, payload)
 	if err != nil || !withinSessionFrame(requestFrame, client.limits) {

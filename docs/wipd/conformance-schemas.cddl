@@ -123,6 +123,15 @@ command-submit = {
   "request_hash": digest,
   "deadline": tstr / null
 }
+; Separately selected wipd.command-submit/2 feature on each hop. The v1 map
+; above remains closed. Proof bytes are transport-only, never command/blob data.
+command-submit-v2 = {
+  "schema": "wipd.command-submit/2",
+  "canonical_command": bstr,
+  "request_hash": digest,
+  "deadline": tstr / null,
+  "detached_proof": (bstr .size (1..1048576)) / null
+}
 ; Local-only Step 9 action. It is accepted only when the authenticated
 ; session negotiated wipd.birth-claim-release/1. The daemon constructs the
 ; immutable claim.release@v1 command from its journal and this stable retry key.

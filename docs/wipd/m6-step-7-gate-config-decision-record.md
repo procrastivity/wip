@@ -164,9 +164,21 @@ tracker-candidate/outbox projections. Its transfer fold therefore fails closed
 on `config.set`, shared-reference events, and narrated/boundary tracker effects
 instead of silently claiming parity. Those client projection consequences are
 deferred and must be represented before such transfer histories are accepted.
-Role projection, the Step 17/18 public config/provider APIs, and detached
-command-submit v2 transport remain separately sequenced; no repair operation
-is registered or exposed through command-submit/1. The earlier
+Separately negotiated command-submit v2 envelopes and Environment detached-proof
+retry retention/forwarding are now present on both transport hops. That feature
+is not a repair-operation capability: no repair operation is registered or
+exposed through either submission version. The private terminal validator
+currently forbids a client `terminal_receipts` row, `QueryCommand` explicitly
+excludes repair submissions, and public canonical decoding has no repair input
+contract. The smallest remaining registration boundary is a separately reviewed
+canonical repair input/result and authenticated status/receipt bridge that
+preserves the existing closed receipt schema, private terminal/witness history,
+atomic nonce/proof admission, and original verification time. It must also
+install the terminal range (including successful no-event outcomes) and claim
+journal acknowledgment before repair can enter either capability set. This
+transport slice does not force that bridge or duplicate authorization logic.
+Role projection and the Step 17/18 public config/provider APIs remain deferred.
+The separate post-claim-close sweep remains later work. The earlier
 implementer-thread status at base
 `a54e75563e27233013b319c2b0c344c2a02098f2` is historical context, not current
 implementation status.

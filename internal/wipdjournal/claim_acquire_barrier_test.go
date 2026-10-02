@@ -19,6 +19,10 @@ func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = downgradeDetachedProofTestDBToV9(db); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
 	for _, statement := range []string{
 		`DROP TRIGGER claim_acquire_before_insert`,
 		`CREATE TRIGGER claim_acquire_before_insert BEFORE INSERT ON claim_acquire_attempts
@@ -47,11 +51,11 @@ func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
 	t.Cleanup(func() { _ = journal.Close() })
 	var version int
 	var marker string
-	if err = journal.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 9 {
-		t.Fatalf("upgraded journal version=%d err=%v; want 9", version, err)
+	if err = journal.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("upgraded journal version=%d err=%v; want %d", version, err, schemaVersion)
 	}
-	if err = journal.db.QueryRow(`SELECT name FROM schema_migrations WHERE version=9`).Scan(&marker); err != nil ||
-		marker != "environment-resolved-claim-acquire-barrier" {
+	if err = journal.db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&marker); err != nil ||
+		marker != "environment-detached-command-proof" {
 		t.Fatalf("upgraded journal migration marker=%q err=%v", marker, err)
 	}
 	installed, err := journal.InstallSnapshot(context.Background())

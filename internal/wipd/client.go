@@ -22,6 +22,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdprofile"
+	"github.com/procrastivity/wip/internal/wipdwire"
 	"golang.org/x/net/http2"
 )
 
@@ -260,8 +261,26 @@ func (c *Client) StartedDaemon() bool {
 // Result mapping documented for the opt-in local fixture Handler. A transport
 // loss after submission is reported as uncertain, never as refusal or failure.
 func (c *Client) ExecuteCommand(ctx context.Context, command operation.Command) (operation.Result, error) {
+	return c.executeCommand(ctx, command, false, nil)
+}
+
+// ExecuteCommandV2 requires the selected v2 local capability even when proof
+// is omitted on replay. It never retries through ExecuteCommand or falls back
+// to v1 after any negotiation, protocol, or post-send transport error.
+func (c *Client) ExecuteCommandV2(ctx context.Context, command operation.Command, proof []byte) (operation.Result, error) {
+	return c.executeCommand(ctx, command, true, proof)
+}
+
+func (c *Client) executeCommand(ctx context.Context, command operation.Command, version2 bool, proof []byte) (operation.Result, error) {
 	if c == nil || c.httpClient == nil {
 		return operation.Result{}, &ExchangeError{Code: "transport.unavailable", Err: ErrUnavailable}
+	}
+	if version2 && !containsString(c.hello.features, wipdwire.CommandSubmitV2Feature) ||
+		!version2 && command.Request.Operation.Name == "gate.exemption.repair" {
+		return operation.Result{}, &ExchangeError{Code: "protocol.unsupported-extension"}
+	}
+	if proof != nil && (len(proof) == 0 || len(proof) > 1<<20) {
+		return operation.Result{}, &ExchangeError{Code: "protocol.malformed-message"}
 	}
 	if !operationCapabilityContains(c.hello.operations, command.Request.Operation, identitySchemaV1) {
 		return operation.Result{}, &ExchangeError{Code: string(operation.ProblemUnsupportedVersion)}
@@ -274,12 +293,17 @@ func (c *Client) ExecuteCommand(ctx context.Context, command operation.Command) 
 	if err != nil {
 		return operation.Result{}, &ExchangeError{Code: "protocol.malformed-message", Err: err}
 	}
-	payload, err := encodePayload(map[string]any{
+	fields := map[string]any{
 		"schema":            "wipd.command-submit/1",
 		"canonical_command": canonical,
 		"request_hash":      hash,
 		"deadline":          nil,
-	})
+	}
+	if version2 {
+		fields["schema"] = wipdwire.CommandSubmitV2Feature
+		fields["detached_proof"] = proof
+	}
+	payload, err := encodePayload(fields)
 	if err != nil {
 		return operation.Result{}, &ExchangeError{Code: "protocol.malformed-message", Err: err}
 	}
@@ -453,13 +477,17 @@ func (c *Client) negotiate(ctx context.Context) error {
 			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
 		})
 	}
+	features := []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema}
+	if c.m6 {
+		features = []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, wipdwire.CommandSubmitV2Feature, frameSchema}
+	}
 	payload, err := encodePayload(map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
 		"protocol_max":     []any{uint64(1), uint64(0)},
 		"identity_schemas": []any{identitySchemaV1},
 		"operations":       operations,
 		"store_schemas":    []any{storeSchemaV1},
-		"features":         []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema},
+		"features":         features,
 	})
 	if err != nil {
 		return err
@@ -507,6 +535,9 @@ func (c *Client) negotiate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if !c.m6 && containsString(hello.features, wipdwire.CommandSubmitV2Feature) {
+		return errUnsupportedExtension
+	}
 	parameters, err := decodeSessionParameters(second.payload)
 	if err != nil {
 		return err
@@ -538,7 +569,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !containsString(features, frameSchema) || len(features) > 4 ||
+	if err != nil || !containsString(features, frameSchema) || len(features) > 5 ||
 		!onlyKnownFeatures(features) {
 		return serverHello{}, errUnsupportedExtension
 	}
@@ -581,7 +612,7 @@ func knownOperationVersion(name string, version uint16) bool {
 
 func onlyKnownFeatures(features []string) bool {
 	for _, feature := range features {
-		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature {
+		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature && feature != wipdwire.CommandSubmitV2Feature {
 			return false
 		}
 	}

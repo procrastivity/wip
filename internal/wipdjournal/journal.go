@@ -35,10 +35,10 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 9
+	schemaVersion  = 10
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
-	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state`
+	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state, submission_schema, detached_proof`
 )
 
 var (
@@ -114,13 +114,15 @@ const (
 // JournalPosition is zero for authority-class attempt evidence, which is not a
 // deferred local command journal entry.
 type Entry struct {
-	Command         operation.Command
-	CanonicalBytes  []byte
-	RequestHash     string
-	EnvironmentSeq  uint64
-	JournalPosition uint64
-	Delivery        operation.DeliveryClass
-	State           State
+	Command          operation.Command
+	CanonicalBytes   []byte
+	RequestHash      string
+	SubmissionSchema string
+	DetachedProof    []byte
+	EnvironmentSeq   uint64
+	JournalPosition  uint64
+	Delivery         operation.DeliveryClass
+	State            State
 	// Created is true only for the call to PrepareCommand that committed this
 	// entry. It is not persisted; exact retries load the original entry with
 	// Created=false so callers never repeat accepted effects.
@@ -205,6 +207,9 @@ func Open(root string, identity Identity) (*Journal, error) {
 	}
 	if created {
 		err = installSchema(db, identity)
+		if err == nil {
+			err = upgradeSchemaV9(db, identity)
+		}
 	} else {
 		for err == nil {
 			var version int
@@ -228,6 +233,8 @@ func Open(root string, identity Identity) (*Journal, error) {
 				err = upgradeSchemaV7(db, identity)
 			case 8:
 				err = upgradeSchemaV8(db, identity)
+			case 9:
+				err = upgradeSchemaV9(db, identity)
 			case schemaVersion:
 				err = checkIdentity(db, identity)
 			default:
@@ -362,7 +369,8 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 	}
 	entry := Entry{
 		Command: command, CanonicalBytes: bytes.Clone(canonical), RequestHash: hash,
-		EnvironmentSeq: uint64(nextSequence), Delivery: delivery, State: state, Created: true,
+		SubmissionSchema: "wipd.command-submit/1",
+		EnvironmentSeq:   uint64(nextSequence), Delivery: delivery, State: state, Created: true,
 	}
 	if delivery != operation.DeliveryAuthority {
 		entry.JournalPosition = uint64(nextPosition)
@@ -376,8 +384,20 @@ func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
 // Environment identity and the exact next sequence. Ordinary callers should
 // use PrepareCommand and let the Environment assign those fields.
 func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, error) {
+	return j.PrepareCanonicalSubmission(command, "wipd.command-submit/1", nil)
+}
+
+// PrepareCanonicalSubmission atomically retains the envelope version and exact
+// detached bytes alongside (never inside) the command retry identity. A replay
+// may omit the proof; supplied bytes and the version cannot replace stored data.
+// This is transport retention, not authorization verification or admission.
+func (j *Journal) PrepareCanonicalSubmission(command operation.Command, schema string, proof []byte) (Entry, error) {
 	if j == nil {
 		return Entry{}, ErrClosed
+	}
+	if schema != "wipd.command-submit/1" && schema != wipdwire.CommandSubmitV2Feature ||
+		schema == "wipd.command-submit/1" && proof != nil || proof != nil && (len(proof) == 0 || len(proof) > 1<<20) {
+		return Entry{}, ErrInvalidCommand
 	}
 	input := CommandInput{
 		ID: command.ID, CausationCommandID: command.CausationCommandID,
@@ -406,7 +426,8 @@ func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, err
 		if err = j.verifyEntry(entry); err != nil {
 			return Entry{}, err
 		}
-		if !bytes.Equal(entry.CanonicalBytes, canonical) {
+		if !bytes.Equal(entry.CanonicalBytes, canonical) || entry.SubmissionSchema != schema ||
+			proof != nil && !bytes.Equal(entry.DetachedProof, proof) {
 			return Entry{}, ErrCommandIDConflict
 		}
 		return cloneEntry(entry), nil
@@ -436,8 +457,8 @@ func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, err
 		state = StateAttemptPrepared
 		position = nil
 	}
-	if _, err = tx.Exec(`INSERT INTO commands(command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`, command.ID, nextSequence, position, hash, canonical, string(delivery), string(state)); err != nil {
+	if _, err = tx.Exec(`INSERT INTO commands(command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state, submission_schema, detached_proof)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, command.ID, nextSequence, position, hash, canonical, string(delivery), string(state), schema, proof); err != nil {
 		return Entry{}, err
 	}
 	if delivery == operation.DeliveryAuthority {
@@ -453,6 +474,7 @@ func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, err
 	}
 	entry := Entry{
 		Command: cloneCommand(command), CanonicalBytes: bytes.Clone(canonical), RequestHash: hash,
+		SubmissionSchema: schema, DetachedProof: bytes.Clone(proof),
 		EnvironmentSeq: command.EnvironmentSequence, Delivery: delivery, State: state, Created: true,
 	}
 	if delivery != operation.DeliveryAuthority {
@@ -772,12 +794,15 @@ func scanEntry(row scanner) (Entry, error) {
 	var position sql.NullInt64
 	var encoded []byte
 	var delivery, state string
-	if err := row.Scan(&entry.Command.ID, &sequence, &position, &entry.RequestHash, &encoded, &delivery, &state); errors.Is(err, sql.ErrNoRows) {
+	if err := row.Scan(&entry.Command.ID, &sequence, &position, &entry.RequestHash, &encoded, &delivery, &state, &entry.SubmissionSchema, &entry.DetachedProof); errors.Is(err, sql.ErrNoRows) {
 		return Entry{}, ErrNotFound
 	} else if err != nil {
 		return Entry{}, err
 	}
-	if sequence <= 0 || position.Valid && position.Int64 <= 0 {
+	if sequence <= 0 || position.Valid && position.Int64 <= 0 ||
+		entry.SubmissionSchema != "wipd.command-submit/1" && entry.SubmissionSchema != wipdwire.CommandSubmitV2Feature ||
+		entry.SubmissionSchema == "wipd.command-submit/1" && entry.DetachedProof != nil ||
+		entry.DetachedProof != nil && (len(entry.DetachedProof) == 0 || len(entry.DetachedProof) > 1<<20) {
 		return Entry{}, ErrInvalidJournal
 	}
 	command, err := operation.DecodeCanonicalCommand(encoded)
@@ -801,6 +826,7 @@ func scanEntry(row scanner) (Entry, error) {
 
 func cloneEntry(entry Entry) Entry {
 	entry.CanonicalBytes = bytes.Clone(entry.CanonicalBytes)
+	entry.DetachedProof = bytes.Clone(entry.DetachedProof)
 	entry.Command.Request = cloneRequest(entry.Command.Request)
 	return entry
 }
@@ -972,7 +998,7 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&migration); err != nil || migration != "environment-resolved-claim-acquire-barrier" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&migration); err != nil || migration != "environment-detached-command-proof" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)

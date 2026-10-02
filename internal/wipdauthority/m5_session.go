@@ -25,11 +25,12 @@ const (
 type labSessionContextKey struct{}
 
 type labConnectionSession struct {
-	mu          sync.Mutex
-	negotiating bool
-	negotiated  bool
-	failed      bool
-	operations  map[operation.ID]struct{}
+	mu              sync.Mutex
+	negotiating     bool
+	negotiated      bool
+	failed          bool
+	operations      map[operation.ID]struct{}
+	commandSubmitV2 bool
 }
 
 func labConnectionContext(ctx context.Context, _ net.Conn) context.Context {
@@ -112,12 +113,16 @@ func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []b
 			"name": name, "versions": selectedVersions[name], "identity_schemas": []any{"wipd.command/1"},
 		})
 	}
+	selectedFeatures := []any{"wipd.frame/1"}
+	if containsString(features, wipdwire.CommandSubmitV2Feature) {
+		selectedFeatures = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+	}
 	serverHello, err := wipdwire.EncodeCanonical(map[string]any{
 		"selected_protocol": []any{uint64(1), uint64(0)},
 		"identity_schemas":  stringsToAny(selectedSchemas),
 		"operations":        selectedCapabilities,
 		"store_schemas":     []any{"wipd.store/1"},
-		"features":          []any{"wipd.frame/1"},
+		"features":          selectedFeatures,
 	})
 	if err != nil {
 		return nil, nil, nil, labProtocolProblemInvalidCapabilities

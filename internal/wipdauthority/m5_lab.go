@@ -479,6 +479,13 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		writeLabProblem(writer, frame.RequestID, problem)
 		return
 	}
+	selection, err := wipdwire.DecodeCanonicalMap(hello,
+		"selected_protocol", "identity_schemas", "operations", "store_schemas", "features")
+	if err != nil {
+		writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+		return
+	}
+	selectedFeatures, _ := sortedStrings(selection["features"])
 	first, err := wipdwire.EncodeFrame(wipdwire.Frame{RequestID: frame.RequestID, Kind: "server.hello", Payload: hello})
 	if err != nil {
 		http.Error(writer, "internal error", http.StatusInternalServerError)
@@ -499,6 +506,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 	}
 	session.mu.Lock()
 	session.operations = operations
+	session.commandSubmitV2 = containsString(selectedFeatures, wipdwire.CommandSubmitV2Feature)
 	session.negotiated = true
 	succeeded = true
 	session.mu.Unlock()

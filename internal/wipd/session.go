@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 const (
@@ -121,7 +122,7 @@ func decodeClientHello(payload []byte) (capabilityHello, error) {
 	return hello, nil
 }
 
-func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose bool) (serverHello, sessionParameters, error) {
+func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose, commandSubmitV2 bool) (serverHello, sessionParameters, error) {
 	const supportedMajor, supportedMinor = uint16(1), uint16(0)
 	if client.protocolMin.major != supportedMajor || client.protocolMin.minor > supportedMinor ||
 		client.protocolMax.major != supportedMajor || client.protocolMax.minor < supportedMinor {
@@ -139,6 +140,9 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 	}
 	if claimJournalClose {
 		serverFeatures = append(serverFeatures, claimJournalCloseFeature)
+	}
+	if commandSubmitV2 {
+		serverFeatures = append(serverFeatures, wipdwire.CommandSubmitV2Feature)
 	}
 	sort.Strings(serverFeatures)
 	result := serverHello{
