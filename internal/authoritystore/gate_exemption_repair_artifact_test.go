@@ -158,6 +158,68 @@ func TestGateExemptionRepairArtifactRejectsWrongVersionsActionsAndUnknownFields(
 	}
 }
 
+func TestGateExemptionRepairArtifactRejectsRawNullUndefinedTypeConfusion(t *testing.T) {
+	fixture := gateRepairFixture(t)
+	valid := signDefaultGateRepairBinding(t, fixture, nil, nil, nil)
+	if _, err := parseGateExemptionRepairAuthorization(valid, fixture.domain, fixture.binding, fixture.verifiedAt); err != nil {
+		t.Fatalf("explicit null, false, and integer controls rejected: %v", err)
+	}
+
+	for _, field := range []string{"key_generation", "artifact_sequence", "previous_artifact_digest"} {
+		t.Run("wrapper "+field, func(t *testing.T) {
+			raw := rewriteGateRepairWrapperRawField(t, valid, field, cbor.RawMessage{0xf7}, fixture.owner)
+			assertGateRepairOwnerSignature(t, raw, fixture)
+			if _, err := parseGateExemptionRepairAuthorization(raw, fixture.domain, fixture.binding, fixture.verifiedAt); !errors.Is(err, ErrInvalidProof) {
+				t.Fatalf("undefined wrapper %s accepted: %v", field, err)
+			}
+		})
+	}
+
+	tests := []struct {
+		name  string
+		field string
+		value cbor.RawMessage
+	}{
+		{name: "next epoch undefined", field: "next_epoch", value: cbor.RawMessage{0xf7}},
+		{name: "loss accepted null", field: "loss_accepted", value: cbor.RawMessage{0xf6}},
+		{name: "loss accepted undefined", field: "loss_accepted", value: cbor.RawMessage{0xf7}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := rewriteGateRepairPayloadRawField(t, valid, test.field, test.value, fixture.owner)
+			assertGateRepairOwnerSignature(t, raw, fixture)
+			if _, err := parseGateExemptionRepairAuthorization(raw, fixture.domain, fixture.binding, fixture.verifiedAt); !errors.Is(err, ErrInvalidProof) {
+				t.Fatalf("invalid raw %s type accepted: %v", test.field, err)
+			}
+		})
+	}
+}
+
+func TestGateExemptionRepairArtifactRejectsRecursivelyNoncanonicalIntegers(t *testing.T) {
+	fixture := gateRepairFixture(t)
+	valid := signDefaultGateRepairBinding(t, fixture, nil, nil, nil)
+	sevenBinding := fixture.binding
+	sevenBinding.Boundary.EventCount = 7
+	validSeven := signGateRepairBinding(t, fixture, sevenBinding, fixture.verifiedAt.Add(-time.Minute), fixture.verifiedAt.Add(time.Minute), nil, nil, nil)
+	tests := []struct {
+		name    string
+		raw     []byte
+		binding gateExemptionRepairBinding
+	}{
+		{name: "wrapper authority epoch", raw: rewriteGateRepairWrapperRawField(t, valid, "authority_epoch", cbor.RawMessage{0x18, 0x07}, fixture.owner), binding: fixture.binding},
+		{name: "payload current epoch", raw: rewriteGateRepairPayloadRawField(t, valid, "current_epoch", cbor.RawMessage{0x18, 0x07}, fixture.owner), binding: fixture.binding},
+		{name: "subject event count", raw: rewriteGateRepairSubjectRawField(t, validSeven, "event_count", cbor.RawMessage{0x18, 0x07}, fixture.owner), binding: sevenBinding},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertGateRepairOwnerSignature(t, test.raw, fixture)
+			if _, err := parseGateExemptionRepairAuthorization(test.raw, fixture.domain, test.binding, fixture.verifiedAt); !errors.Is(err, ErrInvalidProof) {
+				t.Fatalf("coherently signed noncanonical integer accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestGateExemptionRepairArtifactRejectsCanonicalSubjectMismatches(t *testing.T) {
 	fixture := gateRepairFixture(t)
 	tests := []struct {
@@ -299,6 +361,113 @@ func encodeRawStringMap(t *testing.T, fields map[string]cbor.RawMessage, order [
 	return result
 }
 
+func marshalCanonicalRawStringMap(t *testing.T, fields map[string]cbor.RawMessage) []byte {
+	t.Helper()
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := encodeTest(t, keys[i]), encodeTest(t, keys[j])
+		if len(left) != len(right) {
+			return len(left) < len(right)
+		}
+		return bytes.Compare(left, right) < 0
+	})
+	return encodeRawStringMap(t, fields, keys)
+}
+
+func rewriteGateRepairWrapperRawField(t *testing.T, raw []byte, key string, value cbor.RawMessage, owner ed25519.PrivateKey) []byte {
+	t.Helper()
+	var fields map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields[key]; !ok {
+		t.Fatalf("wrapper field %q missing", key)
+	}
+	fields[key] = value
+	return signGateRepairRawWrapper(t, fields, owner)
+}
+
+func rewriteGateRepairPayloadRawField(t *testing.T, raw []byte, key string, value cbor.RawMessage, owner ed25519.PrivateKey) []byte {
+	t.Helper()
+	var wrapper map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(raw, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := artifactDecoder.Unmarshal(wrapper["payload"], &payload); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields[key]; !ok {
+		t.Fatalf("payload field %q missing", key)
+	}
+	fields[key] = value
+	updateGateRepairWrapperPayload(t, wrapper, marshalCanonicalRawStringMap(t, fields))
+	return signGateRepairRawWrapper(t, wrapper, owner)
+}
+
+func rewriteGateRepairSubjectRawField(t *testing.T, raw []byte, key string, value cbor.RawMessage, owner ed25519.PrivateKey) []byte {
+	t.Helper()
+	var wrapper map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(raw, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := artifactDecoder.Unmarshal(wrapper["payload"], &payload); err != nil {
+		t.Fatal(err)
+	}
+	var payloadFields map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(payload, &payloadFields); err != nil {
+		t.Fatal(err)
+	}
+	var subject []byte
+	if err := artifactDecoder.Unmarshal(payloadFields["subject"], &subject); err != nil {
+		t.Fatal(err)
+	}
+	var subjectFields map[string]cbor.RawMessage
+	if err := artifactDecoder.Unmarshal(subject, &subjectFields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := subjectFields[key]; !ok {
+		t.Fatalf("subject field %q missing", key)
+	}
+	subjectFields[key] = value
+	newSubject := marshalCanonicalRawStringMap(t, subjectFields)
+	payloadFields["subject"] = cbor.RawMessage(encodeTest(t, newSubject))
+	payloadFields["subject_digest"] = cbor.RawMessage(encodeTest(t, digestBytes(newSubject)))
+	updateGateRepairWrapperPayload(t, wrapper, marshalCanonicalRawStringMap(t, payloadFields))
+	return signGateRepairRawWrapper(t, wrapper, owner)
+}
+
+func updateGateRepairWrapperPayload(t *testing.T, wrapper map[string]cbor.RawMessage, payload []byte) {
+	t.Helper()
+	wrapper["payload"] = cbor.RawMessage(encodeTest(t, payload))
+	wrapper["payload_digest"] = cbor.RawMessage(encodeTest(t, digestBytes(payload)))
+}
+
+func signGateRepairRawWrapper(t *testing.T, fields map[string]cbor.RawMessage, owner ed25519.PrivateKey) []byte {
+	t.Helper()
+	delete(fields, "signature")
+	unsigned := marshalCanonicalRawStringMap(t, fields)
+	preimage := append([]byte("wipd/signed-artifact/v1\x00"), unsigned...)
+	fields["signature"] = cbor.RawMessage(encodeTest(t, ed25519.Sign(owner, preimage)))
+	return marshalCanonicalRawStringMap(t, fields)
+}
+
+func assertGateRepairOwnerSignature(t *testing.T, raw []byte, fixture gateRepairArtifactFixture) {
+	t.Helper()
+	if _, err := ownerArtifact(raw, fixture.domain.OwnerPublicKey, fixture.domain.ID, fixture.domain.OwnerKeyID,
+		"owner-attestation", "wipd.owner-attestation/1", fixture.domain.ActiveEpoch); err != nil {
+		t.Fatalf("malformed signed regression fixture: %v", err)
+	}
+}
+
 func TestGateExemptionRepairArtifactEnforcesFreshnessWithoutClockSkew(t *testing.T) {
 	fixture := gateRepairFixture(t)
 	for _, test := range []struct {
@@ -333,7 +502,6 @@ func TestGateExemptionRepairArtifactEnforcesFreshnessWithoutClockSkew(t *testing
 
 func TestGateExemptionRepairArtifactEnforcesTextReferenceAndBoundaryBounds(t *testing.T) {
 	fixture := gateRepairFixture(t)
-	baseProof := signDefaultGateRepairBinding(t, fixture, nil, nil, nil)
 	invalid := []struct {
 		name   string
 		mutate func(*gateExemptionRepairBinding)
@@ -354,6 +522,17 @@ func TestGateExemptionRepairArtifactEnforcesTextReferenceAndBoundaryBounds(t *te
 		{name: "incident empty HTTPS host", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "https:///path" }},
 		{name: "incident non-HTTPS URI", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "http://incident.invalid/a" }},
 		{name: "invalid URN", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:x:" }},
+		{name: "URN NID too short", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:x:issue" }},
+		{name: "URN NID trailing hyphen", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example-:issue" }},
+		{name: "URN invalid NSS character", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:^issue" }},
+		{name: "URN NSS cannot start with slash", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:/bad" }},
+		{name: "URN malformed percent escape", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:%GG" }},
+		{name: "URN r-component cannot start with slash", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:issue?+/bad" }},
+		{name: "URN q-component cannot start with question", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:issue?=?fragment" }},
+		{name: "URN empty r-component", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:x?+" }},
+		{name: "URN empty q-component", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:issue?=" }},
+		{name: "URN unknown optional delimiter", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:issue?bad" }},
+		{name: "URN malformed optional percent escape", mutate: func(binding *gateExemptionRepairBinding) { binding.IncidentRef = "urn:example:issue?+version%GG" }},
 		{name: "boundary count zero", mutate: func(binding *gateExemptionRepairBinding) { binding.Boundary.EventCount = 0 }},
 		{name: "boundary count beyond SQLite range", mutate: func(binding *gateExemptionRepairBinding) { binding.Boundary.EventCount = uint64(1) << 63 }},
 		{name: "boundary event ID", mutate: func(binding *gateExemptionRepairBinding) { binding.Boundary.HighWaterEvent = "not-an-event" }},
@@ -384,7 +563,9 @@ func TestGateExemptionRepairArtifactEnforcesTextReferenceAndBoundaryBounds(t *te
 			binding := fixture.binding
 			binding.Evidence = append([]string(nil), fixture.binding.Evidence...)
 			test.mutate(&binding)
-			if _, err := parseGateExemptionRepairAuthorization(baseProof, fixture.domain, binding, fixture.verifiedAt); !errors.Is(err, ErrInvalidProof) {
+			raw := signGateRepairBinding(t, fixture, binding, fixture.verifiedAt, fixture.verifiedAt.Add(time.Minute), nil, nil, nil)
+			assertGateRepairOwnerSignature(t, raw, fixture)
+			if _, err := parseGateExemptionRepairAuthorization(raw, fixture.domain, binding, fixture.verifiedAt); !errors.Is(err, ErrInvalidProof) {
 				t.Fatalf("out-of-contract binding accepted: %v", err)
 			}
 		})
@@ -407,7 +588,15 @@ func TestGateExemptionRepairArtifactEnforcesTextReferenceAndBoundaryBounds(t *te
 
 func TestGateExemptionRepairArtifactAcceptsHTTPSAndURNReferences(t *testing.T) {
 	fixture := gateRepairFixture(t)
-	for _, reference := range []string{"https://incident.invalid/root/issue-42", "urn:example:incident:issue-42"} {
+	for _, reference := range []string{
+		"https://incident.invalid/root/issue-42",
+		"urn:example:incident:issue-42",
+		"urn:example:%69ncident",
+		"urn:example:incident%2Fissue-42",
+		"urn:example:incident?+%76ersion%2F2?=%6Cang%2Fen#section?details",
+		"urn:example:incident?=%66ormat%2Fjson",
+		"urn:example:incident#section-2",
+	} {
 		t.Run(reference, func(t *testing.T) {
 			binding := fixture.binding
 			binding.IncidentRef = reference

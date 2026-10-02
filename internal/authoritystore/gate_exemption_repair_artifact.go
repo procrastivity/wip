@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/fxamacker/cbor/v2"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -74,7 +75,7 @@ type verifiedGateExemptionRepairAuthorization struct {
 // nonce; admission, historical boundary proof, and recovery are separate work.
 func parseGateExemptionRepairAuthorization(raw []byte, domain Domain, binding gateExemptionRepairBinding, verifiedAt time.Time) (verifiedGateExemptionRepairAuthorization, error) {
 	var verified verifiedGateExemptionRepairAuthorization
-	if len(raw) == 0 || validDomain(domain) != nil || verifiedAt.IsZero() {
+	if len(raw) == 0 || len(raw) > 1<<20 || validDomain(domain) != nil || verifiedAt.IsZero() || !validGateExemptionRepairArtifactEncoding(raw) {
 		return verified, ErrInvalidProof
 	}
 	expectedSubject, err := gateExemptionRepairSubjectBytes(binding)
@@ -122,6 +123,47 @@ func parseGateExemptionRepairAuthorization(raw []byte, domain Domain, binding ga
 	}, nil
 }
 
+func validGateExemptionRepairArtifactEncoding(raw []byte) bool {
+	if !canonicalArtifactCBOR(raw) {
+		return false
+	}
+	var wrapperFields map[string]cbor.RawMessage
+	var wrapper signedArtifact
+	if artifactDecoder.Unmarshal(raw, &wrapperFields) != nil ||
+		!rawCBORFieldEquals(wrapperFields, "key_generation", 0xf6) ||
+		!rawCBORFieldEquals(wrapperFields, "artifact_sequence", 0xf6) ||
+		!rawCBORFieldEquals(wrapperFields, "previous_artifact_digest", 0xf6) ||
+		artifactDecoder.Unmarshal(raw, &wrapper) != nil || !canonicalArtifactCBOR(wrapper.Payload) {
+		return false
+	}
+	var payloadFields map[string]cbor.RawMessage
+	var attestation gateExemptionRepairAttestation
+	if artifactDecoder.Unmarshal(wrapper.Payload, &payloadFields) != nil ||
+		!rawCBORFieldEquals(payloadFields, "next_epoch", 0xf6) ||
+		!rawCBORFieldEquals(payloadFields, "loss_accepted", 0xf4) ||
+		artifactDecoder.Unmarshal(wrapper.Payload, &attestation) != nil {
+		return false
+	}
+	return canonicalArtifactCBOR(attestation.Subject)
+}
+
+func canonicalArtifactCBOR(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value any
+	if artifactDecoder.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	encoded, err := artifactEncoder.Marshal(value)
+	return err == nil && bytes.Equal(encoded, raw)
+}
+
+func rawCBORFieldEquals(fields map[string]cbor.RawMessage, key string, expected byte) bool {
+	value, ok := fields[key]
+	return ok && bytes.Equal(value, []byte{expected})
+}
+
 func gateExemptionRepairSubjectBytes(binding gateExemptionRepairBinding) ([]byte, error) {
 	if !ulid.MatchString(binding.CommandID) || !validDigest(binding.RequestHash) ||
 		!ulid.MatchString(binding.RepoID) || !ulid.MatchString(binding.NodeID) ||
@@ -160,20 +202,130 @@ func validGateExemptionRepairIncidentRef(value string) bool {
 	case strings.EqualFold(parsed.Scheme, "https"):
 		return parsed.Opaque == "" && parsed.Host != "" && parsed.Hostname() != "" && parsed.User == nil
 	case strings.EqualFold(parsed.Scheme, "urn"):
-		nid, nss, found := strings.Cut(parsed.Opaque, ":")
-		if !found || len(nid) < 2 || len(nid) > 32 || nss == "" {
-			return false
-		}
-		for index, char := range nid {
-			alphaNumeric := char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
-			if !alphaNumeric && (char != '-' || index == 0 || index == len(nid)-1) {
-				return false
-			}
-		}
-		return true
+		return validGateExemptionRepairURN(value)
 	default:
 		return false
 	}
+}
+
+func validGateExemptionRepairURN(value string) bool {
+	if len(value) < len("urn:") || !strings.EqualFold(value[:len("urn:")], "urn:") {
+		return false
+	}
+	nid, assignedName, found := strings.Cut(value[len("urn:"):], ":")
+	if !found || len(nid) < 2 || len(nid) > 32 || assignedName == "" {
+		return false
+	}
+	for index := 0; index < len(nid); index++ {
+		char := nid[index]
+		if !urnAlphaNumeric(char) && (char != '-' || index == 0 || index == len(nid)-1) {
+			return false
+		}
+	}
+
+	assignedEnd := strings.IndexAny(assignedName, "?#")
+	nss, optional := assignedName, ""
+	if assignedEnd >= 0 {
+		nss, optional = assignedName[:assignedEnd], assignedName[assignedEnd:]
+	}
+	if !validURNComponentWithPCharPrefix(nss, true, false) {
+		return false
+	}
+	return validURNOptionalComponents(optional)
+}
+
+func validURNOptionalComponents(optional string) bool {
+	if optional == "" {
+		return true
+	}
+	if strings.HasPrefix(optional, "#") {
+		return validURNComponent(optional[1:], true, true)
+	}
+	if strings.HasPrefix(optional, "?=") {
+		return validURNQComponent(optional[2:])
+	}
+	if !strings.HasPrefix(optional, "?+") {
+		return false
+	}
+	remainder := optional[2:]
+	end := len(remainder)
+	if index := strings.Index(remainder, "?="); index >= 0 && index < end {
+		end = index
+	}
+	if index := strings.IndexByte(remainder, '#'); index >= 0 && index < end {
+		end = index
+	}
+	if !validURNComponentWithPCharPrefix(remainder[:end], true, true) {
+		return false
+	}
+	trailing := remainder[end:]
+	if trailing == "" {
+		return true
+	}
+	if strings.HasPrefix(trailing, "?=") {
+		return validURNQComponent(trailing[2:])
+	}
+	if strings.HasPrefix(trailing, "#") {
+		return validURNComponent(trailing[1:], true, true)
+	}
+	return false
+}
+
+func validURNQComponent(value string) bool {
+	query, fragment, hasFragment := strings.Cut(value, "#")
+	if !validURNComponentWithPCharPrefix(query, true, true) {
+		return false
+	}
+	return !hasFragment || validURNComponent(fragment, true, true)
+}
+
+func validURNComponentWithPCharPrefix(value string, allowSlash, allowQuestion bool) bool {
+	prefixLength, ok := urnPCharPrefix(value)
+	return ok && validURNComponent(value[prefixLength:], allowSlash, allowQuestion)
+}
+
+func urnPCharPrefix(value string) (int, bool) {
+	if len(value) == 0 {
+		return 0, false
+	}
+	if value[0] == '%' {
+		if len(value) < 3 || !urnHex(value[1]) || !urnHex(value[2]) {
+			return 0, false
+		}
+		return 3, true
+	}
+	return 1, urnPChar(value[0])
+}
+
+func validURNComponent(value string, allowSlash, allowQuestion bool) bool {
+	for index := 0; index < len(value); {
+		char := value[index]
+		if char == '%' {
+			if index+2 >= len(value) || !urnHex(value[index+1]) || !urnHex(value[index+2]) {
+				return false
+			}
+			index += 3
+			continue
+		}
+		if urnPChar(char) || (allowSlash && char == '/') || (allowQuestion && char == '?') {
+			index++
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func urnPChar(char byte) bool {
+	return urnAlphaNumeric(char) || strings.ContainsRune("-._~!$&'()*+,;=:@", rune(char))
+}
+
+func urnAlphaNumeric(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
+}
+
+func urnHex(char byte) bool {
+	return char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F'
 }
 
 func validGateExemptionRepairEvidence(values []string) bool {
