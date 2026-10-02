@@ -450,6 +450,8 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.NodeLifecycleInput:
 		targetID, targetKinds[value.NodeID] = value.NodeID, true
+	case operation.GateExemptionRepairInput:
+		targetID, targetKinds[value.NodeID] = value.NodeID, true
 	case operation.StageCreateInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.StepLifecycleInput:

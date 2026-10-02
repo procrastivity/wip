@@ -165,18 +165,22 @@ on `config.set`, shared-reference events, and narrated/boundary tracker effects
 instead of silently claiming parity. Those client projection consequences are
 deferred and must be represented before such transfer histories are accepted.
 Separately negotiated command-submit v2 envelopes and Environment detached-proof
-retry retention/forwarding are now present on both transport hops. That feature
-is not a repair-operation capability: no repair operation is registered or
-exposed through either submission version. The private terminal validator
-currently forbids a client `terminal_receipts` row, `QueryCommand` explicitly
-excludes repair submissions, and public canonical decoding has no repair input
-contract. The smallest remaining registration boundary is a separately reviewed
-canonical repair input/result and authenticated status/receipt bridge that
-preserves the existing closed receipt schema, private terminal/witness history,
-atomic nonce/proof admission, and original verification time. It must also
-install the terminal range (including successful no-event outcomes) and claim
-journal acknowledgment before repair can enter either capability set. This
-transport slice does not force that bridge or duplicate authorization logic.
+retry retention/forwarding are now present on both transport hops.
+`gate.exemption.repair@v1` now has a canonical input and typed result, and enters
+the runtime capability set only after independent v2 negotiation on both hops.
+V1 submission and unsupported or partially negotiated v2 fail before admission
+and nonce reservation. The public v2 path atomically links the existing private
+admission to the claim journal and retains the exact signed terminal receipt in
+the existing closed `wipd.terminal-receipt/1` schema. Its output byte string
+reports the node, gate, and whether the successful result was already exempt;
+the existing nullable event range represents no-event success and refusal.
+Authenticated `QueryCommand`, Environment installation, and exact claim-journal
+acknowledgment cover all three outcomes, including restart and lost ACK replies.
+Detached proof bytes and original verification time remain private and unchanged
+across replay; they never enter canonical commands, hashes, blobs, or receipts.
+Historical private-only admissions and terminals remain private and cannot be
+promoted by replay. Existing proof/nonce admission, factual and declaration
+guards, terminal witnesses, and claim/domain/epoch fences remain authoritative.
 Role projection and the Step 17/18 public config/provider APIs remain deferred.
 The separate post-claim-close sweep remains later work. The earlier
 implementer-thread status at base

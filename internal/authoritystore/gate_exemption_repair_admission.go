@@ -222,6 +222,10 @@ func (command gateExemptionRepairCommand) claimCommand() operation.Command {
 // verification, and owner-proof verification. It is not called by public
 // command submission and creates no execution owner, event, or receipt.
 func (s *Store) admitGateExemptionRepair(ctx context.Context, command gateExemptionRepairCommand, proof []byte, peer tls.ConnectionState, at time.Time) (gateExemptionRepairAdmission, error) {
+	return s.admitGateRepair(ctx, command, proof, peer, at, time.Time{}, false)
+}
+
+func (s *Store) admitGateRepair(ctx context.Context, command gateExemptionRepairCommand, proof []byte, peer tls.ConnectionState, at, deadline time.Time, journal bool) (gateExemptionRepairAdmission, error) {
 	var out gateExemptionRepairAdmission
 	canonical, hash, err := command.canonicalBytes()
 	if err != nil || len(proof) > 1<<20 || at.IsZero() {
@@ -263,6 +267,12 @@ func (s *Store) admitGateExemptionRepair(ctx context.Context, command gateExempt
 	if err == nil {
 		if stored.RequestHash != hash || !bytes.Equal(stored.Command, canonical) || len(proof) != 0 && !bytes.Equal(stored.Proof, proof) {
 			return out, ErrConflict
+		}
+		if journal {
+			public, linkErr := gateRepairJournalLinked(ctx, tx, stored)
+			if linkErr != nil || !public {
+				return out, ErrConflict
+			}
 		}
 		if terminal, terminalErr := readGateExemptionRepairTerminal(ctx, tx, command.DomainID, command.ID); terminalErr == nil {
 			if err = validateStoredGateExemptionRepairAdmissionCore(ctx, tx, stored); err != nil {
@@ -326,6 +336,21 @@ func (s *Store) admitGateExemptionRepair(ctx context.Context, command gateExempt
 		command.Boundary.PrefixDigest, verified.nonce, proof, verifiedAt)
 	if err != nil {
 		return out, writeError(err)
+	}
+	if journal {
+		publicCommand, decodeErr := operation.DecodeCanonicalCommand(canonical)
+		if decodeErr != nil {
+			return out, ErrInvalidProof
+		}
+		if err = appendConnectedClaimJournalEntry(ctx, tx, publicCommand, canonical, hash); err != nil {
+			return out, err
+		}
+		if err = ctx.Err(); err != nil {
+			return out, err
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return out, context.DeadlineExceeded
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return out, err

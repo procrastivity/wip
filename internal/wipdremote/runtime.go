@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
@@ -193,6 +194,16 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 		_ = runtime.Close()
 		return nil, nil, err
 	}
+	if runtime.SupportsCommandSubmitV2() && config.CommandCatalogue == "m6-step5" {
+		if err = registry.Register(operation.GateExemptionRepairV1, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "repair requires connected authority submission",
+			}}
+		}); err != nil {
+			_ = runtime.Close()
+			return nil, nil, err
+		}
+	}
 	server := wipd.NewServerWithRegistry(registry)
 	environment, err := wipd.NewJournalCommandStartEnvironment(runtime.journal)
 	if err == nil {
@@ -224,6 +235,12 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	for _, definition := range definitions {
 		operations = append(operations, definition.Metadata().Operation)
 	}
+	if config.CommandCatalogue == "m6-step5" {
+		operations = append(operations, operation.GateExemptionRepairV1.Metadata().Operation)
+	}
+	sort.Slice(operations, func(i, j int) bool {
+		return operations[i].Name < operations[j].Name || operations[i].Name == operations[j].Name && operations[i].Version < operations[j].Version
+	})
 	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	client, err := wipdseed.OpenCommandExchangeClient(startupCtx, profile, roots, config.ClientStateDirectory, operations)
@@ -265,6 +282,10 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 		return empty, err
 	}
 	if entry.SubmissionSchema == wipdwire.CommandSubmitV2Feature && !runtime.SupportsCommandSubmitV2() {
+		return empty, errors.New("protocol.unsupported-extension")
+	}
+	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation &&
+		(entry.SubmissionSchema != wipdwire.CommandSubmitV2Feature || !runtime.SupportsCommandSubmitV2()) {
 		return empty, errors.New("protocol.unsupported-extension")
 	}
 	for _, blob := range entry.Command.Request.Blobs {

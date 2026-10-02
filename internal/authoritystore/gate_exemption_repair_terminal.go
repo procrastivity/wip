@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/procrastivity/wip/internal/operation"
 )
 
 type gateExemptionRepairTerminal struct {
@@ -100,6 +102,10 @@ func readGateExemptionRepairTerminal(ctx context.Context, queryer gateRepairQuer
 }
 
 func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byte, hash string, suppliedProof, eventID []byte, occurred time.Time) (gateExemptionRepairTerminal, error) {
+	return s.completeGateRepair(ctx, canonical, hash, suppliedProof, eventID, occurred, nil)
+}
+
+func (s *Store) completeGateRepair(ctx context.Context, canonical []byte, hash string, suppliedProof, eventID []byte, occurred time.Time, sign Signer) (gateExemptionRepairTerminal, error) {
 	var empty gateExemptionRepairTerminal
 	command, err := decodeGateExemptionRepairCommand(canonical, hash)
 	if err != nil || len(suppliedProof) > 1<<20 || occurred.IsZero() {
@@ -134,6 +140,13 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 	}
 	if err = validateStoredGateExemptionRepairAdmissionCore(ctx, tx, stored); err != nil {
 		return empty, err
+	}
+	public, err := gateRepairJournalLinked(ctx, tx, stored)
+	if err != nil {
+		return empty, err
+	}
+	if public != (sign != nil) {
+		return empty, ErrConflict
 	}
 	if terminal, terminalErr := readGateExemptionRepairTerminal(ctx, tx, stored.DomainID, stored.CommandID); terminalErr == nil {
 		if err = validateGateExemptionRepairTerminal(ctx, tx, stored, terminal); err != nil {
@@ -217,8 +230,10 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 		return empty, writeError(err)
 	}
 	if appendEvent {
-		identity := eventIdentity{stored.DomainID, stored.CommandID, stored.RequestHash, stored.EnvironmentID,
-			stored.EnvironmentSequence, command.ActedAt, stored.RepoID}
+		identity := eventIdentity{
+			stored.DomainID, stored.CommandID, stored.RequestHash, stored.EnvironmentID,
+			stored.EnvironmentSequence, command.ActedAt, stored.RepoID,
+		}
 		position, appendErr := appendCommandEvent(ctx, tx, identity, occurred, terminalEventID,
 			"gate.exemption-repaired", stored.NodeID, map[string]any{"gate": stored.Gate})
 		if appendErr != nil || position != anchor.EventCount+1 {
@@ -228,6 +243,20 @@ func (s *Store) completeGateExemptionRepair(ctx context.Context, canonical []byt
 			return empty, ErrInvalidStore
 		}
 		if err = step13ProjectionTx(ctx, tx); err != nil {
+			return empty, err
+		}
+	}
+	if public {
+		output, problem, accepted, first, last, encodeErr := gateRepairResult(command, terminal)
+		if encodeErr != nil {
+			return empty, encodeErr
+		}
+		_, err = retainTerminalReceiptTx(ctx, tx, commandIdentity{
+			domain: stored.DomainID, id: stored.CommandID, hash: stored.RequestHash, epoch: stored.AuthorityEpoch,
+			environment: stored.EnvironmentID, sequence: stored.EnvironmentSequence,
+			name: operation.GateExemptionRepairV1.Metadata().Operation.Name, version: 1,
+		}, terminal.ResultCode, output, problem, accepted, first, last, occurred, sign)
+		if err != nil {
 			return empty, err
 		}
 	}
@@ -393,9 +422,8 @@ func validateGateExemptionRepairTerminal(ctx context.Context, tx *sql.Tx, admiss
 		operationName != gateExemptionRepairOperationName || version != 1 {
 		return fmt.Errorf("%w: private repair terminal submission mismatch", ErrInvalidStore)
 	}
-	var receipts int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM terminal_receipts WHERE domain_id=? AND command_id=?`, admission.DomainID, admission.CommandID).Scan(&receipts); err != nil || receipts != 0 {
-		return fmt.Errorf("%w: private repair unexpectedly has a client receipt", ErrInvalidStore)
+	if err = validateGateRepairReceipt(ctx, tx, admission, terminal, command); err != nil {
+		return fmt.Errorf("%w: repair receipt does not match its committed terminal", err)
 	}
 	var ownedEvents int
 	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, admission.DomainID, admission.CommandID).Scan(&ownedEvents); err != nil {
@@ -523,8 +551,7 @@ func checkStep15State(db *sql.DB) error {
 		`SELECT count(*) FROM gate_exemption_repair_terminals t
 			LEFT JOIN gate_exemption_repair_admissions a ON a.domain_id=t.domain_id AND a.command_id=t.command_id
 			LEFT JOIN submissions s ON s.domain_id=t.domain_id AND s.command_id=t.command_id
-			LEFT JOIN terminal_receipts r ON r.domain_id=t.domain_id AND r.command_id=t.command_id
-			WHERE a.domain_id IS NULL OR s.domain_id IS NULL OR r.command_id IS NOT NULL OR
+			WHERE a.domain_id IS NULL OR s.domain_id IS NULL OR
 				t.request_hash!=a.request_hash OR s.request_hash!=a.request_hash OR s.command!=a.command OR
 				s.epoch!=a.authority_epoch OR s.environment_id!=a.environment_id OR
 				s.environment_sequence!=a.environment_sequence OR s.operation_name!='gate.exemption.repair' OR

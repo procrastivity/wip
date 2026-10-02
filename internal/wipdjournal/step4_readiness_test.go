@@ -113,6 +113,10 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		{"Step removal target", operation.StepRemoveInput{StepID: stepLive, Reason: "done"}, matter},
 		{"Matter finish", operation.MatterFinishInput{MatterID: matter}, matter},
 		{"Matter locator repair", operation.MatterLocatorRepairInput{MatterID: matter, Action: "accept", AssignedLocator: "readiness"}, matter},
+		{"repair on Matter", operation.GateExemptionRepairInput{NodeID: matter}, matter},
+		{"repair resolves Stage ancestry", operation.GateExemptionRepairInput{NodeID: stage}, matter},
+		{"repair resolves Step ancestry", operation.GateExemptionRepairInput{NodeID: stepLive}, matter},
+		{"repair on removed Step is not ready", operation.GateExemptionRepairInput{NodeID: stepInserted}, ""},
 		{"content on Matter", operation.ContentWriteInput{SubjectID: matter, Kind: "brief"}, matter},
 		{"finding on Step", operation.FindingAppendInput{SubjectID: stepLive}, matter},
 		{"removed Step is not ready", operation.StepLifecycleInput{StepID: stepInserted}, ""},
@@ -138,6 +142,8 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		"removed Step":                 request(operation.StepLifecycleInput{StepID: stepInserted}),
 		"removed Step cancel":          request(operation.StepCancelInput{StepID: stepInserted, Reason: "obsolete"}),
 		"different Matter Step cancel": request(operation.StepCancelInput{StepID: otherStepSameRepo, Reason: "wrong claim scope"}),
+		"repair on removed Step":       request(operation.GateExemptionRepairInput{NodeID: stepInserted}),
+		"repair on different Matter":   request(operation.GateExemptionRepairInput{NodeID: otherStepSameRepo}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err = journal.ValidateCommandClaimReadiness(ctx, invalid); err == nil {

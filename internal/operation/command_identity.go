@@ -57,6 +57,9 @@ func (command Command) CanonicalBytes() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("operation: canonical command: %w", err)
 	}
+	if command.Request.Operation == GateExemptionRepairV1.Metadata().Operation && len(encoded) > 1<<20 {
+		return nil, fmt.Errorf("operation: gate exemption repair command exceeds 1 MiB")
+	}
 	return encoded, nil
 }
 
@@ -247,6 +250,13 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"gate": input.Gate, "node_id": input.NodeID}, nil
 	case GateDismissInput:
 		return canonicalMap{"gate": input.Gate, "node_id": input.NodeID, "reason": input.Reason}, nil
+	case GateExemptionRepairInput:
+		return canonicalMap{
+			"node_id": input.NodeID, "gate": input.Gate,
+			"event_count": input.EventCount, "high_water_event_id": input.HighWaterEventID,
+			"prefix_digest": input.PrefixDigest, "incident_ref": input.IncidentRef,
+			"reason": input.Reason, "evidence_refs": canonicalStrings(input.EvidenceRefs),
+		}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}

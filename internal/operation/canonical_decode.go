@@ -419,6 +419,37 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return GateDismissInput{Gate: gate, NodeID: nodeID, Reason: reason}, nil
+	case GateExemptionRepairV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "node_id", "gate", "event_count", "high_water_event_id", "prefix_digest", "incident_ref", "reason", "evidence_refs")
+		if err != nil {
+			return nil, err
+		}
+		var input GateExemptionRepairInput
+		if input.NodeID, err = commandString(fields, "node_id"); err != nil {
+			return nil, err
+		}
+		if input.Gate, err = commandString(fields, "gate"); err != nil {
+			return nil, err
+		}
+		if input.EventCount, err = commandUint(fields, "event_count"); err != nil {
+			return nil, err
+		}
+		if input.HighWaterEventID, err = commandString(fields, "high_water_event_id"); err != nil {
+			return nil, err
+		}
+		if input.PrefixDigest, err = commandString(fields, "prefix_digest"); err != nil {
+			return nil, err
+		}
+		if input.IncidentRef, err = commandString(fields, "incident_ref"); err != nil {
+			return nil, err
+		}
+		if input.Reason, err = commandString(fields, "reason"); err != nil {
+			return nil, err
+		}
+		if input.EvidenceRefs, err = commandStringArray(fields, "evidence_refs"); err != nil {
+			return nil, err
+		}
+		return input, nil
 	case MatterStartV1.Metadata().Operation, MatterPauseV1.Metadata().Operation,
 		MatterResumeV1.Metadata().Operation, MatterCancelV1.Metadata().Operation,
 		StageStartV1.Metadata().Operation, StagePauseV1.Metadata().Operation,

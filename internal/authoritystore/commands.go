@@ -259,6 +259,9 @@ func (s *Store) QueryCommand(ctx context.Context, domain, id, hash string, epoch
 	if _, err = verifyPeer(ctx, tx, domain, environment, epoch, peer, at); err != nil {
 		return out, err
 	}
+	if repair, repairErr := s.gateRepairStatusTx(ctx, tx, domain, id, hash, environment); !errors.Is(repairErr, ErrNotFound) {
+		return repair, repairErr
+	}
 	var stored, env string
 	err = tx.QueryRowContext(ctx, `SELECT request_hash,environment_id FROM submissions WHERE domain_id=? AND command_id=? AND operation_name!='gate.exemption.repair'`, domain, id).Scan(&stored, &env)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -744,7 +747,9 @@ func appendCommandEvent(ctx context.Context, tx *sql.Tx, c eventIdentity, occurr
 	return position, err
 }
 
-func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdentity, head uint64, code string, output, problem, rangeValue, first, last any, occurred time.Time, sign Signer, beforeCommit func([]byte, []byte, uint64, uint64) error) (CommandStatus, error) {
+// retainTerminalReceiptTx signs and retains the existing closed receipt inside
+// the caller's terminal transaction. It does not advance identity or commit.
+func retainTerminalReceiptTx(ctx context.Context, tx *sql.Tx, c commandIdentity, code string, output, problem, rangeValue, first, last any, occurred time.Time, sign Signer) (CommandStatus, error) {
 	var out CommandStatus
 	receipt, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.terminal-receipt/1", "domain_id": c.domain, "authority_epoch": c.epoch, "identity_schema": "wipd.command/1", "command_id": c.id, "request_hash": c.hash, "operation": map[string]any{"name": c.name, "version": c.version}, "environment": map[string]any{"id": c.environment, "sequence": c.sequence}, "result": map[string]any{"code": code, "output": output, "problem_code": problem}, "accepted_events": rangeValue})
 	if err != nil {
@@ -799,6 +804,16 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 	if _, err = tx.ExecContext(ctx, `INSERT INTO terminal_receipts VALUES(?,?,?,?,?,?,?,?,?,?)`, c.domain, c.id, receipt, wrapper, c.epoch, generation, sequence, first, last, code); err != nil {
 		return out, err
 	}
+	out.Receipt, out.SignedReceipt = receipt, wrapper
+	return out, nil
+}
+
+func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdentity, head uint64, code string, output, problem, rangeValue, first, last any, occurred time.Time, sign Signer, beforeCommit func([]byte, []byte, uint64, uint64) error) (CommandStatus, error) {
+	var out CommandStatus
+	retained, err := retainTerminalReceiptTx(ctx, tx, c, code, output, problem, rangeValue, first, last, occurred, sign)
+	if err != nil {
+		return out, err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE submissions SET state='terminal' WHERE domain_id=? AND command_id=?`, c.domain, c.id); err != nil {
 		return out, err
 	}
@@ -806,7 +821,11 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 		return out, err
 	}
 	if beforeCommit != nil {
-		if err = beforeCommit(receipt, wrapper, generation, sequence); err != nil {
+		var artifact signedArtifact
+		if err = artifactDecoder.Unmarshal(retained.SignedReceipt, &artifact); err != nil || artifact.Generation == nil || artifact.Sequence == nil {
+			return out, ErrInvalidProof
+		}
+		if err = beforeCommit(retained.Receipt, retained.SignedReceipt, *artifact.Generation, *artifact.Sequence); err != nil {
 			return out, err
 		}
 	}
@@ -815,8 +834,7 @@ func (s *Store) finishCommandTx(ctx context.Context, tx *sql.Tx, c commandIdenti
 	}
 	delete(s.owners, ownerKey(c.domain, c.id))
 	delete(s.executions, ownerKey(c.domain, c.id))
-	out.Receipt, out.SignedReceipt = receipt, wrapper
-	return out, nil
+	return retained, nil
 }
 
 func sameCommandCompletion(left, right CommandCompletion) bool {

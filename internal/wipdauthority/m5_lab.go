@@ -192,6 +192,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	} else if len(config.ArtifactKeyCertificate) != 0 || config.SignArtifact != nil {
 		return nil, ErrInvalidLabConfig
 	}
+	if m6 {
+		// The detached operation has no generic Registry.Dispatch handler. Its
+		// capability is selected only with v2 and its durable private seam owns
+		// proof admission, factual guards, terminal witnesses, and receipts.
+		operations = append(operations, operation.GateExemptionRepairV1)
+	}
 	app := &m5LabHandler{
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),

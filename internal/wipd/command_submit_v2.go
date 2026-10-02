@@ -60,6 +60,9 @@ func (coordinator *CommandStartCoordinator) RunConnectedCanonicalSubmission(ctx 
 	guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error,
 ) (CommandStartResult, error) {
 	if submit.Schema == "wipd.command-submit/1" {
+		if command.Request.Operation.Name == "gate.exemption.repair" {
+			return CommandStartResult{}, errUnsupportedExtension
+		}
 		return coordinator.RunConnectedCanonicalTerminal(ctx, command, guardAndWrite)
 	}
 	if submit.Schema != wipdwire.CommandSubmitV2Feature || !coordinator.supportsCommandSubmitV2() {

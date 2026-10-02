@@ -118,14 +118,14 @@ func (j *Journal) ClaimJournal(binding ClaimJournalBinding) (wipdwire.JournalBar
 	var members []Entry
 	for _, entry := range entries {
 		claim := entry.Command.Request.Claim
-		if entry.Delivery != operation.DeliveryClaim || claim == nil || claim.ID != binding.ClaimID {
+		if !repairClaimJournalMember(entry) || claim == nil || claim.ID != binding.ClaimID {
 			continue
 		}
 		if claim.Epoch != strconv.FormatUint(binding.ClaimEpoch, 10) || entry.Command.Request.Context.Repo != j.identity.RepoID ||
 			entry.Command.Request.Context.Clone == "" || entry.Command.Request.Context.Worktree == "" {
 			return empty, nil, ErrClaimJournalIncomplete
 		}
-		if entry.State != StateReturned {
+		if entry.State != StateReturned && (entry.Delivery != operation.DeliveryAuthority || entry.State != StateAttemptPrepared) {
 			return empty, nil, ErrClaimJournalIncomplete
 		}
 		members = append(members, entry)
@@ -357,6 +357,16 @@ func installedClaimReceiptRange(tx *sql.Tx, installed wipdwire.PrefixAnchor, ent
 		return nil, ErrInvalidJournal
 	}
 	if fields["accepted_events"] == nil {
+		if entry.Delivery == operation.DeliveryAuthority {
+			if !repairReceiptNoEvent(entry, receipt.CanonicalReceipt) {
+				return nil, ErrInvalidJournal
+			}
+			events, eventErr := installedEventCountForCommand(tx, entry.Command.ID)
+			if eventErr != nil || events != 0 {
+				return nil, ErrInvalidJournal
+			}
+			return nil, nil
+		}
 		var firstPosition, lastPosition sql.NullInt64
 		var count int64
 		if err = tx.QueryRow(`SELECT event_count,first_position,last_position FROM installed_receipts WHERE command_id=? AND request_hash=?`, entry.Command.ID, entry.RequestHash).
@@ -368,6 +378,9 @@ func installedClaimReceiptRange(tx *sql.Tx, installed wipdwire.PrefixAnchor, ent
 			return nil, ErrInvalidJournal
 		}
 		return nil, nil
+	}
+	if entry.Delivery == operation.DeliveryAuthority {
+		return installedRepairReceiptRange(tx, installed, entry, receipt)
 	}
 	return installedBirthReceiptRange(tx, installed, entry, receipt)
 }

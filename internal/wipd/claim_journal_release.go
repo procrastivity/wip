@@ -317,6 +317,12 @@ func validResultCode(code operation.ResultCode) bool {
 // may have been lost with the previous process. Authority admission permits
 // only one unacknowledged head per acquired journal, so ACKing the latest
 // installed head for each claim is sufficient and remains idempotent.
+func claimJournalMember(entry wipdjournal.Entry) bool {
+	return entry.Delivery == operation.DeliveryClaim ||
+		entry.Delivery == operation.DeliveryAuthority && entry.Command.Request.Operation.Name == "gate.exemption.repair" &&
+			entry.Command.Request.Operation.Version == 1
+}
+
 func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(ctx context.Context, current wipdjournal.Entry,
 	installed CommandStartSnapshot,
 ) error {
@@ -328,7 +334,7 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 	needsAck := make(map[string]bool)
 	claimEpochs := make(map[string]string)
 	for _, entry := range entries {
-		if entry.EnvironmentSeq > current.EnvironmentSeq || entry.Delivery != operation.DeliveryClaim {
+		if entry.EnvironmentSeq > current.EnvironmentSeq || !claimJournalMember(entry) {
 			continue
 		}
 		claim := entry.Command.Request.Claim
@@ -352,7 +358,8 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 		}
 		receipt, ok := installed.Receipts[entry.Command.ID]
 		if !ok {
-			if entry.Command.ID == current.Command.ID && entry.State == wipdjournal.StatePreAdmission {
+			if entry.Command.ID == current.Command.ID && (entry.State == wipdjournal.StatePreAdmission ||
+				entry.Delivery == operation.DeliveryAuthority && entry.State == wipdjournal.StateAttemptPrepared) {
 				continue
 			}
 			return fmt.Errorf("%w: claim command %s has no installed receipt", ErrCommandStartBlocked, entry.Command.ID)
@@ -375,7 +382,7 @@ func (coordinator *CommandStartCoordinator) acknowledgeLatestClaimJournalHeads(c
 	}
 	for _, entry := range entries {
 		claim := entry.Command.Request.Claim
-		if entry.EnvironmentSeq > current.EnvironmentSeq || entry.Delivery != operation.DeliveryClaim || claim == nil {
+		if entry.EnvironmentSeq > current.EnvironmentSeq || !claimJournalMember(entry) || claim == nil {
 			continue
 		}
 		head, ok := latest[claim.ID]
@@ -426,7 +433,7 @@ func (coordinator *CommandStartCoordinator) claimJournalNeedsAcknowledgment(clai
 func (coordinator *CommandStartCoordinator) acknowledgeClaimJournalReceipt(ctx context.Context, entry wipdjournal.Entry,
 	installed CommandStartSnapshot,
 ) error {
-	if coordinator == nil || ctx == nil || entry.Delivery != operation.DeliveryClaim || !validClaimJournalSnapshot(installed, coordinator.domainID) {
+	if coordinator == nil || ctx == nil || !claimJournalMember(entry) || !validClaimJournalSnapshot(installed, coordinator.domainID) {
 		return ErrCommandStartIdentity
 	}
 	claim := entry.Command.Request.Claim
@@ -472,7 +479,7 @@ func (coordinator *CommandStartCoordinator) acknowledgeClaimJournalReceipt(ctx c
 	found := false
 	for _, member := range entries {
 		memberClaim := member.Command.Request.Claim
-		if member.Delivery != operation.DeliveryClaim || memberClaim == nil || memberClaim.ID != claim.ID || member.EnvironmentSeq > entry.EnvironmentSeq {
+		if !claimJournalMember(member) || memberClaim == nil || memberClaim.ID != claim.ID || member.EnvironmentSeq > entry.EnvironmentSeq {
 			continue
 		}
 		if memberClaim.Epoch != claim.Epoch {

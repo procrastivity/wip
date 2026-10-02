@@ -69,6 +69,58 @@ func TestCommandSubmitV2RemoteSelectionIsIndependentAndClosed(t *testing.T) {
 	}
 }
 
+func TestRepairRemoteOfferIsOptionalOnlyWithoutSelectedV2(t *testing.T) {
+	operations := []operation.ID{operation.GateExemptionRepairV1.Metadata().Operation, operation.MatterCreateV1.Metadata().Operation}
+	for _, tc := range []struct {
+		name, features string
+		includeRepair  bool
+		valid          bool
+	}{
+		{"v1-omits-repair", "v1", false, true},
+		{"v1-includes-repair", "v1", true, false},
+		{"v2-includes-repair", "v2", true, true},
+		{"v2-omits-repair", "v2", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: submitV2RoundTrip(func(request *http.Request) (*http.Response, error) {
+				frame, err := wipdwire.ReadFrame(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				offer, err := wipdwire.DecodeCanonicalMap(frame.Payload,
+					"protocol_min", "protocol_max", "identity_schemas", "operations", "store_schemas", "features")
+				if err != nil {
+					t.Fatal(err)
+				}
+				selected := offer["operations"].([]any)
+				if !tc.includeRepair {
+					selected = selected[1:]
+				}
+				features := []any{"wipd.frame/1"}
+				if tc.features == "v2" {
+					features = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+				}
+				hello, _ := wipdwire.EncodeCanonical(map[string]any{
+					"selected_protocol": []any{uint64(1), uint64(0)}, "identity_schemas": []any{"wipd.command/1"},
+					"operations": selected, "store_schemas": []any{"wipd.store/1"}, "features": features,
+				})
+				parameters, _ := wipdwire.EncodeCanonical(map[string]any{
+					"frame_schema": "wipd.frame/1", "max_frame_body": uint64(wipdwire.FrameLimit), "max_chunk_data": uint64(65_536),
+					"max_stream_bytes": uint64(maxClientTransferBytes), "max_concurrent_exchanges": uint64(32), "receive_window_bytes": uint64(1_048_576),
+				})
+				return submitV2Response(t, []wipdwire.Frame{
+					{RequestID: frame.RequestID, Kind: "server.hello", Payload: hello},
+					{RequestID: frame.RequestID, Sequence: 1, Kind: "session.parameters", Payload: parameters},
+				}), nil
+			})}
+			_, err := negotiateRemoteOperations(context.Background(), client, "https://authority.example:8443", operations)
+			if (err == nil) != tc.valid {
+				t.Fatalf("repair selection error=%v; valid=%t", err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestCommandSubmitV2RemoteProofForwardingAndErrorsNeverDowngrade(t *testing.T) {
 	pin := "sha256:" + strings.Repeat("0", 64)
 	profile, err := wipdauthority.NewProfile("https://authority.example:8443", testDomainID, 1, pin, pin)

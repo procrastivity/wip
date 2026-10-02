@@ -895,6 +895,12 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 	if err != nil {
 		return nil, 0, 0, ErrInvalidTransfer
 	}
+	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation && fields["accepted_events"] == nil {
+		if repairReceiptNoEvent(entry, raw) {
+			return nil, 0, 0, nil
+		}
+		return nil, 0, 0, ErrInvalidTransfer
+	}
 	rangeFields, ok := fields["accepted_events"].(map[string]any)
 	if !ok || !wipdwire.ExactMapKeys(rangeFields, "first_event_id", "last_event_id", "event_count") {
 		return nil, 0, 0, ErrInvalidTransfer
@@ -950,6 +956,31 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 	}
 	if len(ids) != int(count) || ids[0] != firstID || ids[len(ids)-1] != lastID {
 		return nil, 0, 0, ErrInvalidTransfer
+	}
+	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation {
+		resultFields, ok := fields["result"].(map[string]any)
+		if !ok || count != 1 {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
+		output, ok := resultFields["output"].([]byte)
+		if !ok {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
+		decoded, valid := repairOutput(entry, output)
+		if !valid || decoded.AlreadyExempt {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
+		var record []byte
+		if uint64(firstPosition) <= installed.EventCount {
+			if err := tx.QueryRowContext(ctx, `SELECT record FROM installed_events WHERE position=?`, firstPosition).Scan(&record); err != nil {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+		} else {
+			record = transfer.records[uint64(firstPosition)-installed.EventCount-1].Record
+		}
+		if !repairEventMatches(record, entry, firstID) {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
 	}
 	return ids, firstPosition, lastPosition, nil
 }
@@ -1023,8 +1054,11 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		if _, ok = resultFields["output"].([]byte); !ok {
 			return ErrInvalidTransfer
 		}
-		if len(eventIDs) == 0 {
+		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) {
 			return fmt.Errorf("%w: successful effectful fold has no verified events", ErrInvalidTransfer)
+		}
+		if len(eventIDs) == 0 {
+			return nil
 		}
 		rangeFields, ok := accepted.(map[string]any)
 		if !ok || !wipdwire.ExactMapKeys(rangeFields, "first_event_id", "last_event_id", "event_count") ||

@@ -123,9 +123,9 @@ func TestGateExemptionRepairAdmissionPersistsAndRecoversDetachedIdentity(t *test
 		t.Fatalf("admission leaked into command effects or failed to reserve identity: events %d/%d receipts %d/%d submissions %d/%d nonces=%d head=%d",
 			beforeEvents, afterEvents, beforeReceipts, afterReceipts, beforeSubmissions, afterSubmissions, reservations, sequenceHead)
 	}
-	for _, definition := range operation.Catalogue() {
+	for _, definition := range operation.GateCatalogue() {
 		if definition.Metadata().Operation.Name == gateExemptionRepairOperationName {
-			t.Fatal("repair admission unexpectedly registered a public operation")
+			t.Fatal("detached repair entered the generic gate admission path")
 		}
 	}
 	if err = fixture.store.s.Close(); err != nil {

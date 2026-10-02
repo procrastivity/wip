@@ -236,6 +236,9 @@ func (coordinator *CommandStartCoordinator) RunConnectedTerminal(ctx context.Con
 // Environment sequence or acted time. The journal accepts it only at the
 // exact next sequence for its bound Environment.
 func (coordinator *CommandStartCoordinator) RunConnectedCanonicalTerminal(ctx context.Context, command operation.Command, guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error) (CommandStartResult, error) {
+	if command.Request.Operation.Name == "gate.exemption.repair" {
+		return CommandStartResult{}, ErrCommandStartBlocked
+	}
 	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
 		if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
 			if err := coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request); err != nil {
@@ -331,6 +334,13 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 			return empty, fmt.Errorf("%w: decode installed replay receipt: %v", ErrCommandStartIdentity, err)
 		}
 		if code != operation.ResultSucceeded {
+			// A repair refusal can be installed before its exact journal ACK is
+			// sent or answered. Recover that ACK before returning the receipt.
+			if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation {
+				if err = coordinator.acknowledgeClaimJournalReceipt(ctx, entry, installed); err != nil {
+					return empty, fmt.Errorf("wipd: acknowledge installed repair refusal: %w", err)
+				}
+			}
 			return result, nil
 		}
 	}
@@ -431,7 +441,7 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 			!bytes.Equal(receipt.CanonicalReceipt, fold.CanonicalReceipt) {
 			return empty, fmt.Errorf("%w: installed command receipt differs from returned fold", ErrCommandStartIdentity)
 		}
-		if entry.Delivery == operation.DeliveryClaim {
+		if claimJournalMember(entry) {
 			if err = coordinator.acknowledgeClaimJournalReceipt(ctx, entry, installed); err != nil {
 				return empty, fmt.Errorf("wipd: acknowledge installed claim journal receipt: %w", err)
 			}
@@ -487,7 +497,7 @@ func (coordinator *CommandStartCoordinator) returnPending(
 			!bytes.Equal(installedReceipt.CanonicalReceipt, fold.CanonicalReceipt) || installed.ManifestDigest != fold.Manifest.Digest {
 			return installed, false, ErrCommandStartIdentity
 		}
-		if pendingEntry.Delivery == operation.DeliveryClaim {
+		if claimJournalMember(pendingEntry) {
 			if err = coordinator.acknowledgeClaimJournalReceipt(ctx, pendingEntry, installed); err != nil {
 				return installed, false, fmt.Errorf("acknowledge returned claim journal receipt: %w", err)
 			}
@@ -789,6 +799,20 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			if _, outputErr := decodeCommandContentOutput(entry, outputBytes); outputErr != nil {
 				return "", ErrCommandStartIdentity
 			}
+		case operation.GateExemptionRepairV1.Metadata().Operation:
+			output, outputErr := decodeRepairOutput(outputBytes)
+			input, inputOK := entry.Command.Request.Input.(operation.GateExemptionRepairInput)
+			if outputErr != nil || !inputOK || output.Gate != input.Gate || output.NodeID != input.NodeID || output.AlreadyExempt != !hasRange ||
+				hasRange && accepted["event_count"] != uint64(1) {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.GateDeclareV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "gate", "scale")
+			input, inputOK := entry.Command.Request.Input.(operation.GateDeclareInput)
+			if outputErr != nil || !inputOK || output["gate"] != input.Gate || output["scale"] != input.Scale ||
+				hasRange && accepted["event_count"] != uint64(1) {
+				return "", ErrCommandStartIdentity
+			}
 		default:
 			if !(operation.Step4Operation(entry.Command.Request.Operation) || operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
 				return "", ErrCommandStartIdentity
@@ -803,7 +827,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 		if !found || metadata.Delivery != entry.Delivery {
 			return "", ErrCommandStartIdentity
 		}
-		if len(metadata.Writes) > 0 && !hasRange {
+		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation {
 			return "", ErrCommandStartIdentity
 		}
 		if hasRange {
@@ -904,6 +928,11 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			return operation.Result{}, ErrCommandStartIdentity
 		}
 		typed = content
+	case operation.GateExemptionRepairV1.Metadata().Operation:
+		typed, err = decodeRepairOutput(outputBytes)
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
 	default:
 		if operation.Step5Operation(entry.Command.Request.Operation) {
 			typed, err = decodeStep5Output(entry.Command.Request.Operation, outputBytes)

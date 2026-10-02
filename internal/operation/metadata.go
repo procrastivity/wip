@@ -99,6 +99,10 @@ const (
 	// live/tombstone status, and lifecycle/ancestry needed by gate eligibility.
 	FootprintGateSubject         Footprint = "gate.subject"
 	FootprintGateDismissalReason Footprint = "gate.dismissal-reason"
+	// RepairBoundary binds the historical event prefix to the gate declaration.
+	FootprintGateRepairBoundary Footprint = "gate.repair-boundary"
+	// RepairOwnerAuthorization is detached owner-root proof, never a command field.
+	FootprintGateRepairOwnerAuthorization Footprint = "gate.repair-owner-authorization"
 	// TrackerCandidates writes the durable candidate/outbox rows emitted by a gate event.
 	FootprintTrackerCandidates Footprint = "tracker.candidates"
 	// RepoTrackerPushConfig reads the Repo's effective tracker backend and push level.

@@ -18,6 +18,9 @@ func (d Definition) ValidateRequest(request Request) error {
 	if !validActor(request.Actor) {
 		return fmt.Errorf("actor %q is not human, role:<name>, or system:<source>", request.Actor)
 	}
+	if d.metadata.Operation == GateExemptionRepairV1.Metadata().Operation && request.Actor != "human" {
+		return fmt.Errorf("gate.exemption.repair@v1 requires a human actor")
+	}
 	for _, dimension := range d.metadata.RequiredContext {
 		var value string
 		switch dimension {
@@ -95,6 +98,10 @@ func (d Definition) ValidateRequest(request Request) error {
 			return fmt.Errorf("gate.dismiss@v1 requires a gate name and reason")
 		}
 		if err := validateULID("gate subject ID", input.NodeID); err != nil {
+			return err
+		}
+	case GateExemptionRepairInput:
+		if err := validateGateExemptionRepairInput(input); err != nil {
 			return err
 		}
 	case MatterCreateInput:
@@ -251,6 +258,10 @@ func (d Definition) ValidateResult(result Result) error {
 		case GateDismissOutput:
 			if strings.TrimSpace(output.Gate) == "" || validateULID("gate output node ID", output.NodeID) != nil || !validGateScale(output.Scale) {
 				return fmt.Errorf("gate dismissal output is invalid")
+			}
+		case GateExemptionRepairOutput:
+			if !validRepairText(output.Gate, 1, 256, false) || validateULID("gate output node ID", output.NodeID) != nil {
+				return fmt.Errorf("gate exemption repair output is invalid")
 			}
 		case ContentSegmentOutput:
 			if validateULID("content output ID", output.ID) != nil || validateULID("content subject ID", output.SubjectID) != nil ||

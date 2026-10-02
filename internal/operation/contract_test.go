@@ -38,7 +38,7 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 	if metadata.ExternalEffects == nil || len(metadata.ExternalEffects) != 0 {
 		t.Fatalf("external effects = %#v, want explicit empty set", metadata.ExternalEffects)
 	}
-	if len(Catalogue()) != 30 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
+	if len(Catalogue()) != 31 || Catalogue()[1].Metadata().Operation != StepCreateV1.Metadata().Operation ||
 		Catalogue()[2].Metadata().Operation != StepStartV1.Metadata().Operation ||
 		Catalogue()[3].Metadata().Operation != StepFinishV1.Metadata().Operation ||
 		Catalogue()[4].Metadata().Operation != MatterFinishV1.Metadata().Operation ||
@@ -57,7 +57,8 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 		Catalogue()[26].Metadata().Operation != StageFinishV1.Metadata().Operation ||
 		Catalogue()[27].Metadata().Operation != GateDeclareV1.Metadata().Operation ||
 		Catalogue()[28].Metadata().Operation != GateCloseV1.Metadata().Operation ||
-		Catalogue()[29].Metadata().Operation != GateDismissV1.Metadata().Operation {
+		Catalogue()[29].Metadata().Operation != GateDismissV1.Metadata().Operation ||
+		Catalogue()[30].Metadata().Operation != GateExemptionRepairV1.Metadata().Operation {
 		t.Fatalf("catalogue = %+v, want M5 operations followed by the complete Step 4 set", Catalogue())
 	}
 }
@@ -358,17 +359,27 @@ func TestM6LifecycleDeliveryAndFootprintsArePinned(t *testing.T) {
 		{StageCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle, FootprintCancelReason}, []Footprint{FootprintStageLifecycle}},
 		{MatterCancelV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintCancelReason}, []Footprint{FootprintMatterLifecycle}},
 		{StageFinishV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle}, []Footprint{FootprintStageLifecycle}},
-		{GateDeclareV1, DeliveryClaim,
+		{
+			GateDeclareV1, DeliveryClaim,
 			[]Footprint{FootprintMatterActiveClaim, FootprintRepoGateDeclarations, FootprintGateOrder, FootprintGateExemptionSnapshot},
-			[]Footprint{FootprintRepoGateDeclarations, FootprintGateExemptionSnapshot}},
-		{GateCloseV1, DeliveryClaim,
-			[]Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
-				FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates},
-			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}},
-		{GateDismissV1, DeliveryClaim,
-			[]Footprint{FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
-				FootprintGateDismissalReason, FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates},
-			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}},
+			[]Footprint{FootprintRepoGateDeclarations, FootprintGateExemptionSnapshot},
+		},
+		{
+			GateCloseV1, DeliveryClaim,
+			[]Footprint{
+				FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+				FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates,
+			},
+			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates},
+		},
+		{
+			GateDismissV1, DeliveryClaim,
+			[]Footprint{
+				FootprintMatterActiveClaim, FootprintGateDeclaration, FootprintGateOwner, FootprintGateState, FootprintGateSubject,
+				FootprintGateDismissalReason, FootprintRepoTrackerPushConfig, FootprintTrackerReferences, FootprintTrackerSharedAggregates,
+			},
+			[]Footprint{FootprintGateState, FootprintTrackerSharedAggregates, FootprintTrackerCandidates},
+		},
 	}
 	for _, test := range tests {
 		metadata := test.definition.Metadata()

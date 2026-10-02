@@ -173,6 +173,11 @@ func checkStep4State(db *sql.DB) error {
 			if validationErr != nil {
 				return fmt.Errorf("%w: private repair terminal %s: %v", ErrInvalidStore, s.id, validationErr)
 			}
+			var publicReceipt int
+			if err = db.QueryRow(`SELECT count(*) FROM terminal_receipts WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&publicReceipt); err != nil {
+				return err
+			}
+			terminals += publicReceipt
 			continue
 		}
 		var receipt, wrapper []byte

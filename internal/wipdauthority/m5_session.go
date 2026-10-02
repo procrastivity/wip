@@ -95,6 +95,9 @@ func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []b
 	selectedSchemas := []string{"wipd.command/1"}
 	for _, definition := range supported {
 		id := definition.Metadata().Operation
+		if id == operation.GateExemptionRepairV1.Metadata().Operation && !containsString(features, wipdwire.CommandSubmitV2Feature) {
+			continue
+		}
 		client, found := findCapability(clientOperations, id.Name)
 		if !found || !containsVersion(client.versions, uint64(id.Version)) || !containsString(client.schemas, "wipd.command/1") || !containsString(identitySchemas, "wipd.command/1") {
 			continue

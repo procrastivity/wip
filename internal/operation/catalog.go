@@ -211,6 +211,7 @@ var catalogue = []Definition{
 	MatterStartV1, StageStartV1, MatterPauseV1, StagePauseV1, StepPauseV1,
 	MatterResumeV1, StageResumeV1, StepResumeV1, MatterCancelV1, StageCancelV1,
 	StepCancelV1, StageFinishV1, GateDeclareV1, GateCloseV1, GateDismissV1,
+	GateExemptionRepairV1,
 }
 
 // Catalogue returns the currently defined semantic operations. It is not the

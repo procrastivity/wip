@@ -266,6 +266,29 @@ func validateTerminalIdentity(payload []byte, domain string, entry wipdjournal.E
 	if _, ok = result["code"].(string); !ok {
 		return errors.New("wipdremote: malformed terminal result code")
 	}
+	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation && result["code"] == string(operation.ResultSucceeded) {
+		input, inputOK := entry.Command.Request.Input.(operation.GateExemptionRepairInput)
+		outputBytes, bytesOK := result["output"].([]byte)
+		if !inputOK || !bytesOK || result["problem_code"] != nil {
+			return errors.New("wipdremote: malformed repair result")
+		}
+		output, err := wipdwire.DecodeCanonicalMap(outputBytes, "gate", "node_id", "already_exempt")
+		already, alreadyOK := output["already_exempt"].(bool)
+		if err != nil || output["gate"] != input.Gate || output["node_id"] != input.NodeID || !alreadyOK {
+			return errors.New("wipdremote: repair result does not match submitted command")
+		}
+		if already {
+			if fields["accepted_events"] != nil {
+				return errors.New("wipdremote: repair no-op has an event range")
+			}
+		} else {
+			accepted, ok := fields["accepted_events"].(map[string]any)
+			if !ok || !wipdwire.ExactMapKeys(accepted, "first_event_id", "last_event_id", "event_count") ||
+				accepted["event_count"] != uint64(1) || accepted["first_event_id"] != accepted["last_event_id"] {
+				return errors.New("wipdremote: effectful repair requires exactly one event")
+			}
+		}
+	}
 	return nil
 }
 

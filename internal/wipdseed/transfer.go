@@ -291,12 +291,24 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	selection, err := wipdwire.DecodeCanonicalMap(frames[0].Payload,
 		"selected_protocol", "identity_schemas", "operations", "store_schemas", "features")
 	if err != nil || !equalVersion(selection["selected_protocol"], 1, 0) ||
-		!equalStringsValue(selection["identity_schemas"], "wipd.command/1") || !equalNegotiatedOperations(selection["operations"], operations) ||
+		!equalStringsValue(selection["identity_schemas"], "wipd.command/1") ||
 		!equalStringsValue(selection["store_schemas"], "wipd.store/1") {
 		return limits, ErrInvalidClientState
 	}
 	selectedV2 := equalStringsValue(selection["features"], wipdwire.CommandSubmitV2Feature, "wipd.frame/1")
 	if !equalStringsValue(selection["features"], "wipd.frame/1") && !selectedV2 || selectedV2 && len(operations) == 0 {
+		return limits, ErrInvalidClientState
+	}
+	selectedOperations := operations
+	if !selectedV2 {
+		selectedOperations = make([]operation.ID, 0, len(operations))
+		for _, id := range operations {
+			if id != operation.GateExemptionRepairV1.Metadata().Operation {
+				selectedOperations = append(selectedOperations, id)
+			}
+		}
+	}
+	if !equalNegotiatedOperations(selection["operations"], selectedOperations) {
 		return limits, ErrInvalidClientState
 	}
 	parameters, err := wipdwire.DecodeCanonicalMap(frames[1].Payload,

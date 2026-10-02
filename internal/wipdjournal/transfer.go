@@ -188,6 +188,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
 			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" &&
+			fields["kind"] != "gate.declared" && fields["kind"] != "gate.closed" && fields["kind"] != "gate.dismissed" && fields["kind"] != "gate.exemption-repaired" &&
 			!transferLifecycleEventKind(asString(fields["kind"]))) ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
@@ -210,6 +211,44 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
 	}
 	switch kind {
+	case "gate.exemption-repaired":
+		return wipdwire.ExactMapKeys(payload, "gate") && asString(payload["gate"]) != "" && transferULID.MatchString(asString(fields["subject_id"]))
+	case "gate.declared":
+		if !wipdwire.ExactMapKeys(payload, "gate", "scale") && !wipdwire.ExactMapKeys(payload, "gate", "scale", "exempt") ||
+			fields["subject_id"] != fields["repo_id"] || asString(payload["gate"]) == "" || !transferGateScale(asString(payload["scale"])) {
+			return false
+		}
+		if raw, present := payload["exempt"]; present {
+			exempt, ok := raw.([]any)
+			if !ok || len(exempt) == 0 {
+				return false
+			}
+			seen := make(map[string]bool, len(exempt))
+			for _, node := range exempt {
+				id := asString(node)
+				if !transferULID.MatchString(id) || seen[id] {
+					return false
+				}
+				seen[id] = true
+			}
+		}
+		return true
+	case "gate.closed", "gate.dismissed":
+		keys := []string{"gate", "scale"}
+		if kind == "gate.dismissed" {
+			keys = append(keys, "reason")
+			if strings.TrimSpace(asString(payload["reason"])) == "" {
+				return false
+			}
+		}
+		if level, present := payload["tracker_push_level"]; present {
+			if level != "off" {
+				return false
+			}
+			keys = append(keys, "tracker_push_level")
+		}
+		return wipdwire.ExactMapKeys(payload, keys...) && asString(payload["gate"]) != "" &&
+			transferGateScale(asString(payload["scale"])) && transferULID.MatchString(asString(fields["subject_id"]))
 	case "batch.swept":
 		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
 	case "batch.anonymous-created":
@@ -327,6 +366,10 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	default:
 		return false
 	}
+}
+
+func transferGateScale(scale string) bool {
+	return scale == "matter" || scale == "stage" || scale == "step"
 }
 
 func transferLifecycleEventKind(kind string) bool {

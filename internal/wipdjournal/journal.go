@@ -287,6 +287,9 @@ func (j *Journal) Identity() Identity {
 // returning it. Exact retries by the caller-allocated ID return the original
 // bytes, sequence, time, and order; different intent under that ID is refused.
 func (j *Journal) PrepareCommand(input CommandInput) (Entry, error) {
+	if input.Request.Operation.Name == "gate.exemption.repair" {
+		return Entry{}, ErrInvalidCommand
+	}
 	if j == nil {
 		return Entry{}, ErrClosed
 	}
@@ -394,6 +397,9 @@ func (j *Journal) PrepareCanonicalCommand(command operation.Command) (Entry, err
 func (j *Journal) PrepareCanonicalSubmission(command operation.Command, schema string, proof []byte) (Entry, error) {
 	if j == nil {
 		return Entry{}, ErrClosed
+	}
+	if command.Request.Operation.Name == "gate.exemption.repair" && schema != wipdwire.CommandSubmitV2Feature {
+		return Entry{}, ErrInvalidCommand
 	}
 	if schema != "wipd.command-submit/1" && schema != wipdwire.CommandSubmitV2Feature ||
 		schema == "wipd.command-submit/1" && proof != nil || proof != nil && (len(proof) == 0 || len(proof) > 1<<20) {
@@ -808,6 +814,9 @@ func scanEntry(row scanner) (Entry, error) {
 	command, err := operation.DecodeCanonicalCommand(encoded)
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: decode command: %v", ErrInvalidJournal, err)
+	}
+	if command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation && entry.SubmissionSchema != wipdwire.CommandSubmitV2Feature {
+		return Entry{}, ErrInvalidJournal
 	}
 	hash, err := command.RequestHash()
 	if err != nil || hash != entry.RequestHash || command.ID != entry.Command.ID || command.EnvironmentSequence != uint64(sequence) {

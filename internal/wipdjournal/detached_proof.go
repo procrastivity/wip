@@ -13,7 +13,7 @@ import (
 func (entry Entry) SubmissionPayload() (any, error) {
 	switch entry.SubmissionSchema {
 	case "wipd.command-submit/1":
-		if entry.DetachedProof != nil {
+		if entry.DetachedProof != nil || entry.Command.Request.Operation.Name == "gate.exemption.repair" {
 			return nil, ErrInvalidCommand
 		}
 		return wipdwire.CommandSubmit{

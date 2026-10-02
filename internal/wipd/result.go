@@ -55,6 +55,13 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				"id": content.ID, "subject_id": content.SubjectID, "kind": content.Kind,
 				"blob_digest": content.BlobDigest, "byte_length": uint64(content.ByteLength),
 			}
+		case operation.GateExemptionRepairV1.Metadata().Operation:
+			encoded, err := encodeRepairOutput(result.Output)
+			if err != nil {
+				return nil, err
+			}
+			fields["output"] = encoded
+			return encodePayload(fields)
 		default:
 			if operation.Step5Operation(id) {
 				encodedOutput, err := encodeStep5Output(id, result.Output)
@@ -195,6 +202,11 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 			}
 			result.Output = operation.ContentSegmentOutput{
 				ID: idValue, SubjectID: subjectID, Kind: kind, BlobDigest: digest, ByteLength: int64(byteLength),
+			}
+		case operation.GateExemptionRepairV1.Metadata().Operation:
+			result.Output, err = decodeRepairOutput(encodedOutput)
+			if err != nil {
+				return operation.Result{}, err
 			}
 		default:
 			if operation.Step5Operation(id) {

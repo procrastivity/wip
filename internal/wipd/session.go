@@ -152,11 +152,24 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 		storeSchemas:     intersectStrings(client.storeSchemas, []string{storeSchemaV1}),
 		features:         intersectStrings(client.features, serverFeatures),
 	}
+	if !containsString(result.features, wipdwire.CommandSubmitV2Feature) || !commandSubmitV2 {
+		result.operations = withoutRepairOperation(result.operations)
+	}
 	if !containsString(result.identitySchemas, identitySchemaV1) ||
 		!containsString(result.storeSchemas, storeSchemaV1) || !containsString(result.features, frameSchema) {
 		return serverHello{}, sessionParameters{}, errUnsupportedExtension
 	}
 	return result, defaultSessionParameters(defaultExchanges), nil
+}
+
+func withoutRepairOperation(operations []operationCapability) []operationCapability {
+	filtered := make([]operationCapability, 0, len(operations))
+	for _, capability := range operations {
+		if capability.name != "gate.exemption.repair" {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
 }
 
 func registeredOperationCapabilities(registry *operation.Registry) []operationCapability {
@@ -192,7 +205,7 @@ func identitySchemaFor(id operation.ID) (string, bool) {
 	case operation.MatterCreateV1.Metadata().Operation, operation.StepCreateV1.Metadata().Operation,
 		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
-		operation.FindingAppendV1.Metadata().Operation:
+		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation:
 		return identitySchemaV1, true
 	default:
 		if operation.Step4Operation(id) || operation.Step5Operation(id) {

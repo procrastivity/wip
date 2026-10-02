@@ -122,3 +122,44 @@ func TestCommandSubmitRetryUsesRestartedDurableEnvelope(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairTerminalRejectsSubstitutedOutputAndRange(t *testing.T) {
+	entry := wipdjournal.Entry{Command: operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1DX70", AuthorityDomainID: "01KZ7XHAQT1S46NYPN1PW1DX3A",
+		ExpectedAuthorityEpoch: 1, EnvironmentID: "01KZ7XHAQT1S46NYPN1PW1DX3C", EnvironmentSequence: 1,
+		Request: operation.Request{
+			Operation: operation.GateExemptionRepairV1.Metadata().Operation,
+			Input:     operation.GateExemptionRepairInput{NodeID: "01KZ7XHAQT1S46NYPN1PW1DX71", Gate: "reviewed"},
+		},
+	}, RequestHash: "sha256:" + fmt.Sprintf("%064x", 1), EnvironmentSeq: 1}
+	for _, tc := range []struct {
+		gate    string
+		already bool
+		rangeOK bool
+		wantErr bool
+	}{
+		{"reviewed", true, false, false},
+		{"other", true, false, true},
+		{"reviewed", false, false, true},
+		{"reviewed", true, true, true},
+	} {
+		output, _ := wipdwire.EncodeCanonical(map[string]any{
+			"gate": tc.gate, "node_id": "01KZ7XHAQT1S46NYPN1PW1DX71", "already_exempt": tc.already,
+		})
+		var accepted any
+		if tc.rangeOK {
+			accepted = map[string]any{"first_event_id": "01KZ7XHAQT1S46NYPN1PW1DX72", "last_event_id": "01KZ7XHAQT1S46NYPN1PW1DX72", "event_count": uint64(1)}
+		}
+		receipt, _ := wipdwire.EncodeCanonical(map[string]any{
+			"schema": "wipd.terminal-receipt/1", "domain_id": entry.Command.AuthorityDomainID, "authority_epoch": uint64(1),
+			"identity_schema": "wipd.command/1", "command_id": entry.Command.ID, "request_hash": entry.RequestHash,
+			"operation":       map[string]any{"name": "gate.exemption.repair", "version": uint64(1)},
+			"environment":     map[string]any{"id": entry.Command.EnvironmentID, "sequence": uint64(1)},
+			"result":          map[string]any{"code": string(operation.ResultSucceeded), "output": output, "problem_code": nil},
+			"accepted_events": accepted,
+		})
+		if err := validateTerminalIdentity(receipt, entry.Command.AuthorityDomainID, entry); (err != nil) != tc.wantErr {
+			t.Fatalf("gate=%q already=%t range=%t: err=%v", tc.gate, tc.already, tc.rangeOK, err)
+		}
+	}
+}

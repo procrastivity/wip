@@ -141,13 +141,6 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
 		return
 	}
-	// No public operation consumes an owner repair proof yet. Never ignore a
-	// supplied authorization or send it through ordinary v1 admission. The
-	// existing private repair admission/terminal contract remains unchanged.
-	if submit.DetachedProof != nil {
-		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
-		return
-	}
 	var deadline time.Time
 	if submit.Deadline != nil {
 		parsed, err := time.Parse(time.RFC3339Nano, *submit.Deadline)
@@ -164,6 +157,11 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	command, err := operation.DecodeCanonicalCommand(submit.CanonicalCommand)
 	if err != nil {
 		writeLabProblem(writer, frame.RequestID, "protocol.malformed-message")
+		return
+	}
+	repair := command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation
+	if repair && (!version2 || !app.m6) || !repair && submit.DetachedProof != nil {
+		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
 		return
 	}
 	session.mu.Lock()
@@ -192,7 +190,12 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	defer cancelAdmission(context.Canceled)
 	watchLabCommandControl(request.Context(), body, frame.RequestID, cancelAdmission)
 
-	status, err := app.store.SubmitCommandWithDeadline(admissionCtx, command, submit.RequestHash, *request.TLS, time.Now().UTC(), deadline)
+	var status authoritystore.CommandStatus
+	if repair {
+		status, err = app.store.SubmitGateExemptionRepairV2(admissionCtx, command, submit.RequestHash, submit.DetachedProof, *request.TLS, time.Now().UTC(), deadline)
+	} else {
+		status, err = app.store.SubmitCommandWithDeadline(admissionCtx, command, submit.RequestHash, *request.TLS, time.Now().UTC(), deadline)
+	}
 	if err != nil {
 		status, err = app.reconcileSubmissionError(admissionCtx, command, submit.RequestHash, *request.TLS, environment.EnvironmentID, deadline, err, frame.RequestID, writer)
 		if err != nil {
@@ -209,7 +212,7 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	}
 	owner := status.Owner
 	var completion *authoritystore.CommandCompletion
-	if owner == nil {
+	if owner == nil && !repair {
 		resumedOwner, resumed, claimed, claimErr := app.store.ClaimPendingCommandCompletion(command, submit.RequestHash)
 		if claimErr != nil {
 			writeLabProblem(writer, frame.RequestID, submissionProblem(claimErr))
@@ -237,7 +240,7 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	}
 	writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Sequence: 0, Kind: "submission.accepted", Payload: accepted})
 	_ = http.NewResponseController(writer).Flush()
-	if owner == nil {
+	if owner == nil && !repair {
 		return
 	}
 	executed := make(chan struct {
@@ -247,7 +250,16 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	go func() {
 		var terminal []byte
 		var executeErr error
-		if completion != nil {
+		if repair {
+			occurred := time.Now().UTC()
+			eventID, idErr := randomULID(occurred)
+			if idErr != nil {
+				executeErr = idErr
+			} else {
+				completed, completeErr := app.store.CompleteGateExemptionRepairV2(context.Background(), command, submit.RequestHash, nil, eventID, occurred, app.sign)
+				terminal, executeErr = completed.Receipt, completeErr
+			}
+		} else if completion != nil {
 			terminal, executeErr = app.completeContinuation(owner, *completion)
 		} else {
 			terminal, executeErr = app.executeSubmitted(owner, command)

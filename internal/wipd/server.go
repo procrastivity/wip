@@ -389,6 +389,10 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.writeProblemPayload(writer, frame.requestID, 0, problem, uint32(parameters.maxFrameBody))
 		return
 	}
+	if command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation && s.connectedCommandStart() == nil {
+		s.writeProblem(writer, frame.requestID, 0, errUnsupportedExtension.Error(), uint32(parameters.maxFrameBody))
+		return
+	}
 
 	<-s.preflightSlots
 	preflightOwned = false

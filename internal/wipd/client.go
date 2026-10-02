@@ -455,6 +455,9 @@ func (c *Client) negotiate(ctx context.Context) error {
 	}}
 	if c.m6 {
 		operations = append(operations, map[string]any{
+			"name": "gate.exemption.repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		})
+		operations = append(operations, map[string]any{
 			"name": "matter.locator-repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 		}, map[string]any{
 			"name": "stage.create", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
@@ -578,6 +581,9 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errInvalidCapabilities
 	}
 	for _, capability := range operations {
+		if capability.name == "gate.exemption.repair" && !containsString(features, wipdwire.CommandSubmitV2Feature) {
+			return serverHello{}, errInvalidCapabilities
+		}
 		if !equalStrings(capability.identitySchemas, []string{identitySchemaV1}) {
 			return serverHello{}, errInvalidCapabilities
 		}
@@ -603,7 +609,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation,
 		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
-		operation.FindingAppendV1.Metadata().Operation:
+		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation:
 		return true
 	default:
 		return operation.Step4Operation(id) || operation.Step5Operation(id)

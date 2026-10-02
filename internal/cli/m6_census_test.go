@@ -338,7 +338,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		"matter.resume@v1": true, "stage.resume@v1": true, "step.resume@v1": true,
 		"matter.cancel@v1": true, "stage.cancel@v1": true, "step.cancel@v1": true,
 		"stage.finish@v1": true,
-		"gate.declare@v1": true, "gate.close@v1": true, "gate.dismiss@v1": true,
+		"gate.declare@v1": true, "gate.close@v1": true, "gate.dismiss@v1": true, "gate.exemption.repair@v1": true,
 	}
 	definitions := make(map[string]map[string]string, len(rows))
 	registered := make(map[string]map[string]string)
