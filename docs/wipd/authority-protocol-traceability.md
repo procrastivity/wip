@@ -129,8 +129,14 @@ ratified as a separate post-normal-claim-close authority operation initiated
 by the closing Environment. Its closed input identifies exact Matter/Batch
 targets and references the successful release command/hash, canonical receipt
 digest, and exact installed end-prefix anchor; the result and refusal codes
-are fixed in the Step 7 decision record. It remains outside the runtime
-catalogue and is not advertised.
+are fixed in the Step 7 decision record. It remains outside the global
+operation catalogue and generic command submission, but the explicit
+`m6-step7` profile advertises and routes it through dedicated authenticated
+Environment IPC. M5 and M6 Step 5 profiles do not advertise it. Installed
+receipt replay, fresh-ID `already-swept` null-range installation, and
+lost-terminal/restart recovery are covered by
+`internal/wipdauthority/batch_sweep_process_test.go`; this is not an automatic
+Environment sweep trigger.
 
 ## 3. Protocol field traceability
 

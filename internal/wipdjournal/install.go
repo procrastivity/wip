@@ -897,7 +897,7 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if fields["accepted_events"] == nil {
-		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) {
+		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) || batchSweepReceiptNoEvent(entry, raw) {
 			return nil, 0, 0, nil
 		}
 		return nil, 0, 0, ErrInvalidTransfer
@@ -1055,7 +1055,7 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		if _, ok = resultFields["output"].([]byte); !ok {
 			return ErrInvalidTransfer
 		}
-		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) {
+		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) {
 			return fmt.Errorf("%w: successful effectful fold has no verified events", ErrInvalidTransfer)
 		}
 		if len(eventIDs) == 0 {
@@ -1098,6 +1098,29 @@ func gateDeclarationReceiptNoEvent(entry Entry, raw []byte) bool {
 	}
 	output, err := wipdwire.DecodeCanonicalMap(rawOutput, "gate", "scale")
 	return err == nil && output["gate"] == input.Gate && output["scale"] == input.Scale
+}
+
+func batchSweepReceiptNoEvent(entry Entry, raw []byte) bool {
+	if entry.Command.Request.Operation != operation.BatchSweepAnonymousV1.Metadata().Operation ||
+		operation.BatchSweepAnonymousV1.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || fields["accepted_events"] != nil {
+		return false
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "code", "output", "problem_code") ||
+		result["code"] != string(operation.ResultSucceeded) || result["problem_code"] != nil {
+		return false
+	}
+	rawOutput, ok := result["output"].([]byte)
+	if !ok {
+		return false
+	}
+	output, err := wipdwire.DecodeCanonicalMap(rawOutput, "outcome")
+	return err == nil && output["outcome"] == string(operation.BatchSweepAnonymousAlreadySwept)
 }
 
 func encodeManifest(manifest wipdwire.BlobManifest) ([]byte, error) {

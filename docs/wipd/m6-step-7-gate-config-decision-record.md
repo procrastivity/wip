@@ -109,12 +109,17 @@ but are ineligible; never backfill from the current prefix.
 
 On later authority execution, revalidate the reference against the exact
 successful receipt, release event/range, and prefix anchor; require the same
-authenticated Environment and no-current-claim state. Successful output is
+authenticated Environment and no-current-claim state. The authenticated
+closing Environment's reference asserts successful local installation;
+authority cannot independently observe that private journal state. The local
+submission path requires a successful installed-release lookup before it
+prepares a sweep attempt. Successful output is
 typed with outcome `swept` or `already-swept`; the latter is a fresh-ID
 `result.succeeded` with `accepted_events: null`. Stable refusals are
 `refusal.batch-sweep-target-missing` (Matter/Batch missing),
 `refusal.batch-sweep-claim-close` (close evidence missing, mismatched,
-non-normal, or uninstalled),
+non-normal, or a substituted reference; locally uninstalled evidence never
+enters submission),
 `refusal.batch-sweep-not-eligible` (D55/current-claim/anonymous-target
 predicates), and `refusal.batch-sweep-unsupported-state` (unsupported
 Run/Dispatch/role bracket).
@@ -183,8 +188,9 @@ Accepted reference and freshness rules:
 
 Preserve closed `wipd.command-submit/1` unchanged. Add a separately negotiated
 v2 submission capability on both local wipd IPC and authority submission, using
-the existing feature-negotiation mechanism. The feature token and closed-map
-spelling are to be fixed in protocol implementation. Version 2 carries the
+the existing feature-negotiation mechanism. The implemented feature token and
+envelope schema are `wipd.command-submit/2`; the closed envelope adds
+`detached_proof` to the v1 submission fields. Version 2 carries the
 detached owner authorization outside canonical command identity. Persist the
 exact proof bytes alongside the Environment's durable retry identity without
 adding them to that identity. A repair must fail closed if either hop lacks v2;
@@ -205,16 +211,37 @@ stand-down `@v1` maps.
 
 ## Implementation and archive status
 
-Implementation remains partial. The ordinary gate declaration/close/dismiss
-foundation, FINISH-A correction, pure detached-proof validation, private
+Implementation remains partial. Ordinary gate declaration/close/dismiss now
+traverse authenticated Environment IPC, authority execution, verified tail and
+receipt installation, and exact claim-journal ACK through the explicit
+`m6-step7` profile. Identical declaration installs a successful null-range
+receipt; ordinary refusal ACK retains quarantine and cannot enter the normal
+release barrier. Restarted exact replay returns the original result, including
+installed replay after normal claim release; fresh gate commands still require
+the active exact claim. Unsupported role-owned gate effects remain fail-closed.
+The FINISH-A correction, pure detached-proof validation, private
 repair admission/terminal path, and the separately contracted anonymous Batch
 sweep are present on the M6 Step 7 feature branch, but Step 7 is not complete.
 The sweep is selected only by the explicit `m6-step7` profile, uses locally
 installed normal claim-release evidence, and remains outside the global
-operation catalogue and generic command submission. Seed/pull history remains
-the authority event prefix;
+operation catalogue and generic command submission. Its dedicated IPC path
+retains an unresolved attempt after a lost terminal reply and recovers the exact
+original signed authority receipt on same-ID retry after restart. A fresh-ID
+`already-swept` null-range success and a refusal both install durably and replay
+without new effects. A committed release whose local install failed cannot
+source a sweep until that exact release is recovered and installed. Old local
+profiles and an authority lacking the selected Step 7 operations fail closed.
+The executable acceptance is
+`internal/wipdauthority/batch_sweep_process_test.go`; closed no-event receipt
+validation and reopen/rollback checks are in
+`internal/wipdjournal/batch_sweep_receipt_test.go`.
+Seed/pull history remains the authority event prefix;
 client-state/1 rebuilds and validates its gate projection from that history,
 while detached repair proof/nonce state remains private to the authority store.
+Standalone sweep folding uses the target Matter's Done state plus its own and
+enclosing applicable gate obligations, not descendant/ancestor completion;
+legacy same-command FINISH-A inline sweeps remain accepted. No automatic
+Environment sweep trigger or recovery scheduler is added by these IPC slices.
 Client-state/1 does not represent Repo config, shared-reference/aggregate, or
 tracker-candidate/outbox projections. Its transfer fold therefore fails closed
 on `config.set`, shared-reference events, and narrated/boundary tracker effects
