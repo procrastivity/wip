@@ -352,7 +352,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		if !validCensusOperationID(id) {
 			t.Errorf("operation row %d has invalid versioned ID %q", index+1, id)
 		}
-		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
+		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "m6-step7-profile-only", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
 			t.Errorf("%s has unsupported status %q", id, row["status"])
 		}
 		if row["status"] == "catalogued-m5" && !m5Operations[id] || row["status"] == "catalogued-m6" && !m6Operations[id] {
@@ -418,7 +418,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 				t.Errorf("%s is marked catalogued but is absent from operation.Catalogue()", id)
 			}
 		}
-		if row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
+		if row["status"] == "m6-step7-profile-only" || row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
 			if _, ok := actual[id]; ok {
 				t.Errorf("%s operation %s must remain outside operation.Catalogue()", row["status"], id)
 			}
@@ -631,7 +631,7 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 		"authenticated-control": {"claim.acquire@v1", "claim.release@v1", "claim.stand-down@v1", "claim-journal.repair@v1", "claim-journal.close@v1"},
 		"environment-identity":  {"environment.certificate.renew@v1", "environment.certificate.rotate@v1", "environment.identity.recover@v1", "environment.identity.revoke@v1"},
 		"authority-read":        {"batch.read@v1"},
-		"authority-operation":   {"matter.locator-repair@v1"},
+		"authority-operation":   {"matter.locator-repair@v1", "batch.sweep-anonymous@v1"},
 		"daemon-diagnostics":    {"diagnostics.inspect@v1"},
 	}
 	for kind, operationIDs := range requiredOwnerOperations {

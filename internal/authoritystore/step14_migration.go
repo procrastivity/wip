@@ -163,6 +163,9 @@ func UpgradeV12(root string) error {
 	if err = installStep17(db); err != nil {
 		return err
 	}
+	if err = installBatchSweep(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}

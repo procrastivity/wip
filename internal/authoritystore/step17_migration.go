@@ -437,5 +437,8 @@ func UpgradeV15(root string) error {
 	if err = installStep17(db); err != nil {
 		return err
 	}
+	if err = installBatchSweep(db); err != nil {
+		return err
+	}
 	return checkSchema(db)
 }

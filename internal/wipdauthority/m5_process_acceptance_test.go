@@ -1060,6 +1060,29 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		_ = closedJournal.Close()
 		t.Fatalf("recovered acquired-claim barrier/receipt = %+v, %v", closeAttempt, err)
 	}
+	// Inspect the coordinator API, not only the unchanged IPC receipt schema.
+	// The current prefix has advanced through another acquisition and writes;
+	// replay must report the original 14-event installation end, with no calls
+	// to the authority (the embedded interfaces below are deliberately nil).
+	replayEnvironment, err := wipd.NewJournalCommandStartEnvironment(closedJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayCoordinator, err := wipd.NewServer().NewCommandStartCoordinator(m5TestDomain, closedJournal, releaseAnchorReplayAuthority{}, replayEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiReplay, err := replayCoordinator.ReleaseClaimJournal(context.Background(), claimReleaseID, acquired.Grant.ClaimID,
+		acquired.Grant.ClaimEpoch, matterOutput.ID, dispatchID, "human")
+	if err != nil || !sameAuthorityAnchor(apiReplay.Snapshot.Anchor, wireAnchor(closedAnchor)) || !bytes.Equal(apiReplay.Receipt, authorityClose.Receipt) {
+		_ = closedJournal.Close()
+		t.Fatalf("reopened coordinator lost the original acquired release installation anchor: %+v %v", apiReplay, err)
+	}
+	currentInstall, err := closedJournal.InstallSnapshot(context.Background())
+	if err != nil || currentInstall.Anchor.EventCount <= apiReplay.Snapshot.Anchor.EventCount {
+		_ = closedJournal.Close()
+		t.Fatalf("fixture did not advance beyond the release installation: %+v %v", currentInstall.Anchor, err)
+	}
 	closedBinding, err = closedJournal.InstalledClaimJournalBinding(acquired.Grant.ClaimID)
 	if err != nil || closedBinding.State != "released" || closedBinding.JournalID == "" || closedBinding.Generation == 0 ||
 		closedBinding.ClaimEpoch != acquired.Grant.ClaimEpoch || closedBinding.MatterID != matterOutput.ID || closedBinding.DispatchID != dispatchID {
@@ -1132,6 +1155,13 @@ func TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess(t *testing.T) {
 		}
 	}
 }
+
+type releaseAnchorReplayAuthority struct {
+	wipd.CommandStartAuthority
+	wipd.ClaimJournalCloseAuthority
+}
+
+func (releaseAnchorReplayAuthority) SupportsClaimJournalClose() bool { return true }
 
 func sameClaimGrantSummary(left, right wipdjournal.ClaimGrantSummary) bool {
 	return left.GrantID == right.GrantID && left.CommandID == right.CommandID && left.RequestHash == right.RequestHash &&

@@ -74,6 +74,52 @@ type MatterFinishOutput struct {
 
 func (MatterFinishOutput) operationOutput() {}
 
+// ClaimClosePrefix is the exact Environment-installed authority prefix at the
+// end of one successful claim.release receipt.
+type ClaimClosePrefix struct {
+	EventCount uint64
+	EventID    *string
+	Digest     string
+}
+
+// ClaimCloseReference binds a sweep request to the exact successful installed
+// normal claim.release@v1 outcome that closed this claim.
+type ClaimCloseReference struct {
+	ClaimID               string
+	ClaimEpoch            uint64
+	ReleaseCommandID      string
+	ReleaseRequestHash    string
+	TerminalReceiptDigest string
+	InstalledPrefixAnchor ClaimClosePrefix
+}
+
+// BatchSweepAnonymousInput targets one exact Matter and anonymous Batch and
+// carries a reference to its installed normal claim-close result. Receipt and
+// detached-proof bytes are never embedded in the command identity.
+type BatchSweepAnonymousInput struct {
+	MatterID   string
+	BatchID    string
+	ClaimClose ClaimCloseReference
+}
+
+func (BatchSweepAnonymousInput) operationInput() {}
+
+// BatchSweepAnonymousOutcome is the closed success outcome vocabulary.
+type BatchSweepAnonymousOutcome string
+
+const (
+	BatchSweepAnonymousSwept        BatchSweepAnonymousOutcome = "swept"
+	BatchSweepAnonymousAlreadySwept BatchSweepAnonymousOutcome = "already-swept"
+)
+
+// BatchSweepAnonymousOutput reports whether this command emitted the sweep.
+// already-swept is a successful deterministic no-event outcome.
+type BatchSweepAnonymousOutput struct {
+	Outcome BatchSweepAnonymousOutcome
+}
+
+func (BatchSweepAnonymousOutput) operationOutput() {}
+
 // ContentWriteInput writes one create-once prose kind to an existing Matter
 // or Step. The bytes are supplied only through the declared staged blob.
 type ContentWriteInput struct {
@@ -161,17 +207,32 @@ var StepFinishV1 = mustDefine[StepLifecycleInput, StepLifecycleOutput](Metadata{
 })
 
 // MatterFinishV1 is statically authority-delivered even though its exact
-// active Matter claim is required as fencing and context proof. Sealing and
-// an anonymous Batch sweep are one authority transaction.
+// active Matter claim is required as fencing and context proof. New finish
+// executions do not sweep an anonymous Batch; compatible historical receipts
+// may retain that legacy inline effect.
 var MatterFinishV1 = mustDefine[MatterFinishInput, MatterFinishOutput](Metadata{
 	Operation:       ID{Name: "matter.finish", Version: 1},
 	Access:          AccessMutation,
 	Delivery:        DeliveryAuthority,
 	RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
-	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
-	Writes:          []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
+	Guards:          []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle},
+	Writes:          []Footprint{FootprintMatterLifecycle},
 	BlobInputs:      []BlobSpec{},
 	Claim:           ClaimExact,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// BatchSweepAnonymousV1 is an authority-delivered operation available only
+// through the explicit M6 command catalogue.
+var BatchSweepAnonymousV1 = mustDefine[BatchSweepAnonymousInput, BatchSweepAnonymousOutput](Metadata{
+	Operation:       ID{Name: "batch.sweep-anonymous", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo},
+	Guards:          []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
+	Writes:          []Footprint{FootprintAnonymousBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimNone,
 	ExternalEffects: []ExternalEffect{},
 })
 

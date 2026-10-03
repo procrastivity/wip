@@ -275,6 +275,9 @@ func (c *Client) executeCommand(ctx context.Context, command operation.Command, 
 	if c == nil || c.httpClient == nil {
 		return operation.Result{}, &ExchangeError{Code: "transport.unavailable", Err: ErrUnavailable}
 	}
+	if command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
+		return operation.Result{}, &ExchangeError{Code: "protocol.unsupported-extension"}
+	}
 	if version2 && !containsString(c.hello.features, wipdwire.CommandSubmitV2Feature) ||
 		!version2 && command.Request.Operation.Name == "gate.exemption.repair" {
 		return operation.Result{}, &ExchangeError{Code: "protocol.unsupported-extension"}
@@ -457,6 +460,11 @@ func (c *Client) negotiate(ctx context.Context) error {
 		operations = append(operations, map[string]any{
 			"name": "gate.exemption.repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 		})
+		batchSweep := operation.BatchSweepAnonymousV1.Metadata().Operation
+		operations = append(operations, map[string]any{
+			"name": batchSweep.Name, "versions": []any{uint64(batchSweep.Version)},
+			"identity_schemas": []any{identitySchemaV1},
+		})
 		operations = append(operations, map[string]any{
 			"name": "matter.locator-repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 		}, map[string]any{
@@ -609,7 +617,8 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation,
 		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
-		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation:
+		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
+		operation.BatchSweepAnonymousV1.Metadata().Operation:
 		return true
 	default:
 		return operation.Step4Operation(id) || operation.Step5Operation(id)

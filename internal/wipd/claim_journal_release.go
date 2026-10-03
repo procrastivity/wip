@@ -15,9 +15,11 @@ import (
 // ClaimJournalReleaseResult is returned after the acquired release receipt and
 // verified authority tail have been installed atomically in the Environment.
 type ClaimJournalReleaseResult struct {
-	Attempt  wipdjournal.ClaimJournalReleaseCommand
-	Code     operation.ResultCode
-	Receipt  []byte
+	Attempt wipdjournal.ClaimJournalReleaseCommand
+	Code    operation.ResultCode
+	Receipt []byte
+	// Replay carries the retained installation Anchor and identity only;
+	// legacy outcomes without that evidence have a zero Snapshot.
 	Snapshot CommandStartSnapshot
 }
 
@@ -67,7 +69,11 @@ func (coordinator *CommandStartCoordinator) releaseClaimJournal(ctx, resolutionC
 			return empty, ErrCommandStartIdentity
 		}
 		if attempt.Returned {
-			return ClaimJournalReleaseResult{Attempt: attempt, Code: attempt.ResultCode, Receipt: bytes.Clone(attempt.Receipt)}, nil
+			snapshot, lookupErr := coordinator.releaseReplaySnapshot(resolutionContext, attempt.ID, attempt.RequestHash)
+			if lookupErr != nil {
+				return empty, lookupErr
+			}
+			return ClaimJournalReleaseResult{Attempt: attempt, Code: attempt.ResultCode, Receipt: bytes.Clone(attempt.Receipt), Snapshot: snapshot}, nil
 		}
 		boundary.markSubmitted()
 		submitted = true
@@ -93,7 +99,11 @@ func (coordinator *CommandStartCoordinator) releaseClaimJournal(ctx, resolutionC
 			return empty, ErrCommandStartIdentity
 		}
 		if attempt.Returned {
-			return ClaimJournalReleaseResult{Attempt: attempt, Code: attempt.ResultCode, Receipt: bytes.Clone(attempt.Receipt)}, nil
+			snapshot, lookupErr := coordinator.releaseReplaySnapshot(resolutionContext, attempt.ID, attempt.RequestHash)
+			if lookupErr != nil {
+				return empty, lookupErr
+			}
+			return ClaimJournalReleaseResult{Attempt: attempt, Code: attempt.ResultCode, Receipt: bytes.Clone(attempt.Receipt), Snapshot: snapshot}, nil
 		}
 		boundary.markSubmitted()
 		submitted = true

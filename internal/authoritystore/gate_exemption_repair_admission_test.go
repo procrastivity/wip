@@ -436,6 +436,7 @@ func downgradeStep15ToV13(t *testing.T, root string) {
 
 func dropStep17BoundarySchemaForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	dropBatchSweepSchemaForTest(t, db)
 	for index := len(step17Schema) - 1; index >= 1; index-- {
 		object := step17Schema[index]
 		if object.kind == "trigger" {

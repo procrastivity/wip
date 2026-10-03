@@ -205,7 +205,8 @@ func identitySchemaFor(id operation.ID) (string, bool) {
 	case operation.MatterCreateV1.Metadata().Operation, operation.StepCreateV1.Metadata().Operation,
 		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
-		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation:
+		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
+		operation.BatchSweepAnonymousV1.Metadata().Operation:
 		return identitySchemaV1, true
 	default:
 		if operation.Step4Operation(id) || operation.Step5Operation(id) {

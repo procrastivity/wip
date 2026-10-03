@@ -160,7 +160,8 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		return
 	}
 	repair := command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation
-	if repair && (!version2 || !app.m6) || !repair && submit.DetachedProof != nil {
+	sweep := command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation
+	if repair && (!version2 || !app.m6) || sweep && !app.m6 || !repair && submit.DetachedProof != nil {
 		writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
 		return
 	}
@@ -191,7 +192,16 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	watchLabCommandControl(request.Context(), body, frame.RequestID, cancelAdmission)
 
 	var status authoritystore.CommandStatus
-	if repair {
+	if sweep {
+		occurred := time.Now().UTC()
+		eventID, idErr := randomULID(occurred)
+		if idErr != nil {
+			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+			return
+		}
+		status, err = app.store.SweepAnonymousBatchWithDeadline(admissionCtx, command, submit.RequestHash,
+			*request.TLS, occurred, eventID, app.sign, deadline)
+	} else if repair {
 		status, err = app.store.SubmitGateExemptionRepairV2(admissionCtx, command, submit.RequestHash, submit.DetachedProof, *request.TLS, time.Now().UTC(), deadline)
 	} else {
 		status, err = app.store.SubmitCommandWithDeadline(admissionCtx, command, submit.RequestHash, *request.TLS, time.Now().UTC(), deadline)

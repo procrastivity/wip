@@ -61,6 +61,14 @@ func TestMatterCreateDefinitionIsComplete(t *testing.T) {
 		Catalogue()[30].Metadata().Operation != GateExemptionRepairV1.Metadata().Operation {
 		t.Fatalf("catalogue = %+v, want M5 operations followed by the complete Step 4 set", Catalogue())
 	}
+	if _, found := commandIdentityDefinition(BatchSweepAnonymousV1.Metadata().Operation); !found {
+		t.Fatal("Step 7 command identity codec omitted its contract-only operation definition")
+	}
+	for _, definition := range Catalogue() {
+		if definition.Metadata().Operation == BatchSweepAnonymousV1.Metadata().Operation {
+			t.Fatal("Step 7 operation entered the default semantic catalogue")
+		}
+	}
 }
 
 func TestStep4RequestValidationLeavesM5BirthInputsUnchanged(t *testing.T) {
@@ -201,6 +209,79 @@ func TestCanonicalMatterCreateRequestAndResults(t *testing.T) {
 	}
 	if err := MatterCreateV1.ValidateResult(refusal); err != nil {
 		t.Fatalf("canonical refusal: %v", err)
+	}
+}
+
+func TestBatchSweepAnonymousContractAndStableRefusals(t *testing.T) {
+	metadata := BatchSweepAnonymousV1.Metadata()
+	if metadata.Operation.String() != "batch.sweep-anonymous@v1" || metadata.Access != AccessMutation ||
+		metadata.Delivery != DeliveryAuthority || metadata.Claim != ClaimNone || len(metadata.BlobInputs) != 0 {
+		t.Fatalf("batch sweep metadata = %+v", metadata)
+	}
+	request := Request{
+		Operation: metadata.Operation, Actor: "system:environment",
+		Context: Context{Repo: testRepoID}, Input: validBatchSweepAnonymousInput(), Blobs: []BlobInput{},
+	}
+	if err := BatchSweepAnonymousV1.ValidateRequest(request); err != nil {
+		t.Fatalf("valid batch sweep request: %v", err)
+	}
+	invalid := []struct {
+		name   string
+		mutate func(*BatchSweepAnonymousInput)
+	}{
+		{"matter identity", func(input *BatchSweepAnonymousInput) { input.MatterID = "bad" }},
+		{"batch identity", func(input *BatchSweepAnonymousInput) { input.BatchID = "bad" }},
+		{"claim identity", func(input *BatchSweepAnonymousInput) { input.ClaimClose.ClaimID = "bad" }},
+		{"claim epoch", func(input *BatchSweepAnonymousInput) { input.ClaimClose.ClaimEpoch = 0 }},
+		{"release command identity", func(input *BatchSweepAnonymousInput) { input.ClaimClose.ReleaseCommandID = "bad" }},
+		{"release request hash", func(input *BatchSweepAnonymousInput) { input.ClaimClose.ReleaseRequestHash = "bad" }},
+		{"receipt digest", func(input *BatchSweepAnonymousInput) { input.ClaimClose.TerminalReceiptDigest = "bad" }},
+		{"empty installed prefix", func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.InstalledPrefixAnchor.EventCount = 0
+			input.ClaimClose.InstalledPrefixAnchor.EventID = nil
+		}},
+		{"prefix event identity", func(input *BatchSweepAnonymousInput) {
+			eventID := "bad"
+			input.ClaimClose.InstalledPrefixAnchor.EventID = &eventID
+		}},
+		{"prefix digest", func(input *BatchSweepAnonymousInput) { input.ClaimClose.InstalledPrefixAnchor.Digest = "bad" }},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			request.Input = validBatchSweepAnonymousInput()
+			input := request.Input.(BatchSweepAnonymousInput)
+			test.mutate(&input)
+			request.Input = input
+			if err := BatchSweepAnonymousV1.ValidateRequest(request); err == nil {
+				t.Fatal("ValidateRequest() accepted malformed close reference")
+			}
+		})
+	}
+
+	for _, outcome := range []BatchSweepAnonymousOutcome{
+		BatchSweepAnonymousSwept, BatchSweepAnonymousAlreadySwept,
+	} {
+		result := Result{Code: ResultSucceeded, Output: BatchSweepAnonymousOutput{Outcome: outcome}}
+		if err := BatchSweepAnonymousV1.ValidateResult(result); err != nil {
+			t.Errorf("successful outcome %q rejected: %v", outcome, err)
+		}
+	}
+	for _, code := range []ProblemCode{
+		ProblemBatchSweepTargetMissing, ProblemBatchSweepClaimClose,
+		ProblemBatchSweepNotEligible, ProblemBatchSweepUnsupported,
+	} {
+		result := Result{Code: ResultRefused, Problem: &Problem{Code: code, Message: "refused"}}
+		if err := BatchSweepAnonymousV1.ValidateResult(result); err != nil {
+			t.Errorf("stable refusal %q rejected: %v", code, err)
+		}
+	}
+	unknown := Result{Code: ResultRefused, Problem: &Problem{Code: ProblemUnknownClone, Message: "unknown"}}
+	if err := BatchSweepAnonymousV1.ValidateResult(unknown); err == nil {
+		t.Fatal("batch sweep accepted a refusal outside its stable code set")
+	}
+	invalidOutput := Result{Code: ResultSucceeded, Output: BatchSweepAnonymousOutput{Outcome: "other"}}
+	if err := BatchSweepAnonymousV1.ValidateResult(invalidOutput); err == nil {
+		t.Fatal("batch sweep accepted an unknown success outcome")
 	}
 }
 
@@ -346,7 +427,7 @@ func TestM6LifecycleDeliveryAndFootprintsArePinned(t *testing.T) {
 	}{
 		{StepStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintStepLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintStepLifecycle}},
 		{StepFinishV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle}, []Footprint{FootprintStepLifecycle}},
-		{MatterFinishV1, DeliveryAuthority, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle}},
+		{MatterFinishV1, DeliveryAuthority, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle}, []Footprint{FootprintMatterLifecycle}},
 		{MatterStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintMatterLifecycle}, []Footprint{FootprintMatterLifecycle}},
 		{StageStartV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStageLifecycle, FootprintAncestorLifecycle}, []Footprint{FootprintMatterLifecycle, FootprintStageLifecycle}},
 		{StepPauseV1, DeliveryClaim, []Footprint{FootprintMatterActiveClaim, FootprintStepLifecycle}, []Footprint{FootprintStepLifecycle}},

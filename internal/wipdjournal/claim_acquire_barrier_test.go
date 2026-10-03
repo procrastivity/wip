@@ -55,7 +55,7 @@ func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
 		t.Fatalf("upgraded journal version=%d err=%v; want %d", version, err, schemaVersion)
 	}
 	if err = journal.db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&marker); err != nil ||
-		marker != "environment-detached-command-proof" {
+		marker != "environment-release-installation-anchor" {
 		t.Fatalf("upgraded journal migration marker=%q err=%v", marker, err)
 	}
 	installed, err := journal.InstallSnapshot(context.Background())

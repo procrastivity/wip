@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 16
+const schemaVersion = 17
 
 type schemaObject struct {
 	name string
@@ -169,6 +169,9 @@ func CreateEmpty(root string) (*Store, error) {
 					}
 				}
 			}
+		}
+		if err == nil {
+			err = installBatchSweep(db)
 		}
 		if err == nil {
 			err = initBlobDir(path)
@@ -654,6 +657,15 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 		}
 		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 16`).Scan(&name); err != nil || name != "step-7-terminal-and-journal-state-boundaries" {
 			return fmt.Errorf("M6 Step 7 terminal/journal boundary migration marker: %v", err)
+		}
+	}
+	if expectedVersion >= 17 {
+		expected["schema_migrations"] = batchSweepMigrationMarker
+		for _, object := range batchSweepSchema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 17`).Scan(&name); err != nil || name != "step-7-batch-sweep-boundaries" {
+			return fmt.Errorf("M6 Step 7 sweep boundary migration marker: %v", err)
 		}
 	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)

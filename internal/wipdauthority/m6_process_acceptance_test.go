@@ -26,7 +26,7 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	}
 	ctx := context.Background()
 	fixture := newM5CommandFixture(t)
-	registry, err := NewM6Step5Registry()
+	registry, err := NewM6Step7Registry()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "m6-environment", m5TestEnv,
-		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step5")
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +224,64 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 		t.Fatalf("Step cancel output = %#v", stepCanceled.Output)
 	}
 
+	// Exercise the explicit Step 7 path on a fresh Matter. The normal birth
+	// release, final Matter state, acquired release, and standalone sweep all
+	// use the Environment's persisted sequence and installed release anchor.
+	sweepMatterCommandID := m5TwoEnvironmentID(61)
+	sweepMatterCommand := command(sweepMatterCommandID, sequence, operation.Request{
+		Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+		Input: operation.MatterCreateInput{Title: "Step 7 sweep target", Locator: "step-7-sweep-target"},
+	})
+	sequence++
+	sweepMatterResult, err := client.ExecuteCommand(ctx, sweepMatterCommand)
+	sweepMatter, ok := sweepMatterResult.Output.(operation.MatterCreateOutput)
+	if err != nil || sweepMatterResult.Code != operation.ResultSucceeded || !ok || sweepMatter.ID == "" {
+		t.Fatalf("Step 7 target Matter create = %+v, %v; daemon=%s", sweepMatterResult, err, daemonOutput.String())
+	}
+	birthCloseID := m5TwoEnvironmentID(62)
+	if _, err = client.ReleaseBirthClaim(ctx, sweepMatter.ID, birthCloseID, operation.Actor("human")); err != nil {
+		t.Fatalf("Step 7 target birth-claim release: %v", err)
+	}
+	sequence++
+	acquiredSweepClaim, err := client.AcquireClaim(ctx, m5TwoEnvironmentID(63), sweepMatter.ID,
+		m5TwoEnvironmentID(64), m5TwoEnvironmentID(65), m5TwoEnvironmentID(66), operation.Actor("human"))
+	if err != nil || acquiredSweepClaim.Code != operation.ResultSucceeded || acquiredSweepClaim.Grant == nil {
+		t.Fatalf("Step 7 target claim acquisition = %+v, %v", acquiredSweepClaim, err)
+	}
+	sequence++
+	sweepClaim := acquiredSweepClaim.Grant
+	sweepClaimContext := &operation.ClaimContext{ID: sweepClaim.ClaimID, Epoch: fmt.Sprint(sweepClaim.ClaimEpoch)}
+	sweepCommandContext := operation.Context{Repo: m5TestRepo, Clone: m5TwoEnvironmentID(64), Worktree: m5TwoEnvironmentID(65)}
+	sweepMatterStarted := submitAs(sweepClaimContext, sweepCommandContext, m5TwoEnvironmentID(67),
+		operation.MatterStartV1.Metadata().Operation, operation.NodeLifecycleInput{NodeID: sweepMatter.ID})
+	if sweepMatterStarted.Output != (operation.MatterLifecycleOutput{MatterID: sweepMatter.ID, State: "in-progress"}) {
+		t.Fatalf("Step 7 target Matter start = %#v", sweepMatterStarted.Output)
+	}
+	sweepMatterFinish := submitAs(sweepClaimContext, sweepCommandContext, m5TwoEnvironmentID(68),
+		operation.MatterFinishV1.Metadata().Operation, operation.MatterFinishInput{MatterID: sweepMatter.ID})
+	if sweepMatterFinish.Output != (operation.MatterFinishOutput{
+		MatterID: sweepMatter.ID, State: "done", BecameSealed: true,
+	}) {
+		t.Fatalf("Step 7 target Matter finish = %#v", sweepMatterFinish.Output)
+	}
+	claimCloseID := m5TwoEnvironmentID(69)
+	closedSweepClaim, err := client.ReleaseClaimJournal(ctx, claimCloseID, sweepClaim.ClaimID, sweepClaim.ClaimEpoch,
+		sweepMatter.ID, sweepClaim.DispatchID, operation.Actor("human"))
+	if err != nil || closedSweepClaim.Code != operation.ResultSucceeded || closedSweepClaim.CommandID != claimCloseID {
+		t.Fatalf("Step 7 target acquired-claim release = %+v, %v", closedSweepClaim, err)
+	}
+	sweepCommandID := m5TwoEnvironmentID(70)
+	sweepResult, err := client.SweepAnonymousBatch(ctx, sweepCommandID, sweepMatter.ID, sweepClaim.BatchID,
+		claimCloseID, operation.Actor("human"))
+	if err != nil || sweepResult.CommandID != sweepCommandID || sweepResult.Result.Code != operation.ResultSucceeded ||
+		sweepResult.Result.Output != (operation.BatchSweepAnonymousOutput{Outcome: operation.BatchSweepAnonymousSwept}) {
+		t.Fatalf("standalone anonymous Batch sweep = %+v, %v; daemon=%s", sweepResult, err, daemonOutput.String())
+	}
+	if !traceContains(exchangeTrace.snapshot(), "/wipd/v1/exchange request=command.submit response=submission.accepted,command.terminal") ||
+		!traceContains(exchangeTrace.snapshot(), "/wipd/v1/exchange request=pull.request response=pull.start,event.record") {
+		t.Fatalf("Step 7 sweep did not traverse authority submit and verified pull: %v", exchangeTrace.snapshot())
+	}
+
 	if err = client.Close(); err != nil {
 		t.Fatalf("close M6 IPC client before independent journal inspection: %v", err)
 	}
@@ -249,6 +307,30 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	}
 	if len(records) != int(installed.Anchor.EventCount) {
 		t.Fatalf("installed event record count=%d, anchor=%+v", len(records), installed.Anchor)
+	}
+	installedSweep, err := journal.Get(sweepCommandID)
+	sweepReceipt, sweepReceiptOK := installed.Receipts[sweepCommandID]
+	if err != nil || installedSweep.State != wipdjournal.StateAttemptPrepared || installedSweep.RequestHash != sweepResult.RequestHash ||
+		!sweepReceiptOK || sweepReceipt.RequestHash != sweepResult.RequestHash || sweepReceipt.ResultCode != operation.ResultSucceeded {
+		t.Fatalf("Step 7 sweep journal attempt = %+v, %v", installedSweep, err)
+	}
+	closeEvidence, err := journal.ReleaseInstalledClaimCloseByID(ctx, claimCloseID)
+	if err != nil || closeEvidence.ClaimID != sweepClaim.ClaimID || closeEvidence.ReleaseCommandID != claimCloseID {
+		t.Fatalf("installed normal claim-close evidence = %+v, %v", closeEvidence, err)
+	}
+	var sweepEventFound bool
+	for _, record := range records {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			t.Fatalf("decode installed event %s: %v", record.EventID, decodeErr)
+		}
+		if fields["command_id"] == sweepCommandID && fields["kind"] == "batch.swept" && fields["subject_id"] == sweepClaim.BatchID {
+			sweepEventFound = true
+		}
+	}
+	if !sweepEventFound {
+		t.Fatalf("installed Environment tail omitted batch.swept for command %s", sweepCommandID)
 	}
 	var cascade []map[string]any
 	var standaloneStart map[string]any

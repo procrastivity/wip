@@ -127,6 +127,9 @@ func TestDetachedProofMigrationPreservesV1Entries(t *testing.T) {
 }
 
 func downgradeDetachedProofTestDBToV9(db *sql.DB) error {
+	if err := downgradeReleaseAnchorTestDBToV10(db); err != nil {
+		return err
+	}
 	for _, statement := range []string{
 		`DROP TRIGGER command_identity_immutable`,
 		`ALTER TABLE commands DROP COLUMN detached_proof`,

@@ -106,16 +106,17 @@ func checkStep4State(db *sql.DB) error {
 	if err = db.QueryRow(`SELECT count(*) FROM authority_artifacts`).Scan(&count); err != nil {
 		return err
 	}
-	var terminals int
+	var terminals, sweepTerminals int
 	for _, s := range all {
 		id := operation.ID{Name: s.operation, Version: uint16(s.version)}
 		step4 := operation.Step4Operation(id)
 		_, knownGate := gateDefinition(id)
 		step13Gate := version >= 12 && knownGate
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
+		batchSweep := version >= 17 && id == operation.BatchSweepAnonymousV1.Metadata().Operation
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 {
 			return ErrInvalidStore
@@ -186,7 +187,7 @@ func checkStep4State(db *sql.DB) error {
 		var code string
 		err = db.QueryRow(`SELECT receipt,wrapper,artifact_epoch,artifact_generation,artifact_sequence,first_position,last_position,result_code FROM terminal_receipts WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&receipt, &wrapper, &epoch, &gen, &seq, &first, &last, &code)
 		if s.state == "submitted" {
-			if !errors.Is(err, sql.ErrNoRows) {
+			if batchSweep || !errors.Is(err, sql.ErrNoRows) {
 				return ErrInvalidStore
 			}
 			continue
@@ -206,6 +207,13 @@ func checkStep4State(db *sql.DB) error {
 		var storedWrapper []byte
 		if err = db.QueryRow(`SELECT wrapper FROM authority_artifacts WHERE domain_id=? AND epoch=? AND generation=? AND sequence=?`, s.domain, epoch, gen, seq).Scan(&storedWrapper); err != nil || !bytes.Equal(wrapper, storedWrapper) {
 			return ErrInvalidStore
+		}
+		if batchSweep {
+			if err = checkBatchSweepTerminal(db, s, r, receipt, first, last); err != nil {
+				return fmt.Errorf("%w: batch sweep terminal %s: %v", ErrInvalidStore, s.id, err)
+			}
+			sweepTerminals++
+			continue
 		}
 		if code == "result.succeeded" {
 			gateNoop := step13Gate && s.operation == "gate.declare" && !first.Valid && !last.Valid && r.Range == nil
@@ -250,6 +258,12 @@ func checkStep4State(db *sql.DB) error {
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
 			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
 			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
+			return ErrInvalidStore
+		}
+	}
+	if version >= 17 {
+		var boundaries int
+		if err = db.QueryRow(`SELECT count(*) FROM batch_sweep_boundaries`).Scan(&boundaries); err != nil || boundaries != sweepTerminals {
 			return ErrInvalidStore
 		}
 	}
@@ -416,11 +430,18 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 			continue
 		}
 		if version >= 12 {
-			if _, ok := gateDefinition(operation.ID{Name: s.operation, Version: uint16(s.version)}); ok {
+			operationID := operation.ID{Name: s.operation, Version: uint16(s.version)}
+			_, gate := gateDefinition(operationID)
+			batchSweep := operationID == operation.BatchSweepAnonymousV1.Metadata().Operation
+			if gate || batchSweep {
 				event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
 				command, commandErr := operation.DecodeCanonicalCommand(s.command)
 				if parseErr != nil || commandErr != nil || event.hash != s.hash || event.environment != s.env ||
 					event.sequence != s.seq || event.acted != command.ActedAt {
+					err = ErrInvalidStore
+					break
+				}
+				if batchSweep && validateBatchSweepEvent(command, s.hash, pos, id, raw) != nil {
 					err = ErrInvalidStore
 					break
 				}

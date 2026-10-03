@@ -43,8 +43,8 @@ func (j *Journal) InstallClaimJournalRelease(ctx context.Context, expected Insta
 		if err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE claim_journal_release_attempts SET state='returned',canonical_receipt=?,result_code=? WHERE command_id=? AND state='attempt-prepared'`,
-			receipt, string(result), attempt.ID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE claim_journal_release_attempts SET state='returned',canonical_receipt=?,result_code=?,installed_event_count=?,installed_event_id=?,installed_prefix_digest=? WHERE command_id=? AND state='attempt-prepared'`,
+			receipt, string(result), transfer.end.EventCount, transfer.end.EventID, transfer.end.Digest, attempt.ID); err != nil {
 			return err
 		}
 		if result == operation.ResultSucceeded {
@@ -185,7 +185,10 @@ func validClaimJournalReleaseEventRecord(raw []byte, identity Identity, attempt 
 		payloadErr == nil && bytes.Equal(actualPayload, payload)
 }
 
-func validateInstalledClaimJournalRelease(db *sql.DB, identity Identity, attempt ClaimJournalReleaseCommand,
+func validateInstalledClaimJournalRelease(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+}, identity Identity, attempt ClaimJournalReleaseCommand,
 	eventIDs []string, output []byte, result operation.ResultCode,
 ) error {
 	count, err := installedEventCountForCommand(db, attempt.ID)

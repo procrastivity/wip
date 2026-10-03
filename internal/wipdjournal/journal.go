@@ -35,7 +35,7 @@ const (
 	databaseName   = "command-journal.sqlite"
 	lockName       = "command-journal.lock"
 	blobDirName    = "staged-blobs"
-	schemaVersion  = 10
+	schemaVersion  = 11
 	maxBlobSize    = int64(1 << 40)
 	digestPrefix   = "sha256:"
 	commandColumns = `command_id, environment_sequence, journal_position, request_hash, canonical_bytes, delivery, state, submission_schema, detached_proof`
@@ -210,6 +210,9 @@ func Open(root string, identity Identity) (*Journal, error) {
 		if err == nil {
 			err = upgradeSchemaV9(db, identity)
 		}
+		if err == nil {
+			err = upgradeSchemaV10(db, identity)
+		}
 	} else {
 		for err == nil {
 			var version int
@@ -235,6 +238,8 @@ func Open(root string, identity Identity) (*Journal, error) {
 				err = upgradeSchemaV8(db, identity)
 			case 9:
 				err = upgradeSchemaV9(db, identity)
+			case 10:
+				err = upgradeSchemaV10(db, identity)
 			case schemaVersion:
 				err = checkIdentity(db, identity)
 			default:
@@ -671,26 +676,36 @@ func validateInput(identity Identity, input CommandInput) (operation.DeliveryCla
 	if input.Request.Context.Repo != identity.RepoID {
 		return "", "", ErrInvalidCommand
 	}
-	for _, definition := range operation.Catalogue() {
-		metadata := definition.Metadata()
-		if metadata.Operation != input.Request.Operation {
-			continue
-		}
-		if metadata.Access != operation.AccessMutation || metadata.Delivery == operation.DeliveryNone || definition.ValidateRequest(input.Request) != nil {
-			return "", "", ErrInvalidCommand
-		}
-		candidate := operation.Command{
-			ID: input.ID, AuthorityDomainID: identity.DomainID,
-			ExpectedAuthorityEpoch: identity.AuthorityEpoch, EnvironmentID: identity.EnvironmentID,
-			EnvironmentSequence: 1, ActedAt: "2000-01-01T00:00:00Z", CausationCommandID: input.CausationCommandID,
-			CorrelationCommandID: correlation, Request: input.Request,
-		}
-		if _, err := candidate.CanonicalBytes(); err != nil {
-			return "", "", fmt.Errorf("%w: %v", ErrInvalidCommand, err)
-		}
-		return metadata.Delivery, correlation, nil
+	definition, found := journalOperationDefinition(input.Request.Operation)
+	if !found {
+		return "", "", ErrInvalidCommand
 	}
-	return "", "", ErrInvalidCommand
+	metadata := definition.Metadata()
+	if metadata.Access != operation.AccessMutation || metadata.Delivery == operation.DeliveryNone || definition.ValidateRequest(input.Request) != nil {
+		return "", "", ErrInvalidCommand
+	}
+	candidate := operation.Command{
+		ID: input.ID, AuthorityDomainID: identity.DomainID,
+		ExpectedAuthorityEpoch: identity.AuthorityEpoch, EnvironmentID: identity.EnvironmentID,
+		EnvironmentSequence: 1, ActedAt: "2000-01-01T00:00:00Z", CausationCommandID: input.CausationCommandID,
+		CorrelationCommandID: correlation, Request: input.Request,
+	}
+	if _, err := candidate.CanonicalBytes(); err != nil {
+		return "", "", fmt.Errorf("%w: %v", ErrInvalidCommand, err)
+	}
+	return metadata.Delivery, correlation, nil
+}
+
+func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
+	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
+		return operation.BatchSweepAnonymousV1, true
+	}
+	for _, definition := range operation.Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
+	return operation.Definition{}, false
 }
 
 func sameIntent(entry Entry, identity Identity, input CommandInput, correlation string) bool {
@@ -1007,7 +1022,7 @@ func checkIdentity(db *sql.DB, identity Identity) error {
 		return ErrInvalidIdentity
 	}
 	var migration string
-	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&migration); err != nil || migration != "environment-detached-command-proof" {
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version=?`, schemaVersion).Scan(&migration); err != nil || migration != "environment-release-installation-anchor" {
 		return fmt.Errorf("schema migration marker: %v", err)
 	}
 	return checkSchemaObjects(db)

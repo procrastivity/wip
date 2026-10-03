@@ -429,6 +429,7 @@ func rewriteGateRepairTerminalForRecoveryTest(t *testing.T, db *sql.DB, statemen
 
 func downgradeStep16ForMigrationTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	dropBatchSweepSchemaForTest(t, db)
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -481,6 +482,7 @@ func downgradeStep16ForMigrationTest(t *testing.T, db *sql.DB) {
 
 func downgradeStep17ForMigrationTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	dropBatchSweepSchemaForTest(t, db)
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)

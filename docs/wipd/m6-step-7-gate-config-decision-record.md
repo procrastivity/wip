@@ -1,8 +1,9 @@
 # M6 Step 7: gate and config decision record
 
-Status: owner-ratified design decisions; implementation is not complete. This
-record captures decisions made through 2026-10-01. It is a design record, not
-evidence that the operations, projections, or transport are implemented.
+Status: owner-ratified design decisions; implementation remains partial as
+summarized below. This record captures decisions made through 2026-10-01. It
+defines the contract and scope, not the implementation evidence for each
+operation, projection, or transport path.
 
 The operation inventory and ownership baseline remain
 [`m6-step-1-operation-census.md`](m6-step-1-operation-census.md) and its TSVs.
@@ -67,6 +68,56 @@ silently append `batch.swept` to the M2 claim-release or stand-down `@v1`
 event/receipt maps. Preserve their closed schemas. This does not change the
 meaning of `matter.finish@v1`'s existing claim fence or authorize immediate
 seal-time sweep.
+
+The first ratified slice is `batch.sweep-anonymous@v1`, initiated by the
+Environment that closes the claim. That Environment owns durable attempt,
+retry, and installation; the authority owns eligibility, the event/projection,
+and a separate terminal receipt. Eligibility requires successful normal
+`claim.release@v1` closure for an acquired or implicit birth claim, supported
+by successfully installed exact claim-close evidence. A sealed claim journal
+alone is not closure. Stand-down, migration/promotion, and restored or
+history-regressed closure cases are excluded. The target is the exact
+anonymous Batch; named Batches are not candidates.
+
+The authority must make event, projection, and receipt atomic and enforce at
+most one sweep per Batch across concurrent calls and fresh command IDs. Exact
+replay returns its original receipt; reusing an ID with a different request
+hash conflicts. A fresh command ID for an already-swept Batch is an explicit
+typed deterministic no-event success with `accepted_events: null`. Missing
+targets and unmet eligibility refuse. Preserve legacy sweep intent only where
+supported; fail closed rather than partially sweep when open Run, Dispatch, or
+role brackets require unsupported Step 10 state. This slice does not include
+Steps 17/18/19 and adds no sweep journal ACK.
+
+The operation is implemented behind the explicit `m6-step7` profile: it is
+advertised only to that profile and is not part of the global operation
+catalogue, generic command submission, M5 profile, or M6 Step 5 profile. The
+dedicated Environment IPC path sources the close reference from locally
+installed normal release evidence and routes it to the authority transaction.
+Its closed input carries exact `matter_id` and `batch_id`, plus
+`claim_close` containing `claim_id`, positive `claim_epoch`,
+`release_command_id`, `release_request_hash`,
+`terminal_receipt_digest` (the digest of exact canonical terminal-receipt
+bytes), and `installed_prefix_anchor` with `event_count`, nullable `event_id`,
+and `digest`. The command carries no raw receipt bytes or detached proof. The
+closing Environment sources this reference only from its durable, successfully
+installed normal `claim.release@v1` result. Its local journal persists the
+exact installed end anchor atomically with the release receipt, tail, overlay,
+and installed prefix; lookup is keyed by both release command ID and request
+hash. Pre-migration returned attempts with no persisted anchor remain readable
+but are ineligible; never backfill from the current prefix.
+
+On later authority execution, revalidate the reference against the exact
+successful receipt, release event/range, and prefix anchor; require the same
+authenticated Environment and no-current-claim state. Successful output is
+typed with outcome `swept` or `already-swept`; the latter is a fresh-ID
+`result.succeeded` with `accepted_events: null`. Stable refusals are
+`refusal.batch-sweep-target-missing` (Matter/Batch missing),
+`refusal.batch-sweep-claim-close` (close evidence missing, mismatched,
+non-normal, or uninstalled),
+`refusal.batch-sweep-not-eligible` (D55/current-claim/anonymous-target
+predicates), and `refusal.batch-sweep-unsupported-state` (unsupported
+Run/Dispatch/role bracket).
 
 ## Owner-attested exemption repair
 
@@ -148,15 +199,20 @@ implementation limitation, not a separately approved meaning of “sealed.”
 Preserve validation of compatible old `matter.finish@v1` receipts and histories,
 including historical command effects that appended inline `batch.swept`; new
 finish executions append no sweep event. Do not introduce `matter.finish@v2`.
-The separately contracted post-claim-close sweep remains future work, and this
-decision does not alter the M2 claim release or stand-down `@v1` maps.
+The separately contracted post-claim-close sweep is implemented through the
+explicit M6 Step 7 profile; this decision does not alter the M2 claim release or
+stand-down `@v1` maps.
 
 ## Implementation and archive status
 
-Implementation remains partial: the ordinary gate declaration/close/dismiss
-foundation, FINISH-A correction, pure detached-proof validation, and private
-repair admission/terminal path are present on the M6 Step 7 feature branch, but
-Step 7 is not complete. Seed/pull history remains the authority event prefix;
+Implementation remains partial. The ordinary gate declaration/close/dismiss
+foundation, FINISH-A correction, pure detached-proof validation, private
+repair admission/terminal path, and the separately contracted anonymous Batch
+sweep are present on the M6 Step 7 feature branch, but Step 7 is not complete.
+The sweep is selected only by the explicit `m6-step7` profile, uses locally
+installed normal claim-release evidence, and remains outside the global
+operation catalogue and generic command submission. Seed/pull history remains
+the authority event prefix;
 client-state/1 rebuilds and validates its gate projection from that history,
 while detached repair proof/nonce state remains private to the authority store.
 Client-state/1 does not represent Repo config, shared-reference/aggregate, or
@@ -182,8 +238,7 @@ Historical private-only admissions and terminals remain private and cannot be
 promoted by replay. Existing proof/nonce admission, factual and declaration
 guards, terminal witnesses, and claim/domain/epoch fences remain authoritative.
 Role projection and the Step 17/18 public config/provider APIs remain deferred.
-The separate post-claim-close sweep remains later work. The earlier
-implementer-thread status at base
+The earlier implementer-thread status at base
 `a54e75563e27233013b319c2b0c344c2a02098f2` is historical context, not current
 implementation status.
 

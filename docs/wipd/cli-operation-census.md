@@ -126,13 +126,13 @@ rows after read-only Git discovery.
 | `wip plumbing pause` | `writesurface.Pause`; **M**. Appends scale-specific `*.paused`. | Target must be In Progress; writes one node. | **authority handler**; **claim**. |
 | `wip plumbing resume` | `writesurface.Resume`; **M**. Appends scale-specific `*.resumed`. This is node lifecycle resume, not scheduler Run resume. | Target must be Paused; writes one node. | **authority handler**; **claim**. |
 | `wip plumbing cancel` | `writesurface.Cancel`; **M**. Appends scale-specific `*.canceled`; then computes a read-only cursor handoff. | In Progress target and reason; writes one node/candidates. | **authority handler**; **claim**; handoff is result derivation. |
-| `wip plumbing finish` | `writesurface.FinishWithEnvResult`; **M/X-read/F**. Appends scale-specific `*.finished`, possibly `batch.swept`; projection may queue tracker work. If the Matter seals, performs best-effort live tracker alignment reads and writes the final generated tree. | Lifecycle/child/gate completion, anonymous Batch sweep, current execution context; subtree + possible Batch aggregate, then local path. | **split**. Authority owns finish/sweep and post-seal truth read; Environment owns authenticated render path. Aggregate sweep may force **authority**, otherwise claim-local finish. |
+| `wip plumbing finish` | Current direct legacy CLI `writesurface.FinishWithEnvResult`; **M/X-read/F**. On a sealing transition with an associated live anonymous Batch, the legacy writer may append inline `batch.swept` (and historical receipts preserve that behavior). Target M6 authority `matter.finish@v1` does not inline-sweep. | Current guard/write footprint: finish the Matter subtree, possibly write the Batch aggregate through the legacy inline sweep, then run the local post-seal path. | **split**. Target finish stays separate from the closing Environment's durable sweep attempt/retry/install and authority-owned eligibility/effect/receipt. The explicit m6-step7 profile now routes `batch.sweep-anonymous@v1` through dedicated IPC; it is not a CLI verb, global-catalogue entry, or generic submission, and is absent from M5/M6 Step 5 profiles. |
 | `wip plumbing gate list` | `verbs/gate` read surface; **R\***. | Current Repo declarations; no semantic write. | **authority** read. |
 | `wip plumbing gate status` | `verbs/gate` read surface; **R\***. | Node plus own/enclosing declarations/completions; no write. | **authority** read. |
 | `wip plumbing gate declare` | `writesurface.DeclareGate` → `store.DeclareGate`; **M**. Runs gate-order guard and appends `gate.declared` with exemption snapshot. | Repo declarations, gate order, all sealed nodes at scale; writes Repo-wide config/projections. | **authority** by D120. |
 | `wip plumbing gate repair` | `writesurface.RepairGateExemption` → store config owner; **M**. Appends `gate.exemption-repaired`. | Incident-only safety checks over declaration/node history; writes exemption. | **authority** by D120. |
-| `wip plumbing gate close` | `writesurface.CloseGateWithEnvResult`; **M/X-read/F**. Appends `gate.closed`, possibly `batch.swept`; final seal triggers alignment reads and final render. | Effective gate ownership/state, Done node, role actor, possible Batch aggregate/local path. | **split** as for `finish`; claim-local only when no aggregate footprint. |
-| `wip plumbing gate dismiss` | `writesurface.DismissGateWithEnvResult`; **M/X-read/F**. Appends `gate.dismissed`, possibly `batch.swept`; final seal has the same alignment/render effects. | Done node, open gate, emergency reason, actor; possible Batch aggregate/local path. | **split**; authority mutation plus Environment render. |
+| `wip plumbing gate close` | Current direct legacy CLI `writesurface.CloseGateWithEnvResult`; **M/X-read/F**. On a sealing transition with an associated live anonymous Batch, the legacy writer may append inline `batch.swept` (and historical receipts preserve that behavior). Target M6 authority `gate.close@v1` does not inline-sweep; its seal effects remain separate. | Current guard/write footprint: effective gate ownership/state, Done node, role actor; possible Batch aggregate write via legacy inline sweep; then the local post-seal path. | **split**: target authority gate mutation; any anonymous Batch sweep is a separate post-normal-claim-close authority operation initiated/retried/installed by the closing Environment. |
+| `wip plumbing gate dismiss` | Current direct legacy CLI `writesurface.DismissGateWithEnvResult`; **M/X-read/F**. On a sealing transition with an associated live anonymous Batch, the legacy writer may append inline `batch.swept` (and historical receipts preserve that behavior). Target M6 authority `gate.dismiss@v1` does not inline-sweep; its seal effects remain separate. | Current guard/write footprint: Done node, open gate, emergency reason, actor; possible Batch aggregate write via legacy inline sweep; then the local post-seal path. | **split**: target authority gate mutation; any anonymous Batch sweep is a separate post-normal-claim-close authority operation initiated/retried/installed by the closing Environment. |
 | `wip plumbing bind` | `writesurface.Bind`; **M**. Appends `reference.added`; projection can queue current aggregate state. No network. | Matter, reference set, push-level snapshot and shared-reference aggregate. | **authority**: references/aggregates may span Matters. |
 | `wip plumbing unbind` | `writesurface.Unbind`; **M**. Appends `reference.removed`; may recompute/queue aggregate. | Existing membership and all remaining bound Matters. | **authority**. |
 | `wip plumbing rebind` | `writesurface.Rebind`; **M**. Appends `reference.rebound`; may recompute source/destination aggregates. | Existing membership plus two shared aggregates. | **authority**. |
@@ -258,8 +258,8 @@ name the normal drafts, not every projection side effect already noted above.
 | amendment | `internal/writesurface/amendment.go:98` insert/rebalance; `:183` reorder; `:213` replace; `:238` remove |
 | content | `internal/writesurface/content.go:41` write-once; `:65` append finding |
 | dependencies | `internal/writesurface/depend.go:42` add; `:75` remove |
-| lifecycle | `internal/writesurface/lifecycle.go:97` start cascade; `:158` finish/cancel/pause/resume plus optional seal sweep |
-| gates | `internal/writesurface/gate.go:231` dismiss plus optional sweep; `:363` close plus optional sweep |
+| lifecycle | `internal/writesurface/lifecycle.go:97` start cascade; `:158` finish/cancel/pause/resume; on a sealing transition with an associated live anonymous Batch, the current direct legacy Matter-finish writer may append `batch.swept`. Target M6 authority finish does not inline-sweep. |
+| gates | `internal/writesurface/gate.go:231` dismiss; `:363` close; on a sealing transition with an associated live anonymous Batch, current direct legacy writers may append `batch.swept`. Target M6 authority gate mutations do not inline-sweep. |
 | references | `internal/writesurface/bind.go:20` bind; `:43` unbind; `:62` rebind |
 | backlog | `internal/writesurface/backlog.go:50` add/optional auto-delegate; `:102` plan; `:126` decline; `:145` delegate; `:197` confirm tracker creation |
 | batches | `internal/writesurface/batch.go:36` named create; `:55` anonymous create; `:86` join; `:118` leave; `:154` dismiss |
@@ -372,10 +372,17 @@ read/set modes sharing one Cobra command.
    BacklogEntry findings and some entry-local exits may qualify for capture.
    Static metadata must split semantic operations if one operation name cannot
    honestly declare one complete footprint.
-4. **Seal-time anonymous Batch sweep.** An otherwise subtree-local finish/gate
-   write can also write the Batch aggregate. Under D120/D121 that makes the
-   complete operation authority-class unless claim-release design moves the
-   sweep to a distinct authority operation.
+4. **Anonymous Batch sweep.** Ratified separately from finish and gate-close:
+   only after successful normal claim release, the closing Environment
+   initiates/retries/installs the distinct authority operation
+   `batch.sweep-anonymous@v1` through the explicit m6-step7 profile. It is not
+   a CLI verb, global-catalogue entry, or generic submission, and remains
+   unavailable to M5/M6 Step 5 profiles. Its closed input binds exact Matter/Batch IDs to claim ID and
+   epoch, release command ID and request hash, terminal-receipt digest, and
+   exact installed end-prefix anchor. It has typed `swept`/`already-swept`
+   success and the four stable refusal codes recorded in the Step 7 decision
+   record. The authority effect and local install use the existing receipt,
+   return, pull, and journal path.
 5. **Harness operations.** This census explicitly keeps install/uninstall,
    manifest, and version local and refuses authority routing. If M6 interprets
    “every CLI capability” as requiring daemon mediation even for tool

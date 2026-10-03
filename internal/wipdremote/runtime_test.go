@@ -22,36 +22,11 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 	if err := os.Mkdir(profileRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "connected authority test"},
-		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), BasicConstraintsValid: true,
-		IsCA: true, KeyUsage: x509.KeyUsageCertSign,
-	}
-	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, private.Public(), private)
-	if err != nil {
-		t.Fatal(err)
-	}
-	spki, err := x509.MarshalPKIXPublicKey(private.Public())
-	if err != nil {
-		t.Fatal(err)
-	}
-	pin := sha256.Sum256(spki)
-	config := Config{
-		Schema: "wipd.connected-authority-profile/2", Origin: "https://authority.example:8443",
-		DomainID: "01KZ7XHAQT1S46NYPN1PW1DX3A", Epoch: 1, RepoID: "01KZ7XHAQT1S46NYPN1PW1DX3B",
-		OwnerRootSPKI: "sha256:" + hex.EncodeToString(pin[:]), AuthoritySPKIPin: "sha256:" + hex.EncodeToString(pin[:]),
-		AuthorityCertificateDER: certificateDER, OwnerRootPublicKey: private.Public().(ed25519.PublicKey),
-		ArtifactKeyCertificate: []byte{1}, ClientStateDirectory: filepath.Join(t.TempDir(), "client-state"),
-	}
-	if err = SaveConfig(profileRoot, config); err != nil {
+	config := validRuntimeTestConfig(t)
+	if err := SaveConfig(profileRoot, config); err != nil {
 		t.Fatalf("save connected authority profile: %v", err)
 	}
-	if err = SaveConfig(profileRoot, config); err != nil {
+	if err := SaveConfig(profileRoot, config); err != nil {
 		t.Fatalf("exact profile retry: %v", err)
 	}
 	loaded, err := LoadConfig(profileRoot)
@@ -90,6 +65,36 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 	}
 }
 
+func validRuntimeTestConfig(t *testing.T) Config {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "connected authority test"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), BasicConstraintsValid: true,
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, private.Public(), private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(private.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256.Sum256(spki)
+	return Config{
+		Schema: "wipd.connected-authority-profile/2", Origin: "https://authority.example:8443",
+		DomainID: "01KZ7XHAQT1S46NYPN1PW1DX3A", Epoch: 1, RepoID: "01KZ7XHAQT1S46NYPN1PW1DX3B",
+		OwnerRootSPKI: "sha256:" + hex.EncodeToString(pin[:]), AuthoritySPKIPin: "sha256:" + hex.EncodeToString(pin[:]),
+		AuthorityCertificateDER: certificateDER, OwnerRootPublicKey: private.Public().(ed25519.PublicKey),
+		ArtifactKeyCertificate: []byte{1}, ClientStateDirectory: filepath.Join(t.TempDir(), "client-state"),
+	}
+}
+
 func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 	m5, err := registryForConfig(Config{})
 	if err != nil {
@@ -108,12 +113,28 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 	if !hasCommand(m6, operation.StepCancelV1.Metadata().Operation) {
 		t.Fatal("explicit M6 connected profile omitted step.cancel")
 	}
+	if hasCommand(m6, operation.BatchSweepAnonymousV1.Metadata().Operation) {
+		t.Fatal("M6 Step 5 profile unexpectedly enabled the Step 7 sweep")
+	}
 	if !hasCommand(m6, operation.ContentWriteOnceV1.Metadata().Operation) ||
 		!hasCommand(m6, operation.FindingAppendV1.Metadata().Operation) {
 		t.Fatal("explicit M6 connected profile omitted content.write-once or finding.append")
 	}
-	if err = validateConfig(Config{Schema: "wipd.connected-authority-profile/2", CommandCatalogue: "m6-step4"}); err == nil {
+	step7, err := registryForConfig(Config{CommandCatalogue: "m6-step7"})
+	if err != nil || !hasCommand(step7, operation.BatchSweepAnonymousV1.Metadata().Operation) {
+		t.Fatalf("explicit M6 Step 7 catalogue omitted batch sweep: registry=%v err=%v", step7, err)
+	}
+	if hasCommand(m5, operation.BatchSweepAnonymousV1.Metadata().Operation) {
+		t.Fatal("default M5 connected profile unexpectedly enabled the Step 7 sweep")
+	}
+	config := validRuntimeTestConfig(t)
+	config.CommandCatalogue = "m6-step4"
+	if err = validateConfig(config); err == nil {
 		t.Fatal("accepted an unrecognized connected command catalogue")
+	}
+	config.CommandCatalogue = "m6-step7"
+	if err = validateConfig(config); err != nil {
+		t.Fatalf("rejected explicit Step 7 profile: %v", err)
 	}
 }
 

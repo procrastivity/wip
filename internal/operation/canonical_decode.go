@@ -373,6 +373,56 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return MatterFinishInput{MatterID: matterID}, nil
+	case BatchSweepAnonymousV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "batch_id", "claim_close")
+		if err != nil {
+			return nil, err
+		}
+		var input BatchSweepAnonymousInput
+		if input.MatterID, err = commandString(fields, "matter_id"); err != nil {
+			return nil, err
+		}
+		if input.BatchID, err = commandString(fields, "batch_id"); err != nil {
+			return nil, err
+		}
+		closeFields, err := commandMap(fields["claim_close"], "claim_close",
+			"claim_id", "claim_epoch", "release_command_id", "release_request_hash", "terminal_receipt_digest", "installed_prefix_anchor")
+		if err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.ClaimID, err = commandString(closeFields, "claim_id"); err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.ClaimEpoch, err = commandUint(closeFields, "claim_epoch"); err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.ReleaseCommandID, err = commandString(closeFields, "release_command_id"); err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.ReleaseRequestHash, err = commandString(closeFields, "release_request_hash"); err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.TerminalReceiptDigest, err = commandString(closeFields, "terminal_receipt_digest"); err != nil {
+			return nil, err
+		}
+		prefixFields, err := commandMap(closeFields["installed_prefix_anchor"], "installed_prefix_anchor", "event_count", "event_id", "digest")
+		if err != nil {
+			return nil, err
+		}
+		if input.ClaimClose.InstalledPrefixAnchor.EventCount, err = commandUint(prefixFields, "event_count"); err != nil {
+			return nil, err
+		}
+		eventID, err := commandNullableString(prefixFields, "event_id")
+		if err != nil {
+			return nil, err
+		}
+		if prefixFields["event_id"] != nil {
+			input.ClaimClose.InstalledPrefixAnchor.EventID = &eventID
+		}
+		if input.ClaimClose.InstalledPrefixAnchor.Digest, err = commandString(prefixFields, "digest"); err != nil {
+			return nil, err
+		}
+		return input, nil
 	case GateDeclareV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "gate", "scale")
 		if err != nil {

@@ -87,6 +87,120 @@ func TestDecodeCanonicalCommandPreservesAsymmetricTypedRequest(t *testing.T) {
 	}
 }
 
+func TestBatchSweepAnonymousInputCanonicalCodecIsRegistered(t *testing.T) {
+	command := canonicalIdentityCommand()
+	command.Request.Operation = BatchSweepAnonymousV1.Metadata().Operation
+	command.Request.Claim = nil
+	command.Request.Input = validBatchSweepAnonymousInput()
+	command.Request.Blobs = []BlobInput{}
+
+	encoded, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("CanonicalBytes() error = %v", err)
+	}
+	decoded, err := DecodeCanonicalCommand(encoded)
+	if err != nil {
+		t.Fatalf("DecodeCanonicalCommand() error = %v", err)
+	}
+	input, ok := decoded.Request.Input.(BatchSweepAnonymousInput)
+	if !ok {
+		t.Fatalf("decoded input type = %T, want BatchSweepAnonymousInput", decoded.Request.Input)
+	}
+	want := validBatchSweepAnonymousInput()
+	gotClose, wantClose := input.ClaimClose, want.ClaimClose
+	gotPrefix, wantPrefix := gotClose.InstalledPrefixAnchor, wantClose.InstalledPrefixAnchor
+	if input.MatterID != want.MatterID || input.BatchID != want.BatchID || gotClose.ClaimID != wantClose.ClaimID ||
+		gotClose.ClaimEpoch != wantClose.ClaimEpoch || gotClose.ReleaseCommandID != wantClose.ReleaseCommandID ||
+		gotClose.ReleaseRequestHash != wantClose.ReleaseRequestHash || gotClose.TerminalReceiptDigest != wantClose.TerminalReceiptDigest ||
+		gotPrefix.EventCount != wantPrefix.EventCount || gotPrefix.Digest != wantPrefix.Digest ||
+		gotPrefix.EventID == nil || wantPrefix.EventID == nil || *gotPrefix.EventID != *wantPrefix.EventID {
+		t.Fatalf("decoded input = %+v, want %+v", input, want)
+	}
+	commandValue, err := command.canonicalValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputValue := commandValue["input"].(canonicalMap)
+	closeValue := inputValue["claim_close"].(canonicalMap)
+	if _, exists := inputValue["terminal_receipt"]; exists {
+		t.Fatal("canonical input embedded raw receipt bytes")
+	}
+	if _, exists := closeValue["detached_proof"]; exists {
+		t.Fatal("canonical input embedded detached proof bytes")
+	}
+	reencoded, err := decoded.CanonicalBytes()
+	if err != nil || !bytes.Equal(encoded, reencoded) {
+		t.Fatalf("decoded canonical bytes differ: err=%v", err)
+	}
+	if definition, ok := commandIdentityDefinition(BatchSweepAnonymousV1.Metadata().Operation); !ok ||
+		definition.Metadata().Operation != BatchSweepAnonymousV1.Metadata().Operation {
+		t.Fatal("batch.sweep-anonymous@v1 is missing its command identity schema")
+	}
+
+	baseHash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*BatchSweepAnonymousInput){
+		"matter ID": func(input *BatchSweepAnonymousInput) { input.MatterID = testDomainID },
+		"batch ID":  func(input *BatchSweepAnonymousInput) { input.BatchID = testEnvironmentID },
+		"claim ID":  func(input *BatchSweepAnonymousInput) { input.ClaimClose.ClaimID = testDomainID },
+		"claim epoch": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.ClaimEpoch++
+		},
+		"release command ID": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.ReleaseCommandID = testDomainID
+		},
+		"release request hash": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.ReleaseRequestHash = "sha256:" + strings.Repeat("b", 64)
+		},
+		"receipt digest": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.TerminalReceiptDigest = "sha256:" + strings.Repeat("c", 64)
+		},
+		"prefix event count": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.InstalledPrefixAnchor.EventCount++
+		},
+		"prefix event ID": func(input *BatchSweepAnonymousInput) {
+			eventID := testDomainID
+			input.ClaimClose.InstalledPrefixAnchor.EventID = &eventID
+		},
+		"prefix digest": func(input *BatchSweepAnonymousInput) {
+			input.ClaimClose.InstalledPrefixAnchor.Digest = "sha256:" + strings.Repeat("d", 64)
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := command
+			input := validBatchSweepAnonymousInput()
+			mutate(&input)
+			changed.Request.Input = input
+			got, err := changed.RequestHash()
+			if err != nil {
+				t.Fatalf("RequestHash() error = %v", err)
+			}
+			if got == baseHash {
+				t.Fatalf("changed %s retained request_hash %s", name, got)
+			}
+		})
+	}
+}
+
+func validBatchSweepAnonymousInput() BatchSweepAnonymousInput {
+	eventID := testRepoID
+	return BatchSweepAnonymousInput{
+		MatterID: testEnvironmentID,
+		BatchID:  testDomainID,
+		ClaimClose: ClaimCloseReference{
+			ClaimID: testRepoID, ClaimEpoch: 2, ReleaseCommandID: testCommandID,
+			ReleaseRequestHash:    "sha256:" + strings.Repeat("a", 64),
+			TerminalReceiptDigest: "sha256:" + strings.Repeat("b", 64),
+			InstalledPrefixAnchor: ClaimClosePrefix{
+				EventCount: 9, EventID: &eventID, Digest: "sha256:" + strings.Repeat("c", 64),
+			},
+		},
+	}
+}
+
 func TestDecodeCanonicalCommandRejectsOpenOrAlternateEncodings(t *testing.T) {
 	base := canonicalIdentityCommand()
 	value, err := base.canonicalValue()

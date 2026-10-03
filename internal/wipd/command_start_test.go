@@ -871,8 +871,9 @@ func TestBirthClaimReleaseReturnsPrefixAndInstallsBeforeRelease(t *testing.T) {
 	if err != nil || !stored.Returned || !bytes.Equal(stored.Receipt, released.Receipt) {
 		t.Fatalf("durable birth release attempt=%+v err=%v", stored, err)
 	}
-	if _, err = coordinator.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human")); err != nil || authority.releaseCalls != 1 {
-		t.Fatalf("exact local release replay made another authority call: calls=%d err=%v", authority.releaseCalls, err)
+	localReplay, err := coordinator.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, operation.Actor("human"))
+	if err != nil || authority.releaseCalls != 1 || !sameCommandStartAnchor(localReplay.Snapshot.Anchor, released.Snapshot.Anchor) {
+		t.Fatalf("exact local release replay lost its installation anchor or called authority: result=%+v calls=%d err=%v", localReplay, authority.releaseCalls, err)
 	}
 	if _, err = journal.PrepareCommand(commandStartInput(releaseID, "release-id-conflict")); err == nil {
 		t.Fatal("M1 command reused a durable birth-release command ID")
@@ -902,6 +903,28 @@ func TestBirthClaimReleaseReturnsPrefixAndInstallsBeforeRelease(t *testing.T) {
 		if item.Kind != "folded" {
 			t.Fatalf("release left a provisional overlay item: %+v", item)
 		}
+	}
+	// Advance the current prefix after reopen. Same-ID replay must still return
+	// the older installation end without requesting a new authority tail.
+	advancedRecord := commandStartEventRecord(commandStartCommandPrefix+"99", commandStartCommandPrefix+"98", "sha256:"+strings.Repeat("e", 64), commandStartEnvironmentID, 9)
+	advanced, err := commandStartVerifiedTransfer(installed.Anchor, []wipdwire.EventRecord{{EventID: commandStartCommandPrefix + "99", Record: advancedRecord}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reopened.InstallPull(context.Background(), installed.Expectation(), advanced); err != nil {
+		t.Fatal(err)
+	}
+	reopenedEnvironment, err := NewJournalCommandStartEnvironment(reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedCoordinator, err := newServer(operation.NewRegistry(), 4).NewCommandStartCoordinator(commandStartDomainID, reopened, authority, reopenedEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := reopenedCoordinator.ReleaseBirthClaim(context.Background(), matterOutput.ID, releaseID, "human")
+	if err != nil || !sameCommandStartAnchor(replayed.Snapshot.Anchor, released.Snapshot.Anchor) || !bytes.Equal(replayed.Receipt, released.Receipt) || authority.releaseCalls != 1 {
+		t.Fatalf("reopened replay replaced original installation anchor: %+v %v", replayed, err)
 	}
 }
 

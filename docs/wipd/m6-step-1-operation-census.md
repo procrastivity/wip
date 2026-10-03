@@ -21,9 +21,12 @@ The matrix is intentionally split into four executable TSVs:
   owners which a commit-only scan misses.
 
 The TSV operation identity is `name@vN`. `catalogued-m5` means the exact
-identity is present in the current runtime catalogue. Every
+identity is present in the runtime catalogue at this Step 1 checkpoint. Every
 `proposed-not-registered-not-implemented` identity is a Step 1 proposal only;
-it is not accepted by the registry and no handler is implied. The separate
+it is not accepted by the registry at this checkpoint and no handler is
+implied. The later `m6-step7-profile-only` status denotes an operation
+implemented after this census and selected only by the explicit M6 Step 7
+profile; it is not an entry in the global runtime catalogue. The separate
 `authenticated-control-existing` status names current M5 authenticated
 controls, not entries in `operation.Catalogue()` and not new M6 protocol
 semantics. `none` denotes an explicitly empty metadata set. Semicolon-separated
@@ -109,10 +112,18 @@ Several static boundaries are deliberate:
 - `backlog.add@v1` remains authority-class because its current config-driven
   auto-delegation can also mutate shared outbox state. It is not incorrectly
   classified as entry-local capture.
-- Matter/gate finish and optional aggregate Batch sweep are authority-class
-  operations. Authenticated checkout alignment/render is a separate Step 19
-  Environment effect; Step 1 does not claim full CLI parity or settle its
-  failure ordering.
+- Matter/gate finish remains an authority operation under its existing
+  lifecycle contract; the anonymous Batch sweep is a distinct post-normal-
+  claim-close authority operation, initiated/retried/installed by the closing
+  Environment. Historical inline-sweep receipts remain compatible, but new
+  finishes do not emit `batch.swept`. At this Step 1 checkpoint,
+  `batch.sweep-anonymous@v1` was not registered or advertised; it is now
+  selected only by the explicit M6 Step 7 profile. Authenticated checkout
+  alignment/render remains a separate Step 19 Environment effect.
+  Its closed input carries exact Matter/Batch IDs and a claim-close reference
+  (claim ID/epoch, release command ID/hash, terminal receipt digest, and exact
+  installed end-prefix anchor). It has typed `swept`/`already-swept` success
+  and the four ratified stable refusal codes in the Step 7 decision record.
 - `outbox.flush@v1` is Environment-delivered because provider contact and
   credentials are Environment-owned; the exact resulting authority receipt
   is not a generic provider/path command.

@@ -73,7 +73,8 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 
 // NewM6LabServer creates the explicit M6 acceptance path. It preserves the
 // closed M5 compatibility set and additionally requires the complete Step 4
-// and Step 5 catalogues; the M5 lab allowlist itself remains unchanged.
+// and Step 5 catalogues. The Step 7 sweep is admitted only when its explicit
+// candidate definition is present in the supplied M6 registry.
 func NewM6LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
 	return newLabServer(profile, certificate, config, true)
 }
@@ -113,7 +114,18 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		if m6 {
 			maxOperations += len(operation.Step4Catalogue()) + len(operation.Step5Catalogue())
 		}
-		if len(operations) == 0 || len(operations) > maxOperations || m6 && len(operations) != maxOperations ||
+		step7SweepRegistered := false
+		for _, definition := range operations {
+			if definition.Metadata().Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
+				step7SweepRegistered = true
+			}
+		}
+		step7OperationCount := 0
+		if m6 && step7SweepRegistered {
+			step7OperationCount = 1
+		}
+		if len(operations) == 0 || len(operations) > maxOperations+step7OperationCount ||
+			m6 && len(operations) != maxOperations+step7OperationCount ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
 			return nil, ErrInvalidLabConfig
 		}
@@ -141,6 +153,10 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				operation.MatterFinishV1.Metadata().Operation,
 				operation.ContentWriteOnceV1.Metadata().Operation,
 				operation.FindingAppendV1.Metadata().Operation:
+			case operation.BatchSweepAnonymousV1.Metadata().Operation:
+				if !m6 {
+					return nil, ErrInvalidLabConfig
+				}
 			default:
 				return nil, ErrInvalidLabConfig
 			}

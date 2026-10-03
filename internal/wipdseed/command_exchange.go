@@ -32,6 +32,20 @@ func (client *CommandExchangeClient) SupportsCommandSubmitV2() bool {
 	return client != nil && client.client != nil && client.limits.commandSubmitV2
 }
 
+// SupportsOperation reports an exact authority operation selected during
+// this authenticated session's capability negotiation.
+func (client *CommandExchangeClient) SupportsOperation(id operation.ID) bool {
+	if client == nil || client.client == nil {
+		return false
+	}
+	for _, selected := range client.limits.operations {
+		if selected == id {
+			return true
+		}
+	}
+	return false
+}
+
 // OpenCommandExchangeClient validates the installed Environment identity,
 // proves its private-key possession with mTLS, and negotiates the exact birth
 // operation set required by the caller.

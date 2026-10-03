@@ -7,7 +7,7 @@ import (
 )
 
 func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]byte, error) {
-	definition, found := operationDefinition(id)
+	definition, found := connectedOperationDefinition(id)
 	if !found || definition.ValidateResult(result) != nil {
 		return nil, fmt.Errorf("wipd: invalid %s result", id)
 	}
@@ -46,6 +46,9 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				return nil, errMalformedMessage
 			}
 			output = map[string]any{"matter_id": matter.MatterID, "state": matter.State, "became_sealed": matter.BecameSealed}
+		case operation.BatchSweepAnonymousV1.Metadata().Operation:
+			sweep := result.Output.(operation.BatchSweepAnonymousOutput)
+			output = map[string]any{"outcome": string(sweep.Outcome)}
 		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
 			content, ok := result.Output.(operation.ContentSegmentOutput)
 			if !ok || !validRequestID(content.ID) || !validRequestID(content.SubjectID) || content.ByteLength < 0 {
@@ -101,7 +104,7 @@ func decodeM1ResultPayload(payload []byte) (operation.Result, error) {
 }
 
 func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Result, error) {
-	definition, found := operationDefinition(id)
+	definition, found := connectedOperationDefinition(id)
 	if !found {
 		return operation.Result{}, errMalformedMessage
 	}
@@ -187,6 +190,15 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.MatterFinishOutput{MatterID: matterID, State: state, BecameSealed: sealed}
+		case operation.BatchSweepAnonymousV1.Metadata().Operation:
+			if !exactFields(outputFields, "outcome") {
+				return operation.Result{}, errMalformedMessage
+			}
+			outcome, ok := outputFields["outcome"].(string)
+			if !ok {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.BatchSweepAnonymousOutput{Outcome: operation.BatchSweepAnonymousOutcome(outcome)}
 		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
 			if !exactFields(outputFields, "id", "subject_id", "kind", "blob_digest", "byte_length") {
 				return operation.Result{}, errMalformedMessage

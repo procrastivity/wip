@@ -174,6 +174,13 @@ func (runtime *Runtime) SupportsClaimJournalClose() bool {
 	return runtime != nil && runtime.SupportsClaimAcquisition()
 }
 
+// SupportsBatchSweepAnonymous reports only the explicit M6 Step 7 profile and
+// the authority operation capability selected when its command session opened.
+func (runtime *Runtime) SupportsBatchSweepAnonymous() bool {
+	return runtime != nil && runtime.config.CommandCatalogue == "m6-step7" &&
+		runtime.client != nil && runtime.client.SupportsOperation(operation.BatchSweepAnonymousV1.Metadata().Operation)
+}
+
 // NewServer creates a normal empty server when no connected profile is
 // installed, and otherwise composes the authenticated command runtime before
 // returning a daemon server ready to Serve.
@@ -194,7 +201,7 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 		_ = runtime.Close()
 		return nil, nil, err
 	}
-	if runtime.SupportsCommandSubmitV2() && config.CommandCatalogue == "m6-step5" {
+	if runtime.SupportsCommandSubmitV2() && (config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7") {
 		if err = registry.Register(operation.GateExemptionRepairV1, func(context.Context, operation.Request) operation.Result {
 			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
 				Code: operation.ProblemExecutionFailed, Message: "repair requires connected authority submission",
@@ -235,7 +242,7 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	for _, definition := range definitions {
 		operations = append(operations, definition.Metadata().Operation)
 	}
-	if config.CommandCatalogue == "m6-step5" {
+	if config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" {
 		operations = append(operations, operation.GateExemptionRepairV1.Metadata().Operation)
 	}
 	sort.Slice(operations, func(i, j int) bool {
@@ -476,7 +483,7 @@ func validateConfig(config Config) error {
 		config.RepoID == "" || config.ClientStateDirectory == "" || !filepath.IsAbs(config.ClientStateDirectory) {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
-	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" {
+	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" && config.CommandCatalogue != "m6-step7" {
 		return errors.New("wipdremote: unsupported connected command catalogue")
 	}
 	if config.Schema == "wipd.connected-authority-profile/1" {
@@ -499,6 +506,9 @@ func validateConfig(config Config) error {
 }
 
 func registryForConfig(config Config) (*operation.Registry, error) {
+	if config.CommandCatalogue == "m6-step7" {
+		return wipdauthority.NewM6Step7Registry()
+	}
 	if config.CommandCatalogue == "m6-step5" {
 		return wipdauthority.NewM6Step5Registry()
 	}

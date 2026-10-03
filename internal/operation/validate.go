@@ -71,6 +71,33 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
+	case BatchSweepAnonymousInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if err := validateULID("Batch ID", input.BatchID); err != nil {
+			return err
+		}
+		close := input.ClaimClose
+		if err := validateULID("claim ID", close.ClaimID); err != nil {
+			return err
+		}
+		if close.ClaimEpoch == 0 {
+			return fmt.Errorf("claim close epoch must be positive")
+		}
+		if err := validateULID("claim release command ID", close.ReleaseCommandID); err != nil {
+			return err
+		}
+		if !digestPattern.MatchString(close.ReleaseRequestHash) || !digestPattern.MatchString(close.TerminalReceiptDigest) {
+			return fmt.Errorf("claim close request hash and terminal receipt digest must be canonical sha256")
+		}
+		prefix := close.InstalledPrefixAnchor
+		if prefix.EventCount == 0 || prefix.EventID == nil || !digestPattern.MatchString(prefix.Digest) {
+			return fmt.Errorf("claim close installed prefix anchor is invalid")
+		}
+		if err := validateULID("claim close prefix event ID", *prefix.EventID); err != nil {
+			return err
+		}
 	case ContentWriteInput:
 		if err := validateULID("content subject ID", input.SubjectID); err != nil {
 			return err
@@ -247,6 +274,10 @@ func (d Definition) ValidateResult(result Result) error {
 			if validateULID("Matter output ID", output.MatterID) != nil || output.State != "done" {
 				return fmt.Errorf("matter finish output has invalid identity or state")
 			}
+		case BatchSweepAnonymousOutput:
+			if output.Outcome != BatchSweepAnonymousSwept && output.Outcome != BatchSweepAnonymousAlreadySwept {
+				return fmt.Errorf("anonymous Batch sweep output has an unknown outcome")
+			}
 		case GateDeclareOutput:
 			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {
 				return fmt.Errorf("gate declaration output is invalid")
@@ -348,12 +379,25 @@ func (d Definition) ValidateResult(result Result) error {
 		if prefix != "refusal" {
 			return fmt.Errorf("refused result requires a refusal.* problem, got %q", result.Problem.Code)
 		}
+		if d.metadata.Operation == BatchSweepAnonymousV1.Metadata().Operation && !validBatchSweepRefusal(result.Problem.Code) {
+			return fmt.Errorf("batch.sweep-anonymous@v1 has unknown refusal code %q", result.Problem.Code)
+		}
 	case ResultFailed:
 		if prefix != "internal" {
 			return fmt.Errorf("failed result requires an internal.* problem, got %q", result.Problem.Code)
 		}
 	}
 	return nil
+}
+
+func validBatchSweepRefusal(code ProblemCode) bool {
+	switch code {
+	case ProblemBatchSweepTargetMissing, ProblemBatchSweepClaimClose,
+		ProblemBatchSweepNotEligible, ProblemBatchSweepUnsupported:
+		return true
+	default:
+		return false
+	}
 }
 
 func validLifecycleState(state string) bool {

@@ -15,9 +15,12 @@ import (
 // BirthClaimReleaseResult is the locally installed terminal authority outcome
 // for one existing claim.release@v1 identity.
 type BirthClaimReleaseResult struct {
-	Attempt  wipdjournal.BirthReleaseCommand
-	Code     operation.ResultCode
-	Receipt  []byte
+	Attempt wipdjournal.BirthReleaseCommand
+	Code    operation.ResultCode
+	Receipt []byte
+	// On replay, Snapshot carries only the original installation Anchor and
+	// Environment identity, not a current revision/manifest/receipt view.
+	// Legacy outcomes without retained anchor evidence have a zero Snapshot.
 	Snapshot CommandStartSnapshot
 }
 
@@ -102,6 +105,27 @@ func (boundary *birthReleaseBoundary) prepare(ctx context.Context, journal *wipd
 	boundary.crossed = true
 	boundary.mu.Unlock()
 	return attempt, nil
+}
+
+func (boundary *birthReleaseBoundary) prepareCommand(ctx context.Context, journal *wipdjournal.Journal,
+	input wipdjournal.CommandInput,
+) (wipdjournal.Entry, error) {
+	boundary.mu.Lock()
+	if boundary.cancelled || ctx.Err() != nil || boundary.requestContext.Err() != nil || boundary.serverContext.Err() != nil {
+		boundary.cancelled = true
+		cancel := boundary.cancel
+		boundary.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return wipdjournal.Entry{}, errBirthReleaseCancelled
+	}
+	entry, err := journal.PrepareCommand(input)
+	if err == nil {
+		boundary.crossed = true
+	}
+	boundary.mu.Unlock()
+	return entry, err
 }
 
 func (boundary *birthReleaseBoundary) prepareClaimJournalRelease(ctx context.Context, journal *wipdjournal.Journal,
@@ -213,9 +237,13 @@ func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionCon
 			return empty, ErrCommandStartIdentity
 		}
 		if attempt.Returned {
+			snapshot, lookupErr := coordinator.releaseReplaySnapshot(resolutionContext, attempt.ID, attempt.RequestHash)
+			if lookupErr != nil {
+				return empty, lookupErr
+			}
 			return BirthClaimReleaseResult{
 				Attempt: attempt, Code: attempt.ResultCode,
-				Receipt: bytes.Clone(attempt.Receipt),
+				Receipt: bytes.Clone(attempt.Receipt), Snapshot: snapshot,
 			}, nil
 		}
 		boundary.markSubmitted()
@@ -240,9 +268,13 @@ func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionCon
 			return empty, ErrCommandStartIdentity
 		}
 		if attempt.Returned {
+			snapshot, lookupErr := coordinator.releaseReplaySnapshot(resolutionContext, attempt.ID, attempt.RequestHash)
+			if lookupErr != nil {
+				return empty, lookupErr
+			}
 			return BirthClaimReleaseResult{
 				Attempt: attempt, Code: attempt.ResultCode,
-				Receipt: bytes.Clone(attempt.Receipt),
+				Receipt: bytes.Clone(attempt.Receipt), Snapshot: snapshot,
 			}, nil
 		}
 		boundary.markSubmitted()
@@ -335,6 +367,21 @@ func (coordinator *CommandStartCoordinator) releaseBirthClaim(ctx, resolutionCon
 		return empty, ErrCommandStartIdentity
 	}
 	return BirthClaimReleaseResult{Attempt: attempt, Code: code, Receipt: bytes.Clone(receipt), Snapshot: installed}, nil
+}
+
+func (coordinator *CommandStartCoordinator) releaseReplaySnapshot(ctx context.Context, commandID, requestHash string) (CommandStartSnapshot, error) {
+	anchor, err := coordinator.journal.ReleaseInstalledAnchor(ctx, commandID, requestHash)
+	if errors.Is(err, wipdjournal.ErrNotFound) {
+		return CommandStartSnapshot{}, nil
+	}
+	if err != nil {
+		return CommandStartSnapshot{}, err
+	}
+	identity := coordinator.journal.Identity()
+	return CommandStartSnapshot{
+		DomainID: identity.DomainID, Epoch: identity.AuthorityEpoch,
+		EnvironmentID: identity.EnvironmentID, Anchor: anchor,
+	}, nil
 }
 
 func birthReleasePreSubmissionError(ctx context.Context, boundary *birthReleaseBoundary, err error) error {

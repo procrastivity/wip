@@ -353,6 +353,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.serveClaimAcquire(writer, request, hello, parameters, frame)
 		return
 	}
+	if frame.kind == batchSweepFrameKind {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveBatchSweepAnonymous(writer, request, state, hello, parameters, frame)
+		return
+	}
 	if frame.kind != "command.submit" {
 		abortHTTP2Stream()
 	}
@@ -387,6 +393,10 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	if !operationCapabilityContains(hello.operations, command.Request.Operation, identitySchemaV1) {
 		problem := compatibilityProblem(command.Request.Operation, hello.operations)
 		s.writeProblemPayload(writer, frame.requestID, 0, problem, uint32(parameters.maxFrameBody))
+		return
+	}
+	if command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
+		s.writeProblem(writer, frame.requestID, 0, errUnsupportedExtension.Error(), uint32(parameters.maxFrameBody))
 		return
 	}
 	if command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation && s.connectedCommandStart() == nil {

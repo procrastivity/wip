@@ -124,7 +124,13 @@ filesystem/Git/lock/tracker effects, scheduler APIs, and split operations so
 later definitions can be complete. It does not itself define DTOs or make a
 future operation registry. In particular, the census leaves composite
 seal/render ordering, tracker credentials/effect placement, Backlog finding
-classification, seal-time Batch sweep, and local harness policy open.
+classification, and local harness policy open. The anonymous Batch sweep is
+ratified as a separate post-normal-claim-close authority operation initiated
+by the closing Environment. Its closed input identifies exact Matter/Batch
+targets and references the successful release command/hash, canonical receipt
+digest, and exact installed end-prefix anchor; the result and refusal codes
+are fixed in the Step 7 decision record. It remains outside the runtime
+catalogue and is not advertised.
 
 ## 3. Protocol field traceability
 
@@ -455,7 +461,8 @@ This artifact deliberately does **not**:
   client/server;
 - resolve the census's split ownership/classification questions, including
   composite seal/render ordering, tracker credential placement, Backlog finding
-  class, seal-time Batch sweep, or harness policy;
+  class, authority implementation of the already-ratified separate
+  post-claim-close Batch sweep, or harness policy;
 - initialize or mutate WIP state, Linear, tracker configuration, outbox,
   devbox/legacy stores, or any authority state;
 - start M2 Steps 2–9 or implement M3/M4 behavior.

@@ -39,6 +39,7 @@ type sessionLimits struct {
 	chunkData       int
 	streamBytes     int
 	commandSubmitV2 bool
+	operations      []operation.ID
 }
 
 type eventProjection struct {
@@ -333,7 +334,10 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	if chunkData > wipdwire.FrameLimit {
 		chunkData = wipdwire.FrameLimit
 	}
-	limits = sessionLimits{frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes), commandSubmitV2: selectedV2}
+	limits = sessionLimits{
+		frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes),
+		commandSubmitV2: selectedV2, operations: append([]operation.ID(nil), selectedOperations...),
+	}
 	return limits, nil
 }
 
@@ -625,6 +629,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 	projections := make([]eventProjection, 0, len(records))
 	stepProjections := make([]stepProjection, 0, len(records))
 	seenIDs := make(map[string]struct{}, len(records))
+	seenCommands := make(map[string]struct{}, len(records))
 	seenLocators := make(map[string]struct{}, len(records))
 	matterRepos := make(map[string]string)
 	matterStates := make(map[string]string)
@@ -642,6 +647,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 	anonymousBatches := make(map[string]string)
 	sweptBatches := make(map[string]bool)
 	activeClaims := make(map[string]acquiredClaimProjection)
+	normalClaimCloses := make(map[string]foldedLifecycleEvent)
 	claimEpochs := make(map[string]uint64)
 	var pendingAcquisition *acquisitionFoldState
 	var pendingLifecycle *lifecycleFoldState
@@ -885,6 +891,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				seenIDs[id] = struct{}{}
 			}
 			claimEpochs[matterID] = claimEpoch
+			delete(normalClaimCloses, matterID)
 			activeClaims[matterID] = acquiredClaimProjection{
 				ID: claimID, Epoch: claimEpoch, AcquiredSequence: lifecycle.sequence,
 				OwnerEnvironmentID: ownerEnvironmentID, BatchID: batchID, DispatchID: dispatchID,
@@ -987,10 +994,30 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 		case "batch.swept":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			batchID := asString(fields["subject_id"])
-			if !valid || pendingLifecycle == nil || pendingLifecycle.stage != "matter-sweep-optional" ||
-				!sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) ||
-				!clientULIDPattern.MatchString(batchID) || anonymousBatches[pendingLifecycle.matter] != batchID || sweptBatches[batchID] {
+			if !valid || !clientULIDPattern.MatchString(batchID) || sweptBatches[batchID] {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			inline := pendingLifecycle != nil && pendingLifecycle.stage == "matter-sweep-optional" &&
+				sameFoldedLifecycleCommand(pendingLifecycle.command, lifecycle) && anonymousBatches[pendingLifecycle.matter] == batchID
+			if !inline {
+				matterID := ""
+				for matter, batch := range anonymousBatches {
+					if batch == batchID {
+						matterID = matter
+						break
+					}
+				}
+				close, closed := normalClaimCloses[matterID]
+				_, claimed := activeClaims[matterID]
+				_, birthReleased := releasedBirthClaims[matterID]
+				_, reusedCommand := seenCommands[lifecycle.commandID]
+				payload, payloadOK := fields["payload"].(map[string]any)
+				if matterID == "" || matterRepos[matterID] != lifecycle.repoID || matterStates[matterID] != "done" ||
+					!foldedMatterSubtreeDone(matterID, stageStates, stageMatters, stepStates, stepProjections) || claimed || !birthReleased ||
+					!closed || close.environmentID != lifecycle.environmentID || lifecycle.sequence <= close.sequence ||
+					reusedCommand || !payloadOK || !wipdwire.ExactMapKeys(payload) {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
 			}
 			sweptBatches[batchID] = true
 			pendingLifecycle = nil
@@ -1031,13 +1058,15 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				event.SubjectID != event.Payload.ClaimID || !validDigest(event.Payload.BarrierDigest) {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
+			close := foldedLifecycleEvent{
+				commandID: event.CommandID, requestHash: event.Hash, environmentID: event.Environment.ID,
+				sequence: event.Environment.Sequence, repoID: event.RepoID, actedAt: event.ActedAt,
+			}
 			if event.Payload.DispatchID != nil {
 				pending := pendingClaimRelease
 				matterID, claim := activeMatterForClaim(activeClaims, event.Payload.ClaimID)
-				if pending == nil || !sameFoldedLifecycleCommand(pending.command, foldedLifecycleEvent{
-					commandID: event.CommandID, requestHash: event.Hash, environmentID: event.Environment.ID,
-					sequence: event.Environment.Sequence, repoID: event.RepoID, actedAt: event.ActedAt,
-				}) || pending.claimID != event.Payload.ClaimID || pending.matterID != matterID ||
+				if pending == nil || !sameFoldedLifecycleCommand(pending.command, close) ||
+					pending.claimID != event.Payload.ClaimID || pending.matterID != matterID ||
 					pending.dispatchID != *event.Payload.DispatchID || pending.epoch != event.Payload.ClaimEpoch ||
 					pending.repoID != event.RepoID || pending.ownerEnvironmentID != event.Environment.ID ||
 					claim.ID != pending.claimID || claim.Epoch != pending.epoch || claim.DispatchID != pending.dispatchID ||
@@ -1045,6 +1074,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 					return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid acquired claim.released event", ErrInvalidClientState)
 				}
 				delete(activeClaims, matterID)
+				normalClaimCloses[matterID] = close
 				pendingClaimRelease = nil
 				break
 			}
@@ -1079,6 +1109,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
 			releasedBirthClaims[event.Payload.ClaimID] = struct{}{}
+			normalClaimCloses[event.Payload.ClaimID] = close
 			for matterID, claim := range activeClaims {
 				if claim.ID == event.Payload.ClaimID {
 					delete(activeClaims, matterID)
@@ -1087,6 +1118,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 		default:
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
+		seenCommands[asString(fields["command_id"])] = struct{}{}
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(record.Record)))
 		hash := sha256.New()

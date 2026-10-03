@@ -591,7 +591,8 @@ func (j *Journal) InstallBirthRelease(ctx context.Context, expected InstallExpec
 		if err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE birth_release_attempts SET state='returned',canonical_receipt=?,result_code=? WHERE command_id=? AND state='attempt-prepared'`, receipt, string(result), attempt.ID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE birth_release_attempts SET state='returned',canonical_receipt=?,result_code=?,installed_event_count=?,installed_event_id=?,installed_prefix_digest=? WHERE command_id=? AND state='attempt-prepared'`,
+			receipt, string(result), transfer.end.EventCount, transfer.end.EventID, transfer.end.Digest, attempt.ID); err != nil {
 			return err
 		}
 		if err = rebuildOverlay(ctx, tx); err != nil {

@@ -647,17 +647,11 @@ func validateConnectedCommand(entry wipdjournal.Entry) error {
 		entry.Delivery != operation.DeliveryClaim && entry.Delivery != operation.DeliveryAuthority {
 		return fmt.Errorf("%w: delivery %s is not eligible for connected command start", ErrCommandStartBlocked, entry.Delivery)
 	}
-	var metadata *operation.Metadata
-	for _, definition := range operation.Catalogue() {
-		candidate := definition.Metadata()
-		if candidate.Operation == entry.Command.Request.Operation {
-			metadata = &candidate
-			break
-		}
-	}
-	if metadata == nil || metadata.Delivery != entry.Delivery {
+	definition, found := connectedOperationDefinition(entry.Command.Request.Operation)
+	if !found || definition.Metadata().Delivery != entry.Delivery {
 		return fmt.Errorf("%w: operation metadata does not establish eligibility for %s", ErrCommandStartBlocked, entry.Command.ID)
 	}
+	metadata := definition.Metadata()
 	switch metadata.Claim {
 	case operation.ClaimNone:
 		if entry.Command.Request.Claim != nil {
@@ -718,6 +712,13 @@ func operationDefinition(id operation.ID) (operation.Definition, bool) {
 	return operation.Definition{}, false
 }
 
+func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) {
+	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
+		return operation.BatchSweepAnonymousV1, true
+	}
+	return operationDefinition(id)
+}
+
 func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCode, error) {
 	fields, err := wipdwire.DecodeCanonicalMap(raw,
 		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
@@ -753,6 +754,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 	if acceptedValue != nil && !hasRange {
 		return "", ErrCommandStartIdentity
 	}
+	batchSweepNoEvent := false
 	if code == operation.ResultSucceeded {
 		if resultFields["problem_code"] != nil {
 			return "", ErrCommandStartIdentity
@@ -806,6 +808,17 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				hasRange && accepted["event_count"] != uint64(1) {
 				return "", ErrCommandStartIdentity
 			}
+		case operation.BatchSweepAnonymousV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "outcome")
+			_, inputOK := entry.Command.Request.Input.(operation.BatchSweepAnonymousInput)
+			outcome, outcomeOK := output["outcome"].(string)
+			if outputErr != nil || !inputOK || !outcomeOK ||
+				(outcome == string(operation.BatchSweepAnonymousSwept) && (!hasRange || accepted["event_count"] != uint64(1))) ||
+				(outcome == string(operation.BatchSweepAnonymousAlreadySwept) && hasRange) ||
+				(outcome != string(operation.BatchSweepAnonymousSwept) && outcome != string(operation.BatchSweepAnonymousAlreadySwept)) {
+				return "", ErrCommandStartIdentity
+			}
+			batchSweepNoEvent = outcome == string(operation.BatchSweepAnonymousAlreadySwept)
 		case operation.GateDeclareV1.Metadata().Operation:
 			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "gate", "scale")
 			input, inputOK := entry.Command.Request.Input.(operation.GateDeclareInput)
@@ -827,7 +840,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 		if !found || metadata.Delivery != entry.Delivery {
 			return "", ErrCommandStartIdentity
 		}
-		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation {
+		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation && !batchSweepNoEvent {
 			return "", ErrCommandStartIdentity
 		}
 		if hasRange {
@@ -866,7 +879,7 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			return operation.Result{}, ErrCommandStartIdentity
 		}
 		result := operation.Result{Code: code, Problem: &operation.Problem{Code: operation.ProblemCode(problemCode), Message: problemCode}}
-		definition, found := operationDefinition(entry.Command.Request.Operation)
+		definition, found := connectedOperationDefinition(entry.Command.Request.Operation)
 		if !found || definition.ValidateResult(result) != nil {
 			return operation.Result{}, ErrCommandStartIdentity
 		}
@@ -933,6 +946,13 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		if err != nil {
 			return operation.Result{}, ErrCommandStartIdentity
 		}
+	case operation.BatchSweepAnonymousV1.Metadata().Operation:
+		output, decodeErr := wipdwire.DecodeCanonicalMap(outputBytes, "outcome")
+		if decodeErr != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		outcome := asCommandStartString(output["outcome"])
+		typed = operation.BatchSweepAnonymousOutput{Outcome: operation.BatchSweepAnonymousOutcome(outcome)}
 	default:
 		if operation.Step5Operation(entry.Command.Request.Operation) {
 			typed, err = decodeStep5Output(entry.Command.Request.Operation, outputBytes)
@@ -949,7 +969,7 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		}
 	}
 	result := operation.Result{Code: code, Output: typed}
-	definition, found := operationDefinition(entry.Command.Request.Operation)
+	definition, found := connectedOperationDefinition(entry.Command.Request.Operation)
 	if !found || definition.ValidateResult(result) != nil {
 		return operation.Result{}, ErrCommandStartIdentity
 	}
@@ -986,11 +1006,9 @@ func decodeCommandContentOutput(entry wipdjournal.Entry, raw []byte) (operation.
 }
 
 func operationMetadata(id operation.ID) (operation.Metadata, bool) {
-	for _, definition := range operation.Catalogue() {
-		metadata := definition.Metadata()
-		if metadata.Operation == id {
-			return metadata, true
-		}
+	definition, found := connectedOperationDefinition(id)
+	if found {
+		return definition.Metadata(), true
 	}
 	return operation.Metadata{}, false
 }

@@ -110,6 +110,13 @@ const (
 	ProblemUnknownClone     ProblemCode = "refusal.unknown-clone"
 )
 
+const (
+	ProblemBatchSweepTargetMissing ProblemCode = "refusal.batch-sweep-target-missing"
+	ProblemBatchSweepClaimClose    ProblemCode = "refusal.batch-sweep-claim-close"
+	ProblemBatchSweepNotEligible   ProblemCode = "refusal.batch-sweep-not-eligible"
+	ProblemBatchSweepUnsupported   ProblemCode = "refusal.batch-sweep-unsupported-state"
+)
+
 // Problem carries one coded semantic failure.
 type Problem struct {
 	Code    ProblemCode

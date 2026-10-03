@@ -148,7 +148,7 @@ func (command Command) canonicalValue() (canonicalMap, error) {
 		}
 	}
 
-	definition, ok := catalogueDefinition(command.Request.Operation)
+	definition, ok := commandIdentityDefinition(command.Request.Operation)
 	if !ok {
 		return nil, fmt.Errorf("operation: no canonical identity schema for %s", command.Request.Operation)
 	}
@@ -199,7 +199,10 @@ func (command Command) canonicalValue() (canonicalMap, error) {
 	}, nil
 }
 
-func catalogueDefinition(id ID) (Definition, bool) {
+func commandIdentityDefinition(id ID) (Definition, bool) {
+	if id == BatchSweepAnonymousV1.Metadata().Operation {
+		return BatchSweepAnonymousV1, true
+	}
 	for _, definition := range Catalogue() {
 		if definition.metadata.Operation == id {
 			return definition, true
@@ -240,6 +243,24 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"node_id": input.NodeID, "reason": input.Reason}, nil
 	case MatterFinishInput:
 		return canonicalMap{"matter_id": input.MatterID}, nil
+	case BatchSweepAnonymousInput:
+		prefix := input.ClaimClose.InstalledPrefixAnchor
+		return canonicalMap{
+			"matter_id": input.MatterID,
+			"batch_id":  input.BatchID,
+			"claim_close": canonicalMap{
+				"claim_id":                input.ClaimClose.ClaimID,
+				"claim_epoch":             input.ClaimClose.ClaimEpoch,
+				"release_command_id":      input.ClaimClose.ReleaseCommandID,
+				"release_request_hash":    input.ClaimClose.ReleaseRequestHash,
+				"terminal_receipt_digest": input.ClaimClose.TerminalReceiptDigest,
+				"installed_prefix_anchor": canonicalMap{
+					"event_count": prefix.EventCount,
+					"event_id":    nullableStringPointer(prefix.EventID),
+					"digest":      prefix.Digest,
+				},
+			},
+		}, nil
 	case ContentWriteInput:
 		return canonicalMap{"subject_id": input.SubjectID, "kind": input.Kind}, nil
 	case FindingAppendInput:
@@ -312,6 +333,13 @@ func nullableIdentity(identity string) any {
 		return nil
 	}
 	return identity
+}
+
+func nullableStringPointer(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func validateULID(name, value string) error {
