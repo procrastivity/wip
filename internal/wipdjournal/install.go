@@ -1021,6 +1021,13 @@ func eventMatchesCommand(record []byte, entry Entry) bool {
 	if err != nil || fields["command_id"] != entry.Command.ID || fields["request_hash"] != entry.RequestHash {
 		return false
 	}
+	if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
+		input, ok := entry.Command.Request.Input.(operation.BatchSweepAnonymousInput)
+		if !ok || fields["kind"] != "batch.swept" || fields["subject_id"] != input.BatchID ||
+			fields["repo_id"] != entry.Command.Request.Context.Repo {
+			return false
+		}
+	}
 	environment, ok := fields["environment"].(map[string]any)
 	return ok && environment["id"] == entry.Command.EnvironmentID && environment["sequence"] == entry.EnvironmentSeq
 }

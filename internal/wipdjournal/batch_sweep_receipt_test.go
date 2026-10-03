@@ -122,23 +122,13 @@ func TestBatchSweepReopenRejectsAlreadySweptWithGenuineEventRange(t *testing.T) 
 	journal := openInstallTestJournal(t, root)
 	defer func() { _ = journal.Close() }()
 	entry := prepareBatchSweepReceiptTestCommand(t, journal)
-	eventID := testCommandPrefix + "90"
-	input := entry.Command.Request.Input.(operation.BatchSweepAnonymousInput)
-	record, err := wipdwire.EncodeCanonical(map[string]any{
-		"schema": "wipd.event/1", "event_id": eventID, "domain_id": testDomainID,
-		"command_id": entry.Command.ID, "request_hash": entry.RequestHash,
-		"environment": map[string]any{"id": testEnvironmentID, "sequence": entry.EnvironmentSeq},
-		"acted_at":    entry.Command.ActedAt, "occurred_at": entry.Command.ActedAt,
-		"kind": "batch.swept", "subject_id": input.BatchID, "repo_id": testRepoID, "payload": map[string]any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	event := batchSweepReceiptTestEvent(t, entry, "valid")
+	eventID := event.EventID
 	before, err := journal.InstallSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	transfer := verifiedInstallTestTransfer(t, before.Anchor, []wipdwire.EventRecord{{EventID: eventID, Record: record}})
+	transfer := verifiedInstallTestTransfer(t, before.Anchor, []wipdwire.EventRecord{event})
 	receipt := batchSweepReceiptTestBytes(t, entry, "swept", []string{eventID})
 	if _, err := journal.InstallAuthorityOutcome(ctx, before.Expectation(), entry, operation.ResultSucceeded, receipt, transfer); err != nil {
 		t.Fatal(err)
@@ -190,6 +180,155 @@ func TestBatchSweepReopenRejectsAlreadySweptWithGenuineEventRange(t *testing.T) 
 	if !errors.Is(err, ErrInvalidJournal) {
 		t.Fatalf("reopen accepted already-swept with an event: %v", err)
 	}
+}
+
+func TestBatchSweepInstallRejectsSubstitutedEvent(t *testing.T) {
+	for _, mutation := range []string{"wrong-kind", "wrong-batch", "wrong-repo"} {
+		t.Run(mutation, func(t *testing.T) {
+			ctx := context.Background()
+			root := filepath.Join(t.TempDir(), "journal")
+			journal := openInstallTestJournal(t, root)
+			defer func() { _ = journal.Close() }()
+			entry := prepareBatchSweepReceiptTestCommand(t, journal)
+			before, err := journal.InstallSnapshot(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := batchSweepReceiptTestEvent(t, entry, mutation)
+			transfer := verifiedInstallTestTransfer(t, before.Anchor, []wipdwire.EventRecord{event})
+			receipt := batchSweepReceiptTestBytes(t, entry, "swept", []string{event.EventID})
+			if _, err := journal.InstallAuthorityOutcome(ctx, before.Expectation(), entry, operation.ResultSucceeded, receipt, transfer); !errors.Is(err, ErrInvalidTransfer) {
+				t.Fatalf("substituted %s installed: %v", mutation, err)
+			}
+			if after, err := journal.InstallSnapshot(ctx); err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("rejected event partially installed: %+v %v", after, err)
+			}
+			if records, err := journal.EventRecords(ctx); err != nil || len(records) != 0 {
+				t.Fatalf("rejected event retained: %+v %v", records, err)
+			}
+			if overlay, err := journal.Overlay(ctx); err != nil || len(overlay) != 0 {
+				t.Fatalf("rejected event changed overlay: %+v %v", overlay, err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			journal = openInstallTestJournal(t, root)
+			if reopened, err := journal.InstallSnapshot(ctx); err != nil || !reflect.DeepEqual(reopened, before) {
+				t.Fatalf("rejected event survived reopen: %+v %v", reopened, err)
+			}
+		})
+	}
+}
+
+func TestBatchSweepReopenRejectsSubstitutedEvent(t *testing.T) {
+	for _, mutation := range []string{"wrong-kind", "wrong-batch", "wrong-repo"} {
+		t.Run(mutation, func(t *testing.T) {
+			ctx := context.Background()
+			root := filepath.Join(t.TempDir(), "journal")
+			journal := openInstallTestJournal(t, root)
+			defer func() { _ = journal.Close() }()
+			entry := prepareBatchSweepReceiptTestCommand(t, journal)
+			before, err := journal.InstallSnapshot(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := batchSweepReceiptTestEvent(t, entry, "valid")
+			transfer := verifiedInstallTestTransfer(t, before.Anchor, []wipdwire.EventRecord{event})
+			receipt := batchSweepReceiptTestBytes(t, entry, "swept", []string{event.EventID})
+			if _, err := journal.InstallAuthorityOutcome(ctx, before.Expectation(), entry, operation.ResultSucceeded, receipt, transfer); err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			journal = openInstallTestJournal(t, root)
+			corrupt := batchSweepReceiptTestEvent(t, entry, mutation)
+			corruptTransfer := verifiedInstallTestTransfer(t, before.Anchor, []wipdwire.EventRecord{corrupt})
+			manifest, err := encodeManifest(corruptTransfer.Manifest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var trigger string
+			if err := journal.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='installed_event_no_update'`).Scan(&trigger); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := journal.db.Exec(`UPDATE installed_events SET record=? WHERE event_id=?`, corrupt.Record, event.EventID); err == nil {
+				t.Fatal("immutable event allowed substitution without trigger bypass")
+			}
+			// Preserve the exact receipt/range and command identity, recompute a
+			// valid prefix/manifest/overlay, and restore the original trigger.
+			// Reopen must reject the semantic substitution, not broken hashing,
+			// a stale overlay, or a missing schema object.
+			tx, err := journal.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`DROP TRIGGER installed_event_no_update`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(`UPDATE installed_events SET record=? WHERE event_id=?`, corrupt.Record, event.EventID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(trigger); err != nil {
+				t.Fatal(err)
+			}
+			state, err := readInstallState(tx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := updateInstallState(ctx, tx, state, corruptTransfer.End(), corruptTransfer.Manifest().Digest, manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := rebuildOverlay(ctx, tx); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			installed, err := journal.InstallSnapshot(ctx)
+			if err != nil || !sameTransferAnchor(installed.Anchor, corruptTransfer.End()) || !bytes.Equal(installed.Receipts[entry.Command.ID].CanonicalReceipt, receipt) {
+				t.Fatalf("corruption changed receipt or failed to retain the recomputed prefix: %+v %v", installed, err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(root, testIdentity)
+			if reopened != nil {
+				_ = reopened.Close()
+			}
+			if !errors.Is(err, ErrInvalidJournal) {
+				t.Fatalf("reopen accepted substituted %s: %v", mutation, err)
+			}
+		})
+	}
+}
+
+func batchSweepReceiptTestEvent(t *testing.T, entry Entry, mutation string) wipdwire.EventRecord {
+	t.Helper()
+	eventID := testCommandPrefix + "90"
+	input := entry.Command.Request.Input.(operation.BatchSweepAnonymousInput)
+	fields := map[string]any{
+		"schema": "wipd.event/1", "event_id": eventID, "domain_id": testDomainID,
+		"command_id": entry.Command.ID, "request_hash": entry.RequestHash,
+		"environment": map[string]any{"id": testEnvironmentID, "sequence": entry.EnvironmentSeq},
+		"acted_at":    entry.Command.ActedAt, "occurred_at": entry.Command.ActedAt,
+		"kind": "batch.swept", "subject_id": input.BatchID, "repo_id": entry.Command.Request.Context.Repo, "payload": map[string]any{},
+	}
+	switch mutation {
+	case "wrong-kind":
+		fields["kind"] = "matter.finished"
+		fields["payload"] = map[string]any{"from": "in-progress", "to": "done"}
+	case "wrong-batch":
+		fields["subject_id"] = testCommandPrefix + "76"
+	case "wrong-repo":
+		fields["repo_id"] = testCommandPrefix + "77"
+	}
+	raw, err := wipdwire.EncodeCanonical(fields)
+	if err != nil || !validAuthorityEvent(raw, testDomainID, eventID) {
+		t.Fatalf("%s fixture is not a structurally valid event: %v", mutation, err)
+	}
+	return wipdwire.EventRecord{EventID: eventID, Record: raw}
 }
 
 func prepareBatchSweepReceiptTestCommand(t *testing.T, journal *Journal) Entry {
