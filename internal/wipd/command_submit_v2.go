@@ -69,10 +69,8 @@ func (coordinator *CommandStartCoordinator) RunConnectedCanonicalSubmission(ctx 
 		return CommandStartResult{}, errUnsupportedExtension
 	}
 	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
-		if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
-			if err := coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request); err != nil {
-				return wipdjournal.Entry{}, err
-			}
+		if err := coordinator.validateCanonicalClaimReadiness(ctx, command); err != nil {
+			return wipdjournal.Entry{}, err
 		}
 		return coordinator.journal.PrepareCanonicalSubmission(command, submit.Schema, submit.DetachedProof)
 	}, guardAndWrite, true)

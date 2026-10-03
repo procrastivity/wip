@@ -144,7 +144,10 @@ func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, 
 		err := tx.QueryRowContext(ctx, `SELECT scale FROM m6_gate_declarations WHERE domain_id=? AND repo_id=? AND gate=?`, identity.domain, identity.repo, gate).Scan(&existing)
 		if err == nil {
 			if existing == scale {
-				if len(eventIDs) != 0 {
+				// A runtime caller may allocate one candidate ID before the
+				// transaction determines this declaration is already present.
+				// The no-op fold discards it; it never enters history or receipts.
+				if len(eventIDs) > 1 {
 					return fold, ErrInvalidProof
 				}
 				output = operation.GateDeclareOutput{Gate: gate, Scale: scale}

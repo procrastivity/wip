@@ -484,6 +484,12 @@ func (c *Client) negotiate(ctx context.Context) error {
 				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
 			})
 		}
+		for _, definition := range operation.GateCatalogue() {
+			id := definition.Metadata().Operation
+			operations = append(operations, map[string]any{
+				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+			})
+		}
 		sort.Slice(operations, func(i, j int) bool {
 			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
 		})
@@ -618,6 +624,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
 		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
+		operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation,
 		operation.BatchSweepAnonymousV1.Metadata().Operation:
 		return true
 	default:

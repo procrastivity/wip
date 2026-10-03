@@ -122,7 +122,7 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		}
 		step7OperationCount := 0
 		if m6 && step7SweepRegistered {
-			step7OperationCount = 1
+			step7OperationCount = 1 + len(operation.GateCatalogue())
 		}
 		if len(operations) == 0 || len(operations) > maxOperations+step7OperationCount ||
 			m6 && len(operations) != maxOperations+step7OperationCount ||
@@ -157,6 +157,11 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				if !m6 {
 					return nil, ErrInvalidLabConfig
 				}
+			case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation,
+				operation.GateDismissV1.Metadata().Operation:
+				if !m6 || !step7SweepRegistered {
+					return nil, ErrInvalidLabConfig
+				}
 			default:
 				return nil, ErrInvalidLabConfig
 			}
@@ -181,6 +186,13 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			for _, definition := range operation.Step5Catalogue() {
 				if !step5Registered[definition.Metadata().Operation] {
 					return nil, ErrInvalidLabConfig
+				}
+			}
+			if step7SweepRegistered {
+				for _, definition := range operation.GateCatalogue() {
+					if !registered[definition.Metadata().Operation] {
+						return nil, ErrInvalidLabConfig
+					}
 				}
 			}
 		}

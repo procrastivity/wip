@@ -240,13 +240,29 @@ func (coordinator *CommandStartCoordinator) RunConnectedCanonicalTerminal(ctx co
 		return CommandStartResult{}, ErrCommandStartBlocked
 	}
 	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
-		if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
-			if err := coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request); err != nil {
-				return wipdjournal.Entry{}, err
-			}
+		if err := coordinator.validateCanonicalClaimReadiness(ctx, command); err != nil {
+			return wipdjournal.Entry{}, err
 		}
 		return coordinator.journal.PrepareCanonicalCommand(command)
 	}, guardAndWrite, true)
+}
+
+func (coordinator *CommandStartCoordinator) validateCanonicalClaimReadiness(ctx context.Context, command operation.Command) error {
+	switch command.Request.Operation {
+	case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
+		if _, err := coordinator.journal.Get(command.ID); err == nil {
+			// The journal still compares the complete canonical identity/hash
+			// during prepare. An installed replay needs no live claim; an
+			// unresolved retained command is fenced again before submission.
+			return nil
+		} else if !errors.Is(err, wipdjournal.ErrNotFound) {
+			return err
+		}
+	}
+	if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
+		return coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request)
+	}
+	return nil
 }
 
 func (coordinator *CommandStartCoordinator) runConnected(ctx context.Context, input wipdjournal.CommandInput, guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error, terminal bool) (CommandStartResult, error) {
@@ -334,11 +350,13 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 			return empty, fmt.Errorf("%w: decode installed replay receipt: %v", ErrCommandStartIdentity, err)
 		}
 		if code != operation.ResultSucceeded {
-			// A repair refusal can be installed before its exact journal ACK is
+			// A gate refusal can be installed before its exact journal ACK is
 			// sent or answered. Recover that ACK before returning the receipt.
-			if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation {
+			switch entry.Command.Request.Operation {
+			case operation.GateExemptionRepairV1.Metadata().Operation, operation.GateDeclareV1.Metadata().Operation,
+				operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
 				if err = coordinator.acknowledgeClaimJournalReceipt(ctx, entry, installed); err != nil {
-					return empty, fmt.Errorf("wipd: acknowledge installed repair refusal: %w", err)
+					return empty, fmt.Errorf("wipd: acknowledge installed gate refusal: %w", err)
 				}
 			}
 			return result, nil
@@ -826,6 +844,28 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				hasRange && accepted["event_count"] != uint64(1) {
 				return "", ErrCommandStartIdentity
 			}
+			if _, err := decodeGateOutput(entry.Command.Request.Operation, outputBytes); err != nil {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
+			decoded, err := decodeGateOutput(entry.Command.Request.Operation, outputBytes)
+			if err != nil || !hasRange || accepted["event_count"] != uint64(1) {
+				return "", ErrCommandStartIdentity
+			}
+			switch input := entry.Command.Request.Input.(type) {
+			case operation.GateCloseInput:
+				output, ok := decoded.(operation.GateCloseOutput)
+				if !ok || output.Gate != input.Gate || output.NodeID != input.NodeID {
+					return "", ErrCommandStartIdentity
+				}
+			case operation.GateDismissInput:
+				output, ok := decoded.(operation.GateDismissOutput)
+				if !ok || output.Gate != input.Gate || output.NodeID != input.NodeID {
+					return "", ErrCommandStartIdentity
+				}
+			default:
+				return "", ErrCommandStartIdentity
+			}
 		default:
 			if !(operation.Step4Operation(entry.Command.Request.Operation) || operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
 				return "", ErrCommandStartIdentity
@@ -840,7 +880,8 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 		if !found || metadata.Delivery != entry.Delivery {
 			return "", ErrCommandStartIdentity
 		}
-		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation && !batchSweepNoEvent {
+		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation &&
+			entry.Command.Request.Operation != operation.GateDeclareV1.Metadata().Operation && !batchSweepNoEvent {
 			return "", ErrCommandStartIdentity
 		}
 		if hasRange {
@@ -953,6 +994,11 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		}
 		outcome := asCommandStartString(output["outcome"])
 		typed = operation.BatchSweepAnonymousOutput{Outcome: operation.BatchSweepAnonymousOutcome(outcome)}
+	case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
+		typed, err = decodeGateOutput(entry.Command.Request.Operation, outputBytes)
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
 	default:
 		if operation.Step5Operation(entry.Command.Request.Operation) {
 			typed, err = decodeStep5Output(entry.Command.Request.Operation, outputBytes)

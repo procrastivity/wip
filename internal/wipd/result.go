@@ -49,6 +49,13 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 		case operation.BatchSweepAnonymousV1.Metadata().Operation:
 			sweep := result.Output.(operation.BatchSweepAnonymousOutput)
 			output = map[string]any{"outcome": string(sweep.Outcome)}
+		case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
+			encoded, err := encodeGateOutput(result.Output)
+			if err != nil {
+				return nil, err
+			}
+			fields["output"] = encoded
+			return encodePayload(fields)
 		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
 			content, ok := result.Output.(operation.ContentSegmentOutput)
 			if !ok || !validRequestID(content.ID) || !validRequestID(content.SubjectID) || content.ByteLength < 0 {
@@ -199,6 +206,11 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.BatchSweepAnonymousOutput{Outcome: operation.BatchSweepAnonymousOutcome(outcome)}
+		case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation:
+			result.Output, err = decodeGateOutput(id, encodedOutput)
+			if err != nil {
+				return operation.Result{}, err
+			}
 		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
 			if !exactFields(outputFields, "id", "subject_id", "kind", "blob_digest", "byte_length") {
 				return operation.Result{}, errMalformedMessage

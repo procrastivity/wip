@@ -407,6 +407,24 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 		}
 		return app.completeContinuation(owner, completion)
 	}
+	switch input := command.Request.Input.(type) {
+	case operation.GateDeclareInput, operation.GateCloseInput, operation.GateDismissInput:
+		subject := command.Request.Context.Repo
+		switch value := input.(type) {
+		case operation.GateCloseInput:
+			subject = value.NodeID
+		case operation.GateDismissInput:
+			subject = value.NodeID
+		}
+		now := time.Now().UTC()
+		eventID, err := randomULID(now)
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result: operation.Result{Code: operation.ResultSucceeded}, SubjectID: subject, EventID: eventID, Occurred: now,
+		})
+	}
 	switch command.Request.Operation {
 	case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation,
 		operation.MatterFinishV1.Metadata().Operation,

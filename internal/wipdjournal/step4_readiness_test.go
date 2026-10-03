@@ -117,6 +117,10 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		{"repair resolves Stage ancestry", operation.GateExemptionRepairInput{NodeID: stage}, matter},
 		{"repair resolves Step ancestry", operation.GateExemptionRepairInput{NodeID: stepLive}, matter},
 		{"repair on removed Step is not ready", operation.GateExemptionRepairInput{NodeID: stepInserted}, ""},
+		{"gate close on Matter", operation.GateCloseInput{NodeID: matter}, matter},
+		{"gate close resolves Stage ancestry", operation.GateCloseInput{NodeID: stage}, matter},
+		{"gate dismiss resolves Step ancestry", operation.GateDismissInput{NodeID: stepLive}, matter},
+		{"gate close on removed Step is not ready", operation.GateCloseInput{NodeID: stepInserted}, ""},
 		{"content on Matter", operation.ContentWriteInput{SubjectID: matter, Kind: "brief"}, matter},
 		{"finding on Step", operation.FindingAppendInput{SubjectID: stepLive}, matter},
 		{"removed Step is not ready", operation.StepLifecycleInput{StepID: stepInserted}, ""},
@@ -144,11 +148,20 @@ func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 		"different Matter Step cancel": request(operation.StepCancelInput{StepID: otherStepSameRepo, Reason: "wrong claim scope"}),
 		"repair on removed Step":       request(operation.GateExemptionRepairInput{NodeID: stepInserted}),
 		"repair on different Matter":   request(operation.GateExemptionRepairInput{NodeID: otherStepSameRepo}),
+		"gate on different Matter":     request(operation.GateCloseInput{NodeID: otherStepSameRepo}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err = journal.ValidateCommandClaimReadiness(ctx, invalid); err == nil {
 				t.Fatalf("claim readiness accepted %s", name)
 			}
 		})
+	}
+	declaration := request(operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"})
+	if err = journal.ValidateCommandClaimReadiness(ctx, declaration); err != nil {
+		t.Fatalf("declaration did not resolve exact grant Matter: %v", err)
+	}
+	declaration.Claim = &operation.ClaimContext{ID: testCommandPrefix + "97", Epoch: "1"}
+	if err = journal.ValidateCommandClaimReadiness(ctx, declaration); err == nil {
+		t.Fatal("declaration accepted missing exact grant")
 	}
 }

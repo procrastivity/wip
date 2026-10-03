@@ -127,6 +127,12 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 	if hasCommand(m5, operation.BatchSweepAnonymousV1.Metadata().Operation) {
 		t.Fatal("default M5 connected profile unexpectedly enabled the Step 7 sweep")
 	}
+	for _, definition := range operation.GateCatalogue() {
+		id := definition.Metadata().Operation
+		if hasCommand(m5, id) || hasCommand(m6, id) || !hasCommand(step7, id) {
+			t.Fatalf("ordinary gate %s is not isolated to explicit m6-step7", id)
+		}
+	}
 	config := validRuntimeTestConfig(t)
 	config.CommandCatalogue = "m6-step4"
 	if err = validateConfig(config); err == nil {

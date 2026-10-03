@@ -94,10 +94,12 @@ func (s *Store) AcknowledgeOwnedClaimJournalEntry(ctx context.Context, identity 
 		return err
 	}
 	parsed, parseErr := parseJournalCommand(command, hash)
-	// Public repair refusals also need exact idempotent ACK after response
-	// loss. Other operations retain their existing quarantine behavior.
-	repairQuarantine := entryState == "quarantined" && r.Operation.Name == gateExemptionRepairOperationName && r.Operation.Version == 1 && r.Result.Code == "result.refused"
-	if (entryState != "pending-return" && entryState != "unknown" && entryState != "terminal" && !repairQuarantine) || parseErr != nil || !bytes.Equal(retained, receipt) ||
+	// Gate refusals need exact idempotent ACK after response loss. They stay
+	// quarantined; this never makes them eligible for a release barrier.
+	gateOperation := r.Operation.Name == gateExemptionRepairOperationName || r.Operation.Name == "gate.declare" ||
+		r.Operation.Name == "gate.close" || r.Operation.Name == "gate.dismiss"
+	gateQuarantine := entryState == "quarantined" && gateOperation && r.Operation.Version == 1 && r.Result.Code == "result.refused"
+	if (entryState != "pending-return" && entryState != "unknown" && entryState != "terminal" && !gateQuarantine) || parseErr != nil || !bytes.Equal(retained, receipt) ||
 		r.Domain != identity.DomainID || r.ID != id || r.Hash != hash || r.Environment.ID != identity.EnvironmentID ||
 		r.Environment.Sequence != sequence || r.Epoch != identity.AuthorityEpoch || parsed.Claim != identity.ClaimID ||
 		parsed.ClaimEpoch != identity.ClaimEpoch || parsed.Repo != repo || parsed.Worktree != worktree ||
@@ -114,7 +116,7 @@ func (s *Store) AcknowledgeOwnedClaimJournalEntry(ctx context.Context, identity 
 	if err != nil || !equalAnchor(anchor, end) || end.EventCount < lastPosition {
 		return ErrPrefixMismatch
 	}
-	if entryState == "terminal" || repairQuarantine {
+	if entryState == "terminal" || gateQuarantine {
 		if !installedDigest.Valid || installedCount < lastPosition {
 			return ErrInvalidProof
 		}

@@ -34,12 +34,21 @@ func NewM6Step5Registry() (*operation.Registry, error) {
 }
 
 // NewM6Step7Registry returns the explicit M6 capability set through the
-// post-close anonymous Batch sweep operation. M5 and earlier M6 registries do
-// not include this candidate.
+// ordinary gates and post-close anonymous Batch sweep operation. M5 and
+// earlier M6 registries do not include these operations.
 func NewM6Step7Registry() (*operation.Registry, error) {
 	registry, err := NewM6Step5Registry()
 	if err != nil {
 		return nil, err
+	}
+	for _, definition := range operation.GateCatalogue() {
+		if err = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "gate operation requires its authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if err = registry.Register(operation.BatchSweepAnonymousV1, func(context.Context, operation.Request) operation.Result {
 		return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{

@@ -424,7 +424,25 @@ func (j *Journal) ValidateCommandClaimReadiness(ctx context.Context, request ope
 	if j.db == nil {
 		return ErrClosed
 	}
-	matterID, ready, err := installedClaimMatter(ctx, j.db, j.identity.RepoID, request.Input)
+	input := request.Input
+	if _, declaration := input.(operation.GateDeclareInput); declaration {
+		// Repo declarations have no node input. Resolve the exact grant's
+		// Matter, then apply the same installed lineage and readiness fences.
+		if request.Claim == nil {
+			return ErrClaimNotReady
+		}
+		var matterID string
+		err := j.db.QueryRowContext(ctx, `SELECT matter_id FROM installed_claim_grants WHERE claim_id=? AND claim_epoch=?`,
+			request.Claim.ID, request.Claim.Epoch).Scan(&matterID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrClaimNotReady
+		}
+		if err != nil {
+			return err
+		}
+		input = operation.MatterFinishInput{MatterID: matterID}
+	}
+	matterID, ready, err := installedClaimMatter(ctx, j.db, j.identity.RepoID, input)
 	if err != nil {
 		return err
 	}
@@ -451,6 +469,10 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 	case operation.NodeLifecycleInput:
 		targetID, targetKinds[value.NodeID] = value.NodeID, true
 	case operation.GateExemptionRepairInput:
+		targetID, targetKinds[value.NodeID] = value.NodeID, true
+	case operation.GateCloseInput:
+		targetID, targetKinds[value.NodeID] = value.NodeID, true
+	case operation.GateDismissInput:
 		targetID, targetKinds[value.NodeID] = value.NodeID, true
 	case operation.StageCreateInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true

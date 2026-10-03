@@ -51,7 +51,7 @@ func TestGateRepairThroughAuthenticatedWipdProcess(t *testing.T) {
 func runGateRepairThroughAuthenticatedWipdProcess(t *testing.T, success bool, ackLoss string) {
 	ctx := context.Background()
 	fixture := newM5CommandFixture(t)
-	registry, err := NewM6Step5Registry()
+	registry, err := NewM6Step7Registry()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +64,7 @@ func runGateRepairThroughAuthenticatedWipdProcess(t *testing.T, success bool, ac
 	var trace m6AuthorityHTTPTrace
 	if success {
 		fixture.server.http.Handler = dropFirstProcessRepairTerminal(fixture.server.http.Handler, repairTransportID(67))
+		fixture.server.http.Handler = corruptProcessDeclarationBeforeTransfer(t, fixture, fixture.server.http.Handler)
 	}
 	if ackLoss != "" {
 		fixture.server.http.Handler = dropFirstProcessRepairAck(fixture.server.http.Handler, ackLoss)
@@ -89,7 +90,7 @@ func runGateRepairThroughAuthenticatedWipdProcess(t *testing.T, success bool, ac
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "env", m5TestEnv,
-		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step5")
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,95 +150,18 @@ func runGateRepairThroughAuthenticatedWipdProcess(t *testing.T, success bool, ac
 		Context: claimContext, Claim: claim,
 		Input: operation.GateDeclareInput{Gate: "repair-target", Scale: "matter"},
 	})
-	// Gate declaration is a store foundation, not part of the production M6
-	// daemon catalogue. Seed that accepted historical command and exact fold
-	// through the existing store/journal APIs without exposing another operation.
-	if err = client.Close(); err != nil {
-		t.Fatal(err)
+	declared, err := client.ExecuteCommand(ctx, declare)
+	if err != nil || declared.Code != operation.ResultSucceeded || declared.Output != (operation.GateDeclareOutput{Gate: "repair-target", Scale: "matter"}) {
+		t.Fatalf("runtime declaration: %+v %v daemon=%s", declared, err, output.String())
 	}
-	stopDaemon()
 	identity := wipdjournal.Identity{
 		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1,
 		EnvironmentID: m5TestEnv, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
-	}
-	seedJournal, err := wipdjournal.Open(filepath.Join(environment.profileRoot, "environment-journal"), identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seedEntry, err := seedJournal.PrepareCanonicalSubmission(declare, "wipd.command-submit/1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seedSnapshot, err := seedJournal.InstallSnapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seedSnapshot, err = seedJournal.AdmitPending(ctx, seedSnapshot.Expectation(), declare.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	declarationStatus, err := fixture.store.SubmitCommand(ctx, declare, seedEntry.RequestHash, fixture.peer, time.Now().UTC())
-	if err != nil || declarationStatus.Owner == nil {
-		t.Fatalf("fixture declaration admission: %+v %v", declarationStatus, err)
-	}
-	declarationEventID, err := randomULID(time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	declarationStatus, err = fixture.store.CompleteCommand(ctx, declarationStatus.Owner, operation.Result{Code: operation.ResultSucceeded}, m5TestRepo,
-		declarationEventID, time.Now().UTC(), fixture.config.SignArtifact)
-	if err != nil {
-		t.Fatal(err)
 	}
 	anchor, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
 	if err != nil || anchor.EventCount == 0 || anchor.EventID == "" {
 		t.Fatalf("declaration anchor: %+v %v", anchor, err)
 	}
-	if success {
-		rewriteProcessGateDeclaration(t, filepath.Join(fixture.root, "authority.db"), anchor.EventID, matter.ID)
-		anchor, err = fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	db, err := sql.Open("sqlite", filepath.Join(fixture.root, "authority.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var record []byte
-	err = db.QueryRow(`SELECT record FROM authority_events WHERE domain_id=? AND event_id=?`, m5TestDomain, anchor.EventID).Scan(&record)
-	if closeErr := db.Close(); err != nil || closeErr != nil {
-		t.Fatalf("read declaration fixture: %v %v", err, closeErr)
-	}
-	endID := anchor.EventID
-	end := wipdwire.PrefixAnchor{EventCount: anchor.EventCount, EventID: &endID, Digest: anchor.Digest}
-	transfer, err := wipdjournal.VerifyTransfer(m5TestDomain, 1, seedSnapshot.Anchor, end,
-		[]wipdwire.EventRecord{{EventID: endID, Record: record}}, wipdwire.BlobManifest{
-			Schema: "wipd.blob-manifest/1", DomainID: m5TestDomain, Epoch: 1, AsOf: end,
-			Entries: []wipdwire.BlobManifestEntry{}, Digest: emptyManifestDigest(),
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = seedJournal.InstallFold(ctx, seedSnapshot.Expectation(), seedEntry, operation.ResultSucceeded, declarationStatus.Receipt, transfer); err != nil {
-		t.Fatalf("install declaration fixture: %v", err)
-	}
-	seedBinding, err := fixture.store.GetCurrentClaimJournal(ctx, m5TestDomain, 1, m5TestEnv, claim.ID,
-		acquired.Grant.ClaimEpoch, matter.ID, acquired.Grant.DispatchID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	declarationPosition := uint64(1)
-	if success {
-		declarationPosition = 2 // Matter start is claim-delivered; finish is authority-delivered.
-	}
-	if err = fixture.store.AcknowledgeClaimJournalEntry(ctx, m5TestDomain, seedBinding.JournalID, declarationPosition, declarationStatus.Receipt, anchor); err != nil {
-		t.Fatal(err)
-	}
-	if err = seedJournal.Close(); err != nil {
-		t.Fatal(err)
-	}
-	client, stopDaemon, output = startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
 	repair := command(repairTransportID(67), declarationSequence+1, operation.Request{
 		Operation: operation.GateExemptionRepairV1.Metadata().Operation, Actor: "human",
 		Context: claimContext, Claim: claim,
@@ -392,6 +316,60 @@ func runGateRepairThroughAuthenticatedWipdProcess(t *testing.T, success bool, ac
 	after, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
 	if err != nil || after != before {
 		t.Fatalf("replay changed prefix: before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
+// Keep the corruption fixture on the actual two-hop declaration path: damage
+// only its committed event before the terminal response lets wipd pull it.
+func corruptProcessDeclarationBeforeTransfer(t *testing.T, fixture *m5CommandFixture, next http.Handler) http.Handler {
+	var used atomic.Bool
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		next.ServeHTTP(&processDeclarationCorruptionWriter{ResponseWriter: writer, used: &used, corrupt: func(eventID string) {
+			db, err := sql.Open("sqlite", filepath.Join(fixture.root, "authority.db"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			var matterID string
+			err = db.QueryRow(`SELECT m.matter_id FROM matters m JOIN authority_events e ON e.domain_id=m.domain_id AND e.event_id=m.birth_event_id
+				WHERE e.domain_id=? AND e.command_id=?`, m5TestDomain, repairTransportID(60)).Scan(&matterID)
+			_ = db.Close()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			rewriteProcessGateDeclaration(t, filepath.Join(fixture.root, "authority.db"), eventID, matterID)
+		}}, request)
+	})
+}
+
+type processDeclarationCorruptionWriter struct {
+	http.ResponseWriter
+	used    *atomic.Bool
+	corrupt func(string)
+}
+
+func (w *processDeclarationCorruptionWriter) Write(p []byte) (int, error) {
+	frames, err := wipdwire.ReadFrames(p, 1)
+	if err == nil && len(frames) == 1 && frames[0].Kind == "command.terminal" {
+		fields, err := wipdwire.DecodeCanonicalMap(frames[0].Payload, "schema", "domain_id", "authority_epoch", "identity_schema",
+			"command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+		if err == nil && fields["command_id"] == repairTransportID(66) && w.used.CompareAndSwap(false, true) {
+			accepted, ok := fields["accepted_events"].(map[string]any)
+			if ok {
+				id, ok := accepted["last_event_id"].(string)
+				if ok {
+					w.corrupt(id)
+				}
+			}
+		}
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *processDeclarationCorruptionWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
 

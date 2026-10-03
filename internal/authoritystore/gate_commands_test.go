@@ -636,7 +636,9 @@ func TestGateDeclareNoopAndCloseRefusalDoNotAppendEvents(t *testing.T) {
 	noop := step12Command(f, 13, 4, operation.GateDeclareV1,
 		operation.GateDeclareInput{Gate: "reviewed-local", Scale: "matter"}, allocation.ClaimID)
 	noopOwner := submitGateOperation(t, f, noop)
-	noEvent, err := f.s.CompleteCommand(ctx, noopOwner, operation.Result{Code: operation.ResultSucceeded}, "", "", f.now, signWith(f.key))
+	// Runtime supplies a candidate ID without pre-reading the declaration.
+	// It must remain unused, including after reopen and a later real close.
+	noEvent, err := f.s.CompleteCommand(ctx, noopOwner, operation.Result{Code: operation.ResultSucceeded}, repoA, claimTestID(105), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatalf("complete same-scale declaration no-op: %v", err)
 	}
