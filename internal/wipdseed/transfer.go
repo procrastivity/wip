@@ -1013,7 +1013,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				_, reusedCommand := seenCommands[lifecycle.commandID]
 				payload, payloadOK := fields["payload"].(map[string]any)
 				if matterID == "" || matterRepos[matterID] != lifecycle.repoID || matterStates[matterID] != "done" ||
-					!foldedMatterSubtreeDone(matterID, stageStates, stageMatters, stepStates, stepProjections) || claimed || !birthReleased ||
+					claimed || !birthReleased ||
 					!closed || close.environmentID != lifecycle.environmentID || lifecycle.sequence <= close.sequence ||
 					reusedCommand || !payloadOK || !wipdwire.ExactMapKeys(payload) {
 					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState

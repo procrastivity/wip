@@ -245,12 +245,17 @@ func TestBatchSweepTransferPreservesLegacyInlineSweep(t *testing.T) {
 	if _, _, _, err := foldEventRecords(legacy, testDomainID); err != nil {
 		t.Fatalf("legacy same-command inline sweep: %v", err)
 	}
+	declaration := step7ClientTestEvent(t, 501, 401, 2, "gate.declared", testRepoID, map[string]any{"gate": "historical-open", "scale": "matter"})
+	legacyWithGate := append(append(cloneEventRecords(legacy[:1]), declaration), legacy[1:]...)
+	if _, _, _, err := foldEventRecords(legacyWithGate, testDomainID); err != nil {
+		t.Fatalf("legacy inline sweep acquired a new D55 requirement: %v", err)
+	}
 	if _, _, _, err := foldEventRecords(append(legacy, records[6:]...), testDomainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("standalone sweep duplicated a legacy inline sweep: %v", err)
 	}
 }
 
-func TestBatchSweepTransferRejectsIncompleteSubtree(t *testing.T) {
+func TestBatchSweepTransferAcceptsIncompleteSubtree(t *testing.T) {
 	records := postCloseSweepHistory(t, true)
 	stage := step7ClientTestEvent(t, 501, 401, 2, "stage.created", "00000000000000000000000049", map[string]any{
 		"matter_id": sweepFoldMatter, "locator": "unfinished", "title": "Unfinished Stage", "sort_key": uint64(1000),
@@ -259,8 +264,42 @@ func TestBatchSweepTransferRejectsIncompleteSubtree(t *testing.T) {
 	if _, _, _, err := foldEventRecords(records[:len(records)-1], testDomainID); err != nil {
 		t.Fatalf("incomplete subtree before standalone sweep: %v", err)
 	}
-	if _, _, _, err := foldEventRecords(records, testDomainID); !errors.Is(err, ErrInvalidClientState) {
+	if _, _, _, err := foldEventRecords(records, testDomainID); err != nil {
 		t.Fatalf("standalone sweep with unfinished descendant: %v", err)
+	}
+}
+
+func TestBatchSweepTransferRequiresD55AtSweepBoundary(t *testing.T) {
+	for _, satisfaction := range []string{"open", "closed", "dismissed", "exempt", "closed after sweep"} {
+		t.Run(satisfaction, func(t *testing.T) {
+			records := postCloseSweepHistory(t, true)
+			records = records[:len(records)-1]
+			declaration := map[string]any{"gate": "own-review", "scale": "matter"}
+			if satisfaction == "exempt" {
+				declaration["exempt"] = []any{sweepFoldMatter}
+			}
+			records = append(records, step7ClientTestEvent(t, 520, 420, 13, "gate.declared", testRepoID, declaration))
+			if satisfaction == "closed" || satisfaction == "dismissed" {
+				payload := map[string]any{"gate": "own-review", "scale": "matter"}
+				if satisfaction == "dismissed" {
+					payload["reason"] = "review waived"
+				}
+				records = append(records, step7ClientTestEvent(t, 521, 421, 14, "gate."+satisfaction, sweepFoldMatter, payload))
+			}
+			records = append(records, step7ClientTestEvent(t, 522, 422, 15, "batch.swept", sweepFoldBatch, map[string]any{}))
+			if satisfaction == "closed after sweep" {
+				records = append(records, step7ClientTestEvent(t, 523, 423, 16, "gate.closed", sweepFoldMatter,
+					map[string]any{"gate": "own-review", "scale": "matter"}))
+			}
+			_, _, _, err := foldEventRecords(records, testDomainID)
+			if satisfaction == "open" || satisfaction == "closed after sweep" {
+				if !errors.Is(err, ErrInvalidClientState) {
+					t.Fatalf("sweep without D55 obligations satisfied at its boundary: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("sweep with %s own gate: %v", satisfaction, err)
+			}
+		})
 	}
 }
 

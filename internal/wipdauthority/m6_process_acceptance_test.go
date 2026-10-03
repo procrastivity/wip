@@ -257,6 +257,12 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	if sweepMatterStarted.Output != (operation.MatterLifecycleOutput{MatterID: sweepMatter.ID, State: "in-progress"}) {
 		t.Fatalf("Step 7 target Matter start = %#v", sweepMatterStarted.Output)
 	}
+	unfinishedStageResult := submitAs(sweepClaimContext, sweepCommandContext, m5TwoEnvironmentID(71),
+		operation.StageCreateV1.Metadata().Operation, operation.StageCreateInput{MatterID: sweepMatter.ID, Title: "Unfinished sweep child"})
+	unfinishedStage, ok := unfinishedStageResult.Output.(operation.StageCreateOutput)
+	if !ok || unfinishedStage.MatterID != sweepMatter.ID || unfinishedStage.State != "planned" {
+		t.Fatalf("Step 7 target unfinished child = %#v", unfinishedStageResult.Output)
+	}
 	sweepMatterFinish := submitAs(sweepClaimContext, sweepCommandContext, m5TwoEnvironmentID(68),
 		operation.MatterFinishV1.Metadata().Operation, operation.MatterFinishInput{MatterID: sweepMatter.ID})
 	if sweepMatterFinish.Output != (operation.MatterFinishOutput{
@@ -327,6 +333,9 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 		}
 		if fields["command_id"] == sweepCommandID && fields["kind"] == "batch.swept" && fields["subject_id"] == sweepClaim.BatchID {
 			sweepEventFound = true
+		}
+		if fields["subject_id"] == unfinishedStage.ID && fields["kind"] != "stage.created" {
+			t.Fatalf("sweep completed or changed the unfinished child: %#v", fields)
 		}
 	}
 	if !sweepEventFound {

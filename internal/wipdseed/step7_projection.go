@@ -161,6 +161,7 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 
 	declarations := make(map[string]step7GateDeclarationAt)
 	states := make(map[string]step7GateState)
+	batchMatters := make(map[string]string)
 	lifecycle := make(map[string]string, len(nodes))
 	for id := range nodes {
 		lifecycle[id] = "planned"
@@ -179,6 +180,18 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 			}
 		}
 		switch kind {
+		case "batch.anonymous-created":
+			batchMatters[subject], _ = payload["matter_id"].(string)
+		case "batch.swept":
+			// The core fold validates the exact command identity for historical
+			// inline FINISH-A sweeps. Only standalone sweeps require D55 here.
+			if index > 0 && events[index-1]["kind"] == "matter.finished" && events[index-1]["command_id"] == fields["command_id"] {
+				continue
+			}
+			matterID := batchMatters[subject]
+			if matterID == "" || !step7ClientGateSealed(matterID, "", position, nodes, declarations, states, lifecycle) {
+				return nil, ErrInvalidClientState
+			}
 		case "gate.declared":
 			gate, _ := payload["gate"].(string)
 			scale, _ := payload["scale"].(string)
