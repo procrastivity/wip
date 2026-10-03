@@ -1,9 +1,10 @@
 # M6 Step 7: gate and config decision record
 
-Status: owner-ratified design decisions; implementation remains partial as
-summarized below. This record captures decisions made through 2026-10-01. It
-defines the contract and scope, not the implementation evidence for each
-operation, projection, or transport path.
+Status: owner-ratified design decisions; overall M6 implementation remains
+partial as summarized below. The scoped Step 7 implementation was completed
+and accepted on 2026-10-03 (see implementation status). This record captures
+decisions made through 2026-10-01. It defines the contract and scope, not the
+implementation evidence for each operation, projection, or transport path.
 
 The operation inventory and ownership baseline remain
 [`m6-step-1-operation-census.md`](m6-step-1-operation-census.md) and its TSVs.
@@ -211,17 +212,21 @@ stand-down `@v1` maps.
 
 ## Implementation and archive status
 
-Implementation remains partial. Ordinary gate declaration/close/dismiss now
-traverse authenticated Environment IPC, authority execution, verified tail and
-receipt installation, and exact claim-journal ACK through the explicit
-`m6-step7` profile. Identical declaration installs a successful null-range
-receipt; ordinary refusal ACK retains quarantine and cannot enter the normal
-release barrier. Restarted exact replay returns the original result, including
+Step 7's scoped implementation is complete and accepted on 2026-10-03 at
+`origin/go` commit `ab7ae64fadcac671796b630ff0ee34a216642db9`, following
+cumulative HIGH review. The Step 7 WIP item is finished and sealed; overall M6
+operation parity remains partial, and the explicit cross-step deferrals below
+remain fail-closed. Ordinary gate declaration/close/dismiss now traverse
+authenticated Environment IPC, authority execution, verified tail and receipt
+installation, and exact claim-journal ACK through the explicit `m6-step7`
+profile. Identical declaration installs a successful null-range receipt;
+ordinary refusal ACK retains quarantine and cannot enter the normal release
+barrier. Restarted exact replay returns the original result, including
 installed replay after normal claim release; fresh gate commands still require
 the active exact claim. Unsupported role-owned gate effects remain fail-closed.
 The FINISH-A correction, pure detached-proof validation, private
 repair admission/terminal path, and the separately contracted anonymous Batch
-sweep are present on the M6 Step 7 feature branch, but Step 7 is not complete.
+sweep are included in this accepted Step 7 scope.
 The sweep is selected only by the explicit `m6-step7` profile, uses locally
 installed normal claim-release evidence, and remains outside the global
 operation catalogue and generic command submission. Its dedicated IPC path
