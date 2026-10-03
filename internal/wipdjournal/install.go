@@ -1052,8 +1052,27 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		if resultFields["problem_code"] != nil {
 			return ErrInvalidTransfer
 		}
-		if _, ok = resultFields["output"].([]byte); !ok {
+		rawOutput, ok := resultFields["output"].([]byte)
+		if !ok {
 			return ErrInvalidTransfer
+		}
+		if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
+			output, err := wipdwire.DecodeCanonicalMap(rawOutput, "outcome")
+			if err != nil {
+				return ErrInvalidTransfer
+			}
+			switch output["outcome"] {
+			case string(operation.BatchSweepAnonymousSwept):
+				if len(eventIDs) != 1 {
+					return ErrInvalidTransfer
+				}
+			case string(operation.BatchSweepAnonymousAlreadySwept):
+				if len(eventIDs) != 0 || accepted != nil {
+					return ErrInvalidTransfer
+				}
+			default:
+				return ErrInvalidTransfer
+			}
 		}
 		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) {
 			return fmt.Errorf("%w: successful effectful fold has no verified events", ErrInvalidTransfer)
