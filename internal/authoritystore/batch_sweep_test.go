@@ -62,9 +62,11 @@ func newSweepFixture(t *testing.T, openGate, legacy, leaveBirthOpen bool) sweepF
 	if err != nil {
 		t.Fatal(err)
 	}
-	barrier := map[string]any{"schema": "wipd.journal-barrier/1", "journal_id": allocation.JournalID,
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": allocation.JournalID,
 		"claim": map[string]any{"id": allocation.ClaimID, "epoch": uint64(1)}, "entry_count": count, "last_position": count,
-		"terminal_receipt_count": count, "entries_digest": digest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0)}
+		"terminal_receipt_count": count, "entries_digest": digest, "sealed": true, "unresolved_count": uint64(0), "quarantined_count": uint64(0),
+	}
 	raw, hash := f.command(t, 15, x.next, "claim.release", map[string]any{"id": allocation.ClaimID, "epoch": uint64(1)}, map[string]any{"barrier": barrier})
 	pending, err := f.s.SubmitClaimLifecycle(ctx, raw, hash, f.peer, f.now, nil)
 	if err != nil {
@@ -102,9 +104,11 @@ func (x *sweepFixture) closeBirth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	barrier := map[string]any{"schema": "wipd.journal-barrier/1", "journal_id": f.matter,
+	barrier := map[string]any{
+		"schema": "wipd.journal-barrier/1", "journal_id": f.matter,
 		"claim": map[string]any{"id": f.matter, "epoch": uint64(1)}, "entry_count": count, "last_position": count,
-		"terminal_receipt_count": receipts, "entries_digest": digest, "sealed": true, "unresolved_count": unresolved, "quarantined_count": quarantined}
+		"terminal_receipt_count": receipts, "entries_digest": digest, "sealed": true, "unresolved_count": unresolved, "quarantined_count": quarantined,
+	}
 	raw, hash := claimTestBirthRelease(t, f, 16, x.next, barrier)
 	pending, err := f.s.SubmitClaimLifecycle(ctx, raw, hash, f.peer, f.now, nil)
 	if err != nil {
@@ -125,9 +129,12 @@ func sweepReference(t *testing.T, f *claimTestFixture, id, hash, claim string, s
 		t.Fatalf("fixture release = %+v, %v", r, err)
 	}
 	anchor := f.anchor(t)
-	return operation.ClaimCloseReference{ClaimID: claim, ClaimEpoch: 1, ReleaseCommandID: id, ReleaseRequestHash: hash,
+	return operation.ClaimCloseReference{
+		ClaimID: claim, ClaimEpoch: 1, ReleaseCommandID: id, ReleaseRequestHash: hash,
 		TerminalReceiptDigest: digestBytes(status.Receipt), InstalledPrefixAnchor: operation.ClaimClosePrefix{
-			EventCount: anchor.EventCount, EventID: &anchor.EventID, Digest: anchor.Digest}}
+			EventCount: anchor.EventCount, EventID: &anchor.EventID, Digest: anchor.Digest,
+		},
+	}
 }
 
 func (x sweepFixture) command(id int, ref operation.ClaimCloseReference) operation.Command {
@@ -495,11 +502,12 @@ func TestBatchSweepHistoryRejectsCorruptEvent(t *testing.T) {
 			}
 			rewriteGateAuthorityEvent(t, x.f.root, claimTestID(120), func(fields map[string]cbor.RawMessage) error {
 				value := any(claimTestID(999))
-				if field == "payload" {
+				switch field {
+				case "payload":
 					value = map[string]any{"unexpected": true}
-				} else if field == "request_hash" {
+				case "request_hash":
 					value = digestBytes([]byte("other"))
-				} else if field == "kind" {
+				case "kind":
 					value = "batch.dismissed"
 				}
 				return setGateEventField(fields, field, value)

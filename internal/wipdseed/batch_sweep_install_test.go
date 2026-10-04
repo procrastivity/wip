@@ -162,7 +162,7 @@ func TestBatchSweepD55AuthoritySeedPullAndInstall(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer journal.Close()
+			defer func() { _ = journal.Close() }()
 			manifest := wipdwire.BlobManifest{Schema: "wipd.blob-manifest/1", DomainID: testDomainID, Epoch: 1, AsOf: before.Prefix, Entries: before.ManifestEntries, Digest: before.ManifestDigest}
 			prior, err := wipdjournal.VerifyTransfer(testDomainID, 1, emptyWireAnchor(), before.Prefix, before.EventRecords, manifest)
 			if err != nil {

@@ -68,9 +68,10 @@ func TestReleaseInstalledAnchorRetainsExactInstallEnd(t *testing.T) {
 				if _, err = journal.ReleaseInstalledAnchor(context.Background(), id, emptyTransferAnchor().Digest); !errors.Is(err, ErrCommandIDConflict) {
 					t.Fatalf("wrong request hash: %v", err)
 				}
-				if phase == 0 {
+				switch phase {
+				case 0:
 					advanceReleaseAnchorFixture(t, journal)
-				} else if phase == 1 {
+				case 1:
 					if err = journal.Close(); err != nil {
 						t.Fatal(err)
 					}
@@ -248,8 +249,10 @@ func prepareReleaseAnchorFixture(t *testing.T, acquired bool) (*Journal, string,
 	} else {
 		journal = openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
 		claim = testCommandPrefix + "70"
-		barrier := wipdwire.JournalBarrier{Schema: "wipd.journal-barrier/1", Journal: claim,
-			Claim: wipdwire.ClaimRef{ID: claim, Epoch: 1}, Count: 1, Last: 1, Receipts: 1, Sealed: true, Digest: emptyTransferAnchor().Digest}
+		barrier := wipdwire.JournalBarrier{
+			Schema: "wipd.journal-barrier/1", Journal: claim,
+			Claim: wipdwire.ClaimRef{ID: claim, Epoch: 1}, Count: 1, Last: 1, Receipts: 1, Sealed: true, Digest: emptyTransferAnchor().Digest,
+		}
 		attempt, err := journal.PrepareBirthRelease(id, barrier, "human")
 		if err != nil {
 			t.Fatal(err)

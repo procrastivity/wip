@@ -89,9 +89,10 @@ func runBatchSweepProcess(t *testing.T, scenario string) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	catalogue := []string{"m6-step7"}
-	if scenario == "local-step5" {
+	switch scenario {
+	case "local-step5":
 		catalogue = []string{"m6-step5"}
-	} else if scenario == "local-m5" {
+	case "local-m5":
 		catalogue = nil
 	}
 	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "env", m5TestEnv,
@@ -136,7 +137,7 @@ func runBatchSweepProcess(t *testing.T, scenario string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	assertNotAdmitted := func(id string) {
 		var count int
 		if err := db.QueryRow(`SELECT count(*) FROM submissions WHERE domain_id=? AND command_id=?`, m5TestDomain, id).Scan(&count); err != nil || count != 0 {
@@ -155,7 +156,7 @@ func runBatchSweepProcess(t *testing.T, scenario string) {
 		assertProblem(err, "protocol.unsupported-extension")
 		assertNotAdmitted(id)
 		journal := openJournal()
-		defer journal.Close()
+		defer func() { _ = journal.Close() }()
 		if _, err := journal.Get(id); !errors.Is(err, wipdjournal.ErrNotFound) {
 			t.Fatalf("unsupported capability prepared a durable sweep: %v", err)
 		}
@@ -163,9 +164,11 @@ func runBatchSweepProcess(t *testing.T, scenario string) {
 	}
 	command := func(id int, sequence uint64, request operation.Request) operation.Command {
 		commandID := repairTransportID(id)
-		return operation.Command{ID: commandID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		return operation.Command{
+			ID: commandID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
 			EnvironmentID: m5TestEnv, EnvironmentSequence: sequence, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			CorrelationCommandID: commandID, Request: request}
+			CorrelationCommandID: commandID, Request: request,
+		}
 	}
 	created, err := client.ExecuteCommand(ctx, command(60, 1, operation.Request{
 		Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
@@ -281,7 +284,7 @@ func runBatchSweepProcess(t *testing.T, scenario string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer localDB.Close()
+		defer func() { _ = localDB.Close() }()
 		localDB.SetMaxOpenConns(1)
 		var installedReceipt []byte
 		deadline := time.Now().Add(10 * time.Second)

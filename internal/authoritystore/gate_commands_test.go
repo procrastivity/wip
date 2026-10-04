@@ -230,10 +230,10 @@ func TestGateDeclareAndCloseUseAuthorityProjectionAndExactReplay(t *testing.T) {
 		t.Fatalf("exact declaration replay changed receipt: status=%+v err=%v", replay, err)
 	}
 
-	close := step12Command(f, 13, 4, operation.GateCloseV1,
+	closeCommand := step12Command(f, 13, 4, operation.GateCloseV1,
 		operation.GateCloseInput{Gate: "reviewed-local", NodeID: f.matter}, allocation.ClaimID)
-	closeHash, _ := close.RequestHash()
-	closeOwner := submitGateOperation(t, f, close)
+	closeHash, _ := closeCommand.RequestHash()
+	closeOwner := submitGateOperation(t, f, closeCommand)
 	closed, err := f.s.CompleteCommand(ctx, closeOwner, operation.Result{Code: operation.ResultSucceeded}, f.matter, claimTestID(105), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatalf("complete gate close: %v", err)
@@ -247,7 +247,7 @@ func TestGateDeclareAndCloseUseAuthorityProjectionAndExactReplay(t *testing.T) {
 	if err = checkStep13State(f.s.db); err != nil {
 		t.Fatalf("event-derived Step 13 projection validation: %v", err)
 	}
-	replayed, err := f.s.SubmitCommand(ctx, close, closeHash, f.peer, f.now)
+	replayed, err := f.s.SubmitCommand(ctx, closeCommand, closeHash, f.peer, f.now)
 	if err != nil || replayed.Pending || !bytes.Equal(replayed.Receipt, closed.Receipt) {
 		t.Fatalf("exact close replay changed receipt: status=%+v err=%v", replayed, err)
 	}
@@ -396,9 +396,9 @@ func TestMatterFinishAfterGateCloseSealsDespiteUnfinishedDescendant(t *testing.T
 		"id": stageID, "matter_id": f.matter, "locator": "still-unfinished", "title": "Still unfinished", "sort_key": int64(1000), "state": "planned",
 	}, 107)
 
-	close := step12Command(f, 16, 7, operation.GateCloseV1,
+	closeCommand := step12Command(f, 16, 7, operation.GateCloseV1,
 		operation.GateCloseInput{Gate: "matter-review", NodeID: f.matter}, allocation.ClaimID)
-	closeOwner := submitGateOperation(t, f, close)
+	closeOwner := submitGateOperation(t, f, closeCommand)
 	closed, err := f.s.CompleteCommand(ctx, closeOwner, operation.Result{Code: operation.ResultSucceeded}, f.matter, claimTestID(108), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatalf("close Matter gate before finish: %v", err)
@@ -670,9 +670,9 @@ func TestGateDeclareNoopAndCloseRefusalDoNotAppendEvents(t *testing.T) {
 		t.Fatalf("projection after declaration no-op: %v", err)
 	}
 
-	close := step12Command(f, 14, 5, operation.GateCloseV1,
+	closeCommand := step12Command(f, 14, 5, operation.GateCloseV1,
 		operation.GateCloseInput{Gate: "reviewed-local", NodeID: f.matter}, allocation.ClaimID)
-	closeOwner := submitGateOperation(t, f, close)
+	closeOwner := submitGateOperation(t, f, closeCommand)
 	closed, err := f.s.CompleteCommand(ctx, closeOwner, operation.Result{Code: operation.ResultSucceeded}, f.matter, claimTestID(105), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatal(err)
@@ -850,9 +850,9 @@ func TestGateProjectionFailureRollsBackEventAndReceipt(t *testing.T) {
 	}
 	claimTestAcknowledge(t, f, allocation.JournalID, 1, declared)
 
-	close := step12Command(f, 13, 4, operation.GateCloseV1,
+	closeCommand := step12Command(f, 13, 4, operation.GateCloseV1,
 		operation.GateCloseInput{Gate: "reviewed-local", NodeID: f.matter}, allocation.ClaimID)
-	owner := submitGateOperation(t, f, close)
+	owner := submitGateOperation(t, f, closeCommand)
 	var before int
 	if err = f.s.db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=?`, domainA).Scan(&before); err != nil {
 		t.Fatal(err)
@@ -871,7 +871,7 @@ func TestGateProjectionFailureRollsBackEventAndReceipt(t *testing.T) {
 	if err = f.s.db.QueryRow(`SELECT count(*) FROM m6_gate_states WHERE domain_id=? AND node_id=? AND gate=?`, domainA, f.matter, "reviewed-local").Scan(&stateCount); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.s.db.QueryRow(`SELECT count(*) FROM terminal_receipts WHERE domain_id=? AND command_id=?`, domainA, close.ID).Scan(&receiptCount); err != nil {
+	if err = f.s.db.QueryRow(`SELECT count(*) FROM terminal_receipts WHERE domain_id=? AND command_id=?`, domainA, closeCommand.ID).Scan(&receiptCount); err != nil {
 		t.Fatal(err)
 	}
 	if after != before || stateCount != 0 || receiptCount != 0 {
@@ -899,9 +899,9 @@ func TestGateRoleOwnershipRefusesHumanAndUnprovableRoleActor(t *testing.T) {
 	}
 	claimTestAcknowledge(t, f, allocation.JournalID, 1, declared)
 
-	close := step12Command(f, 13, 4, operation.GateCloseV1,
+	closeCommand := step12Command(f, 13, 4, operation.GateCloseV1,
 		operation.GateCloseInput{Gate: "verified", NodeID: f.matter}, allocation.ClaimID)
-	owner = submitGateOperation(t, f, close)
+	owner = submitGateOperation(t, f, closeCommand)
 	human, err := f.s.CompleteCommand(ctx, owner, operation.Result{Code: operation.ResultSucceeded}, f.matter, claimTestID(105), f.now, signWith(f.key))
 	if err != nil {
 		t.Fatal(err)

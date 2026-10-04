@@ -91,7 +91,7 @@ func TestBatchSweepNoEventReceiptInstallationIsExact(t *testing.T) {
 
 func TestBatchSweepTerminalReceiptOutcomeMatchesEventRange(t *testing.T) {
 	journal := openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	entry := prepareBatchSweepReceiptTestCommand(t, journal)
 	for _, test := range []struct {
 		outcome string
@@ -263,7 +263,7 @@ func TestBatchSweepReopenRejectsSubstitutedEvent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer tx.Rollback()
+			defer func() { _ = tx.Rollback() }()
 			if _, err := tx.Exec(`DROP TRIGGER installed_event_no_update`); err != nil {
 				t.Fatal(err)
 			}

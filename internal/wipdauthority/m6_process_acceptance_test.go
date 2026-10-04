@@ -108,7 +108,7 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func(journal *wipdjournal.Journal) { _ = journal.Close() }(journal)
 	birthRelease, err := journal.BirthReleaseAttempt(m5TwoEnvironmentID(32))
 	if err != nil {
 		t.Fatalf("read durable birth-release sequence: %v", err)
@@ -299,7 +299,7 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen installed Environment journal after process shutdown: %v", err)
 	}
-	defer journal.Close()
+	defer func(journal *wipdjournal.Journal) { _ = journal.Close() }(journal)
 	installed, err := journal.InstallSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -395,8 +395,14 @@ func TestM6LifecycleCommandsThroughWipdProcess(t *testing.T) {
 	}
 	for _, terminal := range []struct {
 		id string
-	}{{m5TwoEnvironmentID(47)}, {m5TwoEnvironmentID(48)}, {m5TwoEnvironmentID(39)}, {m5TwoEnvironmentID(40)},
-		{m5TwoEnvironmentID(49)}, {m5TwoEnvironmentID(50)}} {
+	}{
+		{m5TwoEnvironmentID(47)},
+		{m5TwoEnvironmentID(48)},
+		{m5TwoEnvironmentID(39)},
+		{m5TwoEnvironmentID(40)},
+		{m5TwoEnvironmentID(49)},
+		{m5TwoEnvironmentID(50)},
+	} {
 		receipt, found := installed.Receipts[terminal.id]
 		if !found || receipt.ResultCode != operation.ResultSucceeded || len(receipt.CanonicalReceipt) == 0 {
 			t.Fatalf("installed terminal receipt for %s = %+v (found=%v)", terminal.id, receipt, found)

@@ -880,7 +880,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				}
 				break
 			}
-			if !(operation.Step4Operation(entry.Command.Request.Operation) || operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
+			if (!operation.Step4Operation(entry.Command.Request.Operation) && !operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
 				return "", ErrCommandStartIdentity
 			}
 			count, countOK := accepted["event_count"].(uint64)

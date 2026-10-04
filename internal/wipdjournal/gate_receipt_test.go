@@ -12,9 +12,11 @@ func TestGateDeclarationNoEventReceiptIsExactAndExclusive(t *testing.T) {
 	id := testCommandPrefix + "73"
 	entry := Entry{Command: operation.Command{
 		ID: id, AuthorityDomainID: testDomainID, ExpectedAuthorityEpoch: 7, EnvironmentID: testEnvironmentID,
-		Request: operation.Request{Operation: operation.GateDeclareV1.Metadata().Operation, Actor: "human",
+		Request: operation.Request{
+			Operation: operation.GateDeclareV1.Metadata().Operation, Actor: "human",
 			Context: operation.Context{Repo: testRepoID, Clone: id, Worktree: id}, Claim: &operation.ClaimContext{ID: id, Epoch: "1"},
-			Input: operation.GateDeclareInput{Gate: "local-check", Scale: "stage"}},
+			Input: operation.GateDeclareInput{Gate: "local-check", Scale: "stage"},
+		},
 	}, RequestHash: hydrationDigest([]byte("declaration")), EnvironmentSeq: 9}
 	for _, mutation := range []string{"valid", "wrong-gate", "wrong-scale", "extra-output", "output-type", "non-success", "problem", "event-range", "close-operation"} {
 		t.Run(mutation, func(t *testing.T) {

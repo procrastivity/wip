@@ -261,16 +261,15 @@ func checkStep4State(db *sql.DB) error {
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
 					return ErrInvalidStore
 				}
-			} else if gateNoop {
-				// Gate command validation below binds no-op output to the current projection.
-			} else if s.operation == "matter.create" || s.operation == "step.create" {
+			} else if !gateNoop && (s.operation == "matter.create" || s.operation == "step.create") {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
 					return ErrInvalidStore
 				}
-			} else {
+			} else if !gateNoop {
 				return ErrInvalidStore
 			}
+			// Gate command validation below binds no-op output to the current projection.
 		} else if (code == "result.rejected" || code == "result.refused" || code == "result.failed") && !first.Valid && !last.Valid && r.Range == nil && r.Result.Output == nil && r.Result.Problem != nil {
 			prefix := string(*r.Result.Problem)
 			if !validResultProblem(code, prefix) {

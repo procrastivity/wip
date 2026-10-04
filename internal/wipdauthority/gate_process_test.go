@@ -313,7 +313,7 @@ func runOrdinaryGateProcess(t *testing.T, scenario, ackLoss string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	for index, item := range commands {
 		receipt, found := installed.Receipts[item.ID]
 		status, err := fixture.store.QueryCommand(ctx, m5TestDomain, item.ID, m5CommandHash(t, item), 1, fixture.peer, m5TestEnv, time.Now())

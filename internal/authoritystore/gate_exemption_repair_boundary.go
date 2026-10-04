@@ -168,18 +168,18 @@ func captureGateRepairFence(ctx context.Context, tx *sql.Tx, command gateExempti
 		return snapshot, nil, ErrInvalidStore
 	}
 	snapshot.activeEpoch = uint64(active)
-	var close sql.NullString
+	var closeCommandID sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT c.authority_epoch,c.claim_epoch,c.owner_environment_id,m.repo_id,c.worktree_id,c.matter_id,c.close_command_id
 		FROM claims c JOIN matters m ON m.domain_id=c.domain_id AND m.matter_id=c.matter_id
 		WHERE c.domain_id=? AND c.claim_id=?`, command.DomainID, command.ClaimID).Scan(
 		&snapshot.claimAuthorityEpoch, &snapshot.claimEpoch, &snapshot.ownerEnvironmentID, &snapshot.repoID,
-		&snapshot.worktreeID, &snapshot.matterID, &close); err != nil {
+		&snapshot.worktreeID, &snapshot.matterID, &closeCommandID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return snapshot, nil, ErrInvalidStore
 		}
 		return snapshot, nil, err
 	}
-	snapshot.closeCommandID = close.String
+	snapshot.closeCommandID = closeCommandID.String
 	if err := tx.QueryRowContext(ctx, `SELECT journal_id,generation,state FROM claim_journals
 		WHERE domain_id=? AND claim_id=? AND generation=(SELECT max(generation) FROM claim_journals WHERE domain_id=? AND claim_id=?)`,
 		command.DomainID, command.ClaimID, command.DomainID, command.ClaimID).Scan(
