@@ -400,6 +400,18 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
+	if app.m6 && operation.Step8Operation(command.Request.Operation) {
+		now := time.Now().UTC()
+		eventID, err := randomULID(now)
+		if err != nil {
+			return nil, err
+		}
+		// The authority transaction owns guards, assigned edge identity,
+		// policy snapshots, and the exact success/refusal output.
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result: operation.Result{Code: operation.ResultSucceeded}, EventID: eventID, Occurred: now,
+		})
+	}
 	if app.m6 && operation.Step4Operation(command.Request.Operation) {
 		completion, err := app.step4Completion(command)
 		if err != nil {

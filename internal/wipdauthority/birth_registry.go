@@ -60,6 +60,25 @@ func NewM6Step7Registry() (*operation.Registry, error) {
 	return registry, nil
 }
 
+// NewM6Step8Registry extends only the explicit Step 7 acceptance set with
+// unclaimed authority dependency/reference transactions.
+func NewM6Step8Registry() (*operation.Registry, error) {
+	registry, err := NewM6Step7Registry()
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range operation.Step8Catalogue() {
+		if err = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "dependency/reference operation requires its authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
+}
+
 func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {

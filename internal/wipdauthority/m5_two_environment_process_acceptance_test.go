@@ -616,7 +616,7 @@ func prepareM5ProcessEnvironment(t *testing.T, fixture *m5CommandFixture, parent
 		OwnerRootPublicKey: bytes.Clone(fixture.ownerRoot), ArtifactKeyCertificate: bytes.Clone(fixture.config.ArtifactKeyCertificate),
 		ClientStateDirectory: environment.clientStateRoot,
 	}
-	if len(catalogue) > 1 || len(catalogue) == 1 && catalogue[0] != "m6-step5" && catalogue[0] != "m6-step7" {
+	if len(catalogue) > 1 || len(catalogue) == 1 && catalogue[0] != "m6-step5" && catalogue[0] != "m6-step7" && catalogue[0] != "m6-step8" {
 		return environment, fmt.Errorf("unsupported connected command catalogue %q", catalogue)
 	}
 	if len(catalogue) == 1 {

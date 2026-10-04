@@ -48,6 +48,7 @@ type Client struct {
 	hello      serverHello
 	parameters sessionParameters
 	m6         bool
+	step8      bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -84,7 +85,17 @@ func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true)
+	return connectProfileCapabilities(ctx, profile, true, false)
+}
+
+// ConnectM6Step8 explicitly offers the dependency/reference acceptance set.
+// Connect and ConnectM6 retain their M5 and Step 7 capability offers.
+func ConnectM6Step8(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -401,10 +412,10 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
-	return connectProfileCapabilities(ctx, profile, false)
+	return connectProfileCapabilities(ctx, profile, false, false)
 }
 
-func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6 bool) (*Client, error) {
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8 bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -416,6 +427,7 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 	client := &Client{
 		transport: transport,
 		m6:        m6,
+		step8:     step8,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -490,6 +502,14 @@ func (c *Client) negotiate(ctx context.Context) error {
 				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
 			})
 		}
+		if c.step8 {
+			for _, definition := range operation.Step8Catalogue() {
+				id := definition.Metadata().Operation
+				operations = append(operations, map[string]any{
+					"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+				})
+			}
+		}
 		sort.Slice(operations, func(i, j int) bool {
 			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
 		})
@@ -554,6 +574,15 @@ func (c *Client) negotiate(ctx context.Context) error {
 	}
 	if !c.m6 && containsString(hello.features, wipdwire.CommandSubmitV2Feature) {
 		return errUnsupportedExtension
+	}
+	if !c.step8 {
+		for _, capability := range hello.operations {
+			for _, version := range capability.versions {
+				if operation.Step8Operation(operation.ID{Name: capability.name, Version: version}) {
+					return errInvalidCapabilities
+				}
+			}
+		}
 	}
 	parameters, err := decodeSessionParameters(second.payload)
 	if err != nil {
@@ -628,7 +657,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.BatchSweepAnonymousV1.Metadata().Operation:
 		return true
 	default:
-		return operation.Step4Operation(id) || operation.Step5Operation(id)
+		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id)
 	}
 }
 

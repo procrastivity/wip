@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/wipdauthority"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -69,6 +70,7 @@ type ClientState struct {
 	StepProjections    []json.RawMessage            `json:"step_projections"`
 	ContentProjections []json.RawMessage            `json:"content_projections,omitempty"`
 	GateProjection     *step7GateProjection         `json:"step7_gate_projection,omitempty"`
+	Step8Projection    *wipdjournal.Step8Projection `json:"step8_projection,omitempty"`
 }
 
 // PrepareIdentity creates a private Environment key and CSR. The caller keeps

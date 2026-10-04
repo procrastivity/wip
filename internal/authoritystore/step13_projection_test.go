@@ -541,9 +541,12 @@ func TestStep13FoldRejectsCloseAfterSnapshotExemption(t *testing.T) {
 func TestStep13ReferenceReboundCarriesLevelAndProjectsBothCandidates(t *testing.T) {
 	nodes, events, _, _, dismissed, from := step13FoldFixture()
 	const to = "TRACKER-18"
-	events = append(events, step13TestEvent(17, "reference.rebound", dismissed, map[string]any{
-		"from": from, "to": to, "tracker_push_level": "narrated",
-	}))
+	events = append(events,
+		step13TestEvent(17, "config.set", repoA, map[string]any{"key": "tracker.push-level", "value": "narrated"}),
+		step13TestEvent(18, "reference.rebound", dismissed, map[string]any{
+			"from": from, "to": to, "tracker_push_level": "narrated",
+		}),
+	)
 	projection, err := deriveStep13Projection(nodes, events)
 	if err != nil {
 		t.Fatalf("valid narrated reference.rebound rejected: %v", err)
@@ -554,8 +557,8 @@ func TestStep13ReferenceReboundCarriesLevelAndProjectsBothCandidates(t *testing.
 	}
 	oldReference := references[ownerKey(domainA, dismissed)+"/"+from]
 	newReference := references[ownerKey(domainA, dismissed)+"/"+to]
-	if oldReference.removed != claimTestID(317) || oldReference.last != claimTestID(317) ||
-		newReference.removed != "" || newReference.birth != claimTestID(317) || newReference.last != claimTestID(317) {
+	if oldReference.removed != claimTestID(318) || oldReference.last != claimTestID(318) ||
+		newReference.removed != "" || newReference.birth != claimTestID(318) || newReference.last != claimTestID(318) {
 		t.Fatalf("rebound reference history was not retained: old=%+v new=%+v", oldReference, newReference)
 	}
 	aggregates := make(map[string]step13AggregateRow)
@@ -567,12 +570,12 @@ func TestStep13ReferenceReboundCarriesLevelAndProjectsBothCandidates(t *testing.
 		t.Fatalf("rebound did not split the shared tracker aggregate: %+v", aggregates)
 	}
 	want := map[string]string{
-		"tracker:" + claimTestID(317) + ":state:" + from: `{"disposition":"completed"}`,
-		"tracker:" + claimTestID(317) + ":state:" + to:   `{"disposition":"completed"}`,
+		"tracker:" + claimTestID(318) + ":state:" + from: `{"disposition":"completed"}`,
+		"tracker:" + claimTestID(318) + ":state:" + to:   `{"disposition":"completed"}`,
 	}
 	for _, candidate := range projection.candidates {
 		if payload, ok := want[candidate.key]; ok {
-			if candidate.payload != payload || candidate.event != claimTestID(317) {
+			if candidate.payload != payload || candidate.event != claimTestID(318) {
 				t.Fatalf("wrong rebound candidate: %+v", candidate)
 			}
 			delete(want, candidate.key)
@@ -832,5 +835,89 @@ func TestStep13RebuildIsIdempotentAndOpenRejectsDivergentProjection(t *testing.T
 	}
 	if _, err = OpenExisting(f.root); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("reopen accepted divergent projection: %v", err)
+	}
+}
+
+func TestStep13LegacyReferenceBoundRemainsSingletonReplacement(t *testing.T) {
+	matter := claimTestID(71)
+	node := step12Node{
+		domain: domainA, id: matter, kind: "matter", repo: repoA, matter: matter,
+		birth: claimTestID(301), last: claimTestID(301),
+	}
+	nodes := map[string]step13Node{ownerKey(domainA, matter): {node: node, birthPos: 1}}
+	events := []step13Event{
+		step13TestEvent(2, "reference.bound", matter, map[string]any{"ref": "legacy/one"}),
+		step13TestEvent(3, "reference.bound", matter, map[string]any{"ref": "legacy/two"}),
+	}
+	projection, err := deriveStep13Projection(nodes, events)
+	if err != nil {
+		t.Fatalf("derive legacy singleton replacements: %v", err)
+	}
+	if len(projection.references) != 2 || len(projection.aggregates) != 1 || projection.aggregates[0].ref != "legacy/two" ||
+		projection.aggregates[0].members != 1 || projection.aggregates[0].disposition != "" {
+		t.Fatalf("legacy replacement did not leave one active aggregate: %+v", projection)
+	}
+	old, current := projection.references[0], projection.references[1]
+	if old.ref != "legacy/one" || old.removed != claimTestID(303) || old.birth != claimTestID(302) || old.last != claimTestID(303) ||
+		current.ref != "legacy/two" || current.removed != "" || current.birth != claimTestID(303) || current.last != claimTestID(303) {
+		t.Fatalf("legacy replacement membership history changed: old=%+v current=%+v", old, current)
+	}
+}
+
+func TestStep13ReferenceAggregateIsDomainWideButDomainScoped(t *testing.T) {
+	matterA, matterB, matterOtherDomain := claimTestID(72), claimTestID(73), claimTestID(74)
+	ref := "shared/ref"
+	nodes := map[string]step13Node{
+		ownerKey(domainA, matterA):           {node: step12Node{domain: domainA, id: matterA, kind: "matter", repo: repoA, matter: matterA}, birthPos: 1},
+		ownerKey(domainA, matterB):           {node: step12Node{domain: domainA, id: matterB, kind: "matter", repo: repoB, matter: matterB}, birthPos: 1},
+		ownerKey(domainB, matterOtherDomain): {node: step12Node{domain: domainB, id: matterOtherDomain, kind: "matter", repo: repoC, matter: matterOtherDomain}, birthPos: 1},
+	}
+	otherDomainEvent := step13TestEvent(5, "reference.added", matterOtherDomain, map[string]any{"ref": ref})
+	otherDomainEvent.domain, otherDomainEvent.repo = domainB, repoC
+	crossRepoEvent := step13TestEvent(3, "reference.added", matterB, map[string]any{"ref": ref})
+	crossRepoEvent.repo = repoB
+	projection, err := deriveStep13Projection(nodes, []step13Event{
+		step13TestEvent(2, "reference.added", matterA, map[string]any{"ref": ref}),
+		crossRepoEvent,
+		otherDomainEvent,
+	})
+	if err != nil {
+		t.Fatalf("derive cross-Repo/domain shared reference: %v", err)
+	}
+	aggregates := make(map[string]step13AggregateRow)
+	for _, aggregate := range projection.aggregates {
+		aggregates[aggregate.domain] = aggregate
+	}
+	if len(aggregates) != 2 || aggregates[domainA].ref != ref || aggregates[domainA].members != 2 ||
+		aggregates[domainB].ref != ref || aggregates[domainB].members != 1 {
+		t.Fatalf("shared reference identity is not (domain, ref): %+v", projection.aggregates)
+	}
+}
+
+func TestStep13ReferenceCandidateUsesEventPushSnapshotAfterLaterConfigChange(t *testing.T) {
+	matter, ref := claimTestID(75), "snapshot/ref"
+	node := step12Node{
+		domain: domainA, id: matter, kind: "matter", repo: repoA, matter: matter,
+		birth: claimTestID(301), last: claimTestID(301),
+	}
+	nodes := map[string]step13Node{ownerKey(domainA, matter): {node: node, birthPos: 1}}
+	projection, err := deriveStep13Projection(nodes, []step13Event{
+		step13TestEvent(2, "matter.started", matter, map[string]any{
+			"from": "planned", "to": "in-progress", "tracker_push_level": "off",
+		}),
+		step13TestEvent(3, "config.set", repoA, map[string]any{"key": "tracker.push-level", "value": "boundary"}),
+		step13TestEvent(4, "reference.added", matter, map[string]any{
+			"ref": ref, "tracker_push_level": "boundary",
+		}),
+		step13TestEvent(5, "config.set", repoA, map[string]any{"key": "tracker.push-level", "value": "off"}),
+	})
+	if err != nil {
+		t.Fatalf("derive event-snapshotted reference candidate: %v", err)
+	}
+	if len(projection.config) != 1 || projection.config[0].value != "off" || projection.config[0].event != claimTestID(305) ||
+		len(projection.candidates) != 1 || projection.candidates[0].kind != "state" || projection.candidates[0].ref != ref ||
+		projection.candidates[0].event != claimTestID(304) || projection.candidates[0].payload != `{"disposition":"active"}` {
+		t.Fatalf("later mutable config changed the reference event snapshot/candidate: config=%+v candidates=%+v",
+			projection.config, projection.candidates)
 	}
 }

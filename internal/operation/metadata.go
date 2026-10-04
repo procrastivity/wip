@@ -111,6 +111,10 @@ const (
 	FootprintTrackerReferences Footprint = "tracker.references"
 	// TrackerSharedAggregates reads and updates cross-Matter membership/disposition for candidates.
 	FootprintTrackerSharedAggregates Footprint = "tracker.shared-aggregates"
+	FootprintDependencyEndpoints     Footprint = "dependency.endpoints"
+	FootprintDependencyGraph         Footprint = "dependency.graph"
+	FootprintDependencyEdge          Footprint = "dependency.edge"
+	FootprintMatterTrackerReferences Footprint = "matter.tracker-references"
 )
 
 // BlobSpec statically names one accepted staged blob input.

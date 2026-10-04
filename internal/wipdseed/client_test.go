@@ -2303,37 +2303,33 @@ func TestClientSeedFoldPersistsStrictGateProjectionAndFinishOrdering(t *testing.
 	}
 }
 
-func TestClientSeedFoldFailsClosedForUnrepresentedStep13Effects(t *testing.T) {
+func TestClientSeedFoldRepresentsStep13EffectsAndRejectsFalseSnapshot(t *testing.T) {
 	records := step7ClientGateHistory(t)
-	deferred := []struct {
-		name    string
-		record  wipdwire.EventRecord
-		message string
+	represented := []struct {
+		name   string
+		record wipdwire.EventRecord
 	}{
 		{
-			name:    "Repo config",
-			record:  step7ClientTestEvent(t, 513, 411, 12, "config.set", testRepoID, map[string]any{"key": "tracker.push-level", "value": "narrated"}),
-			message: "Repo config projection is deferred",
+			name:   "Repo config",
+			record: step7ClientTestEvent(t, 513, 411, 12, "config.set", testRepoID, map[string]any{"key": "tracker.push-level", "value": "narrated"}),
 		},
 		{
-			name:    "shared reference",
-			record:  step7ClientTestEvent(t, 513, 411, 12, "reference.added", "00000000000000000000000041", map[string]any{"ref": "TRACKER-17"}),
-			message: "shared-reference, aggregate, and candidate projections are deferred",
+			name:   "shared reference",
+			record: step7ClientTestEvent(t, 513, 411, 12, "reference.added", "00000000000000000000000041", map[string]any{"ref": "TRACKER-17"}),
 		},
 	}
-	for _, test := range deferred {
+	for _, test := range represented {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := append(cloneEventRecords(records), test.record)
-			if _, _, _, err := foldEventRecords(candidate, testDomainID); !errors.Is(err, ErrInvalidClientState) || !strings.Contains(err.Error(), test.message) {
-				t.Fatalf("unsupported Step 13 effect was not explicitly refused: %v", err)
+			if _, _, _, err := foldEventRecords(candidate, testDomainID); err != nil {
+				t.Fatalf("represented Step 13 effect refused: %v", err)
 			}
 		})
 	}
 	trackerCandidate := append(cloneEventRecords(records[:8]), step7ClientTestEvent(t, 508, 406, 7, "gate.closed",
 		"00000000000000000000000041", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "narrated"}))
-	if _, _, _, err := foldEventRecords(trackerCandidate, testDomainID); !errors.Is(err, ErrInvalidClientState) ||
-		!strings.Contains(err.Error(), "tracker candidate projection is deferred") {
-		t.Fatalf("gate tracker candidate effect was silently accepted: %v", err)
+	if _, _, _, err := foldEventRecords(trackerCandidate, testDomainID); !errors.Is(err, ErrInvalidClientState) {
+		t.Fatalf("gate snapshot without matching config accepted: %v", err)
 	}
 }
 
@@ -2573,8 +2569,10 @@ func step7ClientRepairTransferFrames(t *testing.T, kind string, all, prior []wip
 	}
 	frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: uint64(len(frames)), Kind: "blob.manifest", Payload: mustEncode(t, manifest)})
 	if kind == "seed" {
-		end := wipdwire.SeedEnd{Schema: "wipd.seed-end/1", TransferID: transferID,
-			VerifiedPrefix: endAnchor, ManifestDigest: manifestDigest, Complete: true}
+		end := wipdwire.SeedEnd{
+			Schema: "wipd.seed-end/1", TransferID: transferID,
+			VerifiedPrefix: endAnchor, ManifestDigest: manifestDigest, Complete: true,
+		}
 		frames = append(frames, wipdwire.Frame{RequestID: requestID, Sequence: uint64(len(frames)), Kind: "seed.end", Payload: mustEncode(t, end)})
 	} else {
 		end := wipdwire.PullEnd{TransferID: transferID, VerifiedPrefix: endAnchor, ManifestDigest: manifestDigest, Complete: true}

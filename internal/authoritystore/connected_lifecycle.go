@@ -386,6 +386,11 @@ func (s *Store) completeM6LifecycleTx(ctx context.Context, tx *sql.Tx, c *lifecy
 			output = operation.MatterLifecycleOutput{MatterID: c.matter, State: to}
 		}
 	}
+	if c.name != "matter.finish" {
+		if err := step13ProjectionTx(ctx, tx); err != nil {
+			return empty, err
+		}
+	}
 	definition, ok := connectedLifecycleDefinition(operation.ID{Name: c.name, Version: 1})
 	result := operation.Result{Code: operation.ResultSucceeded, Output: output}
 	if !ok || definition.ValidateResult(result) != nil || used == 0 {

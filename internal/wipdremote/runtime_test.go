@@ -142,6 +142,23 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 	if err = validateConfig(config); err != nil {
 		t.Fatalf("rejected explicit Step 7 profile: %v", err)
 	}
+	step8, err := registryForConfig(Config{CommandCatalogue: "m6-step8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.CommandCatalogue = "m6-step8"
+	if err = validateConfig(config); err != nil {
+		t.Fatalf("rejected explicit Step 8 profile: %v", err)
+	}
+	if len(step8.Definitions()) != len(step7.Definitions())+5 {
+		t.Fatal("Step 8 widened beyond its five operations")
+	}
+	for _, definition := range operation.Step8Catalogue() {
+		id := definition.Metadata().Operation
+		if hasCommand(m5, id) || hasCommand(m6, id) || hasCommand(step7, id) || !hasCommand(step8, id) {
+			t.Fatalf("%s is not isolated to explicit m6-step8", id)
+		}
+	}
 }
 
 func hasCommand(registry *operation.Registry, command operation.ID) bool {

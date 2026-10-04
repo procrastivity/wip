@@ -469,6 +469,80 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return GateDismissInput{Gate: gate, NodeID: nodeID, Reason: reason}, nil
+	case DependencyAddV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		return DependencyAddInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case DependencyRemoveV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		return DependencyRemoveInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case ReferenceBindV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		return ReferenceBindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceUnbindV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		return ReferenceUnbindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceRebindV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "from", "to")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		from, err := commandString(fields, "from")
+		if err != nil {
+			return nil, err
+		}
+		to, err := commandString(fields, "to")
+		if err != nil {
+			return nil, err
+		}
+		return ReferenceRebindInput{MatterID: matter, From: from, To: to}, nil
 	case GateExemptionRepairV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "node_id", "gate", "event_count", "high_water_event_id", "prefix_digest", "incident_ref", "reason", "evidence_refs")
 		if err != nil {

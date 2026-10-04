@@ -73,6 +73,14 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 			fields["output"] = encoded
 			return encodePayload(fields)
 		default:
+			if operation.Step8Operation(id) {
+				encodedOutput, err := encodeStep8Output(id, result.Output)
+				if err != nil {
+					return nil, err
+				}
+				fields["output"] = encodedOutput
+				return encodePayload(fields)
+			}
 			if operation.Step5Operation(id) {
 				encodedOutput, err := encodeStep5Output(id, result.Output)
 				if err != nil {
@@ -233,6 +241,13 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, err
 			}
 		default:
+			if operation.Step8Operation(id) {
+				result.Output, err = decodeStep8Output(id, encodedOutput)
+				if err != nil {
+					return operation.Result{}, err
+				}
+				break
+			}
 			if operation.Step5Operation(id) {
 				result.Output, err = decodeStep5Output(id, encodedOutput)
 				if err != nil {

@@ -178,7 +178,8 @@ func TestGateHistoryTransferShapesStayClosed(t *testing.T) {
 		{"dismissed", "gate.dismissed", map[string]any{"gate": "reviewed", "scale": "matter", "reason": "obsolete"}, true},
 		{"dismiss-empty-reason", "gate.dismissed", map[string]any{"gate": "reviewed", "scale": "matter", "reason": " "}, false},
 		{"tracker-off", "gate.closed", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "off"}, true},
-		{"tracker-boundary", "gate.closed", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "boundary"}, false},
+		{"tracker-boundary", "gate.closed", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "boundary"}, true},
+		{"tracker-invalid", "gate.closed", map[string]any{"gate": "reviewed", "scale": "matter", "tracker_push_level": "unknown"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			id := testCommandPrefix + "73"

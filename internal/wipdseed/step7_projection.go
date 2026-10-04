@@ -1,7 +1,6 @@
 package wipdseed
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -41,43 +40,6 @@ type step7GateDeclarationAt struct {
 	eligibleNodes map[string]bool
 }
 
-func step7ClientTransferBoundary(kind string, fields map[string]any) error {
-	switch kind {
-	case "config.set":
-		return fmt.Errorf("%w: Repo config projection is deferred for client-state/1", ErrInvalidClientState)
-	case "reference.bound", "reference.added", "reference.removed", "reference.rebound":
-		return fmt.Errorf("%w: shared-reference, aggregate, and candidate projections are deferred for client-state/1", ErrInvalidClientState)
-	}
-	if kind == "gate.closed" || kind == "gate.dismissed" {
-		payload, ok := fields["payload"].(map[string]any)
-		if !ok {
-			return ErrInvalidClientState
-		}
-		if level, exists := payload["tracker_push_level"]; exists {
-			value, ok := level.(string)
-			if !ok {
-				return ErrInvalidClientState
-			}
-			if value != "off" {
-				return fmt.Errorf("%w: tracker candidate projection is deferred for client-state/1", ErrInvalidClientState)
-			}
-		}
-	}
-	if step7LifecycleEvent(kind) {
-		payload, ok := fields["payload"].(map[string]any)
-		if !ok {
-			return ErrInvalidClientState
-		}
-		if level, exists := payload["tracker_push_level"]; exists {
-			value, ok := level.(string)
-			if !ok || value != "off" {
-				return fmt.Errorf("%w: tracker candidate projection is deferred for client-state/1", ErrInvalidClientState)
-			}
-		}
-	}
-	return nil
-}
-
 func step7LifecycleEvent(kind string) bool {
 	scale, verb, ok := strings.Cut(kind, ".")
 	return ok && (scale == "matter" || scale == "stage" || scale == "step") &&
@@ -96,9 +58,6 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 		kind, ok := fields["kind"].(string)
 		if !ok {
 			return nil, ErrInvalidClientState
-		}
-		if err = step7ClientTransferBoundary(kind, fields); err != nil {
-			return nil, err
 		}
 		events[index] = fields
 		payload, ok := fields["payload"].(map[string]any)
@@ -131,9 +90,6 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 			}
 			node.tombstone = position
 			nodes[subject] = node
-		case "config.set", "reference.bound", "reference.added", "reference.removed", "reference.rebound":
-			// The boundary helper above returns a typed fail-closed result.
-			return nil, ErrInvalidClientState
 		}
 	}
 	if len(nodes) == 0 {
@@ -252,7 +208,7 @@ func foldStep7GateProjection(records []wipdwire.EventRecord, domainID string) (*
 			key := subject + "\x00" + gate
 			if !wipdwire.ExactMapKeys(payload, required...) && !wipdwire.ExactMapKeys(payload, withTrackerLevel...) ||
 				gate == "" || !step7Scale(scale) ||
-				hasLevel && (!levelOK || level != "off") ||
+				hasLevel && (!levelOK || !clientPushLevel(level)) ||
 				!found || node.repo != repo || node.kind != scale || node.birth >= position || !step7ClientNodeLiveAt(node, position) ||
 				!declared || declaration.Scale != scale {
 				return nil, ErrInvalidClientState

@@ -697,6 +697,9 @@ func validateInput(identity Identity, input CommandInput) (operation.DeliveryCla
 }
 
 func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
+	if definition, known := step8Definition(id); known {
+		return definition, true
+	}
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
 	}
