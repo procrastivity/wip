@@ -203,6 +203,9 @@ func commandIdentityDefinition(id ID) (Definition, bool) {
 	if id == BatchSweepAnonymousV1.Metadata().Operation {
 		return BatchSweepAnonymousV1, true
 	}
+	if definition, ok := step8ContractDefinition(id); ok {
+		return definition, true
+	}
 	for _, definition := range Catalogue() {
 		if definition.metadata.Operation == id {
 			return definition, true
@@ -278,6 +281,16 @@ func canonicalInput(input Input) (canonicalMap, error) {
 			"prefix_digest": input.PrefixDigest, "incident_ref": input.IncidentRef,
 			"reason": input.Reason, "evidence_refs": canonicalStrings(input.EvidenceRefs),
 		}, nil
+	case DependencyAddInput:
+		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}, nil
+	case DependencyRemoveInput:
+		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}, nil
+	case ReferenceBindInput:
+		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference}, nil
+	case ReferenceUnbindInput:
+		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference}, nil
+	case ReferenceRebindInput:
+		return canonicalMap{"matter_id": input.MatterID, "from": input.From, "to": input.To}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}

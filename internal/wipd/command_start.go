@@ -32,13 +32,14 @@ var (
 // command-start barrier. The implementation obtains the installed prefix,
 // terminal receipt index, and overlay revision from one read transaction.
 type CommandStartSnapshot struct {
-	DomainID       string
-	Epoch          uint64
-	EnvironmentID  string
-	Revision       uint64
-	Anchor         wipdwire.PrefixAnchor
-	ManifestDigest string
-	Receipts       map[string]InstalledCommandReceipt
+	DomainID        string
+	Epoch           uint64
+	EnvironmentID   string
+	Revision        uint64
+	Anchor          wipdwire.PrefixAnchor
+	ManifestDigest  string
+	Receipts        map[string]InstalledCommandReceipt
+	Step8Projection *wipdjournal.Step8Projection
 }
 
 // InstalledCommandReceipt is the local terminal evidence needed to decide
@@ -734,6 +735,11 @@ func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) 
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
 	}
+	for _, definition := range operation.Step8Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
 	return operationDefinition(id)
 }
 
@@ -867,6 +873,13 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				return "", ErrCommandStartIdentity
 			}
 		default:
+			if operation.Step8Operation(entry.Command.Request.Operation) {
+				count, countOK := accepted["event_count"].(uint64)
+				if !hasRange || !countOK || accepted["first_event_id"] != accepted["last_event_id"] || validateStep8Receipt(entry, outputBytes, count) != nil {
+					return "", ErrCommandStartIdentity
+				}
+				break
+			}
 			if !(operation.Step4Operation(entry.Command.Request.Operation) || operation.Step5Operation(entry.Command.Request.Operation)) || !hasRange {
 				return "", ErrCommandStartIdentity
 			}
@@ -1000,7 +1013,12 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			return operation.Result{}, ErrCommandStartIdentity
 		}
 	default:
-		if operation.Step5Operation(entry.Command.Request.Operation) {
+		if operation.Step8Operation(entry.Command.Request.Operation) {
+			typed, err = decodeStep8Output(entry.Command.Request.Operation, outputBytes)
+			if err != nil {
+				return operation.Result{}, ErrCommandStartIdentity
+			}
+		} else if operation.Step5Operation(entry.Command.Request.Operation) {
 			typed, err = decodeStep5Output(entry.Command.Request.Operation, outputBytes)
 			if err != nil {
 				return operation.Result{}, ErrCommandStartIdentity

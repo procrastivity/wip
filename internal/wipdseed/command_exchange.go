@@ -14,6 +14,7 @@ import (
 
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdauthority"
+	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -99,6 +100,15 @@ func (client *CommandExchangeClient) State() ClientState {
 	state.Projections = cloneRawMessages(state.Projections)
 	state.StepProjections = cloneRawMessages(state.StepProjections)
 	state.ContentProjections = cloneRawMessages(state.ContentProjections)
+	if state.Step8Projection != nil {
+		projection := *state.Step8Projection
+		projection.Dependencies = append(projection.Dependencies[:0:0], projection.Dependencies...)
+		projection.References = append(projection.References[:0:0], projection.References...)
+		projection.Aggregates = append(projection.Aggregates[:0:0], projection.Aggregates...)
+		projection.Candidates = append(projection.Candidates[:0:0], projection.Candidates...)
+		projection.ConfigHistory = append(projection.ConfigHistory[:0:0], projection.ConfigHistory...)
+		state.Step8Projection = &projection
+	}
 	return state
 }
 
@@ -305,6 +315,13 @@ func loadInstalledClientState(directory string, profile wipdauthority.Profile) (
 	if err = decoder.Decode(&state); err != nil || decoder.Decode(new(any)) != io.EOF || validateInstalledState(state, profile) != nil {
 		clear(state.PrivateKeyPKCS8)
 		return empty, ErrInvalidClientState
+	}
+	if state.Step8Projection == nil {
+		state.Step8Projection, err = wipdjournal.FoldStep8Projection(state.EventRecords, state.DomainID)
+		if err != nil {
+			clear(state.PrivateKeyPKCS8)
+			return empty, ErrInvalidClientState
+		}
 	}
 	return state, nil
 }

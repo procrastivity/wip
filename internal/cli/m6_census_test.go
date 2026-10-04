@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,7 +62,7 @@ func TestM6OperationCensus(t *testing.T) {
 		}
 	}
 	for id := range operationByID {
-		if !owned[id] {
+		if !owned[id] && operationByID[id]["status"] != "m6-step8-profile-only" {
 			t.Errorf("operation %s has no CLI mode or non-CLI owner", id)
 		}
 	}
@@ -352,7 +353,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		if !validCensusOperationID(id) {
 			t.Errorf("operation row %d has invalid versioned ID %q", index+1, id)
 		}
-		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "m6-step7-profile-only", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
+		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "m6-step7-profile-only", "m6-step8-profile-only", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
 			t.Errorf("%s has unsupported status %q", id, row["status"])
 		}
 		if row["status"] == "catalogued-m5" && !m5Operations[id] || row["status"] == "catalogued-m6" && !m6Operations[id] {
@@ -418,9 +419,43 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 				t.Errorf("%s is marked catalogued but is absent from operation.Catalogue()", id)
 			}
 		}
-		if row["status"] == "m6-step7-profile-only" || row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
+		if row["status"] == "m6-step7-profile-only" || row["status"] == "m6-step8-profile-only" || row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
 			if _, ok := actual[id]; ok {
 				t.Errorf("%s operation %s must remain outside operation.Catalogue()", row["status"], id)
+			}
+		}
+	}
+	step8Operations := map[string]operation.Metadata{
+		"dependency.add@v1":    operation.DependencyAddV1.Metadata(),
+		"dependency.remove@v1": operation.DependencyRemoveV1.Metadata(),
+		"reference.bind@v1":    operation.ReferenceBindV1.Metadata(),
+		"reference.unbind@v1":  operation.ReferenceUnbindV1.Metadata(),
+		"reference.rebind@v1":  operation.ReferenceRebindV1.Metadata(),
+	}
+	for id, metadata := range step8Operations {
+		row, exists := definitions[id]
+		wantStatus := "m6-step8-profile-only"
+		if !exists || row["status"] != wantStatus {
+			t.Errorf("%s is missing its %s census row", id, wantStatus)
+			continue
+		}
+		compareCensusMetadata(t, id, row, metadata)
+		if strings.HasPrefix(id, "reference.") {
+			if !slices.Contains(censusList(row["guards"]), string(operation.FootprintRepoTrackerPushConfig)) {
+				t.Errorf("%s census guards omit Repo tracker-push configuration", id)
+			}
+			if !slices.Contains(censusList(row["reads"]), "Repo-tracker-push-config") {
+				t.Errorf("%s census reads omit effective Repo tracker-push configuration", id)
+			}
+			if !slices.Contains(metadata.Guards, operation.FootprintRepoTrackerPushConfig) {
+				t.Errorf("%s contract metadata omits Repo tracker-push configuration guard", id)
+			}
+		}
+	}
+	for id, row := range definitions {
+		if row["status"] == "m6-step8-profile-only" {
+			if _, exists := step8Operations[id]; !exists {
+				t.Errorf("census has unknown Step 8 profile-only operation %s", id)
 			}
 		}
 	}

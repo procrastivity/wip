@@ -440,5 +440,8 @@ func UpgradeV15(root string) error {
 	if err = installBatchSweep(db); err != nil {
 		return err
 	}
+	if err = installDependencies(db); err != nil {
+		return err
+	}
 	return checkSchema(db)
 }

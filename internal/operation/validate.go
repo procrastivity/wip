@@ -127,6 +127,44 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("gate subject ID", input.NodeID); err != nil {
 			return err
 		}
+	case DependencyAddInput:
+		if err := validateULID("blocked Matter/Step ID", input.BlockedID); err != nil {
+			return err
+		}
+		if err := validateULID("blocker Matter/Step ID", input.BlockerID); err != nil {
+			return err
+		}
+	case DependencyRemoveInput:
+		if err := validateULID("blocked Matter/Step ID", input.BlockedID); err != nil {
+			return err
+		}
+		if err := validateULID("blocker Matter/Step ID", input.BlockerID); err != nil {
+			return err
+		}
+		if input.BlockedID == input.BlockerID {
+			return fmt.Errorf("dependency cannot block itself")
+		}
+	case ReferenceBindInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Reference) == "" {
+			return fmt.Errorf("tracker reference is empty")
+		}
+	case ReferenceUnbindInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Reference) == "" {
+			return fmt.Errorf("tracker reference is empty")
+		}
+	case ReferenceRebindInput:
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.From) == "" || strings.TrimSpace(input.To) == "" || input.From == input.To {
+			return fmt.Errorf("tracker rebind requires two distinct non-empty references")
+		}
 	case GateExemptionRepairInput:
 		if err := validateGateExemptionRepairInput(input); err != nil {
 			return err
@@ -293,6 +331,29 @@ func (d Definition) ValidateResult(result Result) error {
 		case GateExemptionRepairOutput:
 			if !validRepairText(output.Gate, 1, 256, false) || validateULID("gate output node ID", output.NodeID) != nil {
 				return fmt.Errorf("gate exemption repair output is invalid")
+			}
+		case DependencyOutput:
+			if validateULID("blocked Matter/Step output ID", output.BlockedID) != nil ||
+				validateULID("blocker Matter/Step output ID", output.BlockerID) != nil || output.BlockedID == output.BlockerID {
+				return fmt.Errorf("dependency output is invalid")
+			}
+			switch d.metadata.Operation {
+			case DependencyAddV1.Metadata().Operation:
+				if validateULID("dependency edge output ID", output.EdgeID) != nil {
+					return fmt.Errorf("dependency add output is missing its edge identity")
+				}
+			case DependencyRemoveV1.Metadata().Operation:
+				if output.EdgeID != "" {
+					return fmt.Errorf("dependency remove output cannot carry an edge identity")
+				}
+			default:
+				return fmt.Errorf("dependency output is invalid for %s", d.metadata.Operation)
+			}
+		case ReferenceOutput:
+			if validateULID("Matter output ID", output.MatterID) != nil || strings.TrimSpace(output.Reference) == "" ||
+				(d.metadata.Operation == ReferenceRebindV1.Metadata().Operation && strings.TrimSpace(output.PreviousReference) == "") ||
+				(d.metadata.Operation != ReferenceRebindV1.Metadata().Operation && output.PreviousReference != "") {
+				return fmt.Errorf("tracker reference output is invalid")
 			}
 		case ContentSegmentOutput:
 			if validateULID("content output ID", output.ID) != nil || validateULID("content subject ID", output.SubjectID) != nil ||

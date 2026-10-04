@@ -106,9 +106,12 @@ func UpgradeV12(root string) error {
 		name string
 		fn   func(*sql.DB) error
 	}{
-		{"authority state", checkStep4State}, {"snapshot state", checkStep6State},
-		{"claim state", checkStep5State}, {"genesis state", checkM5GenesisState},
-		{"birth journal", checkBirthJournalState}, {"M6 node projection", checkStep12State},
+		{"authority state", checkStep4State},
+		{"snapshot state", checkStep6State},
+		{"claim state", checkStep5State},
+		{"genesis state", checkM5GenesisState},
+		{"birth journal", checkBirthJournalState},
+		{"M6 node projection", checkStep12State},
 		{"M6 gate/config projection", checkStep13State},
 	} {
 		if err = check.fn(db); err != nil {
@@ -164,6 +167,9 @@ func UpgradeV12(root string) error {
 		return err
 	}
 	if err = installBatchSweep(db); err != nil {
+		return err
+	}
+	if err = installDependencies(db); err != nil {
 		return err
 	}
 	if err = checkSchema(db); err != nil {

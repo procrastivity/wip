@@ -146,6 +146,7 @@ func commandStartSnapshot(installed wipdjournal.InstallSnapshot) CommandStartSna
 		DomainID: installed.Identity.DomainID, Epoch: installed.Identity.AuthorityEpoch,
 		EnvironmentID: installed.Identity.EnvironmentID, Revision: installed.Revision,
 		Anchor: installed.Anchor, ManifestDigest: installed.ManifestDigest, Receipts: receipts,
+		Step8Projection: installed.Step8Projection,
 	}
 }
 

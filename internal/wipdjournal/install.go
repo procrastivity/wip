@@ -38,11 +38,12 @@ type InstalledReceipt struct {
 // InstallSnapshot is a stable read of the installed authority prefix,
 // complete manifest, terminal receipt index, and overlay revision.
 type InstallSnapshot struct {
-	Identity       Identity
-	Revision       uint64
-	Anchor         wipdwire.PrefixAnchor
-	ManifestDigest string
-	Receipts       map[string]InstalledReceipt
+	Identity        Identity
+	Revision        uint64
+	Anchor          wipdwire.PrefixAnchor
+	ManifestDigest  string
+	Receipts        map[string]InstalledReceipt
+	Step8Projection *Step8Projection
 }
 
 // Expectation returns the revision and installed prefix used to condition the
@@ -798,9 +799,13 @@ func loadInstallSnapshot(tx *sql.Tx, identity Identity) (InstallSnapshot, error)
 	if err != nil {
 		return InstallSnapshot{}, err
 	}
+	projection, err := installedStep8Projection(tx, identity.DomainID)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
 	snapshot := InstallSnapshot{
 		Identity: identity, Revision: state.revision, Anchor: cloneTransferAnchor(state.anchor),
-		ManifestDigest: state.manifestDigest, Receipts: make(map[string]InstalledReceipt),
+		ManifestDigest: state.manifestDigest, Receipts: make(map[string]InstalledReceipt), Step8Projection: projection,
 	}
 	rows, err := tx.Query(`SELECT command_id,request_hash,environment_sequence,journal_position,result_code,canonical_receipt FROM installed_receipts ORDER BY journal_position`)
 	if err != nil {
@@ -889,6 +894,9 @@ func appendVerifiedEvents(ctx context.Context, tx *sql.Tx, start uint64, records
 // caller-asserted or phantom IDs.
 func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.PrefixAnchor, transfer VerifiedTransfer, entry Entry, result operation.ResultCode, raw []byte) ([]string, int64, int64, error) {
 	if result != operation.ResultSucceeded {
+		if _, known := step8Definition(entry.Command.Request.Operation); known && !step8InstalledRangeMatches(tx, entry, nil) {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
 		return nil, 0, 0, nil
 	}
 	fields, err := wipdwire.DecodeCanonicalMap(raw,
@@ -935,6 +943,10 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	ids := make([]string, 0, int(count))
+	_, step8 := step8Definition(entry.Command.Request.Operation)
+	if step8 && count != 1 {
+		return nil, 0, 0, ErrInvalidTransfer
+	}
 	for position := firstPosition; position <= lastPosition; position++ {
 		var eventID string
 		var record []byte
@@ -953,9 +965,24 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		if !transferULID.MatchString(eventID) || !eventMatchesCommand(record, entry) || len(ids) > 0 && ids[len(ids)-1] >= eventID {
 			return nil, 0, 0, ErrInvalidTransfer
 		}
+		if step8 {
+			event, decodeErr := wipdwire.DecodeCanonicalMap(record, "schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			resultFields, ok := fields["result"].(map[string]any)
+			if decodeErr != nil || !ok {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+			output, ok := resultFields["output"].([]byte)
+			payload, payloadOK := event["payload"].(map[string]any)
+			if !ok || !payloadOK || !step8OutputMatches(entry, output, asString(payload["edge"])) {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+		}
 		ids = append(ids, eventID)
 	}
 	if len(ids) != int(count) || ids[0] != firstID || ids[len(ids)-1] != lastID {
+		return nil, 0, 0, ErrInvalidTransfer
+	}
+	if step8 && !step8InstalledRangeMatches(tx, entry, ids) {
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation {
@@ -1021,6 +1048,9 @@ func eventMatchesCommand(record []byte, entry Entry) bool {
 	if err != nil || fields["command_id"] != entry.Command.ID || fields["request_hash"] != entry.RequestHash {
 		return false
 	}
+	if _, known := step8Definition(entry.Command.Request.Operation); known && !step8EventMatches(fields, entry) {
+		return false
+	}
 	if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		input, ok := entry.Command.Request.Input.(operation.BatchSweepAnonymousInput)
 		if !ok || fields["kind"] != "batch.swept" || fields["subject_id"] != input.BatchID ||
@@ -1061,6 +1091,9 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		}
 		rawOutput, ok := resultFields["output"].([]byte)
 		if !ok {
+			return ErrInvalidTransfer
+		}
+		if _, known := step8Definition(entry.Command.Request.Operation); known && (len(eventIDs) != 1 || !step8OutputMatches(entry, rawOutput, "")) {
 			return ErrInvalidTransfer
 		}
 		if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
@@ -1185,6 +1218,13 @@ func emptyTransferManifest(domainID string, epoch uint64, anchor wipdwire.Prefix
 }
 
 func rebuildOverlay(ctx context.Context, tx *sql.Tx) error {
+	var domain string
+	if err := tx.QueryRow(`SELECT domain_id FROM environment_state WHERE singleton=1`).Scan(&domain); err != nil {
+		return err
+	}
+	if _, err := installedStep8Projection(tx, domain); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM environment_overlay`); err != nil {
 		return err
 	}
@@ -1288,6 +1328,9 @@ func checkInstallationDatabase(db *sql.DB, identity Identity) error {
 	}
 	if err = checkOverlay(tx); err != nil {
 		return err
+	}
+	if _, err = installedStep8Projection(tx, identity.DomainID); err != nil {
+		return ErrInvalidJournal
 	}
 	return tx.Commit()
 }

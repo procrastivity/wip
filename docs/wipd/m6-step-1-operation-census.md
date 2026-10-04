@@ -2,9 +2,11 @@
 
 Status: census for base `bb0520988e6e0894d958e13e84d97e17911ee678` on
 `origin/go`. This closes Step 1 of the approved BDS-253 M6 plan. It records
-current ownership and proposed semantic contracts; it does not register an
-operation, implement a handler, change default CLI routing, or migrate normal
-CLI direct-Store ownership.
+the ownership and proposed semantic contracts at that checkpoint; the census
+itself did not register operations, implement handlers, change default CLI
+routing, or migrate normal CLI direct-Store ownership. Step 8 implementation
+and acceptance are recorded in
+[`m6-step-8-cross-matter-aggregates.md`](m6-step-8-cross-matter-aggregates.md).
 
 The matrix is intentionally split into four executable TSVs:
 
@@ -26,7 +28,18 @@ identity is present in the runtime catalogue at this Step 1 checkpoint. Every
 it is not accepted by the registry at this checkpoint and no handler is
 implied. The later `m6-step7-profile-only` status denotes an operation
 implemented after this census and selected only by the explicit M6 Step 7
-profile; it is not an entry in the global runtime catalogue. The separate
+profile; it is not an entry in the global runtime catalogue. The later
+`m6-step8-profile-only` status denotes the five dependency/reference operations
+implemented after this census and selected by the explicit M6 Step 8 profile.
+They use authenticated IPC and authority transactions, but remain outside the
+global runtime catalogue, claim journal, and ordinary CLI routing. All five
+are authority-delivered with ClaimNone. Dependency endpoints may span Repos
+within one authority domain; uniqueness and cycle checks are domain-wide.
+`Context.Repo` is command context and a domain-member guard, not endpoint scope.
+Removal targets the exact live endpoint pair even when its command Repo
+differs from the add's. Reference membership and shared aggregates are likewise
+domain projections; tracker candidates are derived from the event-time push
+policy, with provider effects remaining outside these operations.
 `authenticated-control-existing` status names current M5 authenticated
 controls, not entries in `operation.Catalogue()` and not new M6 protocol
 semantics. `none` denotes an explicitly empty metadata set. Semicolon-separated

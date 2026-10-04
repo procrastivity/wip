@@ -90,6 +90,12 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if definition, ok := gateDefinition(command.Request.Operation); ok {
 		return s.submitGateCommand(ctx, command, encoded, asserted, peer, at, deadline, checkContext, definition)
 	}
+	if definition, ok := dependencyHistoryDefinition(command.Request.Operation); ok {
+		return s.submitDependencyCommand(ctx, command, encoded, asserted, peer, at, deadline, checkContext, definition)
+	}
+	if definition, ok := referenceHistoryDefinition(command.Request.Operation); ok {
+		return s.submitReferenceCommand(ctx, command, encoded, asserted, peer, at, deadline, checkContext, definition)
+	}
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
@@ -378,25 +384,36 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			if !ok {
 				definition, ok = gateDefinition(cmd.Request.Operation)
 				if !ok {
-					return out, ErrInvalidProof
+					definition, ok = dependencyHistoryDefinition(cmd.Request.Operation)
+					if !ok {
+						definition, ok = referenceHistoryDefinition(cmd.Request.Operation)
+						if !ok {
+							return out, ErrInvalidProof
+						}
+					}
 				}
 			}
 		}
 	}
 	_, isStep4 := step4Definition(cmd.Request.Operation)
 	_, isGate := gateDefinition(cmd.Request.Operation)
-	if !isStep4 && !isGate {
+	_, isDependency := dependencyHistoryDefinition(cmd.Request.Operation)
+	_, isReference := referenceHistoryDefinition(cmd.Request.Operation)
+	if !isStep4 && !isGate && !isDependency && !isReference {
 		if err := definition.ValidateResult(result); err != nil {
 			return out, err
 		}
-	} else if result.Code != operation.ResultSucceeded || result.Problem != nil {
+	} else if result.Code != operation.ResultSucceeded || result.Problem != nil || (isDependency || isReference) && result.Output != nil {
 		return out, ErrInvalidProof
 	}
 	gateNoop := cmd.Request.Operation == operation.GateDeclareV1.Metadata().Operation && subjectID == "" && eventID == ""
-	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) {
+	dependencyCommand := isDependency
+	referenceCommand := isReference
+	if (dependencyCommand || referenceCommand) && (subjectID != "" || !ulid.MatchString(eventID) || len(additionalEventIDs) != 0) {
 		return out, ErrInvalidProof
 	}
-	if result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
+	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && !dependencyCommand && !referenceCommand && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) ||
+		result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
 		return out, ErrInvalidProof
 	}
 	s.mu.Lock()
@@ -503,6 +520,43 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			result = fold.result
 			subjectID = fold.subject
 			if result.Code == operation.ResultSucceeded {
+				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+			} else {
+				problem = string(result.Problem.Code)
+			}
+		case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation:
+			fold, foldErr := completeDependencyTx(ctx, tx, cmd, eventIdentity{
+				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
+				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
+			}, eventID, occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result = fold.result
+			if err = definition.ValidateResult(result); err != nil {
+				return out, ErrInvalidProof
+			}
+			if result.Code == operation.ResultSucceeded {
+				position = fold.first.(uint64)
+				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+			} else {
+				problem = string(result.Problem.Code)
+			}
+		case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation,
+			operation.ReferenceRebindV1.Metadata().Operation:
+			fold, foldErr := completeReferenceTx(ctx, tx, cmd, eventIdentity{
+				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
+				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
+			}, eventID, occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result = fold.result
+			if err = definition.ValidateResult(result); err != nil {
+				return out, ErrInvalidProof
+			}
+			if result.Code == operation.ResultSucceeded {
+				position = fold.first.(uint64)
 				first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
 			} else {
 				problem = string(result.Problem.Code)

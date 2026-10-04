@@ -196,6 +196,20 @@ func step13Events(db *sql.DB) ([]step13Event, error) {
 	return events, rows.Err()
 }
 
+func step13EffectivePushLevel(config map[string]step13Config, domain, repo string) (string, error) {
+	key := ownerKey(domain, repo) + "/"
+	if level, exists := config[key+"tracker.push-level"]; exists {
+		if !referencePushLevel(level.value) {
+			return "", ErrInvalidStore
+		}
+		return level.value, nil
+	}
+	if config[key+"tracker.backend"].value != "" {
+		return "boundary", nil
+	}
+	return "off", nil
+}
+
 func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (step13Projection, error) {
 	config := make(map[string]step13Config)
 	declarations := make(map[string]step13Declaration)
@@ -336,6 +350,12 @@ func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (
 			}
 			if !step13ClosedPayload(event.payload, &payload, required, optional...) {
 				return step13Projection{}, ErrInvalidStore
+			}
+			if payload.TrackerPushLevel != "" {
+				level, err := step13EffectivePushLevel(config, event.domain, event.repo)
+				if err != nil || payload.TrackerPushLevel != level {
+					return step13Projection{}, ErrInvalidStore
+				}
 			}
 			refs := []string{payload.Ref}
 			if event.kind == "reference.rebound" {
@@ -853,6 +873,10 @@ func step13PushLevel(value string) bool {
 }
 
 func readStep13Projection(db *sql.DB) (step13Projection, error) {
+	return readStep13ProjectionTx(context.Background(), db)
+}
+
+func readStep13ProjectionTx(ctx context.Context, queryer step13ProjectionQueryer) (step13Projection, error) {
 	var out step13Projection
 	queries := []string{
 		`SELECT domain_id,repo_id,config_key,value,last_event_id FROM m6_repo_config`,
@@ -863,7 +887,7 @@ func readStep13Projection(db *sql.DB) (step13Projection, error) {
 		`SELECT domain_id,candidate_id,repo_id,kind,subject_id,ref,idempotency_key,payload,birth_event_id FROM m6_tracker_candidates`,
 	}
 	for index, query := range queries {
-		rows, err := db.Query(query)
+		rows, err := queryer.QueryContext(ctx, query)
 		if err != nil {
 			return out, err
 		}

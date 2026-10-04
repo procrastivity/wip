@@ -570,12 +570,16 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 	if err != nil || validateContentManifest(contentProjections, manifest.Entries) != nil {
 		return zero, ErrInvalidClientState
 	}
+	step8Projection, err := wipdjournal.FoldStep8Projection(records, domainID)
+	if err != nil {
+		return zero, ErrInvalidClientState
+	}
 	return ClientState{
 		Schema: "wipd.m5-client-state/1", RepoID: repoID, DomainID: domainID, Epoch: epoch,
 		EnvironmentID: environmentID, OwnerKeyID: profile.OwnerRootSPKI(), SPKIDigest: spkiDigest,
 		Prefix: endAnchor, EventRecords: records, ManifestDigest: manifest.Digest,
 		ManifestEntries: append([]wipdwire.BlobManifestEntry{}, manifest.Entries...), Projections: projections,
-		StepProjections: stepProjections, ContentProjections: contentProjections, GateProjection: gateProjection,
+		StepProjections: stepProjections, ContentProjections: contentProjections, GateProjection: gateProjection, Step8Projection: step8Projection,
 	}, nil
 }
 
@@ -620,6 +624,9 @@ func foldEventRecordsWithGateProjection(records []wipdwire.EventRecord, domainID
 	gates, err := foldStep7GateProjection(records, domainID)
 	if err != nil {
 		return wipdwire.PrefixAnchor{}, nil, nil, nil, err
+	}
+	if _, err := wipdjournal.FoldStep8Projection(records, domainID); err != nil {
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, ErrInvalidClientState
 	}
 	return anchor, projections, steps, gates, nil
 }
@@ -704,9 +711,6 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 		kind, ok := fields["kind"].(string)
 		if !ok {
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
-		}
-		if err := step7ClientTransferBoundary(kind, fields); err != nil {
-			return wipdwire.PrefixAnchor{}, nil, nil, err
 		}
 		if pendingLifecycle != nil && pendingLifecycle.stage == "matter-sweep-optional" && kind != "batch.swept" {
 			pendingLifecycle = nil
@@ -1021,7 +1025,8 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 			}
 			sweptBatches[batchID] = true
 			pendingLifecycle = nil
-		case "gate.declared", "gate.closed", "gate.dismissed", "gate.exemption-repaired":
+		case "gate.declared", "gate.closed", "gate.dismissed", "gate.exemption-repaired",
+			"dependency.added", "dependency.removed", "reference.bound", "reference.added", "reference.removed", "reference.rebound", "config.set":
 			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
@@ -1424,6 +1429,9 @@ func foldedStartEventKind(kind string) bool {
 }
 
 func validLifecycleStartPayload(payload map[string]any, matter bool) bool {
+	if level, exists := payload["tracker_push_level"]; exists {
+		return clientPushLevel(asString(level)) && validLifecycleStartPayload(withoutClientPushLevel(payload), matter)
+	}
 	if wipdwire.ExactMapKeys(payload, "from", "to") {
 		return true
 	}
@@ -1494,6 +1502,9 @@ func lifecycleTransition(kind string) (from, to string, ok bool) {
 }
 
 func validFoldedLifecyclePayload(kind string, payload map[string]any) bool {
+	if level, exists := payload["tracker_push_level"]; exists {
+		return clientPushLevel(asString(level)) && validFoldedLifecyclePayload(kind, withoutClientPushLevel(payload))
+	}
 	from, to, ok := lifecycleTransition(kind)
 	if !ok || payload["from"] != from || payload["to"] != to {
 		return false
@@ -1639,10 +1650,11 @@ func validateInstalledState(state ClientState, profile wipdauthority.Profile) er
 	}
 	anchor, projections, stepProjections, gateProjection, err := foldEventRecordsWithGateProjection(state.EventRecords, state.DomainID)
 	contentProjections, contentErr := foldContentEvents(state.EventRecords, state.DomainID)
-	// Step and gate projections are derived from retained event records. A
-	// missing cached projection is rebuilt on the next pull rather than making
-	// an older client state unreadable.
-	if err != nil || contentErr != nil || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
+	step8Projection, step8Err := wipdjournal.FoldStep8Projection(state.EventRecords, state.DomainID)
+	// Optional caches never substitute for the full retained-history fold. An
+	// absent cache can be reconstructed; a present divergent cache is refused.
+	if err != nil || contentErr != nil || step8Err != nil ||
+		state.Step8Projection != nil && !reflect.DeepEqual(step8Projection, state.Step8Projection) || !anchorEqual(anchor, state.Prefix) || !equalJSONRaw(projections, state.Projections) ||
 		state.StepProjections != nil && !equalJSONRaw(stepProjections, state.StepProjections) ||
 		state.ContentProjections != nil && !equalJSONRaw(contentProjections, state.ContentProjections) ||
 		state.GateProjection != nil && !reflect.DeepEqual(gateProjection, state.GateProjection) {
@@ -1653,6 +1665,20 @@ func validateInstalledState(state ClientState, profile wipdauthority.Profile) er
 		return ErrInvalidClientState
 	}
 	return nil
+}
+
+func clientPushLevel(level string) bool {
+	return level == "off" || level == "boundary" || level == "narrated"
+}
+
+func withoutClientPushLevel(payload map[string]any) map[string]any {
+	result := make(map[string]any, len(payload)-1)
+	for key, value := range payload {
+		if key != "tracker_push_level" {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 func validateStoredCertificate(state ClientState, key any, now time.Time) (tls.Certificate, error) {

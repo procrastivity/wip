@@ -189,6 +189,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
 			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" &&
 			fields["kind"] != "gate.declared" && fields["kind"] != "gate.closed" && fields["kind"] != "gate.dismissed" && fields["kind"] != "gate.exemption-repaired" &&
+			!step8HistoryKind(asString(fields["kind"])) &&
 			!transferLifecycleEventKind(asString(fields["kind"]))) ||
 		!transferULID.MatchString(asString(fields["command_id"])) ||
 		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
@@ -209,6 +210,9 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	kind := asString(fields["kind"])
 	if transferLifecycleEventKind(kind) {
 		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
+	}
+	if step8HistoryKind(kind) {
+		return validStep8HistoryEvent(kind, asString(fields["subject_id"]), asString(fields["repo_id"]), payload)
 	}
 	switch kind {
 	case "gate.exemption-repaired":
@@ -242,7 +246,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			}
 		}
 		if level, present := payload["tracker_push_level"]; present {
-			if level != "off" {
+			if !trackerPushLevel(asString(level)) {
 				return false
 			}
 			keys = append(keys, "tracker_push_level")
@@ -388,6 +392,18 @@ func transferLifecycleEventKind(kind string) bool {
 func validTransferLifecycleEvent(kind, subject string, payload map[string]any) bool {
 	if !transferULID.MatchString(subject) {
 		return false
+	}
+	if level, present := payload["tracker_push_level"]; present {
+		if !trackerPushLevel(asString(level)) {
+			return false
+		}
+		withoutLevel := make(map[string]any, len(payload)-1)
+		for key, value := range payload {
+			if key != "tracker_push_level" {
+				withoutLevel[key] = value
+			}
+		}
+		return validTransferLifecycleEvent(kind, subject, withoutLevel)
 	}
 	scale, verb, _ := strings.Cut(kind, ".")
 	if verb == "started" {

@@ -146,9 +146,12 @@ func UpgradeV11(root string) error {
 		name string
 		fn   func(*sql.DB) error
 	}{
-		{"authority state", checkStep4State}, {"snapshot state", checkStep6State},
-		{"claim state", checkStep5State}, {"genesis state", checkM5GenesisState},
-		{"birth journal", checkBirthJournalState}, {"M6 node projection", checkStep12State},
+		{"authority state", checkStep4State},
+		{"snapshot state", checkStep6State},
+		{"claim state", checkStep5State},
+		{"genesis state", checkM5GenesisState},
+		{"birth journal", checkBirthJournalState},
+		{"M6 node projection", checkStep12State},
 	} {
 		if err = check.fn(db); err != nil {
 			return fmt.Errorf("%w: v11 %s: %v", ErrInvalidStore, check.name, err)
@@ -209,6 +212,9 @@ func UpgradeV11(root string) error {
 		return err
 	}
 	if err = installBatchSweep(db); err != nil {
+		return err
+	}
+	if err = installDependencies(db); err != nil {
 		return err
 	}
 	if err = checkSchema(db); err != nil {

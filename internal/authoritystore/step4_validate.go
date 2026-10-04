@@ -114,12 +114,39 @@ func checkStep4State(db *sql.DB) error {
 		step13Gate := version >= 12 && knownGate
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
 		batchSweep := version >= 17 && id == operation.BatchSweepAnonymousV1.Metadata().Operation
+		dependencyDefinition, knownDependency := dependencyHistoryDefinition(id)
+		dependency := version >= 18 && knownDependency
+		referenceDefinition, knownReference := referenceHistoryDefinition(id)
+		reference := version >= 18 && knownReference
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !dependency && !reference) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 {
 			return ErrInvalidStore
+		}
+		if reference {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			if decodeErr != nil || referenceDefinition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+				return ErrInvalidStore
+			}
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
+		} else if dependency {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			if decodeErr != nil || dependencyDefinition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+				return ErrInvalidStore
+			}
+			// Context.Repo fences command domain membership, not endpoint scope.
+			// Check refusals too: they have no event or edge projection to bind it.
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
 		}
 		if lifecycleOperation(s.operation) {
 			c, e := parseLifecycle(s.command, s.hash)
@@ -224,7 +251,7 @@ func checkStep4State(db *sql.DB) error {
 			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || step13Gate && !gateNoop {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -256,7 +283,7 @@ func checkStep4State(db *sql.DB) error {
 		gateNoop := step13Gate && s.operation == "gate.declare" && code == "result.succeeded" && r.Range == nil
 		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
-			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
 			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
@@ -285,6 +312,14 @@ func checkStep4State(db *sql.DB) error {
 	}
 	if version >= 12 {
 		if err = checkStep13GateCommands(db); err != nil {
+			return err
+		}
+	}
+	if version >= 18 {
+		if err = checkDependencyCommands(db); err != nil {
+			return err
+		}
+		if err = checkReferenceCommands(db, all); err != nil {
 			return err
 		}
 	}
@@ -433,7 +468,11 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 			operationID := operation.ID{Name: s.operation, Version: uint16(s.version)}
 			_, gate := gateDefinition(operationID)
 			batchSweep := operationID == operation.BatchSweepAnonymousV1.Metadata().Operation
-			if gate || batchSweep {
+			_, knownDependency := dependencyHistoryDefinition(operationID)
+			dependency := version >= 18 && knownDependency
+			_, knownReference := referenceHistoryDefinition(operationID)
+			reference := version >= 18 && knownReference
+			if gate || batchSweep || dependency || reference {
 				event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
 				command, commandErr := operation.DecodeCanonicalCommand(s.command)
 				if parseErr != nil || commandErr != nil || event.hash != s.hash || event.environment != s.env ||
@@ -442,6 +481,14 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 					break
 				}
 				if batchSweep && validateBatchSweepEvent(command, s.hash, pos, id, raw) != nil {
+					err = ErrInvalidStore
+					break
+				}
+				if dependency && validateDependencyHistoryEvent(event, s, command) != nil {
+					err = ErrInvalidStore
+					break
+				}
+				if reference && validateReferenceHistoryEvent(event, s, command) != nil {
 					err = ErrInvalidStore
 					break
 				}

@@ -13,6 +13,7 @@ import (
 
 func dropBatchSweepSchemaForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	dropDependencySchemaForTest(t, db)
 	for index := len(batchSweepSchema) - 1; index >= 0; index-- {
 		object := batchSweepSchema[index]
 		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
@@ -68,7 +69,7 @@ func TestBatchSweepExplicitV16Migration(t *testing.T) {
 	}
 	var version, boundaries int
 	var retained []byte
-	if err = x.f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 17 {
+	if err = x.f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatalf("migration version %d: %v", version, err)
 	}
 	if err = x.f.s.db.QueryRow(`SELECT count(*) FROM batch_sweep_boundaries`).Scan(&boundaries); err != nil || boundaries != 0 || x.f.anchor(t) != before {
