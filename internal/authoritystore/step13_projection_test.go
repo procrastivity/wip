@@ -466,15 +466,15 @@ func TestStep13FoldRejectsUndeclaredAndPreDeclarationClose(t *testing.T) {
 	matter := claimTestID(55)
 	node := step12Node{domain: domainA, id: matter, kind: "matter", repo: repoA, matter: matter, birth: claimTestID(301), last: claimTestID(301)}
 	nodes := map[string]step13Node{ownerKey(domainA, matter): {node: node, birthPos: 1}}
-	close := step13TestEvent(2, "gate.closed", matter, map[string]any{"gate": "reviewed", "scale": "matter"})
+	closure := step13TestEvent(2, "gate.closed", matter, map[string]any{"gate": "reviewed", "scale": "matter"})
 	t.Run("undeclared", func(t *testing.T) {
-		if _, err := deriveStep13Projection(nodes, []step13Event{close}); !errors.Is(err, ErrInvalidStore) {
+		if _, err := deriveStep13Projection(nodes, []step13Event{closure}); !errors.Is(err, ErrInvalidStore) {
 			t.Fatalf("undeclared normal close accepted: %v", err)
 		}
 	})
 	t.Run("pre-declaration", func(t *testing.T) {
 		declaration := step13TestEvent(3, "gate.declared", repoA, map[string]any{"gate": "reviewed", "scale": "matter"})
-		if _, err := deriveStep13Projection(nodes, []step13Event{close, declaration}); !errors.Is(err, ErrInvalidStore) {
+		if _, err := deriveStep13Projection(nodes, []step13Event{closure, declaration}); !errors.Is(err, ErrInvalidStore) {
 			t.Fatalf("pre-declaration close accepted: %v", err)
 		}
 	})
@@ -651,9 +651,10 @@ func TestStep13SharedReferenceAndNarratedStageCandidateReplayParity(t *testing.T
 		}
 		seenIDs[candidate.id] = true
 		seenKeys[candidate.key] = true
-		if candidate.kind == "comment" {
+		switch candidate.kind {
+		case "comment":
 			stageComments = append(stageComments, candidate)
-		} else if candidate.kind == "state" {
+		case "state":
 			sharedStateCandidates = append(sharedStateCandidates, candidate)
 		}
 	}

@@ -177,13 +177,14 @@ func checkMatterFinishHistory(db *sql.DB, c *lifecycleCommand, receipt receiptRe
 		}
 		return nil
 	}
-	return fmt.Errorf("Matter finish history matches neither current nor legacy contract: %w", ErrInvalidStore)
+	return fmt.Errorf("matter finish history matches neither current nor legacy contract: %w", ErrInvalidStore)
 }
 
 func matterFinishHistoryMatches(receipt receiptRecord, events []lifecycleEvent, matter, batch string, expected struct {
 	sealed bool
 	swept  bool
-}) bool {
+},
+) bool {
 	expectedCount := 1
 	if expected.swept {
 		expectedCount++

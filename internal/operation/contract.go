@@ -110,6 +110,8 @@ const (
 	ProblemUnknownClone     ProblemCode = "refusal.unknown-clone"
 )
 
+// ProblemBatchSweepTargetMissing and the other batch sweep constants describe
+// refusals of a standalone anonymous Batch sweep.
 const (
 	ProblemBatchSweepTargetMissing ProblemCode = "refusal.batch-sweep-target-missing"
 	ProblemBatchSweepClaimClose    ProblemCode = "refusal.batch-sweep-claim-close"

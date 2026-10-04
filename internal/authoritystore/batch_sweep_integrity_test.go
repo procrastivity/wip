@@ -92,11 +92,12 @@ func TestBatchSweepAuthoritativeCloseCorruption(t *testing.T) {
 				}
 				rewriteGateAuthorityEvent(t, x.f.root, eventID, func(fields map[string]cbor.RawMessage) error {
 					value := any(claimTestID(999))
-					if field == "payload" {
+					switch field {
+					case "payload":
 						value = map[string]any{"claim_id": ref.ClaimID, "claim_epoch": ref.ClaimEpoch, "dispatch_id": nil, "barrier_digest": digestBytes([]byte("other barrier"))}
-					} else if field == "kind" {
+					case "kind":
 						value = "claim.stood-down"
-					} else if field == "request_hash" {
+					case "request_hash":
 						value = digestBytes([]byte("other request"))
 					}
 					return setGateEventField(fields, field, value)

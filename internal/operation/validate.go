@@ -78,20 +78,20 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("Batch ID", input.BatchID); err != nil {
 			return err
 		}
-		close := input.ClaimClose
-		if err := validateULID("claim ID", close.ClaimID); err != nil {
+		claimClose := input.ClaimClose
+		if err := validateULID("claim ID", claimClose.ClaimID); err != nil {
 			return err
 		}
-		if close.ClaimEpoch == 0 {
+		if claimClose.ClaimEpoch == 0 {
 			return fmt.Errorf("claim close epoch must be positive")
 		}
-		if err := validateULID("claim release command ID", close.ReleaseCommandID); err != nil {
+		if err := validateULID("claim release command ID", claimClose.ReleaseCommandID); err != nil {
 			return err
 		}
-		if !digestPattern.MatchString(close.ReleaseRequestHash) || !digestPattern.MatchString(close.TerminalReceiptDigest) {
+		if !digestPattern.MatchString(claimClose.ReleaseRequestHash) || !digestPattern.MatchString(claimClose.TerminalReceiptDigest) {
 			return fmt.Errorf("claim close request hash and terminal receipt digest must be canonical sha256")
 		}
-		prefix := close.InstalledPrefixAnchor
+		prefix := claimClose.InstalledPrefixAnchor
 		if prefix.EventCount == 0 || prefix.EventID == nil || !digestPattern.MatchString(prefix.Digest) {
 			return fmt.Errorf("claim close installed prefix anchor is invalid")
 		}

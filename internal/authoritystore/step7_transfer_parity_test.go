@@ -21,7 +21,7 @@ func readStep7ReceiptSnapshot(t *testing.T, s *Store) []step7ReceiptSnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []step7ReceiptSnapshot
 	for rows.Next() {
 		var row step7ReceiptSnapshot
@@ -71,8 +71,10 @@ func TestStep7SeedPullReopenPreservesHistoryReceiptsAndDetachedRepair(t *testing
 	if err != nil || terminal.ResultCode != "result.succeeded" || terminal.EventID == "" {
 		t.Fatalf("complete repair before seed/pull: terminal=%+v err=%v", terminal, err)
 	}
-	start := PrefixAnchor{EventCount: fixture.command.Boundary.EventCount,
-		EventID: fixture.command.Boundary.HighWaterEvent, Digest: fixture.command.Boundary.PrefixDigest}
+	start := PrefixAnchor{
+		EventCount: fixture.command.Boundary.EventCount,
+		EventID:    fixture.command.Boundary.HighWaterEvent, Digest: fixture.command.Boundary.PrefixDigest,
+	}
 	end := fixture.f.anchor(t)
 	projection, err := readStep13Projection(fixture.f.s.db)
 	if err != nil {

@@ -107,6 +107,8 @@ func (BatchSweepAnonymousInput) operationInput() {}
 // BatchSweepAnonymousOutcome is the closed success outcome vocabulary.
 type BatchSweepAnonymousOutcome string
 
+// BatchSweepAnonymousSwept and BatchSweepAnonymousAlreadySwept distinguish
+// a newly emitted sweep from an already completed sweep.
 const (
 	BatchSweepAnonymousSwept        BatchSweepAnonymousOutcome = "swept"
 	BatchSweepAnonymousAlreadySwept BatchSweepAnonymousOutcome = "already-swept"

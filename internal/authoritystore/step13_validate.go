@@ -369,7 +369,8 @@ func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (
 			if !step13PushLevel(payload.TrackerPushLevel) {
 				return step13Projection{}, ErrInvalidStore
 			}
-			if event.kind == "reference.bound" {
+			switch event.kind {
+			case "reference.bound":
 				for key, prior := range references {
 					if prior.domain == event.domain && prior.matter == event.subject && prior.removed == "" && prior.ref != payload.Ref {
 						prior.removed, prior.last = event.id, event.id
@@ -383,7 +384,7 @@ func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (
 					birth = prior.birth
 				}
 				references[key] = step13Reference{event.domain, event.subject, payload.Ref, "", birth, event.id}
-			} else if event.kind == "reference.added" {
+			case "reference.added":
 				key := ownerKey(event.domain, event.subject) + "/" + payload.Ref
 				prior, exists := references[key]
 				if exists && prior.removed == "" {
@@ -394,7 +395,7 @@ func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (
 					birth = prior.birth
 				}
 				references[key] = step13Reference{event.domain, event.subject, payload.Ref, "", birth, event.id}
-			} else if event.kind == "reference.removed" {
+			case "reference.removed":
 				key := ownerKey(event.domain, event.subject) + "/" + payload.Ref
 				prior, exists := references[key]
 				if !exists || prior.removed != "" {
@@ -402,7 +403,7 @@ func deriveStep13Projection(nodes map[string]step13Node, events []step13Event) (
 				}
 				prior.removed, prior.last = event.id, event.id
 				references[key] = prior
-			} else {
+			default:
 				fromKey := ownerKey(event.domain, event.subject) + "/" + payload.From
 				from, exists := references[fromKey]
 				if !exists || from.removed != "" {
@@ -488,9 +489,10 @@ func step13GateCandidates(candidates *[]step13Candidate, narrated map[string]boo
 		return nil
 	}
 	var stages []step13Node
-	if subject.node.kind == "stage" {
+	switch subject.node.kind {
+	case "stage":
 		stages = append(stages, subject)
-	} else if subject.node.kind == "matter" {
+	case "matter":
 		for _, node := range nodes {
 			if node.node.domain == event.domain && node.node.matter == matterID && node.node.kind == "stage" {
 				stages = append(stages, node)

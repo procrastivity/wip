@@ -117,9 +117,11 @@ func (s *Store) sweepAnonymousBatchWithDeadline(ctx context.Context, command ope
 		d.ID, command.ID, hash, canonical, d.ActiveEpoch, command.EnvironmentID, command.EnvironmentSequence, command.Request.Operation.Name, command.Request.Operation.Version); err != nil {
 		return empty, writeError(err)
 	}
-	c := commandIdentity{domain: d.ID, epoch: d.ActiveEpoch, environment: command.EnvironmentID,
+	c := commandIdentity{
+		domain: d.ID, epoch: d.ActiveEpoch, environment: command.EnvironmentID,
 		sequence: command.EnvironmentSequence, id: command.ID, name: command.Request.Operation.Name,
-		version: uint64(command.Request.Operation.Version), repo: command.Request.Context.Repo, encoded: canonical, hash: hash}
+		version: uint64(command.Request.Operation.Version), repo: command.Request.Context.Repo, encoded: canonical, hash: hash,
+	}
 	boundary := func(receipt, _ []byte, _, _ uint64) error {
 		if checkContext {
 			if err := ctx.Err(); err != nil {
@@ -155,8 +157,10 @@ func (s *Store) sweepAnonymousBatchWithDeadline(ctx context.Context, command ope
 	var first, last, accepted any
 	if outcome == operation.BatchSweepAnonymousSwept {
 		input := command.Request.Input.(operation.BatchSweepAnonymousInput)
-		position, err := appendCommandEvent(ctx, tx, eventIdentity{d.ID, command.ID, hash, command.EnvironmentID,
-			command.EnvironmentSequence, command.ActedAt, command.Request.Context.Repo}, occurred, eventID, "batch.swept", input.BatchID, map[string]any{})
+		position, err := appendCommandEvent(ctx, tx, eventIdentity{
+			d.ID, command.ID, hash, command.EnvironmentID,
+			command.EnvironmentSequence, command.ActedAt, command.Request.Context.Repo,
+		}, occurred, eventID, "batch.swept", input.BatchID, map[string]any{})
 		if err != nil {
 			return empty, err
 		}

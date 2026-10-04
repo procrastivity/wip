@@ -180,7 +180,7 @@ func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, 
 		output = operation.GateDeclareOutput{Gate: gate, Scale: scale}
 	case operation.GateCloseInput:
 		gate, node = input.Gate, input.NodeID
-		scale, kind, err = gateSubjectTx(ctx, tx, identity.domain, identity.repo, gate, node, command.Request.Claim.ID)
+		scale, _, err = gateSubjectTx(ctx, tx, identity.domain, identity.repo, gate, node, command.Request.Claim.ID)
 		if errors.Is(err, errGateRefused) {
 			return refuse("refusal.gate-subject", "the gate subject or Repo declaration does not match")
 		}

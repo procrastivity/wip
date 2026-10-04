@@ -1011,14 +1011,14 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 						break
 					}
 				}
-				close, closed := normalClaimCloses[matterID]
+				claimClose, closed := normalClaimCloses[matterID]
 				_, claimed := activeClaims[matterID]
 				_, birthReleased := releasedBirthClaims[matterID]
 				_, reusedCommand := seenCommands[lifecycle.commandID]
 				payload, payloadOK := fields["payload"].(map[string]any)
 				if matterID == "" || matterRepos[matterID] != lifecycle.repoID || matterStates[matterID] != "done" ||
 					claimed || !birthReleased ||
-					!closed || close.environmentID != lifecycle.environmentID || lifecycle.sequence <= close.sequence ||
+					!closed || claimClose.environmentID != lifecycle.environmentID || lifecycle.sequence <= claimClose.sequence ||
 					reusedCommand || !payloadOK || !wipdwire.ExactMapKeys(payload) {
 					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 				}
@@ -1063,14 +1063,14 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				event.SubjectID != event.Payload.ClaimID || !validDigest(event.Payload.BarrierDigest) {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
-			close := foldedLifecycleEvent{
+			claimClose := foldedLifecycleEvent{
 				commandID: event.CommandID, requestHash: event.Hash, environmentID: event.Environment.ID,
 				sequence: event.Environment.Sequence, repoID: event.RepoID, actedAt: event.ActedAt,
 			}
 			if event.Payload.DispatchID != nil {
 				pending := pendingClaimRelease
 				matterID, claim := activeMatterForClaim(activeClaims, event.Payload.ClaimID)
-				if pending == nil || !sameFoldedLifecycleCommand(pending.command, close) ||
+				if pending == nil || !sameFoldedLifecycleCommand(pending.command, claimClose) ||
 					pending.claimID != event.Payload.ClaimID || pending.matterID != matterID ||
 					pending.dispatchID != *event.Payload.DispatchID || pending.epoch != event.Payload.ClaimEpoch ||
 					pending.repoID != event.RepoID || pending.ownerEnvironmentID != event.Environment.ID ||
@@ -1079,7 +1079,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 					return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid acquired claim.released event", ErrInvalidClientState)
 				}
 				delete(activeClaims, matterID)
-				normalClaimCloses[matterID] = close
+				normalClaimCloses[matterID] = claimClose
 				pendingClaimRelease = nil
 				break
 			}
@@ -1114,7 +1114,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
 			releasedBirthClaims[event.Payload.ClaimID] = struct{}{}
-			normalClaimCloses[event.Payload.ClaimID] = close
+			normalClaimCloses[event.Payload.ClaimID] = claimClose
 			for matterID, claim := range activeClaims {
 				if claim.ID == event.Payload.ClaimID {
 					delete(activeClaims, matterID)

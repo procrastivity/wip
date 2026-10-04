@@ -51,6 +51,7 @@ type GateDismissOutput struct {
 
 func (GateDismissOutput) operationOutput() {}
 
+// GateDeclareV1 declares a prospective Repo gate boundary.
 var GateDeclareV1 = mustDefine[GateDeclareInput, GateDeclareOutput](Metadata{
 	Operation: ID{Name: "gate.declare", Version: 1}, Access: AccessMutation,
 	Delivery: DeliveryClaim, RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
@@ -59,6 +60,7 @@ var GateDeclareV1 = mustDefine[GateDeclareInput, GateDeclareOutput](Metadata{
 	Claim: ClaimExact, ExternalEffects: []ExternalEffect{},
 })
 
+// GateCloseV1 closes a declared gate on an exact node.
 var GateCloseV1 = mustDefine[GateCloseInput, GateCloseOutput](Metadata{
 	Operation: ID{Name: "gate.close", Version: 1}, Access: AccessMutation,
 	Delivery: DeliveryClaim, RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},
@@ -70,6 +72,7 @@ var GateCloseV1 = mustDefine[GateCloseInput, GateCloseOutput](Metadata{
 	Claim: ClaimExact, ExternalEffects: []ExternalEffect{},
 })
 
+// GateDismissV1 dismisses a declared gate on an exact Done node.
 var GateDismissV1 = mustDefine[GateDismissInput, GateDismissOutput](Metadata{
 	Operation: ID{Name: "gate.dismiss", Version: 1}, Access: AccessMutation,
 	Delivery: DeliveryClaim, RequiredContext: []ContextDimension{ContextRepo, ContextClone, ContextWorktree},

@@ -37,9 +37,12 @@ func TestOrdinaryGateResultPayloadAndReceipt(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(decoded, want) {
 				t.Fatalf("decode: %+v %v; want %+v", decoded, err, want)
 			}
-			entry := wipdjournal.Entry{Delivery: operation.DeliveryClaim, RequestHash: "sha256:" + strings.Repeat("a", 64), EnvironmentSeq: 7,
-				Command: operation.Command{ID: node, AuthorityDomainID: strings.Repeat("b", 64), ExpectedAuthorityEpoch: 1, EnvironmentID: node,
-					Request: operation.Request{Operation: id, Input: test.input}},
+			entry := wipdjournal.Entry{
+				Delivery: operation.DeliveryClaim, RequestHash: "sha256:" + strings.Repeat("a", 64), EnvironmentSeq: 7,
+				Command: operation.Command{
+					ID: node, AuthorityDomainID: strings.Repeat("b", 64), ExpectedAuthorityEpoch: 1, EnvironmentID: node,
+					Request: operation.Request{Operation: id, Input: test.input},
+				},
 			}
 			accepted := map[string]any{"first_event_id": node, "last_event_id": node, "event_count": uint64(1)}
 			fields := map[string]any{

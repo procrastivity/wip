@@ -102,8 +102,10 @@ func TestBatchSweepTransferFoldsStandaloneAfterEitherNormalClose(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			records := postCloseSweepHistory(t, birthLast)
 			want := step7IndependentPrefixAnchor(records)
-			manifest := wipdwire.BlobManifest{Schema: "wipd.blob-manifest/1", DomainID: testDomainID, Epoch: 1,
-				AsOf: want, Entries: []wipdwire.BlobManifestEntry{}, Digest: emptyManifestDigest()}
+			manifest := wipdwire.BlobManifest{
+				Schema: "wipd.blob-manifest/1", DomainID: testDomainID, Epoch: 1,
+				AsOf: want, Entries: []wipdwire.BlobManifestEntry{}, Digest: emptyManifestDigest(),
+			}
 			// Journal transfer validation already accepts this distinct command.
 			if transfer, err := wipdjournal.VerifyTransfer(testDomainID, 1, emptyWireAnchor(), want, records, manifest); err != nil || !transfer.Valid() {
 				t.Fatalf("journal structural verification: %v", err)
