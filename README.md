@@ -17,6 +17,60 @@ original bash implementation until cutover.
 
 ## Install
 
+Install the binary first, then optionally project it into an agent harness.
+Neither binary installation nor `wip version` opens or migrates a WIP store.
+
+### GitHub release binary
+
+The release installer supports **Linux amd64** and **macOS arm64**. It requires
+`curl` and either `sha256sum` or `shasum`, downloads the binary and `SHA256SUMS`,
+and verifies the binary before installing it. Windows and other architectures
+are not published by this release pipeline.
+
+Until a release includes the new `wip-install.sh` asset, run the installer from
+this checkout against the existing Go release assets:
+
+```sh
+WIP_VERSION=v0.3.0 sh scripts/install.sh
+```
+
+After an installer-bearing release is published, download and inspect its
+installer, then run it (the default selects the latest release):
+
+```sh
+curl -fsSL https://github.com/procrastivity/wip/releases/latest/download/wip-install.sh -o /tmp/wip-install.sh
+less /tmp/wip-install.sh
+sh /tmp/wip-install.sh
+```
+
+Set `WIP_VERSION=vX.Y.Z` on the `sh` command to pin the binary's release tag.
+For a fully pinned bootstrap, also replace `latest/download` in the installer
+URL with `download/vX.Y.Z` from an installer-bearing release. `WIP_BASE_URL`
+selects another trusted GitHub repository with the same asset layout.
+The installer and checksum file are trusted GitHub/HTTPS inputs; checking the
+binary checksum detects transfer corruption, not a compromised release.
+
+The default destination is `~/.local/bin/wip`; set `WIP_INSTALL_DIR` to choose
+another directory, including a disposable destination for a trial:
+
+```sh
+WIP_INSTALL_DIR="$PWD/release-bin" WIP_VERSION=v0.3.0 sh scripts/install.sh
+./release-bin/wip version
+```
+
+Installation replaces an existing `wip` file **or symlink** by renaming a
+verified executable into place. It does not follow a development-build symlink
+or overwrite its target. To replace your daily symlink, deliberately run the
+installer with its default destination; no separate symlink removal is needed.
+Ensure `~/.local/bin` is on PATH, run `hash -r` if your shell caches commands,
+then check `command -v wip` and `wip version`. A different WIP earlier on PATH
+can still shadow the installed binary.
+
+This installs only `wip`, not the experimental `wipd`, and never activates a
+daemon, changes stores, or installs harness skills automatically.
+
+### Nix and harness projection
+
 ```
 nix profile install github:procrastivity/wip/go   # the binary, system-wide
 wip install                                       # project into every detected harness

@@ -37,13 +37,19 @@ jobs:
       - name: cross-compile
         run: nix develop --command make cross-compile
 
+      # Binary bootstrap is separate from `wip install` harness projection.
+      # Its public filename must agree with README.md (toolsmith T37).
+      - name: installer
+        run: cp scripts/install.sh dist/wip-install.sh
+
       - name: changelog
         run: |
           nix develop --command make changelog
           nix develop --command make release-notes TAG=${{ github.ref_name }}
 
       # Attached alongside the binaries so a curl-fetched binary can be
-      # verified without trusting the transport.
+      # checked for transfer corruption. The installer and checksum file
+      # themselves are trusted GitHub/HTTPS inputs, not authenticated here.
       - name: checksums
         working-directory: dist
         run: sha256sum wip-darwin-arm64 wip-linux-amd64 > SHA256SUMS
@@ -59,5 +65,6 @@ jobs:
             --notes-file dist/RELEASE_NOTES.md \
             dist/wip-darwin-arm64 \
             dist/wip-linux-amd64 \
+            dist/wip-install.sh \
             dist/SHA256SUMS \
             dist/CHANGELOG.md

@@ -13,7 +13,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # shell files at all, so this list is the only shell gate — `make lint`,
 # and so CI's lint job, checks it in full.
 ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy contrib/online-authority-proof/run contrib/online-authority-proof/runtime-test contrib/online-authority-proof/test-policy
-SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release $(ORB_SHELLCHECK_FILES)
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh $(ORB_SHELLCHECK_FILES)
 
 .PHONY: fmt lint test check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
 
