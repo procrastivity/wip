@@ -22,63 +22,80 @@ Neither binary installation nor `wip version` opens or migrates a WIP store.
 
 ### GitHub release binary
 
-The release installer supports **Linux amd64** and **macOS arm64**. It requires
-`curl` and either `sha256sum` or `shasum`, downloads the binary and `SHA256SUMS`,
-and verifies the binary before installing it. Windows and other architectures
-are not published by this release pipeline.
-
-Until a release includes the new `wip-install.sh` asset, run the installer from
-this checkout against the existing Go release assets:
-
-```sh
-WIP_VERSION=v0.3.0 sh scripts/install.sh
-```
-
-After an installer-bearing release is published, download and inspect its
-installer, then run it (the default selects the latest release):
+Install the latest release to `~/.local/bin/wip` — no checkout or Go toolchain
+required. The installer supports **Linux amd64** and **macOS arm64** and requires
+`curl` plus either `sha256sum` or `shasum`.
 
 ```sh
 curl -fsSL https://github.com/procrastivity/wip/releases/latest/download/wip-install.sh -o /tmp/wip-install.sh
-less /tmp/wip-install.sh
 sh /tmp/wip-install.sh
 ```
 
-Set `WIP_VERSION=vX.Y.Z` on the `sh` command to pin the binary's release tag.
-For a fully pinned bootstrap, also replace `latest/download` in the installer
-URL with `download/vX.Y.Z` from an installer-bearing release. `WIP_BASE_URL`
-selects another trusted GitHub repository with the same asset layout.
-The installer and checksum file are trusted GitHub/HTTPS inputs; checking the
-binary checksum detects transfer corruption, not a compromised release.
-
-The default destination is `~/.local/bin/wip`; set `WIP_INSTALL_DIR` to choose
-another directory, including a disposable destination for a trial:
+Put the destination on PATH and verify which binary your shell selects:
 
 ```sh
-WIP_INSTALL_DIR="$PWD/release-bin" WIP_VERSION=v0.3.0 sh scripts/install.sh
-./release-bin/wip version
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+command -v wip
+wip version
 ```
 
-Installation replaces an existing `wip` file **or symlink** by renaming a
-verified executable into place. It does not follow a development-build symlink
-or overwrite its target. To replace your daily symlink, deliberately run the
-installer with its default destination; no separate symlink removal is needed.
-Ensure `~/.local/bin` is on PATH, run `hash -r` if your shell caches commands,
-then check `command -v wip` and `wip version`. A different WIP earlier on PATH
-can still shadow the installed binary.
+Keep the PATH setting in your shell's startup configuration for future sessions.
+Re-run the installer to update. Installation replaces an existing `wip` file
+**or symlink** with the verified binary; it never follows a development-build
+symlink or overwrites its target. No separate symlink removal is needed.
 
 This installs only `wip`, not the experimental `wipd`, and never activates a
 daemon, changes stores, or installs harness skills automatically.
 
-### Nix and harness projection
+### Optional: agent harness skills
 
-```
-nix profile install github:procrastivity/wip/go   # the binary, system-wide
-wip install                                       # project into every detected harness
+Once the binary is on PATH, install its generated skills separately:
+
+```sh
+wip install                 # project into every detected harness
 ```
 
 `wip install <harness>` targets one harness; `wip uninstall <harness>`
 removes exactly what install wrote; `wip doctor` reports stale or
 drifted projections.
+
+### Installation options and verification
+
+**Pin a release.** `WIP_VERSION` selects the binary's release tag. To pin both
+the installer and the binary, use the same tag in the download URL and the
+environment. For example, [v0.3.1](https://github.com/procrastivity/wip/releases/tag/v0.3.1)
+publishes both:
+
+```sh
+curl -fsSL https://github.com/procrastivity/wip/releases/download/v0.3.1/wip-install.sh -o /tmp/wip-install.sh
+WIP_VERSION=v0.3.1 sh /tmp/wip-install.sh
+```
+
+**Choose a destination.** Set `WIP_INSTALL_DIR` to override `~/.local/bin`.
+For a disposable trial without replacing your daily binary:
+
+```sh
+install_dir=$(mktemp -d)
+WIP_INSTALL_DIR="$install_dir" WIP_VERSION=v0.3.1 sh /tmp/wip-install.sh
+"$install_dir/wip" version
+```
+
+`WIP_BASE_URL` selects another trusted GitHub repository with the same release
+asset layout. Windows and other architectures are not published by this pipeline.
+
+**Download verification.** You can inspect `/tmp/wip-install.sh` before running
+it. The installer downloads the selected binary and `SHA256SUMS` from the same
+release and checks the binary before replacing the destination. The script and
+checksum file are trusted GitHub/HTTPS inputs: the checksum detects transfer
+corruption, not a compromised release or installer.
+
+**Nix alternative.** Install the binary from the Go branch instead of using a
+release asset, then use the same optional harness step above:
+
+```sh
+nix profile install github:procrastivity/wip/go
+```
 
 ## Develop
 
