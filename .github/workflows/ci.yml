@@ -1,5 +1,5 @@
-# CI for the go branch. main's existing CI (bash line) is untouched and
-# unaffected by this workflow.
+# CI for the Go implementation on main. The original bash implementation
+# is preserved on bash-final.
 #
 # Releasing lives in release.yml, on its own tag trigger — this workflow
 # never publishes. Keeping the two apart is what lets the release gate on
@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [go]
+    branches: [main]
   pull_request:
-    branches: [go]
+    branches: [main]
 
 permissions:
   contents: read

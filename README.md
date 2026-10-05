@@ -12,8 +12,9 @@ Built on the [toolsmith contract](https://github.com/procrastivity/toolsmith)
 (`toolsmith/v1` — the manifest declares it): a single static Go binary
 that projects itself into agent harnesses as generated, stamped skills.
 
-This is the Go line, on the `go` branch. `main` still carries the
-original bash implementation until cutover.
+The Go implementation lives on `main`. The original bash implementation is
+preserved on `bash-final`; existing release tags are unchanged. This branch
+cutover does not activate the experimental `wipd` or migrate any WIP store.
 
 ## Install
 
@@ -90,11 +91,11 @@ release and checks the binary before replacing the destination. The script and
 checksum file are trusted GitHub/HTTPS inputs: the checksum detects transfer
 corruption, not a compromised release or installer.
 
-**Nix alternative.** Install the binary from the Go branch instead of using a
+**Nix alternative.** Install the binary from `main` instead of using a
 release asset, then use the same optional harness step above:
 
 ```sh
-nix profile install github:procrastivity/wip/go
+nix profile install github:procrastivity/wip/main
 ```
 
 ## Develop

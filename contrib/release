@@ -57,11 +57,10 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 	exit 1
 fi
 
-# wip's release branch is `go`, not `main`: main and go are unrelated
-# histories, and release.yml only exists on go.
+# The Go implementation releases from main; bash-final preserves the old line.
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [[ "$BRANCH" != "go" ]]; then
-	echo "warning: releasing from branch '$BRANCH', not 'go'" >&2
+if [[ "$BRANCH" != "main" ]]; then
+	echo "warning: releasing from branch '$BRANCH', not 'main'" >&2
 fi
 
 # --- Compute the new tag from the latest release tag ---

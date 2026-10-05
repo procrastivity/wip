@@ -3,9 +3,8 @@
 # step-01). CHANGELOG.md is generated here per release and never committed,
 # so nothing in the repo can disagree with the tag it was built from.
 #
-# The bash line on `main` is unaffected: `main` and `go` are unrelated
-# histories, and a tag on a `main` commit checks out a tree that carries no
-# release workflow, so this cannot fire for it.
+# The original bash history is preserved on `bash-final`; the Go history
+# now lives on `main`. Existing tags retain their original commits.
 name: Release
 
 on:
