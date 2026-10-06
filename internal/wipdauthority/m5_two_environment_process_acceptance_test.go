@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -16,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -39,64 +41,11 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		t.Skip("wipd's authenticated local socket process is Linux-only")
 	}
 	ctx := context.Background()
-	fixture := newM5CommandFixture(t)
-	registry, err := NewM5BirthRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	configA := fixture.config
-	configA.Registry = registry
-	fixture.config = configA
-	fixture.server = fixture.serverForStore(t, fixture.store)
-
-	owner := m5TestKey("owner-root")
-	ownerID := fixture.profile.OwnerRootSPKI()
-	privateB := m5TestKey("step19-environment-b")
-	csrB, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "M5 Step 19 Environment B"},
-	}, privateB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	grantB := m5TestOwnerArtifact(t, owner, ownerID, m5TestDomain, "enrollment-grant", "wipd.enrollment-grant/1", map[string]any{
-		"schema": "wipd.enrollment-grant/1", "grant_id": m5TwoEnvironmentID(80), "domain_id": m5TestDomain,
-		"authority_epoch": uint64(1), "owner_key_id": ownerID, "scope": "environment-enroll",
-		"requested_spki_digest": m5TestPublicDigest(privateB.Public().(ed25519.PublicKey)),
-		"prior_environment_id":  nil, "nonce": bytes.Repeat([]byte{0x62}, 16),
-		"issued_at":  fixture.now.Add(-time.Minute).Format(time.RFC3339Nano),
-		"expires_at": fixture.now.Add(5 * time.Minute).Format(time.RFC3339Nano),
-	}, fixture.now)
-	environmentBID, err := stableEnvironmentID(m5TestDomain, grantB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leafB, err := m5EnvironmentLeafCertificate(privateB, m5TestKey("environment-ca"), fixture.config.EnvironmentCACertificateDER,
-		m5TestDomain, environmentBID, ownerID, 102, fixture.now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = fixture.store.IssueEnvironmentCertificate(ctx, m5TestDomain, environmentBID, grantB, csrB,
-		[][]byte{leafB, fixture.config.EnvironmentCACertificateDER}, fixture.now); err != nil {
-		t.Fatalf("issue second authenticated fixture Environment certificate: %v", err)
-	}
-
-	trace := &m5TwoEnvironmentTrace{}
-	fixture.server.http.Handler = trace.wrap(fixture.server.http.Handler)
-	authorityCtx, stopAuthority := context.WithCancel(ctx)
-	authorityDone := make(chan error, 1)
-	go func() { authorityDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
-	t.Cleanup(func() {
-		stopAuthority()
-		select {
-		case serveErr := <-authorityDone:
-			if serveErr != nil {
-				t.Errorf("M5 authority server stopped with error: %v", serveErr)
-			}
-		case <-time.After(3 * time.Second):
-			t.Error("M5 authority server did not stop")
-		}
-	})
-
+	crossContainerBundle := os.Getenv("WIP_M5_CROSS_CONTAINER_BUNDLE")
+	crossContainer := crossContainerBundle != ""
+	var fixture *m5CommandFixture
+	var a, b m5ProcessEnvironment
+	var trace *m5TwoEnvironmentTrace
 	root, err := os.MkdirTemp("", "w19-")
 	if err != nil {
 		t.Fatal(err)
@@ -105,17 +54,92 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	a, err := prepareM5ProcessEnvironment(t, fixture, root, "environment-a", m5TestEnv,
-		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1])
-	if err != nil {
-		t.Fatal(err)
+	if crossContainer {
+		bundle, bundleErr := readM5CrossContainerBundle(crossContainerBundle)
+		if bundleErr != nil {
+			t.Fatal(bundleErr)
+		}
+		fixture, err = m5FixtureFromCrossContainerBundle(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err = installM5CrossContainerEnvironment(t, fixture, root, "environment-a", bundle.EnvironmentA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err = installM5CrossContainerEnvironment(t, fixture, root, "environment-b", bundle.EnvironmentB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trace = &m5TwoEnvironmentTrace{}
+	} else {
+		fixture = newM5CommandFixture(t)
+		registry, registryErr := NewM5BirthRegistry()
+		if registryErr != nil {
+			t.Fatal(registryErr)
+		}
+		config := fixture.config
+		config.Registry = registry
+		fixture.config = config
+		fixture.server = fixture.serverForStore(t, fixture.store)
+		a, err = prepareM5ProcessEnvironment(t, fixture, root, "environment-a", m5TestEnv,
+			fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := m5TestKey("owner-root")
+		ownerID := fixture.profile.OwnerRootSPKI()
+		privateB := m5TestKey("step19-environment-b")
+		csrB, csrErr := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+			Subject: pkix.Name{CommonName: "M5 Step 19 Environment B"},
+		}, privateB)
+		if csrErr != nil {
+			t.Fatal(csrErr)
+		}
+		grantB := m5TestOwnerArtifact(t, owner, ownerID, m5TestDomain, "enrollment-grant", "wipd.enrollment-grant/1", map[string]any{
+			"schema": "wipd.enrollment-grant/1", "grant_id": m5TwoEnvironmentID(80), "domain_id": m5TestDomain,
+			"authority_epoch": uint64(1), "owner_key_id": ownerID, "scope": "environment-enroll",
+			"requested_spki_digest": m5TestPublicDigest(privateB.Public().(ed25519.PublicKey)),
+			"prior_environment_id":  nil, "nonce": bytes.Repeat([]byte{0x62}, 16),
+			"issued_at":  fixture.now.Add(-time.Minute).Format(time.RFC3339Nano),
+			"expires_at": fixture.now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+		}, fixture.now)
+		environmentBID, idErr := stableEnvironmentID(m5TestDomain, grantB)
+		if idErr != nil {
+			t.Fatal(idErr)
+		}
+		leafB, certErr := m5EnvironmentLeafCertificate(privateB, m5TestKey("environment-ca"), fixture.config.EnvironmentCACertificateDER,
+			m5TestDomain, environmentBID, ownerID, 102, fixture.now)
+		if certErr != nil {
+			t.Fatal(certErr)
+		}
+		if _, err = fixture.store.IssueEnvironmentCertificate(ctx, m5TestDomain, environmentBID, grantB, csrB,
+			[][]byte{leafB, fixture.config.EnvironmentCACertificateDER}, fixture.now); err != nil {
+			t.Fatalf("issue second authenticated fixture Environment certificate: %v", err)
+		}
+		b, err = prepareM5ProcessEnvironment(t, fixture, root, "environment-b", environmentBID,
+			privateB, leafB, fixture.config.EnvironmentCACertificateDER)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trace = &m5TwoEnvironmentTrace{}
+		fixture.server.http.Handler = trace.wrap(fixture.server.http.Handler)
+		authorityCtx, stopAuthority := context.WithCancel(ctx)
+		authorityDone := make(chan error, 1)
+		go func() { authorityDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
+		t.Cleanup(func() {
+			stopAuthority()
+			select {
+			case serveErr := <-authorityDone:
+				if serveErr != nil {
+					t.Errorf("M5 authority server stopped with error: %v", serveErr)
+				}
+			case <-time.After(3 * time.Second):
+				t.Error("M5 authority server did not stop")
+			}
+		})
 	}
 	defer clear(a.state.PrivateKeyPKCS8)
-	b, err := prepareM5ProcessEnvironment(t, fixture, root, "environment-b", environmentBID,
-		privateB, leafB, fixture.config.EnvironmentCACertificateDER)
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer clear(b.state.PrivateKeyPKCS8)
 	if a.state.EnvironmentID == b.state.EnvironmentID {
 		t.Fatal("independent enrollment grants produced the same Environment identity")
@@ -379,7 +403,9 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		if closeErr != nil || closed.Code != operation.ResultSucceeded || closed.CommandID != m5TwoEnvironmentID(25) || len(closed.Receipt) == 0 {
 			t.Fatalf("Environment B acquired-claim close = %+v, %v", closed, closeErr)
 		}
-		assertM5ClaimCloseTrace(t, trace.forEnvironment(b.state.EnvironmentID), b.state.EnvironmentID, claimB.ClaimID)
+		if !crossContainer {
+			assertM5ClaimCloseTrace(t, trace.forEnvironment(b.state.EnvironmentID), b.state.EnvironmentID, claimB.ClaimID)
+		}
 		replay, replayErr := clientB.ReleaseClaimJournal(ctx, closed.CommandID, claimB.ClaimID, claimB.ClaimEpoch,
 			matterB.ID, claimB.DispatchID, operation.Actor("human"))
 		if replayErr != nil || replay.Code != operation.ResultSucceeded || !bytes.Equal(replay.Receipt, closed.Receipt) {
@@ -388,28 +414,35 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 	})
 
 	runScenario("09-contention-refuses-without-closing-environment-a", func(t *testing.T) {
-		beforeAnchor, anchorErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
-		if anchorErr != nil {
-			t.Fatal(anchorErr)
-		}
-		beforeJournal, journalErr := fixture.store.GetCurrentClaimJournal(ctx, m5TestDomain, 1, a.state.EnvironmentID,
-			claimA.ClaimID, claimA.ClaimEpoch, matterA.ID, claimA.DispatchID)
-		if journalErr != nil || beforeJournal.State != "open" {
-			t.Fatalf("Environment A journal before contention = %+v, %v", beforeJournal, journalErr)
+		var beforeAnchor authoritystore.PrefixAnchor
+		var beforeJournal authoritystore.CurrentClaimJournal
+		if !crossContainer {
+			var anchorErr, journalErr error
+			beforeAnchor, anchorErr = fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+			if anchorErr != nil {
+				t.Fatal(anchorErr)
+			}
+			beforeJournal, journalErr = fixture.store.GetCurrentClaimJournal(ctx, m5TestDomain, 1, a.state.EnvironmentID,
+				claimA.ClaimID, claimA.ClaimEpoch, matterA.ID, claimA.DispatchID)
+			if journalErr != nil || beforeJournal.State != "open" {
+				t.Fatalf("Environment A journal before contention = %+v, %v", beforeJournal, journalErr)
+			}
 		}
 		refused, acquireErr := clientB.AcquireClaim(ctx, m5TwoEnvironmentID(26), matterA.ID,
 			m5TwoEnvironmentID(27), m5TwoEnvironmentID(28), m5TwoEnvironmentID(29), operation.Actor("human"))
 		if acquireErr != nil || refused.Code != operation.ResultRefused || refused.Grant != nil || len(refused.Receipt) == 0 {
 			t.Fatalf("Environment B acquisition of A's active Matter = %+v, %v; want stable refusal", refused, acquireErr)
 		}
-		afterAnchor, anchorErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
-		if anchorErr != nil || afterAnchor != beforeAnchor {
-			t.Fatalf("contention refusal changed authority event prefix: before=%+v after=%+v err=%v", beforeAnchor, afterAnchor, anchorErr)
-		}
-		afterJournal, journalErr := fixture.store.GetCurrentClaimJournal(ctx, m5TestDomain, 1, a.state.EnvironmentID,
-			claimA.ClaimID, claimA.ClaimEpoch, matterA.ID, claimA.DispatchID)
-		if journalErr != nil || afterJournal != beforeJournal {
-			t.Fatalf("contention refusal changed A's open claim journal: before=%+v after=%+v err=%v", beforeJournal, afterJournal, journalErr)
+		if !crossContainer {
+			afterAnchor, anchorErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+			if anchorErr != nil || afterAnchor != beforeAnchor {
+				t.Fatalf("contention refusal changed authority event prefix: before=%+v after=%+v err=%v", beforeAnchor, afterAnchor, anchorErr)
+			}
+			afterJournal, journalErr := fixture.store.GetCurrentClaimJournal(ctx, m5TestDomain, 1, a.state.EnvironmentID,
+				claimA.ClaimID, claimA.ClaimEpoch, matterA.ID, claimA.DispatchID)
+			if journalErr != nil || afterJournal != beforeJournal {
+				t.Fatalf("contention refusal changed A's open claim journal: before=%+v after=%+v err=%v", beforeJournal, afterJournal, journalErr)
+			}
 		}
 	})
 
@@ -420,7 +453,9 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 		if closeErr != nil || closed.Code != operation.ResultSucceeded || len(closed.Receipt) == 0 {
 			t.Fatalf("Environment A acquired-claim close = %+v, %v", closed, closeErr)
 		}
-		assertM5ClaimCloseTrace(t, trace.forEnvironment(a.state.EnvironmentID), a.state.EnvironmentID, claimA.ClaimID)
+		if !crossContainer {
+			assertM5ClaimCloseTrace(t, trace.forEnvironment(a.state.EnvironmentID), a.state.EnvironmentID, claimA.ClaimID)
+		}
 		replay, replayErr := clientA.ReleaseClaimJournal(ctx, closed.CommandID, claimA.ClaimID, claimA.ClaimEpoch,
 			matterA.ID, claimA.DispatchID, operation.Actor("human"))
 		if replayErr != nil || replay.Code != operation.ResultSucceeded || !bytes.Equal(replay.Receipt, closed.Receipt) {
@@ -496,34 +531,603 @@ func TestM5TwoEnvironmentClaimCloseAndFinalPullSpine(t *testing.T) {
 			t.Fatalf("final authenticated Environment pulls diverged: A=%+v B=%+v overlayA=%+v overlayB=%+v", finalA, finalB, overlayA, overlayB)
 		}
 
-		// M5 has no per-Environment read endpoint; this common pinned page is
-		// provenance for both installed pulls because its exact as-of prefix
-		// and manifest match each independently authenticated journal.
-		now := time.Now().UTC()
-		pinned, pinErr := fixture.store.PinSnapshot(ctx, m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(),
-			m5TwoEnvironmentID(90), now, time.Minute)
-		if pinErr != nil {
-			t.Fatalf("pin common final authority read snapshot: %v", pinErr)
-		}
-		page, readErr := fixture.store.ReadMatterPage(ctx, m5TestDomain, 1, pinned.ID, m5TestRepo, 100, "", now)
-		if readErr != nil || page.Source != "authority" || page.Reachability != "reachable" || page.HistoryState != "current" ||
-			!sameAuthorityAnchor(finalA.Anchor, wireAnchor(page.AsOf)) || page.ManifestDigest != finalA.ManifestDigest || len(page.Items) != 2 {
-			t.Fatalf("authority read provenance/as-of differs from both authenticated pulls: page=%+v err=%v stateA=%+v", page, readErr, finalA.Anchor)
-		}
-		if uint64(len(eventsA)) != page.AsOf.EventCount || len(overlayA) < 8 || finalA.ManifestDigest == emptyManifestDigest() {
+		if uint64(len(eventsA)) != finalA.Anchor.EventCount || len(overlayA) < 8 || finalA.ManifestDigest == emptyManifestDigest() {
 			t.Fatalf("final pull omitted complete event/projection/content/manifest state: events=%d overlay=%d manifest=%s",
 				len(eventsA), len(overlayA), finalA.ManifestDigest)
 		}
-		if len(pinned.Delta.Events) != len(eventsA) {
-			t.Fatalf("authority final snapshot has %d events, both pulls have %d", len(pinned.Delta.Events), len(eventsA))
-		}
-		for index, event := range pinned.Delta.Events {
-			if index >= len(eventsA) || eventsA[index].EventID != event.EventID || !bytes.Equal(eventsA[index].Record, event.Record) {
-				t.Fatalf("Environment pulls differ from authority event bytes/order at position %d: pull=%+v authority=%+v",
-					index, eventsA[index], event)
+		if crossContainer {
+			path := os.Getenv("WIP_M5_CROSS_CONTAINER_CLIENT_EVIDENCE")
+			if path == "" {
+				t.Fatal("cross-container client evidence path was not configured")
+			}
+			projectionPath := filepath.Join(root, "cross-container-projections.json")
+			projectionEvidence := runM5CrossContainerProjectionPulls(t, projectionPath, a, b)
+			matterProjectionsA, projectionErr := m5ClientMatterProjections(projectionEvidence.EnvironmentA.MatterProjections)
+			if projectionErr != nil {
+				t.Fatalf("decode Environment A Matter projections: %v", projectionErr)
+			}
+			matterProjectionsB, projectionErr := m5ClientMatterProjections(projectionEvidence.EnvironmentB.MatterProjections)
+			if projectionErr != nil {
+				t.Fatalf("decode Environment B Matter projections: %v", projectionErr)
+			}
+			if projectionEvidence.Schema != "wipd.m5-cross-container-installed-projections/1" ||
+				projectionEvidence.EnvironmentA.EnvironmentID != a.state.EnvironmentID ||
+				projectionEvidence.EnvironmentB.EnvironmentID != b.state.EnvironmentID ||
+				!sameAuthorityAnchor(projectionEvidence.EnvironmentA.Prefix, finalA.Anchor) ||
+				!sameAuthorityAnchor(projectionEvidence.EnvironmentB.Prefix, finalB.Anchor) ||
+				projectionEvidence.EnvironmentA.ManifestDigest != finalA.ManifestDigest ||
+				projectionEvidence.EnvironmentB.ManifestDigest != finalB.ManifestDigest ||
+				!reflect.DeepEqual(projectionEvidence.EnvironmentA.EventRecords, eventsA) ||
+				!reflect.DeepEqual(projectionEvidence.EnvironmentB.EventRecords, eventsB) ||
+				len(matterProjectionsA) != 2 || !reflect.DeepEqual(matterProjectionsA, matterProjectionsB) ||
+				!reflect.DeepEqual(projectionEvidence.EnvironmentA.StepProjections, projectionEvidence.EnvironmentB.StepProjections) ||
+				!reflect.DeepEqual(projectionEvidence.EnvironmentA.ContentProjections, projectionEvidence.EnvironmentB.ContentProjections) {
+				t.Fatalf("authenticated post-reopen client projections differ from the final journal prefix or each other: A=%+v B=%+v",
+					projectionEvidence.EnvironmentA, projectionEvidence.EnvironmentB)
+			}
+			evidence := m5CrossContainerClientEvidence{
+				Schema: "wipd.m5-cross-container-client-evidence/2", DomainID: m5TestDomain, Epoch: 1,
+				EnvironmentA: a.state.EnvironmentID, EnvironmentB: b.state.EnvironmentID,
+				AsOf: finalA.Anchor, ManifestDigest: finalA.ManifestDigest,
+				EventRecords: eventsA, OverlayCount: len(overlayA),
+				EnvironmentAMatterProjections:  matterProjectionsA,
+				EnvironmentBMatterProjections:  matterProjectionsB,
+				EnvironmentAStepProjections:    projectionEvidence.EnvironmentA.StepProjections,
+				EnvironmentBStepProjections:    projectionEvidence.EnvironmentB.StepProjections,
+				EnvironmentAContentProjections: projectionEvidence.EnvironmentA.ContentProjections,
+				EnvironmentBContentProjections: projectionEvidence.EnvironmentB.ContentProjections,
+			}
+			encoded, encodeErr := json.Marshal(evidence)
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			if writeErr := os.WriteFile(path, encoded, 0o600); writeErr != nil {
+				t.Fatalf("write cross-container client convergence evidence: %v", writeErr)
+			}
+		} else {
+			// M5 has no per-Environment read endpoint; this common pinned page is
+			// provenance for both installed pulls because its exact as-of prefix
+			// and manifest match each independently authenticated journal.
+			now := time.Now().UTC()
+			pinned, pinErr := fixture.store.PinSnapshot(ctx, m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(),
+				m5TwoEnvironmentID(90), now, time.Minute)
+			if pinErr != nil {
+				t.Fatalf("pin common final authority read snapshot: %v", pinErr)
+			}
+			page, readErr := fixture.store.ReadMatterPage(ctx, m5TestDomain, 1, pinned.ID, m5TestRepo, 100, "", now)
+			if readErr != nil || page.Source != "authority" || page.Reachability != "reachable" || page.HistoryState != "current" ||
+				!sameAuthorityAnchor(finalA.Anchor, wireAnchor(page.AsOf)) || page.ManifestDigest != finalA.ManifestDigest || len(page.Items) != 2 {
+				t.Fatalf("authority read provenance/as-of differs from both authenticated pulls: page=%+v err=%v stateA=%+v", page, readErr, finalA.Anchor)
+			}
+			if len(pinned.Delta.Events) != len(eventsA) {
+				t.Fatalf("authority final snapshot has %d events, both pulls have %d", len(pinned.Delta.Events), len(eventsA))
+			}
+			for index, event := range pinned.Delta.Events {
+				if index >= len(eventsA) || eventsA[index].EventID != event.EventID || !bytes.Equal(eventsA[index].Record, event.Record) {
+					t.Fatalf("Environment pulls differ from authority event bytes/order at position %d: pull=%+v authority=%+v",
+						index, eventsA[index], event)
+				}
 			}
 		}
 	})
+}
+
+type m5CrossContainerBundle struct {
+	Schema                  string               `json:"schema"`
+	Origin                  string               `json:"origin"`
+	DomainID                string               `json:"domain_id"`
+	RepoID                  string               `json:"repo_id"`
+	Epoch                   uint64               `json:"authority_epoch"`
+	OwnerRootPublicKey      []byte               `json:"owner_root_public_key"`
+	AuthorityCertificateDER [][]byte             `json:"authority_certificate_chain_der"`
+	ArtifactKeyCertificate  []byte               `json:"artifact_key_certificate"`
+	EnvironmentA            m5ProcessClientState `json:"environment_a"`
+	EnvironmentB            m5ProcessClientState `json:"environment_b"`
+}
+
+type m5CrossContainerTraffic struct {
+	Environment string `json:"environment_id"`
+	Kind        string `json:"frame_kind"`
+	Host        string `json:"host"`
+	RemoteAddr  string `json:"remote_addr"`
+	At          string `json:"at"`
+}
+
+type m5CrossContainerRefusalEvidence struct {
+	Environment string                `json:"environment_id"`
+	MatterID    string                `json:"matter_id"`
+	Before      wipdwire.PrefixAnchor `json:"before"`
+	After       wipdwire.PrefixAnchor `json:"after"`
+	Unchanged   bool                  `json:"prefix_unchanged"`
+}
+
+type m5CrossContainerAuthorityEvidence struct {
+	Schema         string                             `json:"schema"`
+	DomainID       string                             `json:"domain_id"`
+	Epoch          uint64                             `json:"authority_epoch"`
+	EnvironmentA   string                             `json:"environment_a"`
+	EnvironmentB   string                             `json:"environment_b"`
+	Source         string                             `json:"source"`
+	Reachability   string                             `json:"reachability"`
+	HistoryState   string                             `json:"history_state"`
+	AsOf           wipdwire.PrefixAnchor              `json:"as_of"`
+	ManifestDigest string                             `json:"manifest_digest"`
+	Items          int                                `json:"matter_count"`
+	Matter         []m5CrossContainerMatterProjection `json:"matter_projections"`
+	Events         []wipdwire.EventRecord             `json:"events"`
+	Traffic        []m5CrossContainerTraffic          `json:"traffic"`
+	Contention     m5CrossContainerRefusalEvidence    `json:"contention_refusal"`
+}
+
+type m5CrossContainerClientEvidence struct {
+	Schema                         string                             `json:"schema"`
+	DomainID                       string                             `json:"domain_id"`
+	Epoch                          uint64                             `json:"authority_epoch"`
+	EnvironmentA                   string                             `json:"environment_a"`
+	EnvironmentB                   string                             `json:"environment_b"`
+	AsOf                           wipdwire.PrefixAnchor              `json:"as_of"`
+	ManifestDigest                 string                             `json:"manifest_digest"`
+	EventRecords                   []wipdwire.EventRecord             `json:"event_records"`
+	OverlayCount                   int                                `json:"overlay_count"`
+	EnvironmentAMatterProjections  []m5CrossContainerMatterProjection `json:"environment_a_matter_projections"`
+	EnvironmentBMatterProjections  []m5CrossContainerMatterProjection `json:"environment_b_matter_projections"`
+	EnvironmentAStepProjections    []json.RawMessage                  `json:"environment_a_step_projections"`
+	EnvironmentBStepProjections    []json.RawMessage                  `json:"environment_b_step_projections"`
+	EnvironmentAContentProjections []json.RawMessage                  `json:"environment_a_content_projections"`
+	EnvironmentBContentProjections []json.RawMessage                  `json:"environment_b_content_projections"`
+}
+
+type m5CrossContainerMatterProjection struct {
+	ID           string `cbor:"id" json:"id"`
+	RepoID       string `cbor:"repo_id" json:"repo_id"`
+	Locator      string `cbor:"locator" json:"locator"`
+	Title        string `cbor:"title" json:"title"`
+	BirthEventID string `cbor:"birth_event_id" json:"birth_event_id"`
+}
+
+type m5CrossContainerInstalledProjection struct {
+	EnvironmentID      string                 `json:"environment_id"`
+	Prefix             wipdwire.PrefixAnchor  `json:"prefix"`
+	ManifestDigest     string                 `json:"manifest_digest"`
+	EventRecords       []wipdwire.EventRecord `json:"event_records"`
+	MatterProjections  []json.RawMessage      `json:"matter_projections"`
+	StepProjections    []json.RawMessage      `json:"step_projections"`
+	ContentProjections []json.RawMessage      `json:"content_projections"`
+}
+
+type m5CrossContainerInstalledProjections struct {
+	Schema       string                              `json:"schema"`
+	EnvironmentA m5CrossContainerInstalledProjection `json:"environment_a"`
+	EnvironmentB m5CrossContainerInstalledProjection `json:"environment_b"`
+}
+
+func runM5CrossContainerProjectionPulls(t *testing.T, output string, a, b m5ProcessEnvironment) m5CrossContainerInstalledProjections {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.v", "-test.run=^TestM5CrossContainerClientProjectionEvidence$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"WIP_M5_CROSS_CONTAINER_PROJECTION_PROFILE_A="+filepath.Join(a.profileRoot, "connected-authority.json"),
+		"WIP_M5_CROSS_CONTAINER_PROJECTION_STATE_A="+a.clientStateRoot,
+		"WIP_M5_CROSS_CONTAINER_PROJECTION_PROFILE_B="+filepath.Join(b.profileRoot, "connected-authority.json"),
+		"WIP_M5_CROSS_CONTAINER_PROJECTION_STATE_B="+b.clientStateRoot,
+		"WIP_M5_CROSS_CONTAINER_PROJECTION_OUTPUT="+output,
+	)
+	commandOutput, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run authenticated client projection pulls after journal reopen: %v\n%s", err, commandOutput)
+	}
+	defer func() { _ = os.Remove(output) }()
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read authenticated client projection evidence: %v", err)
+	}
+	var evidence m5CrossContainerInstalledProjections
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&evidence); err != nil || decoder.Decode(new(any)) != io.EOF {
+		t.Fatalf("decode authenticated client projection evidence: %v", err)
+	}
+	return evidence
+}
+
+func m5ClientMatterProjections(values []json.RawMessage) ([]m5CrossContainerMatterProjection, error) {
+	projections := make([]m5CrossContainerMatterProjection, 0, len(values))
+	for _, raw := range values {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil || len(fields) < 5 || len(fields) > 6 {
+			return nil, fmt.Errorf("invalid client Matter projection fields")
+		}
+		for _, key := range []string{"id", "repo_id", "locator", "title", "birth_event_id"} {
+			if _, ok := fields[key]; !ok {
+				return nil, fmt.Errorf("client Matter projection omits %q", key)
+			}
+		}
+		if state, ok := fields["state"]; ok {
+			var value string
+			if len(fields) != 6 || json.Unmarshal(state, &value) != nil || value == "" {
+				return nil, fmt.Errorf("client Matter projection has invalid state")
+			}
+		}
+		var projection m5CrossContainerMatterProjection
+		if err := json.Unmarshal(raw, &projection); err != nil || projection.ID == "" || projection.RepoID == "" ||
+			projection.Locator == "" || projection.Title == "" || projection.BirthEventID == "" {
+			return nil, fmt.Errorf("client Matter projection has invalid values")
+		}
+		projections = append(projections, projection)
+	}
+	return projections, nil
+}
+
+// TestM5CrossContainerAuthorityFixtureWorker owns the disposable authority
+// store and HTTPS service for the Compose cross-container acceptance run.
+func TestM5CrossContainerAuthorityFixtureWorker(t *testing.T) {
+	bundlePath := os.Getenv("WIP_M5_CROSS_CONTAINER_BUNDLE_OUTPUT")
+	stopPath := os.Getenv("WIP_M5_CROSS_CONTAINER_STOP")
+	evidencePath := os.Getenv("WIP_M5_CROSS_CONTAINER_AUTHORITY_EVIDENCE")
+	if bundlePath == "" || stopPath == "" || evidencePath == "" {
+		t.Skip("cross-container authority worker is enabled only by the isolated runtime harness")
+	}
+	if filepath.Dir(bundlePath) != filepath.Dir(stopPath) || filepath.Dir(bundlePath) != filepath.Dir(evidencePath) {
+		t.Fatal("cross-container worker artifacts must share the run-owned authority state directory")
+	}
+	fixture := newM5CommandFixtureAt(t, "0.0.0.0:8443", "authority-env", "authority-env")
+	registry, err := NewM5BirthRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	fixture.config = config
+	fixture.server = fixture.serverForStore(t, fixture.store)
+
+	owner := m5TestKey("owner-root")
+	ownerID := fixture.profile.OwnerRootSPKI()
+	privateB := m5TestKey("step19-environment-b")
+	csrB, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "M5 Step 19 Environment B"}}, privateB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantB := m5TestOwnerArtifact(t, owner, ownerID, m5TestDomain, "enrollment-grant", "wipd.enrollment-grant/1", map[string]any{
+		"schema": "wipd.enrollment-grant/1", "grant_id": m5TwoEnvironmentID(80), "domain_id": m5TestDomain,
+		"authority_epoch": uint64(1), "owner_key_id": ownerID, "scope": "environment-enroll",
+		"requested_spki_digest": m5TestPublicDigest(privateB.Public().(ed25519.PublicKey)),
+		"prior_environment_id":  nil, "nonce": bytes.Repeat([]byte{0x62}, 16),
+		"issued_at":  fixture.now.Add(-time.Minute).Format(time.RFC3339Nano),
+		"expires_at": fixture.now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	}, fixture.now)
+	environmentBID, err := stableEnvironmentID(m5TestDomain, grantB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafB, err := m5EnvironmentLeafCertificate(privateB, m5TestKey("environment-ca"), fixture.config.EnvironmentCACertificateDER,
+		m5TestDomain, environmentBID, ownerID, 102, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.IssueEnvironmentCertificate(context.Background(), m5TestDomain, environmentBID, grantB, csrB,
+		[][]byte{leafB, fixture.config.EnvironmentCACertificateDER}, fixture.now); err != nil {
+		t.Fatalf("authority-side test provisioning for Environment B: %v", err)
+	}
+	clientRoot := t.TempDir()
+	environmentA, err := prepareM5ProcessEnvironment(t, fixture, clientRoot, "environment-a", m5TestEnv,
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentB, err := prepareM5ProcessEnvironment(t, fixture, clientRoot, "environment-b", environmentBID,
+		privateB, leafB, fixture.config.EnvironmentCACertificateDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := m5CrossContainerBundle{
+		Schema: "wipd.m5-cross-container-bundle/1", Origin: fixture.profile.Origin(), DomainID: m5TestDomain,
+		RepoID: m5TestRepo, Epoch: 1, OwnerRootPublicKey: bytes.Clone(fixture.ownerRoot),
+		AuthorityCertificateDER: cloneByteSlices(fixture.serverCert.Certificate),
+		ArtifactKeyCertificate:  bytes.Clone(fixture.config.ArtifactKeyCertificate),
+		EnvironmentA:            environmentA.state, EnvironmentB: environmentB.state,
+	}
+	bundleBytes, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(bundleBytes)
+	trace := &m5TwoEnvironmentTrace{}
+	fixture.server.http.Handler = trace.wrapWithAuthorityStore(fixture.server.http.Handler, fixture.store)
+	serveCtx, stopServer := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- fixture.server.Serve(serveCtx, fixture.listener) }()
+	if err = waitForM5AuthorityReady(fixture, 10*time.Second); err != nil {
+		stopServer()
+		t.Fatalf("cross-container authority did not become ready: %v", err)
+	}
+	if err = os.WriteFile(bundlePath, bundleBytes, 0o600); err != nil {
+		stopServer()
+		t.Fatalf("write cross-container client fixture bundle: %v", err)
+	}
+	defer clear(environmentA.state.PrivateKeyPKCS8)
+	defer clear(environmentB.state.PrivateKeyPKCS8)
+	if err = waitForM5File(stopPath, 5*time.Minute); err != nil {
+		stopServer()
+		t.Fatal(err)
+	}
+	stopServer()
+	if serveErr := <-serveDone; serveErr != nil {
+		t.Fatalf("cross-container authority server shutdown: %v", serveErr)
+	}
+	evidence, err := m5BuildCrossContainerAuthorityEvidence(context.Background(), fixture, trace, environmentBID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceBytes, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(evidencePath, evidenceBytes, 0o600); err != nil {
+		t.Fatalf("write typed authority-side M5 evidence: %v", err)
+	}
+}
+
+func waitForM5AuthorityReady(fixture *m5CommandFixture, timeout time.Duration) error {
+	client, err := fixture.profile.HTTPClient(fixture.serverRoots)
+	if err != nil {
+		return err
+	}
+	defer client.CloseIdleConnections()
+	deadline := time.Now().Add(timeout)
+	var lastRequestErr error
+	for time.Now().Before(deadline) {
+		response, requestErr := client.Get(fixture.profile.HealthURL())
+		if requestErr == nil {
+			_ = response.Body.Close()
+			if response.ProtoMajor == 2 && response.StatusCode == http.StatusNoContent {
+				return nil
+			}
+			return fmt.Errorf("unexpected health response: protocol=%s status=%s", response.Proto, response.Status)
+		}
+		lastRequestErr = requestErr
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("health endpoint did not answer before timeout: %w", lastRequestErr)
+}
+
+func readM5CrossContainerBundle(path string) (bundle m5CrossContainerBundle, retErr error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return bundle, err
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil && retErr == nil {
+			retErr = fmt.Errorf("close cross-container M5 bundle: %w", closeErr)
+		}
+	}()
+	decoder := json.NewDecoder(io.LimitReader(file, 4<<20))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&bundle); err != nil {
+		return bundle, err
+	}
+	if bundle.Schema != "wipd.m5-cross-container-bundle/1" || bundle.DomainID != m5TestDomain || bundle.RepoID != m5TestRepo ||
+		bundle.Epoch != 1 || len(bundle.OwnerRootPublicKey) != ed25519.PublicKeySize || len(bundle.AuthorityCertificateDER) != 2 ||
+		len(bundle.ArtifactKeyCertificate) == 0 || bundle.EnvironmentA.EnvironmentID == bundle.EnvironmentB.EnvironmentID {
+		return bundle, fmt.Errorf("invalid cross-container M5 client bundle")
+	}
+	var trailing any
+	if err = decoder.Decode(&trailing); err != io.EOF {
+		return bundle, fmt.Errorf("cross-container M5 bundle has trailing data")
+	}
+	return bundle, nil
+}
+
+func m5FixtureFromCrossContainerBundle(bundle m5CrossContainerBundle) (*m5CommandFixture, error) {
+	serverLeaf, err := x509.ParseCertificate(bundle.AuthorityCertificateDER[0])
+	if err != nil {
+		return nil, err
+	}
+	serverSPKI := sha256.Sum256(serverLeaf.RawSubjectPublicKeyInfo)
+	ownerSPKI, err := x509.MarshalPKIXPublicKey(ed25519.PublicKey(bundle.OwnerRootPublicKey))
+	if err != nil {
+		return nil, err
+	}
+	ownerDigest := sha256.Sum256(ownerSPKI)
+	ownerID := "sha256:" + hex.EncodeToString(ownerDigest[:])
+	profile, err := NewProfile(bundle.Origin, bundle.DomainID, bundle.Epoch,
+		"sha256:"+hex.EncodeToString(serverSPKI[:]), ownerID)
+	if err != nil {
+		return nil, err
+	}
+	profile, err = profile.WithM5LabRepoID(bundle.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	return &m5CommandFixture{
+		profile: profile, serverCert: tls.Certificate{Certificate: cloneByteSlices(bundle.AuthorityCertificateDER)},
+		ownerRoot: bytes.Clone(bundle.OwnerRootPublicKey), now: time.Now().UTC(),
+		config: M5LabConfig{ArtifactKeyCertificate: bytes.Clone(bundle.ArtifactKeyCertificate)},
+	}, nil
+}
+
+func installM5CrossContainerEnvironment(t *testing.T, fixture *m5CommandFixture, parent, name string,
+	state m5ProcessClientState,
+) (m5ProcessEnvironment, error) {
+	t.Helper()
+	var environment m5ProcessEnvironment
+	root := filepath.Join(parent, name)
+	environment.profileRoot = filepath.Join(root, "profile")
+	environment.clientStateRoot = filepath.Join(root, "client-state")
+	environment.state = state
+	if state.Schema != "wipd.m5-client-state/1" || state.DomainID != m5TestDomain || state.RepoID != m5TestRepo || state.Epoch != 1 ||
+		state.EnvironmentID == "" || len(state.PrivateKeyPKCS8) == 0 || len(state.CertificateDER) != 2 {
+		return environment, fmt.Errorf("invalid Environment state in cross-container bundle")
+	}
+	if err := os.MkdirAll(environment.profileRoot, 0o700); err != nil {
+		return environment, err
+	}
+	if err := os.MkdirAll(environment.clientStateRoot, 0o700); err != nil {
+		return environment, err
+	}
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		return environment, err
+	}
+	if err = os.WriteFile(filepath.Join(environment.clientStateRoot, "client-state.json"), stateBytes, 0o600); err != nil {
+		return environment, err
+	}
+	serverLeaf, err := x509.ParseCertificate(fixture.serverCert.Certificate[0])
+	if err != nil {
+		return environment, err
+	}
+	serverSPKI := sha256.Sum256(serverLeaf.RawSubjectPublicKeyInfo)
+	profileConfig := struct {
+		Schema                  string `json:"schema"`
+		Origin                  string `json:"origin"`
+		DomainID                string `json:"domain_id"`
+		Epoch                   uint64 `json:"authority_epoch"`
+		RepoID                  string `json:"repo_id"`
+		OwnerRootSPKI           string `json:"owner_root_spki"`
+		AuthoritySPKIPin        string `json:"authority_spki_pin"`
+		AuthorityCertificateDER []byte `json:"authority_certificate_der"`
+		OwnerRootPublicKey      []byte `json:"owner_root_public_key"`
+		ArtifactKeyCertificate  []byte `json:"artifact_key_certificate"`
+		ClientStateDirectory    string `json:"client_state_directory"`
+	}{
+		Schema: "wipd.connected-authority-profile/2", Origin: fixture.profile.Origin(), DomainID: m5TestDomain,
+		Epoch: 1, RepoID: m5TestRepo, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+		AuthoritySPKIPin:        "sha256:" + hex.EncodeToString(serverSPKI[:]),
+		AuthorityCertificateDER: bytes.Clone(fixture.serverCert.Certificate[1]),
+		OwnerRootPublicKey:      bytes.Clone(fixture.ownerRoot), ArtifactKeyCertificate: bytes.Clone(fixture.config.ArtifactKeyCertificate),
+		ClientStateDirectory: environment.clientStateRoot,
+	}
+	configBytes, err := json.Marshal(profileConfig)
+	if err != nil {
+		return environment, err
+	}
+	return environment, os.WriteFile(filepath.Join(environment.profileRoot, "connected-authority.json"), configBytes, 0o600)
+}
+
+func cloneByteSlices(values [][]byte) [][]byte {
+	cloned := make([][]byte, len(values))
+	for index, value := range values {
+		cloned[index] = bytes.Clone(value)
+	}
+	return cloned
+}
+
+func waitForM5File(path string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		select {
+		case <-deadline.C:
+			return fmt.Errorf("cross-container authority worker timed out waiting for stop signal")
+		case <-ticker.C:
+		}
+	}
+}
+
+func m5BuildCrossContainerAuthorityEvidence(ctx context.Context, fixture *m5CommandFixture, trace *m5TwoEnvironmentTrace,
+	environmentBID string,
+) (m5CrossContainerAuthorityEvidence, error) {
+	var evidence m5CrossContainerAuthorityEvidence
+	now := time.Now().UTC()
+	pinned, err := fixture.store.PinSnapshot(ctx, m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(), m5TwoEnvironmentID(91), now, time.Minute)
+	if err != nil {
+		return evidence, err
+	}
+	page, err := fixture.store.ReadMatterPage(ctx, m5TestDomain, 1, pinned.ID, m5TestRepo, 100, "", now)
+	if err != nil {
+		return evidence, err
+	}
+	if page.Source != "authority" || page.Reachability != "reachable" || page.HistoryState != "current" || len(page.Items) != 2 ||
+		page.ManifestDigest != pinned.Manifest.Digest || !sameAuthorityAnchor(wireAnchor(page.AsOf), wireAnchor(pinned.Delta.End)) {
+		return evidence, fmt.Errorf("authority-side M5 evidence is not one current pinned prefix: page=%+v pin=%+v", page, pinned)
+	}
+	matterProjections := make([]m5CrossContainerMatterProjection, 0, len(page.Items))
+	for _, item := range page.Items {
+		var projection m5CrossContainerMatterProjection
+		if err = wipdwire.DecodeCanonical(item.Value, &projection, "id", "repo_id", "locator", "title", "birth_event_id"); err != nil || projection.ID != item.ID {
+			return evidence, fmt.Errorf("authority Matter projection is invalid at its pinned as-of prefix: item=%s err=%v", item.ID, err)
+		}
+		matterProjections = append(matterProjections, projection)
+	}
+	var traffic []m5CrossContainerTraffic
+	for _, entry := range trace.all() {
+		traffic = append(traffic, m5CrossContainerTraffic{
+			Environment: entry.environment, Kind: entry.kind, Host: entry.host, RemoteAddr: entry.remoteAddr,
+			At: entry.at.Format(time.RFC3339Nano),
+		})
+	}
+	if len(traffic) == 0 {
+		return evidence, fmt.Errorf("authority worker observed no authenticated M5 network frames")
+	}
+	refusals := trace.refusals()
+	if len(refusals) != 1 || refusals[0].Environment != environmentBID || !refusals[0].Unchanged {
+		return evidence, fmt.Errorf("authority-side typed contention evidence does not prove a stable refusal: %+v", refusals)
+	}
+	requiredKinds := map[string]bool{
+		"claim.acquire": false, "command.submit": false, "claim-journal.ack": false,
+		"claim-journal.seal": false, "claim.release": false, "pull.request": false,
+	}
+	environments := map[string]bool{m5TestEnv: false, environmentBID: false}
+	for _, item := range traffic {
+		if _, ok := environments[item.Environment]; !ok || item.Host != "authority-env:8443" || item.RemoteAddr == "" ||
+			strings.HasPrefix(item.RemoteAddr, "127.") || strings.HasPrefix(item.RemoteAddr, "[::1]:") {
+			return evidence, fmt.Errorf("authority worker saw unexpected client traffic endpoint: %+v", item)
+		}
+		environments[item.Environment] = true
+		if _, ok := requiredKinds[item.Kind]; ok {
+			requiredKinds[item.Kind] = true
+		}
+	}
+	for kind, seen := range requiredKinds {
+		if !seen {
+			return evidence, fmt.Errorf("authority worker did not observe required remote frame %q", kind)
+		}
+	}
+	for environment, seen := range environments {
+		if !seen {
+			return evidence, fmt.Errorf("authority worker did not observe authenticated traffic from Environment %s", environment)
+		}
+	}
+	var finalRelease time.Time
+	finalPulls := map[string]bool{m5TestEnv: false, environmentBID: false}
+	for _, entry := range trace.all() {
+		if entry.environment == m5TestEnv && entry.kind == "claim.release" && entry.at.After(finalRelease) {
+			finalRelease = entry.at
+		}
+	}
+	if finalRelease.IsZero() {
+		return evidence, fmt.Errorf("authority worker observed no Environment A claim release")
+	}
+	for _, entry := range trace.all() {
+		if entry.kind == "pull.request" && entry.at.After(finalRelease) {
+			if _, ok := finalPulls[entry.environment]; ok {
+				finalPulls[entry.environment] = true
+			}
+		}
+	}
+	for environment, seen := range finalPulls {
+		if !seen {
+			return evidence, fmt.Errorf("authority worker did not observe Environment %s authenticated pull after final claim release", environment)
+		}
+	}
+	events := make([]wipdwire.EventRecord, len(pinned.Delta.Events))
+	for index, event := range pinned.Delta.Events {
+		events[index] = wipdwire.EventRecord{EventID: event.EventID, Record: bytes.Clone(event.Record)}
+	}
+	evidence = m5CrossContainerAuthorityEvidence{
+		Schema: "wipd.m5-cross-container-authority-evidence/2", DomainID: m5TestDomain, Epoch: 1,
+		EnvironmentA: m5TestEnv, EnvironmentB: environmentBID,
+		Source: page.Source, Reachability: page.Reachability, HistoryState: page.HistoryState,
+		AsOf: wireAnchor(page.AsOf), ManifestDigest: page.ManifestDigest, Items: len(page.Items), Matter: matterProjections,
+		Events: events, Traffic: traffic,
+		Contention: refusals[0],
+	}
+	return evidence, nil
 }
 
 type m5ProcessEnvironment struct {
@@ -681,34 +1285,108 @@ func m5EnvironmentLeafCertificate(leafPrivate, caPrivate ed25519.PrivateKey, caD
 type m5TwoEnvironmentTraceEntry struct {
 	environment string
 	kind        string
+	host        string
+	remoteAddr  string
+	at          time.Time
 	payload     []byte
 }
 
 type m5TwoEnvironmentTrace struct {
-	mu      sync.Mutex
-	entries []m5TwoEnvironmentTraceEntry
+	mu              sync.Mutex
+	entries         []m5TwoEnvironmentTraceEntry
+	refusalEvidence []m5CrossContainerRefusalEvidence
 }
 
 func (trace *m5TwoEnvironmentTrace) wrap(next http.Handler) http.Handler {
+	return trace.wrapWithAuthorityStore(next, nil)
+}
+
+func (trace *m5TwoEnvironmentTrace) wrapWithAuthorityStore(next http.Handler, store *authoritystore.Store) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var acquire *wipdwire.ClaimAcquire
+		var environmentID, matterID string
+		var before authoritystore.PrefixAnchor
 		if request.URL.Path == "/wipd/v1/exchange" {
 			body, err := io.ReadAll(request.Body)
 			if err == nil {
 				_ = request.Body.Close()
 				request.Body = io.NopCloser(bytes.NewReader(body))
 				if frame, frameErr := wipdwire.ReadFrame(bytes.NewReader(body)); frameErr == nil {
-					trace.add(m5TwoEnvironmentIDFromTLS(request), frame.Kind, frame.Payload)
+					environmentID = m5TwoEnvironmentIDFromTLS(request)
+					trace.add(environmentID, frame.Kind, request.Host, request.RemoteAddr, frame.Payload)
+					if store != nil && frame.Kind == "claim.acquire" {
+						var decoded wipdwire.ClaimAcquire
+						if wipdwire.DecodeCanonical(frame.Payload, &decoded, "schema", "canonical_command", "request_hash", "installed", "deadline") == nil {
+							if fields, decodeErr := wipdwire.DecodeCanonicalMap(decoded.CanonicalCommand,
+								"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id", "operation", "context", "claim", "input", "blobs"); decodeErr == nil {
+								if identity, ok := fields["environment"].(map[string]any); ok {
+									environmentID, _ = identity["id"].(string)
+								}
+								if input, ok := fields["input"].(map[string]any); ok {
+									matterID, _ = input["matter_id"].(string)
+								}
+								if matterID != "" && environmentID != "" {
+									acquire = &decoded
+									before, _ = store.CurrentPrefixAnchor(request.Context(), m5TestDomain)
+								}
+							}
+						}
+					}
 				}
 			}
 		}
-		next.ServeHTTP(writer, request)
+		if acquire == nil {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		captured := &m5ResponseCapture{ResponseWriter: writer}
+		next.ServeHTTP(captured, request)
+		responseFrames, frameErr := wipdwire.ReadFrames(captured.body.Bytes(), 4)
+		if frameErr != nil || len(responseFrames) != 2 || responseFrames[0].Kind != "submission.accepted" ||
+			responseFrames[1].Kind != "command.terminal" {
+			return
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(responseFrames[1].Payload,
+			"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+		if decodeErr != nil {
+			return
+		}
+		result, ok := fields["result"].(map[string]any)
+		if !ok || result["code"] != string(operation.ResultRefused) {
+			return
+		}
+		after, anchorErr := store.CurrentPrefixAnchor(request.Context(), m5TestDomain)
+		if anchorErr != nil {
+			return
+		}
+		beforeWire, afterWire := wireAnchor(before), wireAnchor(after)
+		control := m5CrossContainerRefusalEvidence{
+			Environment: environmentID, MatterID: matterID, Before: beforeWire, After: afterWire,
+			Unchanged: before == after && sameAuthorityAnchor(beforeWire, acquire.Installed),
+		}
+		trace.mu.Lock()
+		trace.refusalEvidence = append(trace.refusalEvidence, control)
+		trace.mu.Unlock()
 	})
 }
 
-func (trace *m5TwoEnvironmentTrace) add(environment, kind string, payload []byte) {
+type m5ResponseCapture struct {
+	http.ResponseWriter
+	body bytes.Buffer
+}
+
+func (capture *m5ResponseCapture) Write(data []byte) (int, error) {
+	_, _ = capture.body.Write(data)
+	return capture.ResponseWriter.Write(data)
+}
+
+func (trace *m5TwoEnvironmentTrace) add(environment, kind, host, remoteAddr string, payload []byte) {
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
-	trace.entries = append(trace.entries, m5TwoEnvironmentTraceEntry{environment: environment, kind: kind, payload: bytes.Clone(payload)})
+	trace.entries = append(trace.entries, m5TwoEnvironmentTraceEntry{
+		environment: environment, kind: kind, host: host, remoteAddr: remoteAddr,
+		at: time.Now().UTC(), payload: bytes.Clone(payload),
+	})
 }
 
 func (trace *m5TwoEnvironmentTrace) clear() {
@@ -723,10 +1401,32 @@ func (trace *m5TwoEnvironmentTrace) forEnvironment(environment string) []m5TwoEn
 	var out []m5TwoEnvironmentTraceEntry
 	for _, entry := range trace.entries {
 		if entry.environment == environment {
-			out = append(out, m5TwoEnvironmentTraceEntry{environment: entry.environment, kind: entry.kind, payload: bytes.Clone(entry.payload)})
+			out = append(out, m5TwoEnvironmentTraceEntry{
+				environment: entry.environment, kind: entry.kind, host: entry.host, remoteAddr: entry.remoteAddr,
+				at: entry.at, payload: bytes.Clone(entry.payload),
+			})
 		}
 	}
 	return out
+}
+
+func (trace *m5TwoEnvironmentTrace) all() []m5TwoEnvironmentTraceEntry {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	out := make([]m5TwoEnvironmentTraceEntry, 0, len(trace.entries))
+	for _, entry := range trace.entries {
+		out = append(out, m5TwoEnvironmentTraceEntry{
+			environment: entry.environment, kind: entry.kind, host: entry.host, remoteAddr: entry.remoteAddr,
+			at: entry.at, payload: bytes.Clone(entry.payload),
+		})
+	}
+	return out
+}
+
+func (trace *m5TwoEnvironmentTrace) refusals() []m5CrossContainerRefusalEvidence {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	return append([]m5CrossContainerRefusalEvidence(nil), trace.refusalEvidence...)
 }
 
 func m5TwoEnvironmentIDFromTLS(request *http.Request) string {
