@@ -11,8 +11,10 @@ normative final closure is `design-security-privacy-review.md` and its owning
 Step 2–8 contracts. In particular, v1 collision refusal is not retroactively
 changed; D127 collision success is `matter.create@v2`.
 
-The implementation checkout is branch `go` at commit
-`a221387c15d6ed47c88a25c6bd44bf42a2586ffd` when this artifact was prepared.
+The implementation checkout was at commit
+`a221387c15d6ed47c88a25c6bd44bf42a2586ffd` on the then-`go` branch when this
+artifact was prepared. That history now lives on `main`; use `origin/main`
+for ongoing development, not the historical branch name.
 The supplied M2 workplan was `m2-step1-workplan-context.md`. The D115–D131
 source is the operative `MODEL.md` and authority design in the sibling
 `wip-reboot` source set at commit

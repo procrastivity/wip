@@ -1,7 +1,8 @@
 # M1 Step 1: CLI read and mutation census
 
-Status: fresh census at `go` commit `a221387c15d6ed47c88a25c6bd44bf42a2586ffd`,
-after `tracker-plumbing` and BDS-223. This is the BDS-227/M1 Step 1 inventory.
+Status: historical census at commit `a221387c15d6ed47c88a25c6bd44bf42a2586ffd`,
+then on `go` (now `main`), after `tracker-plumbing` and BDS-223.
+This is the BDS-227/M1 Step 1 inventory.
 It records current ownership; it does not define operation request/result types,
 wire encoding, a dispatcher, a daemon, or changed storage ownership.
 

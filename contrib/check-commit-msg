@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # contrib/check-commit-msg — pre-commit commit-msg hook entry. Rejects any
 # commit message that isn't conventional-commit shaped (H4: enforced from
-# commit one on the go branch). pre-commit passes the commit-msg file path
+# commit one of the Go implementation). pre-commit passes the commit-msg file path
 # as $1.
 set -euo pipefail
 

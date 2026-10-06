@@ -1,7 +1,8 @@
 # M6 Step 1: executable operation and owner census
 
-Status: census for base `bb0520988e6e0894d958e13e84d97e17911ee678` on
-`origin/go`. This closes Step 1 of the approved BDS-253 M6 plan. It records
+Status: census for base `bb0520988e6e0894d958e13e84d97e17911ee678`, then on
+`origin/go` (the branch is now `origin/main`). This closes Step 1 of the
+approved BDS-253 M6 plan. It records
 the ownership and proposed semantic contracts at that checkpoint; the census
 itself did not register operations, implement handlers, change default CLI
 routing, or migrate normal CLI direct-Store ownership. Step 8 implementation
