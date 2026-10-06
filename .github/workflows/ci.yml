@@ -1,4 +1,4 @@
-# CI for the Go implementation on main. The original bash implementation
+# CI for the Go implementation on main and wipd. The original bash implementation
 # is preserved on bash-final.
 #
 # Releasing lives in release.yml, on its own tag trigger — this workflow
@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, wipd]
   pull_request:
-    branches: [main]
+    branches: [main, wipd]
 
 permissions:
   contents: read
