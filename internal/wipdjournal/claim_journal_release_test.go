@@ -124,7 +124,7 @@ func TestSealedClaimJournalWithoutAttemptCanPrepareSameReleaseAfterReopen(t *tes
 func openClaimJournalCloseTestFixture(t *testing.T, base int) (*Journal, ClaimJournalBinding, ClaimAcquireAttempt) {
 	t.Helper()
 	fixture := makeHydrationGrantFixture(t, nil, base)
-	journal, err := Open(filepath.Join(t.TempDir(), "journal"), fixture.identity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "journal"), fixture.identity)
 	if err != nil {
 		t.Fatal(err)
 	}

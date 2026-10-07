@@ -171,7 +171,7 @@ func TestStep8GenuineAuthorityReceiptsSeedPullTerminalReopen(t *testing.T) {
 	directory := t.TempDir()
 	state := enrollFixtureClient(t, f, directory)
 	peer := peerStateFromClient(t, state)
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	identity := wipdjournal.Identity{RepoID: testRepoID, DomainID: testDomainID, AuthorityEpoch: 1, EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID}
 	journal, err := wipdjournal.Open(root, identity)
 	if err != nil {

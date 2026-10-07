@@ -13,7 +13,7 @@ import (
 func TestInstalledClaimMatterResolvesM6StageAndStepLineage(t *testing.T) {
 	ctx := context.Background()
 	fixture := makeHydrationGrantFixture(t, nil, 30)
-	journal, err := Open(filepath.Join(t.TempDir(), "journal"), fixture.identity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "journal"), fixture.identity)
 	if err != nil {
 		t.Fatal(err)
 	}

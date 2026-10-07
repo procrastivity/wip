@@ -17,8 +17,24 @@ import (
 	"github.com/procrastivity/wip/internal/operation"
 )
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
+
 func TestSaveConfigExactRetryAndConflict(t *testing.T) {
-	profileRoot := filepath.Join(t.TempDir(), "profile")
+	profileRoot := filepath.Join(privateTempDir(t), "profile")
 	if err := os.Mkdir(profileRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +64,7 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 		t.Fatalf("conflict changed saved profile = %+v, %v", loaded, err)
 	}
 
-	legacyRoot := filepath.Join(t.TempDir(), "legacy-profile")
+	legacyRoot := filepath.Join(privateTempDir(t), "legacy-profile")
 	legacy := config
 	legacy.Schema = "wipd.connected-authority-profile/1"
 	legacy.OwnerRootPublicKey = nil

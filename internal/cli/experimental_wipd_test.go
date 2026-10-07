@@ -20,9 +20,25 @@ import (
 	"github.com/procrastivity/wip/internal/wipd"
 )
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
+
 func TestExperimentalProfileStatusIsLocalAndDoesNotTouchLegacyStore(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "private-profile")
-	legacyPath := filepath.Join(t.TempDir(), "legacy-wip.db")
+	profile := filepath.Join(privateTempDir(t), "private-profile")
+	legacyPath := filepath.Join(privateTempDir(t), "legacy-wip.db")
 	sentinel := []byte("legacy store remains untouched")
 	if err := os.WriteFile(legacyPath, sentinel, 0o600); err != nil {
 		t.Fatal(err)
@@ -54,8 +70,8 @@ func TestExperimentalProfileStatusIsLocalAndDoesNotTouchLegacyStore(t *testing.T
 }
 
 func TestExplicitExperimentalProfileNeverFallsBackToLegacyMatterCreate(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "private-profile")
-	legacyPath := filepath.Join(t.TempDir(), "legacy-wip.db")
+	profile := filepath.Join(privateTempDir(t), "private-profile")
+	legacyPath := filepath.Join(privateTempDir(t), "legacy-wip.db")
 	sentinel := []byte("legacy store remains untouched")
 	if err := os.WriteFile(legacyPath, sentinel, 0o600); err != nil {
 		t.Fatal(err)

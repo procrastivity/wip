@@ -156,7 +156,7 @@ func TestBatchSweepD55AuthoritySeedPullAndInstall(t *testing.T) {
 			if installed.Prefix.EventCount != before.Prefix.EventCount+1 || len(transfer.Records()) != 1 {
 				t.Fatalf("first sweep did not install exactly one event: %+v", installed.Prefix)
 			}
-			journal, err := wipdjournal.Open(filepath.Join(t.TempDir(), "journal"), wipdjournal.Identity{
+			journal, err := wipdjournal.Open(filepath.Join(privateTempDir(t), "journal"), wipdjournal.Identity{
 				RepoID: testRepoID, DomainID: testDomainID, AuthorityEpoch: 1, EnvironmentID: before.EnvironmentID, OwnerRootSPKI: before.OwnerKeyID,
 			})
 			if err != nil {

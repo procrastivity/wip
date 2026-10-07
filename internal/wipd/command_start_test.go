@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,22 @@ const (
 	commandStartEnvironmentID = "01KZ7XHAQT1S46NYPN1PW1DX3D"
 	commandStartCommandPrefix = "01KZ7XHAQT1S46NYPN1PW1DX"
 )
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
 
 func TestCommandStartAnchorNotAfter(t *testing.T) {
 	olderID := commandStartCommandPrefix + "01"
@@ -377,7 +394,7 @@ func (authority *commandStartFakeAuthority) SubmitBirthClaimRelease(ctx context.
 
 func newCommandStartFixture(t *testing.T) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartTracedEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
 	t.Helper()
-	return newCommandStartFixtureAt(t, t.TempDir()+"/journal")
+	return newCommandStartFixtureAt(t, privateTempDir(t)+"/journal")
 }
 
 func newCommandStartFixtureAt(t *testing.T, root string) (*CommandStartCoordinator, *wipdjournal.Journal, *commandStartTracedEnvironment, *commandStartFakeAuthority, *commandStartTrace, *Server) {
@@ -816,7 +833,7 @@ func TestConnectedCanonicalMatterAndStepBirthReplayThroughTerminalCoordinator(t 
 }
 
 func TestBirthClaimReleaseReturnsPrefixAndInstallsBeforeRelease(t *testing.T) {
-	root := t.TempDir() + "/journal"
+	root := privateTempDir(t) + "/journal"
 	coordinator, journal, environment, authority, trace, _ := newCommandStartFixtureAt(t, root)
 	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"73", 1, "", commandStartCommandPrefix+"73",
 		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Birth", Locator: "birth"}, nil)
@@ -935,7 +952,7 @@ func TestMatterCreateV2BirthBarrierSurvivesReopenAndReleases(t *testing.T) {
 			name = "with collision repair"
 		}
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir() + "/journal"
+			root := privateTempDir(t) + "/journal"
 			coordinator, journal, environment, authority, _, _ := newCommandStartFixtureAt(t, root)
 			authority.returnResults = []operation.ResultCode{operation.ResultSucceeded}
 			authority.returnContinue = []bool{false}
@@ -1030,7 +1047,7 @@ func TestMatterCreateV2BirthBarrierSurvivesReopenAndReleases(t *testing.T) {
 }
 
 func TestBirthReleaseUnknownOutcomeBlocksCommandsAndRetriesExactIdentity(t *testing.T) {
-	root := t.TempDir() + "/journal"
+	root := privateTempDir(t) + "/journal"
 	coordinator, journal, environment, authority, _, _ := newCommandStartFixtureAt(t, root)
 	matter := commandStartCanonicalCommand(commandStartCommandPrefix+"83", 1, "", commandStartCommandPrefix+"83",
 		operation.MatterCreateV1.Metadata().Operation, operation.MatterCreateInput{Title: "Birth", Locator: "birth"}, nil)
@@ -1174,7 +1191,7 @@ func TestBirthClaimReleaseStopsAtQuarantineWithoutAcknowledgingOrReturningSuffix
 }
 
 func TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead(t *testing.T) {
-	root := t.TempDir() + "/journal"
+	root := privateTempDir(t) + "/journal"
 	identity := wipdjournal.Identity{RepoID: commandStartRepoID, DomainID: commandStartDomainID, AuthorityEpoch: 7, EnvironmentID: commandStartEnvironmentID}
 	journal, err := wipdjournal.Open(root, identity)
 	if err != nil {

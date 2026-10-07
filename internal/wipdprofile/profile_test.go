@@ -9,8 +9,24 @@ import (
 	"github.com/procrastivity/wip/internal/store"
 )
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
+
 func TestResolveProfilePaths(t *testing.T) {
-	base := t.TempDir()
+	base := privateTempDir(t)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "xdg"))
 	t.Setenv("WIP_DB_PATH", "")
 
@@ -22,30 +38,30 @@ func TestResolveProfilePaths(t *testing.T) {
 		{name: "missing profile", prepare: func(*testing.T) string { return "" }, wantErr: ErrMissingProfile},
 		{name: "relative root", prepare: func(*testing.T) string { return "relative/root" }, wantErr: ErrRelativeRoot},
 		{name: "symlink root", prepare: func(t *testing.T) string {
-			target := filepath.Join(t.TempDir(), "target")
+			target := filepath.Join(privateTempDir(t), "target")
 			if err := os.Mkdir(target, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			link := filepath.Join(t.TempDir(), "root-link")
+			link := filepath.Join(privateTempDir(t), "root-link")
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
 			}
 			return link
 		}, wantErr: ErrUnsafeRoot},
 		{name: "symlink ancestor", prepare: func(t *testing.T) string {
-			target := filepath.Join(t.TempDir(), "target")
+			target := filepath.Join(privateTempDir(t), "target")
 			child := filepath.Join(target, "existing-child")
 			if err := os.MkdirAll(child, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			link := filepath.Join(t.TempDir(), "ancestor-link")
+			link := filepath.Join(privateTempDir(t), "ancestor-link")
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
 			}
 			return filepath.Join(link, "existing-child")
 		}, wantErr: ErrUnsafeRoot},
 		{name: "unsafe writable ancestor", prepare: func(t *testing.T) string {
-			ancestor := filepath.Join(t.TempDir(), "unsafe")
+			ancestor := filepath.Join(privateTempDir(t), "unsafe")
 			if err := os.Mkdir(ancestor, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -55,18 +71,18 @@ func TestResolveProfilePaths(t *testing.T) {
 			return filepath.Join(ancestor, "profile")
 		}, wantErr: ErrUnsafeRoot},
 		{name: "non-private profile root", prepare: func(t *testing.T) string {
-			root := filepath.Join(t.TempDir(), "public-profile")
+			root := filepath.Join(privateTempDir(t), "public-profile")
 			if err := os.Mkdir(root, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			return root
 		}, wantErr: ErrUnsafeRoot},
 		{name: "alias and canonical overlap", prepare: func(t *testing.T) string {
-			target := filepath.Join(t.TempDir(), "canonical")
+			target := filepath.Join(privateTempDir(t), "canonical")
 			if err := os.Mkdir(target, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			alias := filepath.Join(t.TempDir(), "alias")
+			alias := filepath.Join(privateTempDir(t), "alias")
 			if err := os.Symlink(target, alias); err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +99,7 @@ func TestResolveProfilePaths(t *testing.T) {
 			return defaultDir
 		}, wantErr: ErrStoreCollision},
 		{name: "WIP_DB_PATH override", prepare: func(t *testing.T) string {
-			dir := filepath.Join(t.TempDir(), "override")
+			dir := filepath.Join(privateTempDir(t), "override")
 			if err := os.Mkdir(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +111,7 @@ func TestResolveProfilePaths(t *testing.T) {
 			return dir
 		}, wantErr: ErrStoreCollision},
 		{name: "XDG_DATA_HOME override", prepare: func(t *testing.T) string {
-			dir := filepath.Join(t.TempDir(), "xdg-override", "wip")
+			dir := filepath.Join(privateTempDir(t), "xdg-override", "wip")
 			host, err := os.Hostname()
 			if err != nil {
 				t.Fatal(err)
@@ -109,7 +125,7 @@ func TestResolveProfilePaths(t *testing.T) {
 			return dir
 		}, wantErr: ErrStoreCollision},
 		{name: "authority.db overlap", prepare: func(t *testing.T) string {
-			dir := filepath.Join(t.TempDir(), "fixture")
+			dir := filepath.Join(privateTempDir(t), "fixture")
 			if err := os.Mkdir(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -119,7 +135,7 @@ func TestResolveProfilePaths(t *testing.T) {
 			return dir
 		}, wantErr: ErrAuthorityDB},
 		{name: "safe explicit root", prepare: func(t *testing.T) string {
-			return filepath.Join(t.TempDir(), "explicit-profile")
+			return filepath.Join(privateTempDir(t), "explicit-profile")
 		}},
 	}
 
@@ -153,8 +169,8 @@ func TestResolveProfilePaths(t *testing.T) {
 }
 
 func TestResolveRejectsSymlinkCanceledByDotDot(t *testing.T) {
-	base := t.TempDir()
-	linkTarget := t.TempDir()
+	base := privateTempDir(t)
+	linkTarget := privateTempDir(t)
 	link := filepath.Join(base, "link")
 	if err := os.Symlink(linkTarget, link); err != nil {
 		t.Fatal(err)
@@ -172,17 +188,26 @@ func TestResolveRejectsSymlinkCanceledByDotDot(t *testing.T) {
 }
 
 func TestResolveRejectsUntrustedOwnerOfStickyWritableAncestor(t *testing.T) {
-	base := t.TempDir()
+	base := privateTempDir(t)
 	ancestor := filepath.Join(base, "untrusted-sticky")
 	if err := os.Mkdir(ancestor, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(ancestor, 0o1777); err != nil {
+	if err := os.Chmod(ancestor, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
 	}
+	info, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 || info.Mode().Perm() != 0o777 {
+		t.Fatalf("sticky ancestor mode = %v, want sticky 0777", info.Mode())
+	}
 	currentOwnerLookup := fileOwnerUID
+	ownerLookupReached := false
 	fileOwnerUID = func(info os.FileInfo) (uint64, bool) {
 		if info.Name() == "untrusted-sticky" {
+			ownerLookupReached = true
 			return 1<<32 - 1, true
 		}
 		return currentOwnerLookup(info)
@@ -193,20 +218,32 @@ func TestResolveRejectsUntrustedOwnerOfStickyWritableAncestor(t *testing.T) {
 	if _, err := Resolve(filepath.Join(ancestor, "profile")); !errors.Is(err, ErrUnsafeRoot) {
 		t.Fatalf("Resolve() error = %v, want untrusted sticky-ancestor refusal", err)
 	}
+	if !ownerLookupReached {
+		t.Fatal("untrusted sticky-ancestor owner lookup was not reached")
+	}
 }
 
 func TestResolveRejectsStickyAncestorWhenOwnerUIDUnavailable(t *testing.T) {
-	base := t.TempDir()
+	base := privateTempDir(t)
 	ancestor := filepath.Join(base, "unknown-owner-sticky")
 	if err := os.Mkdir(ancestor, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(ancestor, 0o1777); err != nil {
+	if err := os.Chmod(ancestor, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
 	}
+	info, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 || info.Mode().Perm() != 0o777 {
+		t.Fatalf("sticky ancestor mode = %v, want sticky 0777", info.Mode())
+	}
 	currentOwnerLookup := fileOwnerUID
+	ownerLookupReached := false
 	fileOwnerUID = func(info os.FileInfo) (uint64, bool) {
 		if info.Name() == "unknown-owner-sticky" {
+			ownerLookupReached = true
 			return 0, false
 		}
 		return currentOwnerLookup(info)
@@ -217,10 +254,13 @@ func TestResolveRejectsStickyAncestorWhenOwnerUIDUnavailable(t *testing.T) {
 	if _, err := Resolve(filepath.Join(ancestor, "profile")); !errors.Is(err, ErrUnsafeRoot) {
 		t.Fatalf("Resolve() error = %v, want unavailable-owner refusal", err)
 	}
+	if !ownerLookupReached {
+		t.Fatal("unavailable sticky-ancestor owner lookup was not reached")
+	}
 }
 
 func TestResolveRefusesBeforeCreationAndLeavesLegacySentinelUnchanged(t *testing.T) {
-	base := t.TempDir()
+	base := privateTempDir(t)
 	legacyDir := filepath.Join(base, "legacy")
 	if err := os.Mkdir(legacyDir, 0o700); err != nil {
 		t.Fatal(err)

@@ -31,7 +31,7 @@ var testIdentity = Identity{
 }
 
 func TestPrepareCommandSurvivesLostResponseAndRestart(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "client-profile")
+	root := filepath.Join(privateTempDir(t), "client-profile")
 	journal, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestPrepareCommandSurvivesLostResponseAndRestart(t *testing.T) {
 }
 
 func TestPreparedCommandSurvivesWriterProcessCrashBeforeResponse(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "client-profile")
+	root := filepath.Join(privateTempDir(t), "client-profile")
 	command := exec.Command(os.Args[0], "-test.run=^TestPrepareCommandCrashHelper$")
 	command.Env = append(os.Environ(), "WIPDJOURNAL_CRASH_HELPER=1", "WIPDJOURNAL_CRASH_ROOT="+root)
 	stdout, err := command.StdoutPipe()
@@ -212,7 +212,7 @@ func TestPrepareCommandCrashHelper(t *testing.T) {
 }
 
 func TestJournalUsesFullSynchronousDurability(t *testing.T) {
-	journal, err := Open(filepath.Join(t.TempDir(), "new", "nested", "client-profile"), testIdentity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "new", "nested", "client-profile"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestJournalUsesFullSynchronousDurability(t *testing.T) {
 }
 
 func TestDurableBlobOrphanAfterWriterCrashIsInvisibleAndAdoptable(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "client-profile")
+	root := filepath.Join(privateTempDir(t), "client-profile")
 	command := exec.Command(os.Args[0], "-test.run=^TestStageBlobOrphanCrashHelper$")
 	command.Env = append(os.Environ(), "WIPDJOURNAL_ORPHAN_HELPER=1", "WIPDJOURNAL_ORPHAN_ROOT="+root)
 	stdout, err := command.StdoutPipe()
@@ -284,7 +284,7 @@ func TestDurableBlobOrphanAfterWriterCrashIsInvisibleAndAdoptable(t *testing.T) 
 }
 
 func TestStageBlobRetryResyncsOrphanBeforeMetadataCommit(t *testing.T) {
-	journal, err := Open(filepath.Join(t.TempDir(), "client-profile"), testIdentity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "client-profile"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestStageBlobOrphanCrashHelper(t *testing.T) {
 }
 
 func TestConcurrentPreparationAllocatesContiguousSequenceAndJournalOrder(t *testing.T) {
-	journal, err := Open(filepath.Join(t.TempDir(), "client-profile"), testIdentity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "client-profile"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestConcurrentPreparationAllocatesContiguousSequenceAndJournalOrder(t *test
 }
 
 func TestConcurrentSameIDRetryReturnsSingleCommittedEntry(t *testing.T) {
-	journal, err := Open(filepath.Join(t.TempDir(), "client-profile"), testIdentity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "client-profile"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestConcurrentSameIDRetryReturnsSingleCommittedEntry(t *testing.T) {
 }
 
 func TestStagedBlobIntegrityAndLengthSurviveRestart(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "client-profile")
+	root := filepath.Join(privateTempDir(t), "client-profile")
 	journal, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)
@@ -548,7 +548,7 @@ func TestStagedBlobIntegrityAndLengthSurviveRestart(t *testing.T) {
 }
 
 func TestOpenBindsIdentityAndOwnsSingleWriterLease(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "client-profile")
+	root := filepath.Join(privateTempDir(t), "client-profile")
 	journal, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)
@@ -575,7 +575,7 @@ func TestOpenBindsIdentityAndOwnsSingleWriterLease(t *testing.T) {
 }
 
 func TestRejectedCommandDoesNotConsumeIDSequenceOrJournalPosition(t *testing.T) {
-	journal, err := Open(filepath.Join(t.TempDir(), "client-profile"), testIdentity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "client-profile"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}

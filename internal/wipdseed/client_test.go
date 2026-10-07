@@ -43,6 +43,22 @@ const (
 
 var testEncoder, _ = cbor.CoreDetEncOptions().EncMode()
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
+
 func TestEnrollAndSeedInstallsOnlyVerifiedEmptyShadow(t *testing.T) {
 	fixture := newClientFixture(t)
 	identity := fixture.identity
@@ -1231,7 +1247,7 @@ func TestAuthenticatedAcquisitionGrantInstallAllowsLaterPullAndReopen(t *testing
 		RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch,
 		EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID,
 	}
-	journalRoot := filepath.Join(t.TempDir(), "environment-journal")
+	journalRoot := filepath.Join(privateTempDir(t), "environment-journal")
 	journal, err := wipdjournal.Open(journalRoot, journalIdentity)
 	if err != nil {
 		t.Fatal(err)

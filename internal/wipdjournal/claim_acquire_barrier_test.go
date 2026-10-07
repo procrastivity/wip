@@ -9,7 +9,7 @@ import (
 )
 
 func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	identity := journal.Identity()
 	if err := journal.Close(); err != nil {
@@ -69,7 +69,7 @@ func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
 }
 
 func TestClaimAcquireBarrierStillRejectsUnresolvedClientCommand(t *testing.T) {
-	journal := openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
+	journal := openInstallTestJournal(t, filepath.Join(privateTempDir(t), "journal"))
 	t.Cleanup(func() { _ = journal.Close() })
 	entry, err := journal.PrepareCommand(CommandInput{
 		ID: testCommandPrefix + "96",

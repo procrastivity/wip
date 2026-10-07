@@ -102,7 +102,7 @@ func TestStep8TerminalBindingAndAtomicRollback(t *testing.T) {
 		for _, mutation := range []string{"valid", "kind", "subject", "Repo", "event-hash", "event-sequence", "acted-at", "input", "snapshot", "output", "output-extra", "edge-output", "operation", "range", "no-range", "receipt-hash", "receipt-environment", "effectful-refusal"} {
 			t.Run(d.Metadata().Operation.Name+"/"+mutation, func(t *testing.T) {
 				ctx := context.Background()
-				root := filepath.Join(t.TempDir(), "journal")
+				root := filepath.Join(privateTempDir(t), "journal")
 				journal := openInstallTestJournal(t, root)
 				defer func() { _ = journal.Close() }()
 				entry, records, event, output := step8InstallFixture(t, journal, d)
@@ -224,7 +224,7 @@ func TestStep8ReopenRejectsForgedEventWithRecomputedPrefixAndOverlay(t *testing.
 	for _, mutation := range []string{"kind", "Repo", "reference", "edge-output", "receipt-output"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			j := openInstallTestJournal(t, root)
 			defer func() { _ = j.Close() }()
 			d := operation.ReferenceBindV1
@@ -310,7 +310,7 @@ func TestStep8ReopenRejectsForgedEventWithRecomputedPrefixAndOverlay(t *testing.
 }
 
 func TestStep8JournalSnapshotHasNoMutableCacheAlias(t *testing.T) {
-	j := openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
+	j := openInstallTestJournal(t, filepath.Join(privateTempDir(t), "journal"))
 	defer func() { _ = j.Close() }()
 	_, records, _, _ := step8InstallFixture(t, j, operation.ReferenceUnbindV1)
 	s, err := j.InstallPull(context.Background(), mustStep8Snapshot(t, j).Expectation(), verifiedInstallTestTransfer(t, emptyTransferAnchor(), records))
@@ -329,7 +329,7 @@ func TestStep8TerminalUsesAlreadyPulledWholeCommandLineage(t *testing.T) {
 	for _, mode := range []string{"success", "refusal hides effect", "success hides second effect"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			j := openInstallTestJournal(t, root)
 			defer func() { _ = j.Close() }()
 			entry, records, event, output := step8InstallFixture(t, j, operation.ReferenceBindV1)

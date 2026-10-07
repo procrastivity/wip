@@ -12,7 +12,7 @@ import (
 )
 
 func TestDetachedProofRetrySurvivesRestartWithoutChangingIdentity(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestDetachedProofRetrySurvivesRestartWithoutChangingIdentity(t *testing.T) 
 	if err = journal.db.QueryRow(`SELECT next_environment_sequence FROM environment_state`).Scan(&sequence); err != nil || sequence != 2 {
 		t.Fatalf("retry consumed sequence: %d %v", sequence, err)
 	}
-	other, err := Open(filepath.Join(t.TempDir(), "other"), testIdentity)
+	other, err := Open(filepath.Join(privateTempDir(t), "other"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestDetachedProofRetrySurvivesRestartWithoutChangingIdentity(t *testing.T) 
 }
 
 func TestDetachedProofMigrationPreservesV1Entries(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)

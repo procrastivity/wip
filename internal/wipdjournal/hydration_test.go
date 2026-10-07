@@ -23,7 +23,7 @@ import (
 
 func TestClaimHydrationRequiresExactVerifiedPinnedClosureAcrossReopen(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 
 	firstBytes := []byte("amber-required-blob")
 	secondBytes := []byte("navy-required-content-is-longer")
@@ -144,7 +144,7 @@ func TestClaimHydrationRequiresExactVerifiedPinnedClosureAcrossReopen(t *testing
 func TestGenericPullManifestCannotCreateClaimHydrationReadiness(t *testing.T) {
 	ctx := context.Background()
 	fixture := makeHydrationGrantFixture(t, nil, 30)
-	journal, err := Open(filepath.Join(t.TempDir(), "journal"), fixture.identity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "journal"), fixture.identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func hydrationManifest(identity Identity, anchor wipdwire.PrefixAnchor, entries 
 
 func TestEmptyRequiredHydrationIsDurablyReadyOnlyForItsInstalledManifest(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	fixture := makeHydrationGrantFixture(t, nil, 40)
 	journal, err := Open(root, fixture.identity)
 	if err != nil {
@@ -480,7 +480,7 @@ func TestClaimGrantRepoIsBoundToJournalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validly signed Repo B grant did not verify for Repo B: %v", err)
 	}
-	journal, err := Open(filepath.Join(t.TempDir(), "repo-a-journal"), fixture.identity)
+	journal, err := Open(filepath.Join(privateTempDir(t), "repo-a-journal"), fixture.identity)
 	if err != nil {
 		t.Fatal(err)
 	}
