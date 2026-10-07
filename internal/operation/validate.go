@@ -134,6 +134,10 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("blocker Matter/Step ID", input.BlockerID); err != nil {
 			return err
 		}
+	case DependencyAddV2Input:
+		if err := validateDependencyV2Input(input.BlockedID, input.BlockerID, input.TargetClaims); err != nil {
+			return err
+		}
 	case DependencyRemoveInput:
 		if err := validateULID("blocked Matter/Step ID", input.BlockedID); err != nil {
 			return err
@@ -144,12 +148,20 @@ func (d Definition) ValidateRequest(request Request) error {
 		if input.BlockedID == input.BlockerID {
 			return fmt.Errorf("dependency cannot block itself")
 		}
+	case DependencyRemoveV2Input:
+		if err := validateDependencyV2Input(input.BlockedID, input.BlockerID, input.TargetClaims); err != nil {
+			return err
+		}
 	case ReferenceBindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
 		if strings.TrimSpace(input.Reference) == "" {
 			return fmt.Errorf("tracker reference is empty")
+		}
+	case ReferenceBindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.Reference, input.TargetClaims); err != nil {
+			return err
 		}
 	case ReferenceUnbindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
@@ -158,11 +170,22 @@ func (d Definition) ValidateRequest(request Request) error {
 		if strings.TrimSpace(input.Reference) == "" {
 			return fmt.Errorf("tracker reference is empty")
 		}
+	case ReferenceUnbindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.Reference, input.TargetClaims); err != nil {
+			return err
+		}
 	case ReferenceRebindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
 		if strings.TrimSpace(input.From) == "" || strings.TrimSpace(input.To) == "" || input.From == input.To {
+			return fmt.Errorf("tracker rebind requires two distinct non-empty references")
+		}
+	case ReferenceRebindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.From, input.TargetClaims); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.To) == "" || input.From == input.To {
 			return fmt.Errorf("tracker rebind requires two distinct non-empty references")
 		}
 	case GateExemptionRepairInput:
@@ -248,6 +271,49 @@ func (d Definition) ValidateRequest(request Request) error {
 		}
 	}
 	return d.validateBlobs(request.Blobs)
+}
+
+func validateDependencyV2Input(blocked, blocker string, claims []TargetClaim) error {
+	if err := validateULID("blocked Matter/Step ID", blocked); err != nil {
+		return err
+	}
+	if err := validateULID("blocker Matter/Step ID", blocker); err != nil {
+		return err
+	}
+	return validateTargetClaims(claims)
+}
+
+func validateReferenceV2Input(matter, reference string, claims []TargetClaim) error {
+	if err := validateULID("Matter ID", matter); err != nil {
+		return err
+	}
+	if strings.TrimSpace(reference) == "" {
+		return fmt.Errorf("tracker reference is empty")
+	}
+	return validateTargetClaims(claims)
+}
+
+func validateTargetClaims(claims []TargetClaim) error {
+	if len(claims) > 2 {
+		return fmt.Errorf("target claim set exceeds two Matters")
+	}
+	previous := ""
+	for _, claim := range claims {
+		if err := validateULID("target Matter ID", claim.MatterID); err != nil {
+			return err
+		}
+		if err := validateULID("target claim ID", claim.ClaimID); err != nil {
+			return err
+		}
+		if claim.ClaimEpoch == 0 {
+			return fmt.Errorf("target claim epoch must be positive")
+		}
+		if previous != "" && previous >= claim.MatterID {
+			return fmt.Errorf("target claims must be unique and ordered by Matter ID")
+		}
+		previous = claim.MatterID
+	}
+	return nil
 }
 
 func validGateScale(scale string) bool {
@@ -338,11 +404,11 @@ func (d Definition) ValidateResult(result Result) error {
 				return fmt.Errorf("dependency output is invalid")
 			}
 			switch d.metadata.Operation {
-			case DependencyAddV1.Metadata().Operation:
+			case DependencyAddV1.Metadata().Operation, DependencyAddV2.Metadata().Operation:
 				if validateULID("dependency edge output ID", output.EdgeID) != nil {
 					return fmt.Errorf("dependency add output is missing its edge identity")
 				}
-			case DependencyRemoveV1.Metadata().Operation:
+			case DependencyRemoveV1.Metadata().Operation, DependencyRemoveV2.Metadata().Operation:
 				if output.EdgeID != "" {
 					return fmt.Errorf("dependency remove output cannot carry an edge identity")
 				}
@@ -351,8 +417,8 @@ func (d Definition) ValidateResult(result Result) error {
 			}
 		case ReferenceOutput:
 			if validateULID("Matter output ID", output.MatterID) != nil || strings.TrimSpace(output.Reference) == "" ||
-				(d.metadata.Operation == ReferenceRebindV1.Metadata().Operation && strings.TrimSpace(output.PreviousReference) == "") ||
-				(d.metadata.Operation != ReferenceRebindV1.Metadata().Operation && output.PreviousReference != "") {
+				((d.metadata.Operation == ReferenceRebindV1.Metadata().Operation || d.metadata.Operation == ReferenceRebindV2.Metadata().Operation) && strings.TrimSpace(output.PreviousReference) == "") ||
+				((d.metadata.Operation != ReferenceRebindV1.Metadata().Operation && d.metadata.Operation != ReferenceRebindV2.Metadata().Operation) && output.PreviousReference != "") {
 				return fmt.Errorf("tracker reference output is invalid")
 			}
 		case ContentSegmentOutput:

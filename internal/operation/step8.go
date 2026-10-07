@@ -20,6 +20,31 @@ type DependencyRemoveInput struct {
 
 func (DependencyRemoveInput) operationInput() {}
 
+// TargetClaim is an exact proof for an authority-derived affected Matter.
+type TargetClaim struct {
+	MatterID   string
+	ClaimID    string
+	ClaimEpoch uint64
+}
+
+// DependencyAddV2Input adds a dependency with exact claims for its affected Matters.
+type DependencyAddV2Input struct {
+	BlockedID    string
+	BlockerID    string
+	TargetClaims []TargetClaim
+}
+
+func (DependencyAddV2Input) operationInput() {}
+
+// DependencyRemoveV2Input removes a dependency with exact claims for its affected Matters.
+type DependencyRemoveV2Input struct {
+	BlockedID    string
+	BlockerID    string
+	TargetClaims []TargetClaim
+}
+
+func (DependencyRemoveV2Input) operationInput() {}
+
 // DependencyOutput identifies the affected edge endpoints.
 type DependencyOutput struct {
 	EdgeID    string `json:"edge,omitempty"`
@@ -37,6 +62,15 @@ type ReferenceBindInput struct {
 
 func (ReferenceBindInput) operationInput() {}
 
+// ReferenceBindV2Input adds a tracker reference with an exact claim for its Matter.
+type ReferenceBindV2Input struct {
+	MatterID     string
+	Reference    string
+	TargetClaims []TargetClaim
+}
+
+func (ReferenceBindV2Input) operationInput() {}
+
 // ReferenceUnbindInput removes one tracker reference from a Matter's active set.
 type ReferenceUnbindInput struct {
 	MatterID  string
@@ -44,6 +78,15 @@ type ReferenceUnbindInput struct {
 }
 
 func (ReferenceUnbindInput) operationInput() {}
+
+// ReferenceUnbindV2Input removes a tracker reference with an exact claim for its Matter.
+type ReferenceUnbindV2Input struct {
+	MatterID     string
+	Reference    string
+	TargetClaims []TargetClaim
+}
+
+func (ReferenceUnbindV2Input) operationInput() {}
 
 // ReferenceRebindInput atomically replaces one reference with another.
 type ReferenceRebindInput struct {
@@ -53,6 +96,16 @@ type ReferenceRebindInput struct {
 }
 
 func (ReferenceRebindInput) operationInput() {}
+
+// ReferenceRebindV2Input replaces a tracker reference with an exact claim for its Matter.
+type ReferenceRebindV2Input struct {
+	MatterID     string
+	From         string
+	To           string
+	TargetClaims []TargetClaim
+}
+
+func (ReferenceRebindV2Input) operationInput() {}
 
 // ReferenceOutput describes one committed reference membership change.
 type ReferenceOutput struct {
@@ -104,13 +157,63 @@ var (
 		Writes: []Footprint{FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
 		Claim: ClaimNone, ExternalEffects: []ExternalEffect{},
 	})
+	// DependencyAddV2 adds a dependency only with exact claims for all affected Matters.
+	DependencyAddV2 = mustDefine[DependencyAddV2Input, DependencyOutput](Metadata{
+		Operation: ID{Name: "dependency.add", Version: 2}, Access: AccessMutation,
+		Delivery: DeliveryAuthority, RequiredContext: []ContextDimension{ContextRepo},
+		Guards: []Footprint{FootprintDependencyEndpoints, FootprintDependencyGraph},
+		Writes: []Footprint{FootprintDependencyEdge, FootprintDependencyGraph}, BlobInputs: []BlobSpec{},
+		Claim: ClaimTargetSet, ExternalEffects: []ExternalEffect{},
+	})
+	// DependencyRemoveV2 removes a dependency only with exact claims for all affected Matters.
+	DependencyRemoveV2 = mustDefine[DependencyRemoveV2Input, DependencyOutput](Metadata{
+		Operation: ID{Name: "dependency.remove", Version: 2}, Access: AccessMutation,
+		Delivery: DeliveryAuthority, RequiredContext: []ContextDimension{ContextRepo},
+		Guards: []Footprint{FootprintDependencyEndpoints, FootprintDependencyEdge},
+		Writes: []Footprint{FootprintDependencyEdge, FootprintDependencyGraph}, BlobInputs: []BlobSpec{},
+		Claim: ClaimTargetSet, ExternalEffects: []ExternalEffect{},
+	})
+	// ReferenceBindV2 adds a reference only with the target Matter's exact claim.
+	ReferenceBindV2 = mustDefine[ReferenceBindV2Input, ReferenceOutput](Metadata{
+		Operation: ID{Name: "reference.bind", Version: 2}, Access: AccessMutation,
+		Delivery: DeliveryAuthority, RequiredContext: []ContextDimension{ContextRepo},
+		Guards: []Footprint{FootprintRepoTrackerPushConfig, FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates},
+		Writes: []Footprint{FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
+		Claim: ClaimTargetSet, ExternalEffects: []ExternalEffect{},
+	})
+	// ReferenceUnbindV2 removes a reference only with the target Matter's exact claim.
+	ReferenceUnbindV2 = mustDefine[ReferenceUnbindV2Input, ReferenceOutput](Metadata{
+		Operation: ID{Name: "reference.unbind", Version: 2}, Access: AccessMutation,
+		Delivery: DeliveryAuthority, RequiredContext: []ContextDimension{ContextRepo},
+		Guards: []Footprint{FootprintRepoTrackerPushConfig, FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates},
+		Writes: []Footprint{FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
+		Claim: ClaimTargetSet, ExternalEffects: []ExternalEffect{},
+	})
+	// ReferenceRebindV2 replaces a reference only with the target Matter's exact claim.
+	ReferenceRebindV2 = mustDefine[ReferenceRebindV2Input, ReferenceOutput](Metadata{
+		Operation: ID{Name: "reference.rebind", Version: 2}, Access: AccessMutation,
+		Delivery: DeliveryAuthority, RequiredContext: []ContextDimension{ContextRepo},
+		Guards: []Footprint{FootprintRepoTrackerPushConfig, FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates},
+		Writes: []Footprint{FootprintMatterTrackerReferences, FootprintTrackerSharedAggregates, FootprintTrackerCandidates}, BlobInputs: []BlobSpec{},
+		Claim: ClaimTargetSet, ExternalEffects: []ExternalEffect{},
+	})
 )
 
-var step8ContractDefinitions = []Definition{DependencyAddV1, DependencyRemoveV1, ReferenceBindV1, ReferenceUnbindV1, ReferenceRebindV1}
+var step8ContractDefinitions = []Definition{
+	DependencyAddV1, DependencyRemoveV1, ReferenceBindV1, ReferenceUnbindV1, ReferenceRebindV1,
+	DependencyAddV2, DependencyRemoveV2, ReferenceBindV2, ReferenceUnbindV2, ReferenceRebindV2,
+}
+
+var step8StrictDefinitions = []Definition{DependencyAddV2, DependencyRemoveV2, ReferenceBindV2, ReferenceUnbindV2, ReferenceRebindV2}
 
 // Step8Catalogue returns the closed dependency/reference acceptance set. These
 // definitions remain outside the default runtime catalogue and CLI boundary.
 func Step8Catalogue() []Definition {
+	return append([]Definition(nil), step8StrictDefinitions...)
+}
+
+// Step8HistoryCatalogue includes strict command definitions and historical v1 schemas.
+func Step8HistoryCatalogue() []Definition {
 	return append([]Definition(nil), step8ContractDefinitions...)
 }
 

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -161,12 +162,17 @@ func TestStep8ForgedTransferRecomputedPrefixRejected(t *testing.T) {
 	}
 }
 
-// Real authority commands produce the terminal receipts and exact records;
-// the Environment journal allocates their immutable command identities.
-func TestStep8GenuineAuthorityReceiptsSeedPullTerminalReopen(t *testing.T) {
+// Fresh v1 authority commands produce retained refusal receipts without model
+// effects; the Environment journal allocates their immutable identities.
+func TestStep8FreshV1RefusalsSeedPullTerminalReopen(t *testing.T) {
 	ctx := context.Background()
 	f := newClientFixture(t)
-	key := registerClientFixtureArtifactKey(t, f)
+	t.Cleanup(func() {
+		if f.store != nil {
+			_ = f.store.Close()
+		}
+	})
+	key, artifactCertificate := registerClientFixtureArtifactKeyWithCertificate(t, f)
 	sign := func(_ context.Context, message []byte) ([]byte, error) { return ed25519.Sign(key, message), nil }
 	directory := t.TempDir()
 	state := enrollFixtureClient(t, f, directory)
@@ -178,43 +184,51 @@ func TestStep8GenuineAuthorityReceiptsSeedPullTerminalReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = journal.Close() }()
+	base, err := journal.InstallSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Retain birth intents locally so the next sequence is shared by both stores.
 	for i, matter := range []string{sweepFoldMatter, sweepFoldOther} {
 		entry, err := journal.PrepareCommand(wipdjournal.CommandInput{ID: fmt.Sprintf("%026d", 400+i), Request: operation.Request{Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: testRepoID}, Input: operation.MatterCreateInput{Title: fmt.Sprintf("Matter %d", i)}}})
 		if err != nil {
 			t.Fatal(err)
 		}
+		base, err = journal.AdmitPending(ctx, base.Expectation(), entry.Command.ID)
+		if err != nil {
+			t.Fatalf("admit birth %d local overlay: %v", i, err)
+		}
 		owner := submitM6PullCommand(t, f.store, peer, entry.Command)
-		_, err = f.store.CompleteCommand(ctx, owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: matter, Title: fmt.Sprintf("Matter %d", i), Locator: fmt.Sprintf("matter-%d", i)}}, matter, m6PullEventID(10+i), time.Now().UTC(), sign)
+		status, err := f.store.CompleteCommand(ctx, owner, operation.Result{Code: operation.ResultSucceeded, Output: operation.MatterCreateOutput{ID: matter, Title: fmt.Sprintf("Matter %d", i), Locator: fmt.Sprintf("matter-%d", i)}}, matter, m6PullEventID(10+i), time.Now().UTC(), sign)
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	state, err = PullAndInstall(ctx, f.profile, f.roots, directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := wipdwire.BlobManifest{Schema: "wipd.blob-manifest/1", DomainID: testDomainID, Epoch: 1, AsOf: state.Prefix, Entries: state.ManifestEntries, Digest: state.ManifestDigest}
-	prior, err := wipdjournal.VerifyTransfer(testDomainID, 1, emptyWireAnchor(), state.Prefix, state.EventRecords, manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := journal.InstallPull(ctx, installSnapshotExpectation(t, journal), prior)
-	if err != nil {
-		t.Fatal(err)
+		nextState, pullErr := PullAndInstall(ctx, f.profile, f.roots, directory)
+		if pullErr != nil {
+			t.Fatalf("pull birth %d: %v", i, pullErr)
+		}
+		transfer, _, verifyErr := VerifyPullTransfer(f.profile, state, state.Prefix, authenticatedPullFrames(t, f, state))
+		if verifyErr != nil || len(transfer.Records()) != 1 {
+			t.Fatalf("verify birth %d incremental outcome transfer: records=%d error=%v", i, len(transfer.Records()), verifyErr)
+		}
+		base, err = journal.InstallFold(ctx, base.Expectation(), entry, operation.ResultSucceeded, status.Receipt, transfer)
+		if err != nil {
+			t.Fatalf("install birth %d authority outcome: %v", i, err)
+		}
+		state = nextState
 	}
 	ops := []struct {
 		def     operation.Definition
 		input   operation.Input
 		refused bool
 	}{
-		{operation.DependencyAddV1, operation.DependencyAddInput{BlockedID: sweepFoldMatter, BlockerID: sweepFoldOther}, false},
+		{operation.DependencyAddV1, operation.DependencyAddInput{BlockedID: sweepFoldMatter, BlockerID: sweepFoldOther}, true},
 		{operation.DependencyAddV1, operation.DependencyAddInput{BlockedID: sweepFoldOther, BlockerID: sweepFoldMatter}, true},
-		{operation.DependencyRemoveV1, operation.DependencyRemoveInput{BlockedID: sweepFoldMatter, BlockerID: sweepFoldOther}, false},
-		{operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: sweepFoldMatter, Reference: "OLD"}, false},
+		{operation.DependencyRemoveV1, operation.DependencyRemoveInput{BlockedID: sweepFoldMatter, BlockerID: sweepFoldOther}, true},
 		{operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: sweepFoldMatter, Reference: "OLD"}, true},
-		{operation.ReferenceRebindV1, operation.ReferenceRebindInput{MatterID: sweepFoldMatter, From: "OLD", To: "NEW"}, false},
-		{operation.ReferenceUnbindV1, operation.ReferenceUnbindInput{MatterID: sweepFoldMatter, Reference: "NEW"}, false},
+		{operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: sweepFoldMatter, Reference: "OLD"}, true},
+		{operation.ReferenceRebindV1, operation.ReferenceRebindInput{MatterID: sweepFoldMatter, From: "OLD", To: "NEW"}, true},
+		{operation.ReferenceUnbindV1, operation.ReferenceUnbindInput{MatterID: sweepFoldMatter, Reference: "NEW"}, true},
 	}
 	for i, op := range ops {
 		entry, err := journal.PrepareCommand(wipdjournal.CommandInput{ID: fmt.Sprintf("%026d", 410+i), Request: operation.Request{Operation: op.def.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: testRepoID}, Input: op.input}})
@@ -253,8 +267,89 @@ func TestStep8GenuineAuthorityReceiptsSeedPullTerminalReopen(t *testing.T) {
 			t.Fatal("terminal projection differs from pull")
 		}
 	}
+	cloneID, worktreeID, dispatchID := "01KZ7XHAQT1S46NYPN1PW1DYA6", "01KZ7XHAQT1S46NYPN1PW1DYA5", "01KZ7XHAQT1S46NYPN1PW1DYA7"
+	acquireID := fmt.Sprintf("%026d", 500)
+	attempt, err := journal.PrepareClaimAcquire(acquireID, sweepFoldMatter, cloneID, worktreeID, dispatchID, "human", base.Anchor)
+	if err != nil {
+		t.Fatalf("prepare real claim-acquire attempt for v2 write: %v", err)
+	}
+	authorityAnchor, err := f.store.CurrentPrefixAnchor(ctx, state.DomainID)
+	if err != nil || authorityAnchor.EventCount != base.Anchor.EventCount || authorityAnchor.Digest != base.Anchor.Digest {
+		t.Fatalf("authority/journal prefix before real claim acquisition differs: authority=%+v journal=%+v error=%v", authorityAnchor, base.Anchor, err)
+	}
+	acquirePending, err := f.store.SubmitClaimAcquire(ctx, attempt.CanonicalBytes, attempt.RequestHash, authorityAnchor, peer, time.Now().UTC())
+	if err != nil || acquirePending.Owner == nil || !acquirePending.Pending {
+		t.Fatalf("submit genuine claim acquisition for v2 write: status=%+v error=%v", acquirePending, err)
+	}
+	claimID, batchID, grantID := fmt.Sprintf("%026d", 501), fmt.Sprintf("%026d", 502), fmt.Sprintf("%026d", 503)
+	snapshotID, claimJournalID := fmt.Sprintf("%026d", 504), fmt.Sprintf("%026d", 505)
+	acquired, authorityGrant, err := f.store.CompleteClaimAcquire(ctx, acquirePending.Owner, authoritystore.AcquireAllocation{
+		ClaimID: claimID, BatchID: batchID, GrantID: grantID, SnapshotID: snapshotID, JournalID: claimJournalID,
+		Installed: authorityAnchor, EventIDs: []string{m6PullEventID(30), m6PullEventID(31), m6PullEventID(32)},
+	}, time.Now().UTC(), sign)
+	if err != nil || acquired.Pending || len(acquired.Receipt) == 0 {
+		t.Fatalf("complete genuine claim acquisition for v2 write: status=%+v error=%v", acquired, err)
+	}
+	claimTransfer, _, err := VerifyPullTransfer(f.profile, state, state.Prefix, authenticatedPullFrames(t, f, state))
+	if err != nil || len(claimTransfer.Records()) != 3 {
+		t.Fatalf("verify genuine claim-acquisition transfer: records=%d error=%v", len(claimTransfer.Records()), err)
+	}
+	verifiedGrant, err := wipdjournal.VerifyClaimGrant(identity, wipdjournal.ClaimGrantTrust{
+		OwnerRootPublicKey: f.ownerRoot, OwnerRootSPKI: f.ownerKeyID, VerifiedAt: time.Now().UTC(),
+	}, wipdjournal.ClaimGrantEvidence{
+		ArtifactKeyCertificate: artifactCertificate, Wrapper: authorityGrant.Wrapper,
+		Start: authorityGrant.Start, End: authorityGrant.End, Transfer: claimTransfer,
+	})
+	if err != nil {
+		t.Fatalf("verify genuine claim-acquisition grant: %v", err)
+	}
+	base, err = journal.InstallClaimAcquireGrant(ctx, base.Expectation(), attempt.ID, verifiedGrant)
+	if err != nil {
+		t.Fatalf("install genuine claim-acquisition grant: %v", err)
+	}
+	state, err = PullAndInstall(ctx, f.profile, f.roots, directory)
+	if err != nil || !anchorEqual(state.Prefix, base.Anchor) || !reflect.DeepEqual(state.Step8Projection, base.Step8Projection) {
+		t.Fatalf("claim-grant pull/install/refold parity: %v", err)
+	}
+	claimProof := []operation.TargetClaim{{MatterID: sweepFoldMatter, ClaimID: claimID, ClaimEpoch: 1}}
+	v2Input := operation.ReferenceBindV2Input{MatterID: sweepFoldMatter, Reference: "V2-BOUND", TargetClaims: claimProof}
+	v2Entry, err := journal.PrepareCommand(wipdjournal.CommandInput{ID: fmt.Sprintf("%026d", 510), Request: operation.Request{
+		Operation: operation.ReferenceBindV2.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: testRepoID}, Input: v2Input,
+	}})
+	if err != nil {
+		t.Fatalf("prepare v2 reference write: %v", err)
+	}
+	v2Owner := submitM6PullCommand(t, f.store, peer, v2Entry.Command)
+	v2Status, err := f.store.CompleteCommand(ctx, v2Owner, operation.Result{Code: operation.ResultSucceeded}, "",
+		m6PullEventID(40), time.Now().UTC(), sign)
+	if err != nil || v2Status.Pending || len(v2Status.Receipt) == 0 || len(v2Status.SignedReceipt) == 0 {
+		t.Fatalf("complete genuine v2 reference write: status=%+v error=%v", v2Status, err)
+	}
+	v2Transfer, _, err := VerifyPullTransfer(f.profile, state, state.Prefix, authenticatedPullFrames(t, f, state))
+	if err != nil || len(v2Transfer.Records()) != 1 {
+		t.Fatalf("verify genuine v2 write transfer: records=%d error=%v", len(v2Transfer.Records()), err)
+	}
+	base, err = journal.InstallAuthorityOutcome(ctx, base.Expectation(), v2Entry, operation.ResultSucceeded, v2Status.Receipt, v2Transfer)
+	if err != nil {
+		t.Fatalf("install genuine v2 write receipt and transfer: %v", err)
+	}
+	state, err = PullAndInstall(ctx, f.profile, f.roots, directory)
+	if err != nil || !anchorEqual(state.Prefix, base.Anchor) || !reflect.DeepEqual(state.Step8Projection, base.Step8Projection) {
+		t.Fatalf("successful v2 seed/pull/install/refold parity: %v", err)
+	}
+	if state.Step8Projection == nil || len(state.Step8Projection.References) != 1 ||
+		state.Step8Projection.References[0].MatterID != sweepFoldMatter || state.Step8Projection.References[0].Reference != "V2-BOUND" ||
+		state.Step8Projection.References[0].RemovedEventID != "" {
+		t.Fatalf("successful v2 reference was not retained by client refold: %+v", state.Step8Projection)
+	}
+	v2Replay, err := f.store.QueryCommand(ctx, state.DomainID, v2Entry.Command.ID, v2Entry.RequestHash,
+		state.Epoch, peer, state.EnvironmentID, time.Now().UTC())
+	if err != nil || !bytes.Equal(v2Replay.Receipt, v2Status.Receipt) || !bytes.Equal(v2Replay.SignedReceipt, v2Status.SignedReceipt) {
+		t.Fatalf("successful v2 terminal replay changed: status=%+v error=%v", v2Replay, err)
+	}
 	seeded, err := EnrollAndSeed(ctx, f.profile, f.roots, f.ownerRoot, f.delegation, testRepoID, f.identity, f.grant, t.TempDir())
-	if err != nil || !reflect.DeepEqual(seeded.EventRecords, state.EventRecords) || !reflect.DeepEqual(seeded.Step8Projection, state.Step8Projection) {
+	if err != nil || !reflect.DeepEqual(seeded.EventRecords, state.EventRecords) || !reflect.DeepEqual(seeded.Step8Projection, state.Step8Projection) ||
+		!anchorEqual(seeded.Prefix, state.Prefix) {
 		t.Fatalf("genuine seed/pull parity: %v", err)
 	}
 	if err := journal.Close(); err != nil {
@@ -279,6 +374,87 @@ func TestStep8GenuineAuthorityReceiptsSeedPullTerminalReopen(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(directory, stateName))
 	if !bytes.Equal(before, after) {
 		t.Fatal("failed client install changed bytes")
+	}
+}
+
+func TestStep8PendingFreshV1RefusalRecoversAfterStoreReopenWithoutEffects(t *testing.T) {
+	ctx := context.Background()
+	f := newClientFixture(t)
+	t.Cleanup(func() {
+		if f.store != nil {
+			_ = f.store.Close()
+		}
+	})
+	key := registerClientFixtureArtifactKey(t, f)
+	signer := func(_ context.Context, message []byte) ([]byte, error) { return ed25519.Sign(key, message), nil }
+	directory := t.TempDir()
+	state := enrollFixtureClient(t, f, directory)
+	peer := peerStateFromClient(t, state)
+	matterID := "01KZ7XHAQT1S46NYPN1PW1DX90"
+	createFixtureMatter(t, f.store, peer, key, state, "01KZ7XHAQT1S46NYPN1PW1DYA9",
+		matterID, m6PullEventID(10), "Pending v1 target", "pending-v1", 1)
+	beforeState, err := PullAndInstall(ctx, f.profile, f.roots, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := operation.Command{
+		ID: "01KZ7XHAQT1S46NYPN1PW1WY00", AuthorityDomainID: state.DomainID, ExpectedAuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, EnvironmentSequence: 2, ActedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano),
+		CorrelationCommandID: "01KZ7XHAQT1S46NYPN1PW1WY00",
+		Request: operation.Request{
+			Operation: operation.ReferenceBindV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: state.RepoID}, Input: operation.ReferenceBindInput{MatterID: matterID, Reference: "FRESH-V1"},
+			Blobs: []operation.BlobInput{},
+		},
+	}
+	hash, err := command.RequestHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.store.SubmitCommand(ctx, command, hash, peer, time.Now().UTC())
+	if err != nil || !pending.Pending || pending.Owner == nil {
+		t.Fatalf("submit fresh pending v1 reference write: status=%+v error=%v", pending, err)
+	}
+	if err = f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.store, err = authoritystore.OpenExisting(f.storeRoot)
+	if err != nil {
+		t.Fatalf("reopen authority with pending fresh v1 write: %v", err)
+	}
+	recovered, err := f.store.RecoverCommand(ctx, command, hash)
+	if err != nil {
+		t.Fatalf("recover pending fresh v1 write: %v", err)
+	}
+	terminal, err := f.store.CompleteCommand(ctx, recovered, operation.Result{Code: operation.ResultSucceeded},
+		"", m6PullEventID(11), time.Now().UTC(), signer)
+	if err != nil || terminal.Pending || len(terminal.Receipt) == 0 || len(terminal.SignedReceipt) == 0 {
+		t.Fatalf("complete recovered fresh v1 refusal: status=%+v error=%v", terminal, err)
+	}
+	receipt, err := wipdwire.DecodeCanonicalMap(terminal.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatalf("decode fresh v1 refusal receipt: %v", err)
+	}
+	result, ok := receipt["result"].(map[string]any)
+	if !ok || result["code"] != string(operation.ResultRefused) || result["problem_code"] != "refusal.step8-v1-claim-required" ||
+		result["output"] != nil || receipt["accepted_events"] != nil {
+		t.Fatalf("recovered fresh v1 receipt has effects or wrong refusal: %+v", receipt)
+	}
+	afterAnchor, err := f.store.CurrentPrefixAnchor(ctx, state.DomainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEventID := ""
+	if beforeState.Prefix.EventID != nil {
+		beforeEventID = *beforeState.Prefix.EventID
+	}
+	if afterAnchor.EventCount != beforeState.Prefix.EventCount || afterAnchor.EventID != beforeEventID || afterAnchor.Digest != beforeState.Prefix.Digest {
+		t.Fatalf("recovered fresh v1 refusal changed model prefix: before=%+v after=%+v", beforeState.Prefix, afterAnchor)
+	}
+	replay, err := f.store.QueryCommand(ctx, state.DomainID, command.ID, hash, state.Epoch, peer, state.EnvironmentID, time.Now().UTC())
+	if err != nil || !bytes.Equal(replay.Receipt, terminal.Receipt) || !bytes.Equal(replay.SignedReceipt, terminal.SignedReceipt) {
+		t.Fatalf("recovered fresh v1 terminal replay changed: status=%+v error=%v", replay, err)
 	}
 }
 

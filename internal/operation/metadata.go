@@ -43,12 +43,13 @@ const (
 // ClaimRequirement says whether the caller must supply an exact claim proof.
 type ClaimRequirement string
 
-// ClaimNone, ClaimExact, and ClaimImplicitBirth distinguish operations with
-// no proof, an M3 claim proof, or the narrow implicit claim created by a
-// provisional Matter birth.
+// ClaimNone, ClaimExact, ClaimTargetSet, and ClaimImplicitBirth distinguish
+// operations with no proof, an M3 scalar proof, a bounded set of Matter claim
+// proofs, or the narrow implicit claim created by a provisional Matter birth.
 const (
 	ClaimNone          ClaimRequirement = "none"
 	ClaimExact         ClaimRequirement = "exact"
+	ClaimTargetSet     ClaimRequirement = "target-set"
 	ClaimImplicitBirth ClaimRequirement = "implicit-birth"
 )
 
@@ -258,7 +259,7 @@ func ValidateMetadata(m Metadata) error {
 		return fmt.Errorf("%s: %w", m.Operation, err)
 	}
 	switch m.Claim {
-	case ClaimNone, ClaimExact, ClaimImplicitBirth:
+	case ClaimNone, ClaimExact, ClaimTargetSet, ClaimImplicitBirth:
 	default:
 		return fmt.Errorf("%s: claim requirement is incomplete or unknown", m.Operation)
 	}

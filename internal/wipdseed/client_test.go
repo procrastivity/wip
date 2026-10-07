@@ -1858,6 +1858,7 @@ type clientFixture struct {
 	caKey          ed25519.PrivateKey
 	caDER          []byte
 	store          *authoritystore.Store
+	storeRoot      string
 	listener       net.Listener
 	server         *wipdauthority.Server
 	serverCertDER  []byte
@@ -1889,7 +1890,8 @@ func newClientFixture(t *testing.T) *clientFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := authoritystore.CreateEmpty(filepath.Join(t.TempDir(), "authority"))
+	storeRoot := filepath.Join(t.TempDir(), "authority")
+	store, err := authoritystore.CreateEmpty(storeRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1974,7 +1976,7 @@ func newClientFixture(t *testing.T) *clientFixture {
 	roots.AddCert(serverCert)
 	return &clientFixture{
 		profile: profile, roots: roots, owner: owner, ownerKeyID: ownerKeyID,
-		authorityPin: serverPin, caKey: caPrivate, caDER: caDER, store: store,
+		authorityPin: serverPin, caKey: caPrivate, caDER: caDER, store: store, storeRoot: storeRoot,
 		identity: identity, grant: enrollmentGrant,
 		ownerRoot: ownerPublic, delegation: delegation,
 		listener: listener, server: server, serverCertDER: serverDER, serverPrivate: serverPrivate,

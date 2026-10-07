@@ -108,7 +108,7 @@ func TestStep8TypedResultsAndReceiptBindings(t *testing.T) {
 				t.Fatal("refusal accepted an effect")
 			}
 			// Unknown operation versions cannot inherit a known output codec.
-			if _, err := decodeOperationResultPayload(operation.ID{Name: id.Name, Version: 2}, wire); err == nil {
+			if _, err := decodeOperationResultPayload(operation.ID{Name: id.Name, Version: 3}, wire); err == nil {
 				t.Fatal("accepted unknown version")
 			}
 		})
@@ -128,7 +128,7 @@ func TestStep8CapabilityVersionAndIdentityIntersection(t *testing.T) {
 			version  uint16
 			schema   string
 			selected bool
-		}{{1, identitySchemaV1, true}, {2, identitySchemaV1, false}, {1, "wipd.command/2", false}} {
+		}{{2, identitySchemaV1, true}, {1, identitySchemaV1, false}, {2, "wipd.command/2", false}} {
 			hello := capabilityHello{
 				protocolMin: protocolVersion{major: 1}, protocolMax: protocolVersion{major: 1},
 				identitySchemas: []string{identitySchemaV1}, storeSchemas: []string{storeSchemaV1}, features: []string{frameSchema},

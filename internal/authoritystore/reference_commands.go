@@ -13,6 +13,7 @@ import (
 func referenceHistoryDefinition(id operation.ID) (operation.Definition, bool) {
 	for _, definition := range []operation.Definition{
 		operation.ReferenceBindV1, operation.ReferenceUnbindV1, operation.ReferenceRebindV1,
+		operation.ReferenceBindV2, operation.ReferenceUnbindV2, operation.ReferenceRebindV2,
 	} {
 		if definition.Metadata().Operation == id {
 			return definition, true
@@ -26,7 +27,7 @@ func (s *Store) submitReferenceCommand(ctx context.Context, command operation.Co
 ) (CommandStatus, error) {
 	var empty CommandStatus
 	metadata := definition.Metadata()
-	if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimNone ||
+	if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimNone && metadata.Claim != operation.ClaimTargetSet ||
 		definition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil || command.Request.Context.Repo == "" ||
 		command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return empty, ErrInvalidProof
@@ -60,7 +61,10 @@ func completeReferenceTx(ctx context.Context, tx *sql.Tx, command operation.Comm
 		return fold, nil
 	}
 	definition, ok := referenceHistoryDefinition(command.Request.Operation)
-	if !ok || definition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
+	if !ok {
+		return fold, ErrInvalidProof
+	}
+	if definition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
 		!ulid.MatchString(eventID) || occurred.IsZero() {
 		return fold, ErrInvalidProof
 	}
@@ -69,9 +73,15 @@ func completeReferenceTx(ctx context.Context, tx *sql.Tx, command operation.Comm
 	switch input := command.Request.Input.(type) {
 	case operation.ReferenceBindInput:
 		matterID, to = input.MatterID, input.Reference
+	case operation.ReferenceBindV2Input:
+		matterID, to = input.MatterID, input.Reference
 	case operation.ReferenceUnbindInput:
 		matterID, from = input.MatterID, input.Reference
+	case operation.ReferenceUnbindV2Input:
+		matterID, from = input.MatterID, input.Reference
 	case operation.ReferenceRebindInput:
+		matterID, from, to = input.MatterID, input.From, input.To
+	case operation.ReferenceRebindV2Input:
 		matterID, from, to = input.MatterID, input.From, input.To
 	default:
 		return fold, ErrInvalidProof
@@ -82,6 +92,15 @@ func completeReferenceTx(ctx context.Context, tx *sql.Tx, command operation.Comm
 	}
 	if !live {
 		return refuse("refusal.reference-matter", "the target Matter must be live in this authority domain and belong to the command Repo")
+	}
+	if command.Request.Operation.Version == 2 {
+		valid, claimErr := validateTargetClaimsTx(ctx, tx, command, []string{matterID})
+		if claimErr != nil {
+			return fold, claimErr
+		}
+		if !valid {
+			return refuse("refusal.claim-fenced", "the exact current claim for the target Matter is required")
+		}
 	}
 	isActive := func(ref string) bool {
 		for _, relation := range projection.references {
@@ -95,21 +114,21 @@ func completeReferenceTx(ctx context.Context, tx *sql.Tx, command operation.Comm
 	payload := map[string]any{}
 	output := operation.ReferenceOutput{MatterID: matterID}
 	switch command.Request.Operation {
-	case operation.ReferenceBindV1.Metadata().Operation:
+	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceBindV2.Metadata().Operation:
 		if isActive(to) {
 			return refuse("refusal.reference-exists", "that tracker reference is already bound to the Matter")
 		}
 		eventKind = "reference.added"
 		payload["ref"] = to
 		output.Reference = to
-	case operation.ReferenceUnbindV1.Metadata().Operation:
+	case operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceUnbindV2.Metadata().Operation:
 		if !isActive(from) {
 			return refuse("refusal.reference-missing", "that tracker reference is not bound to the Matter")
 		}
 		eventKind = "reference.removed"
 		payload["ref"] = from
 		output.Reference = from
-	case operation.ReferenceRebindV1.Metadata().Operation:
+	case operation.ReferenceRebindV1.Metadata().Operation, operation.ReferenceRebindV2.Metadata().Operation:
 		if !isActive(from) {
 			return refuse("refusal.reference-missing", "the source tracker reference is not bound to the Matter")
 		}
@@ -205,9 +224,15 @@ func validateReferenceHistoryEvent(event step12Event, submission storedSubmissio
 	switch input := command.Request.Input.(type) {
 	case operation.ReferenceBindInput:
 		matterID, ref, kind = input.MatterID, input.Reference, "reference.added"
+	case operation.ReferenceBindV2Input:
+		matterID, ref, kind = input.MatterID, input.Reference, "reference.added"
 	case operation.ReferenceUnbindInput:
 		matterID, ref, kind = input.MatterID, input.Reference, "reference.removed"
+	case operation.ReferenceUnbindV2Input:
+		matterID, ref, kind = input.MatterID, input.Reference, "reference.removed"
 	case operation.ReferenceRebindInput:
+		matterID, from, to, kind = input.MatterID, input.From, input.To, "reference.rebound"
+	case operation.ReferenceRebindV2Input:
 		matterID, from, to, kind = input.MatterID, input.From, input.To, "reference.rebound"
 	default:
 		return ErrInvalidStore
@@ -215,7 +240,7 @@ func validateReferenceHistoryEvent(event step12Event, submission storedSubmissio
 	if event.kind != kind {
 		return ErrInvalidStore
 	}
-	if command.Request.Operation == operation.ReferenceRebindV1.Metadata().Operation {
+	if command.Request.Operation == operation.ReferenceRebindV1.Metadata().Operation || command.Request.Operation == operation.ReferenceRebindV2.Metadata().Operation {
 		var payload struct {
 			From             string `cbor:"from"`
 			To               string `cbor:"to"`
@@ -268,9 +293,15 @@ func checkReferenceCommands(db *sql.DB, submissions []storedSubmission) error {
 			switch input := command.Request.Input.(type) {
 			case operation.ReferenceBindInput:
 				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
+			case operation.ReferenceBindV2Input:
+				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
 			case operation.ReferenceUnbindInput:
 				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
+			case operation.ReferenceUnbindV2Input:
+				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
 			case operation.ReferenceRebindInput:
+				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.To, PreviousReference: input.From}
+			case operation.ReferenceRebindV2Input:
 				output = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.To, PreviousReference: input.From}
 			default:
 				return ErrInvalidStore
@@ -288,15 +319,21 @@ func checkReferenceCommands(db *sql.DB, submissions []storedSubmission) error {
 }
 
 func referenceRefusalAllowed(id operation.ID, problem string) bool {
+	if problem == "refusal.step8-v1-claim-required" {
+		return id.Version == 1
+	}
+	if problem == "refusal.claim-fenced" {
+		return id.Version == 2
+	}
 	if problem == "refusal.reference-matter" {
 		return true
 	}
 	switch id {
-	case operation.ReferenceBindV1.Metadata().Operation:
+	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceBindV2.Metadata().Operation:
 		return problem == "refusal.reference-exists"
-	case operation.ReferenceUnbindV1.Metadata().Operation:
+	case operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceUnbindV2.Metadata().Operation:
 		return problem == "refusal.reference-missing"
-	case operation.ReferenceRebindV1.Metadata().Operation:
+	case operation.ReferenceRebindV1.Metadata().Operation, operation.ReferenceRebindV2.Metadata().Operation:
 		return problem == "refusal.reference-missing" || problem == "refusal.reference-destination-exists"
 	default:
 		return false

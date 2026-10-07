@@ -19,7 +19,7 @@ func (s *Store) submitDependencyCommand(ctx context.Context, command operation.C
 ) (CommandStatus, error) {
 	var empty CommandStatus
 	metadata := definition.Metadata()
-	if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimNone ||
+	if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimNone && metadata.Claim != operation.ClaimTargetSet ||
 		definition.ValidateRequest(command.Request) != nil || command.Request.Context.Repo == "" ||
 		command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return empty, ErrInvalidProof
@@ -67,7 +67,11 @@ func completeDependencyTx(ctx context.Context, tx *sql.Tx, command operation.Com
 	switch input := command.Request.Input.(type) {
 	case operation.DependencyAddInput:
 		blocked, blocker = input.BlockedID, input.BlockerID
+	case operation.DependencyAddV2Input:
+		blocked, blocker = input.BlockedID, input.BlockerID
 	case operation.DependencyRemoveInput:
+		blocked, blocker = input.BlockedID, input.BlockerID
+	case operation.DependencyRemoveV2Input:
 		blocked, blocker = input.BlockedID, input.BlockerID
 	default:
 		return fold, ErrInvalidProof
@@ -78,6 +82,19 @@ func completeDependencyTx(ctx context.Context, tx *sql.Tx, command operation.Com
 	if blocked == blocker {
 		return refuse("refusal.dependency-cycle", "a dependency cannot block itself or create a cycle")
 	}
+	if command.Request.Operation.Version == 2 {
+		targets := []string{nodes[ownerKey(identity.domain, blocked)].node.matter, nodes[ownerKey(identity.domain, blocker)].node.matter}
+		if targets[0] == targets[1] {
+			targets = targets[:1]
+		}
+		valid, claimErr := validateTargetClaimsTx(ctx, tx, command, targets)
+		if claimErr != nil {
+			return fold, claimErr
+		}
+		if !valid {
+			return refuse("refusal.claim-fenced", "the exact current claims for all dependency endpoint Matters are required")
+		}
+	}
 	active := make([]dependencyEdge, 0, len(edges))
 	for _, edge := range edges {
 		if edge.domain == identity.domain && edge.tombstone == "" &&
@@ -87,7 +104,7 @@ func completeDependencyTx(ctx context.Context, tx *sql.Tx, command operation.Com
 	}
 
 	switch command.Request.Operation {
-	case operation.DependencyAddV1.Metadata().Operation:
+	case operation.DependencyAddV1.Metadata().Operation, operation.DependencyAddV2.Metadata().Operation:
 		for _, edge := range active {
 			if edge.blocked == blocked && edge.blocker == blocker {
 				return refuse("refusal.dependency-exists", "that dependency pair is already in force")
@@ -116,7 +133,7 @@ func completeDependencyTx(ctx context.Context, tx *sql.Tx, command operation.Com
 		if err != nil {
 			return fold, err
 		}
-	case operation.DependencyRemoveV1.Metadata().Operation:
+	case operation.DependencyRemoveV1.Metadata().Operation, operation.DependencyRemoveV2.Metadata().Operation:
 		var edgeID string
 		for _, edge := range active {
 			if edge.blocked == blocked && edge.blocker == blocker {

@@ -8,44 +8,95 @@ import (
 	"testing"
 )
 
-func TestStep8DefinitionsAreAuthorityOnlyAndClaimFree(t *testing.T) {
-	for _, definition := range step8ContractDefinitions {
+func TestStep8DefinitionsAreAuthorityOnlyAndRequireTargetSet(t *testing.T) {
+	for _, definition := range Step8Catalogue() {
 		metadata := definition.Metadata()
-		if metadata.Delivery != DeliveryAuthority || metadata.Claim != ClaimNone || len(metadata.RequiredContext) != 1 ||
+		if metadata.Delivery != DeliveryAuthority || metadata.Claim != ClaimTargetSet || len(metadata.RequiredContext) != 1 ||
 			metadata.RequiredContext[0] != ContextRepo || len(metadata.BlobInputs) != 0 {
-			t.Errorf("%s metadata = %+v, want Repo authority operation without claim/blob context", metadata.Operation, metadata)
+			t.Errorf("%s metadata = %+v, want Repo authority operation with target claims and no blobs", metadata.Operation, metadata)
 		}
-		request := Request{Operation: metadata.Operation, Actor: "human", Context: Context{Repo: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, Input: nil, Blobs: []BlobInput{}}
+		const matter = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+		const claim = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+		request := Request{Operation: metadata.Operation, Actor: "human", Context: Context{Repo: "01ARZ3NDEKTSV4RRFFQ69G5FAX"}, Blobs: []BlobInput{}}
 		switch metadata.Operation {
-		case DependencyAddV1.Metadata().Operation:
-			request.Input = DependencyAddInput{BlockedID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", BlockerID: "01ARZ3NDEKTSV4RRFFQ69G5FAW"}
-		case DependencyRemoveV1.Metadata().Operation:
-			request.Input = DependencyRemoveInput{BlockedID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", BlockerID: "01ARZ3NDEKTSV4RRFFQ69G5FAW"}
-		case ReferenceBindV1.Metadata().Operation:
-			request.Input = ReferenceBindInput{MatterID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Reference: "T-1"}
-		case ReferenceUnbindV1.Metadata().Operation:
-			request.Input = ReferenceUnbindInput{MatterID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Reference: "T-1"}
-		case ReferenceRebindV1.Metadata().Operation:
-			request.Input = ReferenceRebindInput{MatterID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", From: "T-1", To: "T-2"}
+		case DependencyAddV2.Metadata().Operation:
+			request.Input = DependencyAddV2Input{BlockedID: matter, BlockerID: claim, TargetClaims: []TargetClaim{{MatterID: matter, ClaimID: claim, ClaimEpoch: 3}}}
+		case DependencyRemoveV2.Metadata().Operation:
+			request.Input = DependencyRemoveV2Input{BlockedID: matter, BlockerID: claim, TargetClaims: []TargetClaim{{MatterID: matter, ClaimID: claim, ClaimEpoch: 3}}}
+		case ReferenceBindV2.Metadata().Operation:
+			request.Input = ReferenceBindV2Input{MatterID: matter, Reference: "T-1", TargetClaims: []TargetClaim{{MatterID: matter, ClaimID: claim, ClaimEpoch: 3}}}
+		case ReferenceUnbindV2.Metadata().Operation:
+			request.Input = ReferenceUnbindV2Input{MatterID: matter, Reference: "T-1", TargetClaims: []TargetClaim{{MatterID: matter, ClaimID: claim, ClaimEpoch: 3}}}
+		case ReferenceRebindV2.Metadata().Operation:
+			request.Input = ReferenceRebindV2Input{MatterID: matter, From: "T-1", To: "T-2", TargetClaims: []TargetClaim{{MatterID: matter, ClaimID: claim, ClaimEpoch: 3}}}
 		}
 		if err := definition.ValidateRequest(request); err != nil {
 			t.Errorf("%s valid request: %v", metadata.Operation, err)
 		}
-		if metadata.Operation == DependencyAddV1.Metadata().Operation {
-			request.Input = DependencyAddInput{BlockedID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", BlockerID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-			if err := definition.ValidateRequest(request); err != nil {
-				t.Errorf("dependency self-edge should reach authority cycle validation: %v", err)
+		if metadata.Claim == ClaimTargetSet {
+			request.Claim = &ClaimContext{ID: claim, Epoch: "3"}
+			if err := definition.ValidateRequest(request); err == nil {
+				t.Errorf("%s accepted scalar claim alongside target set", metadata.Operation)
 			}
-		}
-		request.Claim = &ClaimContext{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", Epoch: "1"}
-		if err := definition.ValidateRequest(request); err == nil {
-			t.Errorf("%s accepted one-Matter claim context", metadata.Operation)
 		}
 	}
 	for _, definition := range Catalogue() {
 		if _, exists := step8ContractDefinition(definition.Metadata().Operation); exists {
 			t.Errorf("%s was advertised in the default runtime catalogue", definition.Metadata().Operation)
 		}
+	}
+}
+
+func TestStep8V2TargetClaimSetsAreBoundedAndCanonical(t *testing.T) {
+	const m1 = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	const m2 = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const c1 = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	const c2 = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	claims := []TargetClaim{{MatterID: m1, ClaimID: c1, ClaimEpoch: 3}, {MatterID: m2, ClaimID: c2, ClaimEpoch: 8}}
+	request := Request{
+		Operation: DependencyAddV2.Metadata().Operation, Actor: "human", Context: Context{Repo: "01ARZ3NDEKTSV4RRFFQ69G5FAZ"},
+		Input: DependencyAddV2Input{BlockedID: m1, BlockerID: m2, TargetClaims: claims}, Blobs: []BlobInput{},
+	}
+	if err := DependencyAddV2.ValidateRequest(request); err != nil {
+		t.Fatal(err)
+	}
+	command := Command{
+		ID: "01ARZ3NDEKTSV4RRFFQ69G5FB0", AuthorityDomainID: m1, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m2, EnvironmentSequence: 1, ActedAt: "2026-09-23T11:59:00Z", CorrelationCommandID: "01ARZ3NDEKTSV4RRFFQ69G5FB0", Request: request,
+	}
+	encoded, err := command.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeCanonicalCommand(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Request.Input.(DependencyAddV2Input); len(got.TargetClaims) != 2 || got.TargetClaims[1] != claims[1] {
+		t.Fatalf("roundtrip target claims = %+v", got.TargetClaims)
+	}
+	changed := command
+	changed.Request.Input = DependencyAddV2Input{BlockedID: m1, BlockerID: m2, TargetClaims: []TargetClaim{{MatterID: m1, ClaimID: c1, ClaimEpoch: 4}, {MatterID: m2, ClaimID: c2, ClaimEpoch: 8}}}
+	changedBytes, err := changed.CanonicalBytes()
+	if err != nil || bytes.Equal(encoded, changedBytes) {
+		t.Fatalf("target claim epoch was not bound into identity: err=%v", err)
+	}
+	for name, malformed := range map[string][]TargetClaim{
+		"duplicate":  {claims[0], claims[0]},
+		"unsorted":   {claims[1], claims[0]},
+		"too-many":   {claims[0], claims[1], {MatterID: "01ARZ3NDEKTSV4RRFFQ69G5FB1", ClaimID: c1, ClaimEpoch: 1}},
+		"zero-epoch": {{MatterID: m1, ClaimID: c1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request.Input = DependencyAddV2Input{BlockedID: m1, BlockerID: m2, TargetClaims: malformed}
+			if err := DependencyAddV2.ValidateRequest(request); err == nil {
+				t.Fatal("malformed claim set accepted")
+			}
+		})
+	}
+	request.Input = DependencyAddV2Input{BlockedID: m1, BlockerID: m2, TargetClaims: []TargetClaim{}}
+	if err := DependencyAddV2.ValidateRequest(request); err != nil {
+		t.Fatalf("empty set must reach semantic refusal: %v", err)
 	}
 }
 

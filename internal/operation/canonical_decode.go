@@ -483,6 +483,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return DependencyAddInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case DependencyAddV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return DependencyAddV2Input{BlockedID: blocked, BlockerID: blocker, TargetClaims: claims}, err
 	case DependencyRemoveV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "blocked_id", "blocker_id")
 		if err != nil {
@@ -497,6 +512,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return DependencyRemoveInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case DependencyRemoveV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return DependencyRemoveV2Input{BlockedID: blocked, BlockerID: blocker, TargetClaims: claims}, err
 	case ReferenceBindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "reference")
 		if err != nil {
@@ -511,6 +541,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceBindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceBindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceBindV2Input{MatterID: matter, Reference: reference, TargetClaims: claims}, err
 	case ReferenceUnbindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "reference")
 		if err != nil {
@@ -525,6 +570,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceUnbindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceUnbindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceUnbindV2Input{MatterID: matter, Reference: reference, TargetClaims: claims}, err
 	case ReferenceRebindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "from", "to")
 		if err != nil {
@@ -543,6 +603,25 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceRebindInput{MatterID: matter, From: from, To: to}, nil
+	case ReferenceRebindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "from", "to", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		from, err := commandString(fields, "from")
+		if err != nil {
+			return nil, err
+		}
+		to, err := commandString(fields, "to")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceRebindV2Input{MatterID: matter, From: from, To: to, TargetClaims: claims}, err
 	case GateExemptionRepairV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "node_id", "gate", "event_count", "high_water_event_id", "prefix_digest", "incident_ref", "reason", "evidence_refs")
 		if err != nil {
@@ -658,6 +737,34 @@ func commandStringArray(fields map[string]any, key string) ([]string, error) {
 		result[index] = text
 	}
 	return result, nil
+}
+
+func commandDecodeTargetClaims(value any) ([]TargetClaim, error) {
+	values, ok := value.([]any)
+	if !ok || len(values) > 2 {
+		return nil, fmt.Errorf("operation: target_claims must be an array of at most two records")
+	}
+	claims := make([]TargetClaim, 0, len(values))
+	for index, value := range values {
+		fields, err := commandMap(value, fmt.Sprintf("target_claims[%d]", index), "matter_id", "claim_id", "claim_epoch")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		id, err := commandString(fields, "claim_id")
+		if err != nil {
+			return nil, err
+		}
+		epoch, err := commandUint(fields, "claim_epoch")
+		if err != nil {
+			return nil, err
+		}
+		claims = append(claims, TargetClaim{MatterID: matter, ClaimID: id, ClaimEpoch: epoch})
+	}
+	return claims, nil
 }
 
 func commandDecodeBlobs(value any) ([]BlobInput, error) {

@@ -283,17 +283,35 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		}, nil
 	case DependencyAddInput:
 		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}, nil
+	case DependencyAddV2Input:
+		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
 	case DependencyRemoveInput:
 		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}, nil
+	case DependencyRemoveV2Input:
+		return canonicalMap{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
 	case ReferenceBindInput:
 		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference}, nil
+	case ReferenceBindV2Input:
+		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
 	case ReferenceUnbindInput:
 		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference}, nil
+	case ReferenceUnbindV2Input:
+		return canonicalMap{"matter_id": input.MatterID, "reference": input.Reference, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
 	case ReferenceRebindInput:
 		return canonicalMap{"matter_id": input.MatterID, "from": input.From, "to": input.To}, nil
+	case ReferenceRebindV2Input:
+		return canonicalMap{"matter_id": input.MatterID, "from": input.From, "to": input.To, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}
+}
+
+func canonicalTargetClaims(claims []TargetClaim) canonicalArray {
+	values := make(canonicalArray, len(claims))
+	for i, claim := range claims {
+		values[i] = canonicalMap{"matter_id": claim.MatterID, "claim_id": claim.ClaimID, "claim_epoch": claim.ClaimEpoch}
+	}
+	return values
 }
 
 func canonicalStrings(values []string) canonicalArray {

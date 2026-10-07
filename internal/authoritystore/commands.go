@@ -463,6 +463,13 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if d.ActiveEpoch != cmd.ExpectedAuthorityEpoch {
 		return out, ErrFenced
 	}
+	if (isDependency || isReference) && cmd.Request.Operation.Version == 1 {
+		result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+			Code:    operation.ProblemCode("refusal.step8-v1-claim-required"),
+			Message: "fresh Step 8 v1 writes are refused; submit the strict v2 operation with exact target claims",
+		}}
+		subjectID, eventID = "", ""
+	}
 	if result.Code == operation.ResultSucceeded && contentOperation(cmd.Request.Operation) {
 		kind, subject := contentInput(cmd.Request)
 		_, guardErr := validateContentClaimTx(ctx, tx, cmd, kind, subject)
@@ -524,7 +531,8 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			} else {
 				problem = string(result.Problem.Code)
 			}
-		case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation:
+		case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation,
+			operation.DependencyAddV2.Metadata().Operation, operation.DependencyRemoveV2.Metadata().Operation:
 			fold, foldErr := completeDependencyTx(ctx, tx, cmd, eventIdentity{
 				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
 				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
@@ -543,7 +551,8 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 				problem = string(result.Problem.Code)
 			}
 		case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation,
-			operation.ReferenceRebindV1.Metadata().Operation:
+			operation.ReferenceRebindV1.Metadata().Operation, operation.ReferenceBindV2.Metadata().Operation,
+			operation.ReferenceUnbindV2.Metadata().Operation, operation.ReferenceRebindV2.Metadata().Operation:
 			fold, foldErr := completeReferenceTx(ctx, tx, cmd, eventIdentity{
 				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
 				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,

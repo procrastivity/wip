@@ -122,7 +122,7 @@ func checkStep4State(db *sql.DB) error {
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
 			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !dependency && !reference) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
-			!step4 && s.version != 1 {
+			!step4 && s.version != 1 && !dependency && !reference {
 			return ErrInvalidStore
 		}
 		if reference {

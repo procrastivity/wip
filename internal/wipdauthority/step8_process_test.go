@@ -57,7 +57,7 @@ func TestStep8ThroughAuthenticatedWipdProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("authenticated AF_UNIX IPC is Linux-only")
 	}
-	for _, scenario := range []string{"lost-terminal-dependency.add", "lost-terminal-dependency.remove", "lost-terminal-reference.bind", "lost-terminal-reference.rebind", "lost-terminal-reference.unbind", "lost-local-response", "aggregate-lifecycle", "local-step7", "local-m5", "authority-step7"} {
+	for _, scenario := range []string{"lost-terminal-dependency.add", "lost-terminal-dependency.remove", "lost-terminal-reference.bind", "lost-terminal-reference.rebind", "lost-terminal-reference.unbind", "lost-terminal-success", "valid-v2", "lost-local-response", "aggregate-lifecycle", "local-step7", "local-m5", "authority-step7"} {
 		t.Run(scenario, func(t *testing.T) { runStep8Process(t, scenario) })
 	}
 }
@@ -214,6 +214,29 @@ func runStep8Process(t *testing.T, scenario string) {
 		matters = append(matters, matter.ID)
 	}
 	a, b := matters[0], matters[1]
+	positiveV2 := scenario == "valid-v2" || scenario == "lost-terminal-success"
+	var claimA, claimB operation.TargetClaim
+	if positiveV2 {
+		for index, matter := range matters {
+			released, releaseErr := client.ReleaseBirthClaim(ctx, matter, repairTransportID(250+index), operation.Actor("human"))
+			if releaseErr != nil || released.Code != operation.ResultSucceeded || len(released.Receipt) == 0 {
+				t.Fatalf("release birth claim for %s: %+v %v; daemon=%s", matter, released, releaseErr, output.String())
+			}
+			sequence++
+			acquired, acquireErr := client.AcquireClaim(ctx, repairTransportID(252+index), matter,
+				repairTransportID(254+index), repairTransportID(256+index), repairTransportID(258+index), operation.Actor("human"))
+			if acquireErr != nil || acquired.Code != operation.ResultSucceeded || acquired.Grant == nil {
+				t.Fatalf("acquire Step 8 proof for %s: %+v %v; daemon=%s", matter, acquired, acquireErr, output.String())
+			}
+			sequence++
+			claim := operation.TargetClaim{MatterID: matter, ClaimID: acquired.Grant.ClaimID, ClaimEpoch: acquired.Grant.ClaimEpoch}
+			if index == 0 {
+				claimA = claim
+			} else {
+				claimB = claim
+			}
+		}
+	}
 	ops := []struct {
 		definition operation.Definition
 		input      operation.Input
@@ -222,29 +245,59 @@ func runStep8Process(t *testing.T, scenario string) {
 		kind       string
 		subject    string
 	}{
-		{operation.DependencyAddV1, operation.DependencyAddInput{BlockedID: a, BlockerID: b}, nil, "", "dependency.added", a},
-		{operation.DependencyRemoveV1, operation.DependencyRemoveInput{BlockedID: a, BlockerID: b}, operation.DependencyOutput{BlockedID: a, BlockerID: b}, "", "dependency.removed", a},
-		{operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: a, Reference: "OLD"}, operation.ReferenceOutput{MatterID: a, Reference: "OLD"}, "", "reference.added", a},
-		{operation.ReferenceRebindV1, operation.ReferenceRebindInput{MatterID: a, From: "OLD", To: "NEW"}, operation.ReferenceOutput{MatterID: a, Reference: "NEW", PreviousReference: "OLD"}, "", "reference.rebound", a},
-		{operation.ReferenceUnbindV1, operation.ReferenceUnbindInput{MatterID: a, Reference: "NEW"}, operation.ReferenceOutput{MatterID: a, Reference: "NEW"}, "", "reference.removed", a},
+		{operation.DependencyAddV2, operation.DependencyAddV2Input{BlockedID: a, BlockerID: b}, nil, "refusal.claim-fenced", "", a},
+		{operation.DependencyRemoveV2, operation.DependencyRemoveV2Input{BlockedID: a, BlockerID: b}, nil, "refusal.claim-fenced", "", a},
+		{operation.ReferenceBindV2, operation.ReferenceBindV2Input{MatterID: a, Reference: "OLD"}, nil, "refusal.claim-fenced", "", a},
+		{operation.ReferenceRebindV2, operation.ReferenceRebindV2Input{MatterID: a, From: "OLD", To: "NEW"}, nil, "refusal.claim-fenced", "", a},
+		{operation.ReferenceUnbindV2, operation.ReferenceUnbindV2Input{MatterID: a, Reference: "NEW"}, nil, "refusal.claim-fenced", "", a},
 	}
-	// A terminal refusal keeps the established command-start quarantine
-	// barrier. Each fixture therefore ends with one operation's refusal.
-	refused := ops[len(ops)-1]
-	refused.want, refused.kind, refused.problem = nil, "", "refusal.reference-missing"
-	switch strings.TrimPrefix(scenario, "lost-terminal-") {
-	case "dependency.add":
-		refused.definition, refused.input, refused.problem = operation.DependencyAddV1, operation.DependencyAddInput{BlockedID: a, BlockerID: a}, "refusal.dependency-cycle"
-	case "dependency.remove":
-		refused.definition, refused.input, refused.problem = operation.DependencyRemoveV1, operation.DependencyRemoveInput{BlockedID: a, BlockerID: b}, "refusal.dependency-missing"
-	case "reference.bind":
-		refused.definition, refused.input, refused.problem = operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: repairTransportID(151), Reference: "OLD"}, "refusal.reference-matter"
-	case "reference.rebind":
-		refused.definition, refused.input = operation.ReferenceRebindV1, operation.ReferenceRebindInput{MatterID: a, From: "OLD", To: "OTHER"}
+	selectedOperation := ""
+	if strings.HasPrefix(scenario, "lost-terminal-") {
+		selectedOperation = strings.TrimPrefix(scenario, "lost-terminal-")
+	} else if scenario == "lost-local-response" {
+		selectedOperation = "dependency.add"
+	} else if scenario == "lost-terminal-success" {
+		selectedOperation = "dependency.add"
 	}
-	if scenario != "aggregate-lifecycle" {
-		ops = append(ops, refused)
+	if scenario == "aggregate-lifecycle" {
+		ops = nil
+	} else if positiveV2 {
+		proof := []operation.TargetClaim{claimA, claimB}
+		ops = []struct {
+			definition operation.Definition
+			input      operation.Input
+			want       operation.Output
+			problem    string
+			kind       string
+			subject    string
+		}{
+			{operation.DependencyAddV2, operation.DependencyAddV2Input{BlockedID: a, BlockerID: b, TargetClaims: proof}, nil, "", "dependency.added", a},
+			{operation.DependencyRemoveV2, operation.DependencyRemoveV2Input{BlockedID: a, BlockerID: b, TargetClaims: proof}, operation.DependencyOutput{BlockedID: a, BlockerID: b}, "", "dependency.removed", a},
+			{operation.ReferenceBindV2, operation.ReferenceBindV2Input{MatterID: a, Reference: "OLD", TargetClaims: []operation.TargetClaim{claimA}}, operation.ReferenceOutput{MatterID: a, Reference: "OLD"}, "", "reference.added", a},
+			{operation.ReferenceRebindV2, operation.ReferenceRebindV2Input{MatterID: a, From: "OLD", To: "NEW", TargetClaims: []operation.TargetClaim{claimA}}, operation.ReferenceOutput{MatterID: a, Reference: "NEW", PreviousReference: "OLD"}, "", "reference.rebound", a},
+			{operation.ReferenceUnbindV2, operation.ReferenceUnbindV2Input{MatterID: a, Reference: "NEW", TargetClaims: []operation.TargetClaim{claimA}}, operation.ReferenceOutput{MatterID: a, Reference: "NEW"}, "", "reference.removed", a},
+		}
+		if scenario == "lost-terminal-success" {
+			ops = ops[:1]
+		}
+	} else if selectedOperation != "" {
+		for _, candidate := range ops {
+			if candidate.definition.Metadata().Operation.Name == selectedOperation {
+				ops = []struct {
+					definition operation.Definition
+					input      operation.Input
+					want       operation.Output
+					problem    string
+					kind       string
+					subject    string
+				}{candidate}
+				break
+			}
+		}
 	}
+	// Exercise all five strict v2 operations through authenticated IPC with
+	// structurally valid but missing proof sets. The authority must return
+	// signed semantic refusals without installing model effects.
 	identity := wipdjournal.Identity{RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1, EnvironmentID: m5TestEnv, OwnerRootSPKI: f.profile.OwnerRootSPKI()}
 	openJournal := func() *wipdjournal.Journal {
 		_ = client.Close()
@@ -266,14 +319,14 @@ func runStep8Process(t *testing.T, scenario string) {
 		EnvironmentID: m5TestEnv, EnvironmentSequence: sequence,
 		ActedAt: time.Now().UTC().Format(time.RFC3339Nano), CorrelationCommandID: invalidClaimID,
 		Request: operation.Request{
-			Operation: operation.ReferenceBindV1.Metadata().Operation, Actor: "human",
+			Operation: operation.ReferenceBindV2.Metadata().Operation, Actor: "human",
 			Context: operation.Context{Repo: m5TestRepo}, Claim: &operation.ClaimContext{ID: a, Epoch: "1"},
-			Input: operation.ReferenceBindInput{MatterID: a, Reference: "REJECTED"},
+			Input: operation.ReferenceBindV2Input{MatterID: a, Reference: "REJECTED"},
 		},
 	}
 	submitsBeforeInvalidClaim := faults.commandSubmits.Load()
 	if _, err = client.ExecuteCommand(ctx, invalidClaimCommand); err == nil || !strings.Contains(err.Error(), "protocol.malformed-message") {
-		t.Fatalf("ClaimNone reference command was not rejected before admission: %v", err)
+		t.Fatalf("v2 reference command with an illegal scalar claim was not rejected before admission: %v", err)
 	}
 	var invalidSubmissions, invalidClaimJournalEntries int
 	if err = db.QueryRow(`SELECT count(*) FROM submissions WHERE domain_id=? AND command_id=?`, m5TestDomain, invalidClaimID).Scan(&invalidSubmissions); err != nil {
@@ -283,12 +336,12 @@ func runStep8Process(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	if invalidSubmissions != 0 || invalidClaimJournalEntries != 0 || faults.commandSubmits.Load() != submitsBeforeInvalidClaim {
-		t.Fatalf("rejected ClaimNone context reached authority: submissions=%d claim-journal=%d submit-count=%d/%d",
+		t.Fatalf("rejected scalar-claim command reached authority: submissions=%d claim-journal=%d submit-count=%d/%d",
 			invalidSubmissions, invalidClaimJournalEntries, faults.commandSubmits.Load(), submitsBeforeInvalidClaim)
 	}
 	journal := openJournal()
 	if _, err = journal.Get(invalidClaimID); !errors.Is(err, wipdjournal.ErrNotFound) {
-		t.Fatalf("rejected ClaimNone context entered the Environment journal: %v", err)
+		t.Fatalf("rejected scalar-claim command entered the Environment journal: %v", err)
 	}
 	if err = journal.Close(); err != nil {
 		t.Fatal(err)
@@ -298,8 +351,8 @@ func runStep8Process(t *testing.T, scenario string) {
 	var previousProjection *wipdjournal.Step8Projection
 	for index, op := range ops {
 		metadata := op.definition.Metadata()
-		if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimNone {
-			t.Fatalf("%s metadata = delivery %s claim %s, want DeliveryAuthority + ClaimNone",
+		if metadata.Delivery != operation.DeliveryAuthority || metadata.Claim != operation.ClaimTargetSet {
+			t.Fatalf("%s metadata = delivery %s claim %s, want DeliveryAuthority + ClaimTargetSet",
 				metadata.Operation, metadata.Delivery, metadata.Claim)
 		}
 		item := command(160+index, op.definition, op.input)
@@ -386,7 +439,7 @@ func runStep8Process(t *testing.T, scenario string) {
 		if err != nil {
 			t.Fatalf("%s: %v daemon=%s trace=%v", op.definition.Metadata().Operation, err, output.String(), trace.snapshot())
 		}
-		if index == 0 {
+		if index == 0 && op.problem == "" {
 			value, ok := got.Output.(operation.DependencyOutput)
 			if !ok || value.EdgeID == "" || value.BlockedID != a || value.BlockerID != b {
 				t.Fatalf("typed edge identity/direction: %+v", got)
@@ -482,21 +535,41 @@ func runStep8Process(t *testing.T, scenario string) {
 					if payload["edge"] != firstEdge || payload["blocker"] != input.BlockerID {
 						t.Fatal("add changed edge identity/endpoints")
 					}
+				case operation.DependencyAddV2Input:
+					if payload["edge"] != firstEdge || payload["blocker"] != input.BlockerID {
+						t.Fatal("v2 add changed edge identity/endpoints")
+					}
 				case operation.DependencyRemoveInput:
 					if payload["edge"] != firstEdge || payload["blocker"] != input.BlockerID {
 						t.Fatal("remove changed edge identity/endpoints")
+					}
+				case operation.DependencyRemoveV2Input:
+					if payload["edge"] != firstEdge || payload["blocker"] != input.BlockerID {
+						t.Fatal("v2 remove changed edge identity/endpoints")
 					}
 				case operation.ReferenceBindInput:
 					if payload["ref"] != input.Reference || payload["tracker_push_level"] != "off" {
 						t.Fatal("bind changed reference/policy snapshot")
 					}
+				case operation.ReferenceBindV2Input:
+					if payload["ref"] != input.Reference || payload["tracker_push_level"] != "off" {
+						t.Fatal("v2 bind changed reference/policy snapshot")
+					}
 				case operation.ReferenceUnbindInput:
 					if payload["ref"] != input.Reference || payload["tracker_push_level"] != "off" {
 						t.Fatal("unbind changed reference/policy snapshot")
 					}
+				case operation.ReferenceUnbindV2Input:
+					if payload["ref"] != input.Reference || payload["tracker_push_level"] != "off" {
+						t.Fatal("v2 unbind changed reference/policy snapshot")
+					}
 				case operation.ReferenceRebindInput:
 					if payload["from"] != input.From || payload["to"] != input.To || payload["tracker_push_level"] != "off" {
 						t.Fatal("rebind changed endpoints/policy snapshot")
+					}
+				case operation.ReferenceRebindV2Input:
+					if payload["from"] != input.From || payload["to"] != input.To || payload["tracker_push_level"] != "off" {
+						t.Fatal("v2 rebind changed endpoints/policy snapshot")
 					}
 				}
 				effects = append(effects, record)
@@ -553,10 +626,14 @@ func runStep8Process(t *testing.T, scenario string) {
 		sequence++ // Claim acquisition consumed the next Environment entry.
 		claim := &operation.ClaimContext{ID: acquired.Grant.ClaimID, Epoch: fmt.Sprint(acquired.Grant.ClaimEpoch)}
 		commandContext := operation.Context{Repo: m5TestRepo, Clone: repairTransportID(182), Worktree: repairTransportID(183)}
-		bind := command(185, operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: lifecycleMatterID, Reference: "LIFECYCLE"})
+		bindInput := operation.ReferenceBindV2Input{
+			MatterID: lifecycleMatterID, Reference: "LIFECYCLE",
+			TargetClaims: []operation.TargetClaim{{MatterID: lifecycleMatterID, ClaimID: acquired.Grant.ClaimID, ClaimEpoch: acquired.Grant.ClaimEpoch}},
+		}
+		bind := command(185, operation.ReferenceBindV2, bindInput)
 		bound, err := client.ExecuteCommand(ctx, bind)
 		if err != nil || bound.Code != operation.ResultSucceeded || bound.Output != (operation.ReferenceOutput{MatterID: lifecycleMatterID, Reference: "LIFECYCLE"}) {
-			t.Fatalf("lifecycle reference bind = %+v, %v; daemon=%s", bound, err, output.String())
+			t.Fatalf("lifecycle reference bind = %+v, %v; daemon=%s trace=%v", bound, err, output.String(), trace.snapshot())
 		}
 		assertLifecycleSnapshot := func(journal *wipdjournal.Journal, disposition, commandID, eventKind, from, to string) {
 			t.Helper()

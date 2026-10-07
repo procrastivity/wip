@@ -26,7 +26,7 @@ func claimTestID(n int) string { return fmt.Sprintf("%026d", n) }
 type claimTestFixture struct {
 	s                       *Store
 	root                    string
-	peer                    tls.ConnectionState
+	peer, peerB             tls.ConnectionState
 	key                     ed25519.PrivateKey
 	now                     time.Time
 	matter, worktree, clone string

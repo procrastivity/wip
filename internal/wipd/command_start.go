@@ -676,6 +676,10 @@ func validateConnectedCommand(entry wipdjournal.Entry) error {
 		if entry.Command.Request.Claim != nil {
 			return fmt.Errorf("%w: claim supplied to an unclaimed operation", ErrCommandStartBlocked)
 		}
+	case operation.ClaimTargetSet:
+		if entry.Command.Request.Claim != nil || entry.Delivery != operation.DeliveryAuthority {
+			return fmt.Errorf("%w: target-set operations require authority delivery and no scalar claim", ErrCommandStartBlocked)
+		}
 	case operation.ClaimImplicitBirth:
 		input, ok := entry.Command.Request.Input.(operation.StepCreateInput)
 		claim := entry.Command.Request.Claim
@@ -735,7 +739,7 @@ func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) 
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
 	}
-	for _, definition := range operation.Step8Catalogue() {
+	for _, definition := range operation.Step8HistoryCatalogue() {
 		if definition.Metadata().Operation == id {
 			return definition, true
 		}
