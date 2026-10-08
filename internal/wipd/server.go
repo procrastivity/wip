@@ -33,6 +33,14 @@ type Server struct {
 	executionLanes         *executionLanes
 	commandStartMu         sync.RWMutex
 	commandStart           *CommandStartCoordinator
+	namedBatchReadMu       sync.RWMutex
+	namedBatchReader       NamedBatchReader
+}
+
+// NamedBatchReader executes only the authenticated batch.read@v1 authority
+// query. Implementations must not mutate Environment or command state.
+type NamedBatchReader interface {
+	ReadNamedBatch(context.Context, wipdwire.LocalNamedBatchReadRequest) (wipdwire.NamedBatchReadResponse, error)
 }
 
 // ConfigureConnectedCommands enables the durable connected birth, command-
@@ -63,6 +71,30 @@ func (s *Server) connectedCommandStart() *CommandStartCoordinator {
 	s.commandStartMu.RLock()
 	defer s.commandStartMu.RUnlock()
 	return s.commandStart
+}
+
+// ConfigureNamedBatchRead enables the explicit Step 09 read capability. It
+// must be configured before Serve and is independent of command submission.
+func (s *Server) ConfigureNamedBatchRead(reader NamedBatchReader) error {
+	if s == nil || reader == nil {
+		return errors.New("wipd: named-Batch reader is required")
+	}
+	s.namedBatchReadMu.Lock()
+	defer s.namedBatchReadMu.Unlock()
+	if s.namedBatchReader != nil {
+		return errors.New("wipd: named-Batch read path is already configured")
+	}
+	s.namedBatchReader = reader
+	return nil
+}
+
+func (s *Server) namedBatchReadPath() NamedBatchReader {
+	if s == nil {
+		return nil
+	}
+	s.namedBatchReadMu.RLock()
+	defer s.namedBatchReadMu.RUnlock()
+	return s.namedBatchReader
 }
 
 type connectionSession struct {
@@ -259,7 +291,7 @@ func (s *Server) serveNegotiate(writer http.ResponseWriter, request *http.Reques
 		}
 		abortHTTP2Stream()
 	}
-	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease(), s.supportsClaimAcquire(), s.supportsClaimJournalClose(), s.supportsCommandSubmitV2())
+	selected, parameters, err := negotiateCapabilities(hello, s.registry, s.supportsBirthClaimRelease(), s.supportsClaimAcquire(), s.supportsClaimJournalClose(), s.supportsCommandSubmitV2(), s.namedBatchReadPath() != nil)
 	if err != nil {
 		if errors.Is(err, errInvalidCapabilities) || errors.Is(err, errIncompatibleVersion) || errors.Is(err, errUnsupportedExtension) {
 			s.writeProblem(writer, frame.requestID, 0, err.Error(), bootstrapFrameBodyLimit)
@@ -357,6 +389,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		<-s.preflightSlots
 		preflightOwned = false
 		s.serveBatchSweepAnonymous(writer, request, state, hello, parameters, frame)
+		return
+	}
+	if frame.kind == namedBatchReadFrameKind {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveNamedBatchRead(writer, request, hello, parameters, frame)
 		return
 	}
 	if frame.kind != "command.submit" {

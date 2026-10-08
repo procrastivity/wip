@@ -48,20 +48,22 @@ type M5LabConfig struct {
 	Registry                    *operation.Registry
 	ArtifactKeyCertificate      []byte
 	SignArtifact                authoritystore.Signer
+	NamedBatchRead              bool
 }
 
 type m5LabHandler struct {
-	profile    Profile
-	store      *authoritystore.Store
-	repoID     string
-	grant      []byte
-	csrDER     []byte
-	caDER      []byte
-	signLeaf   EnvironmentLeafSigner
-	registry   *operation.Registry
-	operations []operation.Definition
-	sign       authoritystore.Signer
-	m6         bool
+	profile        Profile
+	store          *authoritystore.Store
+	repoID         string
+	grant          []byte
+	csrDER         []byte
+	caDER          []byte
+	signLeaf       EnvironmentLeafSigner
+	registry       *operation.Registry
+	operations     []operation.Definition
+	sign           authoritystore.Signer
+	m6             bool
+	namedBatchRead bool
 }
 
 // NewM5LabServer exposes the existing M2 enrollment and negotiated exchange
@@ -157,6 +159,9 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		if len(operations) == 0 || len(operations) > maxOperations+step7OperationCount ||
 			m6 && len(operations) != maxOperations+step7OperationCount ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
+			return nil, ErrInvalidLabConfig
+		}
+		if config.NamedBatchRead && (!m6 || !batchCreateRegistered || batchMembershipCount != len(operation.NamedBatchMembershipCatalogue())) {
 			return nil, ErrInvalidLabConfig
 		}
 		matterRegistered := false
@@ -272,6 +277,9 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	} else if len(config.ArtifactKeyCertificate) != 0 || config.SignArtifact != nil {
 		return nil, ErrInvalidLabConfig
 	}
+	if config.NamedBatchRead && config.Registry == nil {
+		return nil, ErrInvalidLabConfig
+	}
 	if m6 {
 		// The detached operation has no generic Registry.Dispatch handler. Its
 		// capability is selected only with v2 and its durable private seam owns
@@ -281,7 +289,7 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	app := &m5LabHandler{
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
-		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6,
+		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6, namedBatchRead: config.NamedBatchRead,
 		registry: config.Registry, operations: operations, sign: config.SignArtifact,
 	}
 	mux := http.NewServeMux()
@@ -457,6 +465,16 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		kind = "pull"
 		start = authorityAnchor(pull.Installed)
+	case "batch.read":
+		session.mu.Lock()
+		selected := session.namedBatchRead
+		session.mu.Unlock()
+		if !app.namedBatchRead || !selected {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
+			return
+		}
+		app.serveNamedBatchRead(writer, request, body, frame)
+		return
 	case "command.submit":
 		if app.registry == nil {
 			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
@@ -560,7 +578,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
 		return
 	}
-	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations)
+	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations, app.namedBatchRead)
 	if problem != "" {
 		writeLabProblem(writer, frame.RequestID, problem)
 		return
@@ -593,6 +611,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 	session.mu.Lock()
 	session.operations = operations
 	session.commandSubmitV2 = containsString(selectedFeatures, wipdwire.CommandSubmitV2Feature)
+	session.namedBatchRead = containsString(selectedFeatures, wipdwire.NamedBatchReadFeature)
 	session.negotiated = true
 	succeeded = true
 	session.mu.Unlock()

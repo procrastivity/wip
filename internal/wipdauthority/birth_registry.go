@@ -114,6 +114,12 @@ func NewM6Step9BRegistry() (*operation.Registry, error) {
 	return registry, nil
 }
 
+// NewM6Step9CRegistry keeps the complete S9-B command surface while enabling
+// the separately negotiated named-Batch snapshot read at the server boundary.
+func NewM6Step9CRegistry() (*operation.Registry, error) {
+	return NewM6Step9BRegistry()
+}
+
 func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {

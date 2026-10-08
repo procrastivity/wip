@@ -39,6 +39,7 @@ type sessionLimits struct {
 	chunkData       int
 	streamBytes     int
 	commandSubmitV2 bool
+	namedBatchRead  bool
 	operations      []operation.ID
 }
 
@@ -243,6 +244,10 @@ func negotiateRemote(ctx context.Context, client *http.Client, origin string) (s
 }
 
 func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin string, operations []operation.ID) (sessionLimits, error) {
+	return negotiateRemoteCapabilities(ctx, client, origin, operations, false)
+}
+
+func negotiateRemoteCapabilities(ctx context.Context, client *http.Client, origin string, operations []operation.ID, namedBatchRead bool) (sessionLimits, error) {
 	var limits sessionLimits
 	capabilities := make([]any, 0, len(operations))
 	previous := operation.ID{}
@@ -265,6 +270,10 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	features := []any{"wipd.frame/1"}
 	if len(operations) != 0 {
 		features = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+	}
+	if namedBatchRead {
+		features = append(features, wipdwire.NamedBatchReadFeature)
+		sort.Slice(features, func(i, j int) bool { return features[i].(string) < features[j].(string) })
 	}
 	hello := map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
@@ -296,8 +305,12 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 		!equalStringsValue(selection["store_schemas"], "wipd.store/1") {
 		return limits, ErrInvalidClientState
 	}
-	selectedV2 := equalStringsValue(selection["features"], wipdwire.CommandSubmitV2Feature, "wipd.frame/1")
-	if !equalStringsValue(selection["features"], "wipd.frame/1") && !selectedV2 || selectedV2 && len(operations) == 0 {
+	selectedFeatures, selectedFeaturesOK := sortedStrings(selection["features"])
+	selectedV2 := containsString(selectedFeatures, wipdwire.CommandSubmitV2Feature)
+	selectedNamedBatchRead := containsString(selectedFeatures, wipdwire.NamedBatchReadFeature)
+	if !selectedFeaturesOK || !containsString(selectedFeatures, "wipd.frame/1") ||
+		len(selectedFeatures) != 1+boolFeatureCount(selectedV2)+boolFeatureCount(selectedNamedBatchRead) ||
+		selectedV2 && len(operations) == 0 || selectedNamedBatchRead && !namedBatchRead || namedBatchRead && !selectedNamedBatchRead {
 		return limits, ErrInvalidClientState
 	}
 	selectedOperations := operations
@@ -336,9 +349,37 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	}
 	limits = sessionLimits{
 		frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes),
-		commandSubmitV2: selectedV2, operations: append([]operation.ID(nil), selectedOperations...),
+		commandSubmitV2: selectedV2, namedBatchRead: selectedNamedBatchRead, operations: append([]operation.ID(nil), selectedOperations...),
 	}
 	return limits, nil
+}
+
+func boolFeatureCount(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
+}
+
+func sortedStrings(value any) ([]string, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]string, len(items))
+	for index, item := range items {
+		text, ok := item.(string)
+		if !ok || index > 0 && text <= result[index-1] {
+			return nil, false
+		}
+		result[index] = text
+	}
+	return result, true
+}
+
+func containsString(values []string, wanted string) bool {
+	index := sort.SearchStrings(values, wanted)
+	return index < len(values) && values[index] == wanted
 }
 
 func equalNegotiatedOperations(value any, expected []operation.ID) bool {

@@ -38,13 +38,15 @@ type InstalledReceipt struct {
 // InstallSnapshot is a stable read of the installed authority prefix,
 // complete manifest, terminal receipt index, and overlay revision.
 type InstallSnapshot struct {
-	Identity        Identity
-	Revision        uint64
-	Anchor          wipdwire.PrefixAnchor
-	ManifestDigest  string
-	Receipts        map[string]InstalledReceipt
-	Step8Projection *Step8Projection
-	NamedBatches    []NamedBatchProjection
+	Identity              Identity
+	Revision              uint64
+	Anchor                wipdwire.PrefixAnchor
+	ManifestDigest        string
+	Receipts              map[string]InstalledReceipt
+	Step8Projection       *Step8Projection
+	NamedBatches          []NamedBatchProjection
+	NamedBatchMemberships []NamedBatchMembershipProjection
+	NamedBatchDismissals  []NamedBatchDismissalProjection
 }
 
 // Expectation returns the revision and installed prefix used to condition the
@@ -808,10 +810,14 @@ func loadInstallSnapshot(tx *sql.Tx, identity Identity) (InstallSnapshot, error)
 	if err != nil {
 		return InstallSnapshot{}, err
 	}
+	namedBatchMemberships, namedBatchDismissals, err := installedNamedBatchMembershipProjection(tx, identity.DomainID)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
 	snapshot := InstallSnapshot{
 		Identity: identity, Revision: state.revision, Anchor: cloneTransferAnchor(state.anchor),
 		ManifestDigest: state.manifestDigest, Receipts: make(map[string]InstalledReceipt), Step8Projection: projection,
-		NamedBatches: namedBatches,
+		NamedBatches: namedBatches, NamedBatchMemberships: namedBatchMemberships, NamedBatchDismissals: namedBatchDismissals,
 	}
 	rows, err := tx.Query(`SELECT command_id,request_hash,environment_sequence,journal_position,result_code,canonical_receipt FROM installed_receipts ORDER BY journal_position`)
 	if err != nil {

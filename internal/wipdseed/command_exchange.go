@@ -33,6 +33,11 @@ func (client *CommandExchangeClient) SupportsCommandSubmitV2() bool {
 	return client != nil && client.client != nil && client.limits.commandSubmitV2
 }
 
+// SupportsNamedBatchRead reports the authority's explicit read-feature selection.
+func (client *CommandExchangeClient) SupportsNamedBatchRead() bool {
+	return client != nil && client.client != nil && client.limits.namedBatchRead
+}
+
 // SupportsOperation reports an exact authority operation selected during
 // this authenticated session's capability negotiation.
 func (client *CommandExchangeClient) SupportsOperation(id operation.ID) bool {
@@ -51,6 +56,16 @@ func (client *CommandExchangeClient) SupportsOperation(id operation.ID) bool {
 // proves its private-key possession with mTLS, and negotiates the exact birth
 // operation set required by the caller.
 func OpenCommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID) (*CommandExchangeClient, error) {
+	return openCommandExchangeClient(ctx, profile, roots, directory, operations, false)
+}
+
+// OpenCommandExchangeClientWithNamedBatchRead additionally requires the
+// authority's explicit batch.read@v1 capability during negotiation.
+func OpenCommandExchangeClientWithNamedBatchRead(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID) (*CommandExchangeClient, error) {
+	return openCommandExchangeClient(ctx, profile, roots, directory, operations, true)
+}
+
+func openCommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID, namedBatchRead bool) (*CommandExchangeClient, error) {
 	if ctx == nil || roots == nil || directory == "" || len(operations) == 0 {
 		return nil, ErrInvalidClientState
 	}
@@ -73,7 +88,7 @@ func OpenCommandExchangeClient(ctx context.Context, profile wipdauthority.Profil
 		clear(state.PrivateKeyPKCS8)
 		return nil, err
 	}
-	limits, err := negotiateRemoteOperations(ctx, client, profile.Origin(), operations)
+	limits, err := negotiateRemoteCapabilities(ctx, client, profile.Origin(), operations, namedBatchRead)
 	if err != nil {
 		client.CloseIdleConnections()
 		clear(state.PrivateKeyPKCS8)
@@ -132,6 +147,8 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 2
 	case "receipt.query":
 		maxFrames = 1
+	case "batch.read":
+		maxFrames = 1
 	case "pull.request":
 		maxFrames = maxClientTransferEvents + 3
 	case "birth-journal.ack":
@@ -146,6 +163,9 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 1
 	default:
 		return nil, ErrInvalidClientState
+	}
+	if kind == "batch.read" && !client.SupportsNamedBatchRead() {
+		return nil, errors.New("protocol.unsupported-extension")
 	}
 	if kind == "command.submit" {
 		encoded, err := wipdwire.EncodeCanonical(payload)

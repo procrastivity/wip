@@ -122,7 +122,7 @@ func decodeClientHello(payload []byte) (capabilityHello, error) {
 	return hello, nil
 }
 
-func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose, commandSubmitV2 bool) (serverHello, sessionParameters, error) {
+func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose, commandSubmitV2, namedBatchRead bool) (serverHello, sessionParameters, error) {
 	const supportedMajor, supportedMinor = uint16(1), uint16(0)
 	if client.protocolMin.major != supportedMajor || client.protocolMin.minor > supportedMinor ||
 		client.protocolMax.major != supportedMajor || client.protocolMax.minor < supportedMinor {
@@ -143,6 +143,9 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 	}
 	if commandSubmitV2 {
 		serverFeatures = append(serverFeatures, wipdwire.CommandSubmitV2Feature)
+	}
+	if namedBatchRead {
+		serverFeatures = append(serverFeatures, wipdwire.NamedBatchReadFeature)
 	}
 	sort.Strings(serverFeatures)
 	result := serverHello{

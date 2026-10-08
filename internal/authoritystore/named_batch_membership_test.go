@@ -243,6 +243,18 @@ func TestNamedBatchMembershipExactPairsReplayRefusalAndDurableLifetime(t *testin
 	foreignBatchID, foreignMatterID := claimTestID(1321), claimTestID(1324)
 	foreignBatch := namedBatchCommand(claimTestID(1320), domainB, envB, repoC, 1, "foreign Batch")
 	completeNamedBatchForTest(t, store, foreignBatch, peerB, artifactB, now, foreignBatchID, claimTestID(1322))
+	beforeForeignRead, err := store.CurrentPrefixAnchor(ctx, domainA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ReadNamedBatch(ctx, domainA, 7, foreignBatchID, 100, "", now); err != ErrNamedBatchNotFound {
+		t.Fatalf("out-of-domain named Batch did not use the uniform not-found refusal: %v", err)
+	}
+	afterForeignRead, err := store.CurrentPrefixAnchor(ctx, domainA)
+	if err != nil || afterForeignRead != beforeForeignRead {
+		t.Fatalf("out-of-domain named-Batch read changed the authenticated domain prefix: before=%+v after=%+v err=%v",
+			beforeForeignRead, afterForeignRead, err)
+	}
 	foreignMatter := operation.Command{
 		ID: claimTestID(1323), AuthorityDomainID: domainB, ExpectedAuthorityEpoch: 7,
 		EnvironmentID: envB, EnvironmentSequence: 2, ActedAt: "2026-09-23T11:59:00Z", CorrelationCommandID: claimTestID(1323),

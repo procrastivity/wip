@@ -231,7 +231,7 @@ func dependencyReachable(from, target string, adjacency map[string][]string) boo
 
 func freshDependencyEdgeID(at time.Time, domain string, edges []dependencyEdge, tx *sql.Tx) (string, error) {
 	for attempt := 0; attempt < 4; attempt++ {
-		id, err := makeDependencyEdgeID(at)
+		id, err := makeULID(at)
 		if err != nil {
 			return "", err
 		}
@@ -252,7 +252,7 @@ func freshDependencyEdgeID(at time.Time, domain string, edges []dependencyEdge, 
 	return "", ErrResourceLimit
 }
 
-func makeDependencyEdgeID(at time.Time) (string, error) {
+func makeULID(at time.Time) (string, error) {
 	millis := at.UnixMilli()
 	if millis < 0 || uint64(millis) >= 1<<48 {
 		return "", ErrInvalidProof

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipd"
@@ -1039,6 +1040,416 @@ func TestM6Step9BNamedBatchMembershipThroughAuthenticatedProcess(t *testing.T) {
 	}
 	if !traceContains(trace.snapshot(), "/wipd/v1/exchange request=command.submit response=submission.accepted,command.terminal") {
 		t.Fatalf("S9-B operations did not traverse authenticated authority submit and terminal response: %v", trace.snapshot())
+	}
+}
+
+func TestM6Step9CNamedBatchReadThroughAuthenticatedProcessMatchesStore(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authenticated AF_UNIX IPC is Linux-only")
+	}
+	ctx := context.Background()
+	root, err := os.MkdirTemp("/tmp", "s9c-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("WIP_DB_PATH", filepath.Join(root, "legacy", "wip.db"))
+
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step9CRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	config.NamedBatchRead = true
+	fixture.server, err = NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace m6AuthorityHTTPTrace
+	fixture.server.http.Handler = traceM6AuthorityHTTP(fixture.server.http.Handler, &trace)
+	authorityCtx, stopAuthority := context.WithCancel(ctx)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
+	t.Cleanup(func() {
+		stopAuthority()
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil {
+				t.Errorf("M6 S9-C authority server stopped with error: %v", serveErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("M6 S9-C authority server did not stop")
+		}
+	})
+
+	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "environment", m5TestEnv,
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step9c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := m5WipdBinary(t)
+	client, stopDaemon, daemonOutput := startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err = wipd.ConnectM6Step9C(ctx, environment.profileRoot)
+	if err != nil {
+		stopDaemon()
+		t.Fatalf("connect with explicit Step 9-C capability over authenticated AF_UNIX IPC: %v; daemon=%s", err, daemonOutput.String())
+	}
+	t.Cleanup(func() { _ = client.Close(); stopDaemon() })
+
+	commandID := m5TwoEnvironmentID(90)
+	command := operation.Command{
+		ID: commandID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 1, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: commandID,
+		Request: operation.Request{
+			Operation: operation.BatchCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchCreateInput{Name: "S9-C process read"},
+		},
+	}
+	result, err := client.ExecuteCommand(ctx, command)
+	created, ok := result.Output.(operation.BatchCreateOutput)
+	if err != nil || result.Code != operation.ResultSucceeded || !ok || created.ID == "" {
+		t.Fatalf("create named Batch through authenticated Step 9-C process: result=%+v err=%v daemon=%s", result, err, daemonOutput.String())
+	}
+	createMatterID := m5TwoEnvironmentID(91)
+	createMatter := operation.Command{
+		ID: createMatterID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 2, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: createMatterID,
+		Request: operation.Request{
+			Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.MatterCreateInput{Title: "S9-C first member", Locator: "s9c-member-b"},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, createMatter)
+	matterB, matterOK := result.Output.(operation.MatterCreateOutput)
+	if err != nil || result.Code != operation.ResultSucceeded || !matterOK || matterB.ID == "" {
+		t.Fatalf("create Matter for named-Batch read: result=%+v err=%v", result, err)
+	}
+	createMatterAID := m5TwoEnvironmentID(96)
+	createMatterA := operation.Command{
+		ID: createMatterAID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 3, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: createMatterAID,
+		Request: operation.Request{
+			Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.MatterCreateInput{Title: "S9-C member in first Repo", Locator: "s9c-member-a"},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, createMatterA)
+	matterA, matterAOK := result.Output.(operation.MatterCreateOutput)
+	if err != nil || result.Code != operation.ResultSucceeded || !matterAOK || matterA.ID == "" {
+		t.Fatalf("create second Matter for named-Batch read: result=%+v err=%v", result, err)
+	}
+	createMatterCID := m5TwoEnvironmentID(98)
+	createMatterC := operation.Command{
+		ID: createMatterCID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 4, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: createMatterCID,
+		Request: operation.Request{
+			Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.MatterCreateInput{Title: "S9-C third member", Locator: "s9c-member-c"},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, createMatterC)
+	matterC, matterCOK := result.Output.(operation.MatterCreateOutput)
+	if err != nil || result.Code != operation.ResultSucceeded || !matterCOK || matterC.ID == "" {
+		t.Fatalf("create third Matter for named-Batch read: result=%+v err=%v", result, err)
+	}
+	joinID := m5TwoEnvironmentID(92)
+	join := operation.Command{
+		ID: joinID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 5, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: joinID,
+		Request: operation.Request{
+			Operation: operation.BatchJoinV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchMembershipInput{BatchID: created.ID, MatterID: matterB.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, join)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("join named-Batch member: result=%+v err=%v", result, err)
+	}
+	joinAID := m5TwoEnvironmentID(97)
+	joinA := operation.Command{
+		ID: joinAID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 6, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: joinAID,
+		Request: operation.Request{
+			Operation: operation.BatchJoinV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchMembershipInput{BatchID: created.ID, MatterID: matterA.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, joinA)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("join second named-Batch member: result=%+v err=%v", result, err)
+	}
+	joinCID := m5TwoEnvironmentID(99)
+	joinC := operation.Command{
+		ID: joinCID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 7, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: joinCID,
+		Request: operation.Request{
+			Operation: operation.BatchJoinV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchMembershipInput{BatchID: created.ID, MatterID: matterC.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, joinC)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("join third named-Batch member: result=%+v err=%v", result, err)
+	}
+	before, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.ReadNamedBatch(ctx, created.ID, 2, nil)
+	if err != nil {
+		t.Fatalf("read named Batch through authenticated Step 9-C IPC: %v; authority trace=%v", err, trace.snapshot())
+	}
+	direct, err := fixture.store.ReadNamedBatch(ctx, m5TestDomain, 1, created.ID, 2, "", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 2 || len(direct.Items) != 2 || response.Snapshot.AsOf.EventCount != direct.AsOf.EventCount ||
+		response.Snapshot.AsOf.Digest != direct.AsOf.Digest || response.Complete != direct.Complete ||
+		response.NextPageToken == nil || response.Provenance.Source != "authority" || response.FilterHash != direct.FilterHash ||
+		!bytes.Equal(response.Items[0].Value, direct.Items[0].Value) || !bytes.Equal(response.Items[1].Value, direct.Items[1].Value) {
+		t.Fatalf("authenticated/direct named-Batch page mismatch: ipc=%+v direct=%+v", response, direct)
+	}
+	encodedResponse, err := wipdwire.EncodeCanonical(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseFields, err := wipdwire.DecodeCanonicalMap(encodedResponse,
+		"schema", "query", "filter_hash", "snapshot", "provenance", "items", "next_page_token", "complete")
+	queryFields, queryOK := responseFields["query"].(map[string]any)
+	if err != nil || !queryOK || !wipdwire.ExactMapKeys(queryFields, "name", "version") ||
+		responseFields["filter_hash"] != response.FilterHash || response.FilterHash != direct.FilterHash {
+		t.Fatalf("authenticated M2 response query is not closed or filter is not represented by filter_hash: query=%v fields=%v err=%v",
+			queryFields, responseFields, err)
+	}
+	var header struct {
+		Kind    string `cbor:"kind"`
+		BatchID string `cbor:"batch_id"`
+	}
+	if err = cbor.Unmarshal(response.Items[0].Value, &header); err != nil || header.Kind != "batch" || header.BatchID != created.ID {
+		t.Fatalf("authenticated page has incorrect closed header: %+v err=%v", header, err)
+	}
+	fixedSizeFirst, err := client.ReadNamedBatch(ctx, created.ID, 1, nil)
+	if err != nil || len(fixedSizeFirst.Items) != 1 || fixedSizeFirst.Complete || fixedSizeFirst.NextPageToken == nil {
+		t.Fatalf("fixed-size page-one control: page=%+v err=%v", fixedSizeFirst, err)
+	}
+	fixedSizeToken := *fixedSizeFirst.NextPageToken
+	fixedSizeNext, err := client.ReadNamedBatch(ctx, created.ID, 1, &fixedSizeToken)
+	if err != nil || len(fixedSizeNext.Items) != 1 || fixedSizeNext.Complete || fixedSizeNext.NextPageToken == nil {
+		t.Fatalf("fixed-size continuation control: page=%+v err=%v", fixedSizeNext, err)
+	}
+	fixedSizeDirect, err := fixture.store.ReadNamedBatch(ctx, m5TestDomain, 1, created.ID, 1, fixedSizeToken, time.Now().UTC())
+	if err != nil || len(fixedSizeDirect.Items) != 1 || fixedSizeDirect.Complete ||
+		!bytes.Equal(fixedSizeNext.Items[0].Value, fixedSizeDirect.Items[0].Value) {
+		t.Fatalf("fixed-size authenticated/direct continuation control: ipc=%+v direct=%+v err=%v", fixedSizeNext, fixedSizeDirect, err)
+	}
+	pageToken := *response.NextPageToken
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopDaemon()
+	identity := wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	}
+	journalPath := filepath.Join(environment.profileRoot, "environment-journal")
+	projectionJournal, err := wipdjournal.Open(journalPath, identity)
+	if err != nil {
+		t.Fatalf("open installed Environment journal at joined prefix: %v", err)
+	}
+	joinedProjection, projectionErr := projectionJournal.InstallSnapshot(ctx)
+	projectionCloseErr := projectionJournal.Close()
+	if projectionErr != nil || projectionCloseErr != nil || len(joinedProjection.NamedBatches) != 1 ||
+		len(joinedProjection.NamedBatchMemberships) != 3 || joinedProjection.NamedBatchMemberships[0].BatchID != created.ID ||
+		joinedProjection.NamedBatchMemberships[0].MatterID != matterB.ID || joinedProjection.NamedBatchMemberships[0].RepoID != m5TestRepo ||
+		joinedProjection.NamedBatchMemberships[1].BatchID != created.ID || joinedProjection.NamedBatchMemberships[1].MatterID == "" ||
+		joinedProjection.NamedBatchMemberships[1].MatterID != matterA.ID || joinedProjection.NamedBatchMemberships[1].RepoID != m5TestRepo ||
+		joinedProjection.NamedBatchMemberships[2].BatchID != created.ID || joinedProjection.NamedBatchMemberships[2].MatterID != matterC.ID ||
+		joinedProjection.NamedBatchMemberships[2].RepoID != m5TestRepo ||
+		joinedProjection.NamedBatchMemberships[0].MatterID >= joinedProjection.NamedBatchMemberships[1].MatterID ||
+		joinedProjection.NamedBatchMemberships[1].MatterID >= joinedProjection.NamedBatchMemberships[2].MatterID {
+		t.Fatalf("incremental pull did not install named-Batch membership projection: %+v install=%v close=%v",
+			joinedProjection, projectionErr, projectionCloseErr)
+	}
+	client, stopDaemon, daemonOutput = startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err = wipd.ConnectM6Step9C(ctx, environment.profileRoot)
+	if err != nil {
+		stopDaemon()
+		t.Fatalf("reconnect to Step 9-C daemon after membership projection inspection: %v; daemon=%s", err, daemonOutput.String())
+	}
+	leaveID := m5TwoEnvironmentID(93)
+	leave := operation.Command{
+		ID: leaveID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 8, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: leaveID,
+		Request: operation.Request{
+			Operation: operation.BatchLeaveV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchMembershipInput{BatchID: created.ID, MatterID: matterB.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, leave)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("leave named-Batch member after pinning page: result=%+v err=%v", result, err)
+	}
+	rejoinID := m5TwoEnvironmentID(95)
+	rejoin := operation.Command{
+		ID: rejoinID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 9, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: rejoinID,
+		Request: operation.Request{
+			Operation: operation.BatchJoinV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchMembershipInput{BatchID: created.ID, MatterID: matterB.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, rejoin)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("rejoin named-Batch member after pinning page: result=%+v err=%v", result, err)
+	}
+	dismissID := m5TwoEnvironmentID(94)
+	dismiss := operation.Command{
+		ID: dismissID, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 10, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: dismissID,
+		Request: operation.Request{
+			Operation: operation.BatchDismissV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchDismissInput{BatchID: created.ID},
+		},
+	}
+	result, err = client.ExecuteCommand(ctx, dismiss)
+	if err != nil || result.Code != operation.ResultSucceeded {
+		t.Fatalf("dismiss named Batch after pinning page: result=%+v err=%v", result, err)
+	}
+	beforeContinuationRead, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processContinuation, err := client.ReadNamedBatch(ctx, created.ID, 1, &pageToken)
+	if err != nil {
+		t.Fatalf("continue named-Batch process snapshot: %v", err)
+	}
+	directContinuation, err := fixture.store.ReadNamedBatch(ctx, m5TestDomain, 1, created.ID, 1, pageToken, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("continue direct named-Batch snapshot: %v", err)
+	}
+	if len(processContinuation.Items) != 2 || len(directContinuation.Items) != 2 ||
+		!bytes.Equal(processContinuation.Items[0].Value, directContinuation.Items[0].Value) ||
+		!bytes.Equal(processContinuation.Items[1].Value, directContinuation.Items[1].Value) ||
+		!processContinuation.Complete || processContinuation.NextPageToken != nil || !directContinuation.Complete ||
+		processContinuation.Snapshot.AsOf.EventCount != response.Snapshot.AsOf.EventCount ||
+		processContinuation.Snapshot.AsOf.Digest != response.Snapshot.AsOf.Digest || directContinuation.AsOf != before {
+		t.Fatalf("decreased-size authenticated/direct continuation mismatch: process=%+v direct=%+v", processContinuation, directContinuation)
+	}
+	var firstPageMember struct {
+		Kind     string `cbor:"kind"`
+		BatchID  string `cbor:"batch_id"`
+		MatterID string `cbor:"matter_id"`
+		RepoID   string `cbor:"repo_id"`
+	}
+	if cbor.Unmarshal(response.Items[1].Value, &firstPageMember) != nil || firstPageMember.Kind != "membership" ||
+		firstPageMember.BatchID != created.ID || firstPageMember.RepoID != m5TestRepo {
+		t.Fatalf("initial size-two page did not contain its first sorted membership: %+v", firstPageMember)
+	}
+	remaining := map[string]bool{matterA.ID: true, matterB.ID: true, matterC.ID: true}
+	delete(remaining, firstPageMember.MatterID)
+	for index, item := range processContinuation.Items {
+		var membership struct {
+			Kind     string `cbor:"kind"`
+			BatchID  string `cbor:"batch_id"`
+			MatterID string `cbor:"matter_id"`
+			RepoID   string `cbor:"repo_id"`
+		}
+		if cbor.Unmarshal(item.Value, &membership) != nil || membership.Kind != "membership" || membership.BatchID != created.ID ||
+			membership.RepoID != m5TestRepo || !remaining[membership.MatterID] {
+			t.Fatalf("decreased-size continuation item %d is not a remaining sorted membership: %+v", index, membership)
+		}
+		delete(remaining, membership.MatterID)
+		if index > 0 {
+			var previous struct {
+				MatterID string `cbor:"matter_id"`
+			}
+			if cbor.Unmarshal(processContinuation.Items[index-1].Value, &previous) != nil || previous.MatterID >= membership.MatterID {
+				t.Fatalf("remaining memberships are not ordered: previous=%s current=%s", previous.MatterID, membership.MatterID)
+			}
+		}
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("decreased-size continuation omitted pinned members: remaining=%v", remaining)
+	}
+	afterContinuationRead, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterContinuationRead != beforeContinuationRead {
+		t.Fatalf("decreased-size continuation changed authority event prefix: before=%+v after=%+v err=%v",
+			beforeContinuationRead, afterContinuationRead, err)
+	}
+	afterMutation, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterMutation.EventCount <= before.EventCount || processContinuation.Snapshot.AsOf.EventCount != before.EventCount ||
+		processContinuation.Snapshot.AsOf.Digest != before.Digest || directContinuation.AsOf != before {
+		t.Fatalf("continuation did not preserve its pinned prefix through mutations: before=%+v continuation=%+v current=%+v err=%v",
+			before, processContinuation.Snapshot.AsOf, afterMutation, err)
+	}
+	beforeFreshRead, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := client.ReadNamedBatch(ctx, created.ID, 100, nil)
+	if err != nil || !fresh.Complete || len(fresh.Items) != 4 {
+		t.Fatalf("fresh dismissed named-Batch read: page=%+v err=%v", fresh, err)
+	}
+	var dismissedHeader struct {
+		Kind             string  `cbor:"kind"`
+		DismissedEventID *string `cbor:"dismissed_event_id"`
+	}
+	if err = cbor.Unmarshal(fresh.Items[0].Value, &dismissedHeader); err != nil || dismissedHeader.Kind != "batch" ||
+		dismissedHeader.DismissedEventID == nil || *dismissedHeader.DismissedEventID == "" {
+		t.Fatalf("fresh named-Batch read omitted explicit dismissal: header=%+v err=%v", dismissedHeader, err)
+	}
+	afterFreshRead, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterFreshRead != beforeFreshRead {
+		t.Fatalf("fresh read mutated authority prefix: before=%+v after=%+v err=%v", beforeFreshRead, afterFreshRead, err)
+	}
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopDaemon()
+	for reopen := 0; reopen < 2; reopen++ {
+		journal, openErr := wipdjournal.Open(journalPath, identity)
+		if openErr != nil {
+			t.Fatalf("open Environment journal after named-Batch read: %v", openErr)
+		}
+		installed, installErr := journal.InstallSnapshot(ctx)
+		closeErr := journal.Close()
+		if installErr != nil || closeErr != nil || installed.Anchor.EventCount != afterMutation.EventCount || installed.Anchor.Digest != afterMutation.Digest ||
+			installed.Anchor.EventID == nil || *installed.Anchor.EventID != afterMutation.EventID || len(installed.NamedBatches) != 1 ||
+			installed.NamedBatches[0].BatchID != created.ID || len(installed.NamedBatchMemberships) != 3 ||
+			installed.NamedBatchMemberships[0].BatchID != created.ID || installed.NamedBatchMemberships[0].MatterID != matterB.ID ||
+			installed.NamedBatchMemberships[0].RepoID != m5TestRepo ||
+			installed.NamedBatchMemberships[1].BatchID != created.ID || installed.NamedBatchMemberships[1].MatterID != matterA.ID ||
+			installed.NamedBatchMemberships[1].RepoID != m5TestRepo ||
+			installed.NamedBatchMemberships[0].MatterID >= installed.NamedBatchMemberships[1].MatterID ||
+			installed.NamedBatchMemberships[2].BatchID != created.ID || installed.NamedBatchMemberships[2].MatterID != matterC.ID ||
+			installed.NamedBatchMemberships[2].RepoID != m5TestRepo ||
+			installed.NamedBatchMemberships[1].MatterID >= installed.NamedBatchMemberships[2].MatterID ||
+			len(installed.NamedBatchDismissals) != 1 || installed.NamedBatchDismissals[0].BatchID != created.ID ||
+			installed.NamedBatchDismissals[0].DismissedEventID == "" {
+			t.Fatalf("Environment named-Batch event projection changed across journal reopen %d: %+v install=%v close=%v", reopen, installed, installErr, closeErr)
+		}
 	}
 }
 

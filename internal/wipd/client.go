@@ -51,6 +51,7 @@ type Client struct {
 	step8      bool
 	step9a     bool
 	step9b     bool
+	step9c     bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -87,7 +88,7 @@ func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, false, false, false)
+	return connectProfileCapabilities(ctx, profile, true, false, false, false, false)
 }
 
 // ConnectM6Step8 explicitly offers the dependency/reference acceptance set.
@@ -97,7 +98,7 @@ func ConnectM6Step8(ctx context.Context, explicitProfileRoot string) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, false, false)
+	return connectProfileCapabilities(ctx, profile, true, true, false, false, false)
 }
 
 // ConnectM6Step9A explicitly offers named Batch birth. It refuses to connect
@@ -108,7 +109,7 @@ func ConnectM6Step9A(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, false)
+	return connectProfileCapabilities(ctx, profile, true, true, true, false, false)
 }
 
 // ConnectM6Step9B explicitly offers named Batch membership and dismissal. It
@@ -118,7 +119,17 @@ func ConnectM6Step9B(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, true)
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, false)
+}
+
+// ConnectM6Step9C requires the explicit named-Batch read feature in addition
+// to the complete S9-A/S9-B operation set; it never falls back.
+func ConnectM6Step9C(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -435,10 +446,10 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
-	return connectProfileCapabilities(ctx, profile, false, false, false, false)
+	return connectProfileCapabilities(ctx, profile, false, false, false, false, false)
 }
 
-func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership bool) (*Client, error) {
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -453,6 +464,7 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 		step8:     step8,
 		step9a:    namedBatch,
 		step9b:    namedBatchMembership,
+		step9c:    namedBatchRead,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -475,6 +487,10 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 				return nil, fmt.Errorf("%w: named Batch membership is not supported by this profile", ErrUnavailable)
 			}
 		}
+	}
+	if namedBatchRead && !containsString(client.hello.features, wipdwire.NamedBatchReadFeature) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: named Batch read is not supported by this profile", ErrUnavailable)
 	}
 	return client, nil
 }
@@ -567,6 +583,10 @@ func (c *Client) negotiate(ctx context.Context) error {
 	features := []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema}
 	if c.m6 {
 		features = []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, wipdwire.CommandSubmitV2Feature, frameSchema}
+	}
+	if c.step9c {
+		features = append(features, wipdwire.NamedBatchReadFeature)
+		sort.Slice(features, func(i, j int) bool { return features[i].(string) < features[j].(string) })
 	}
 	payload, err := encodePayload(map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
@@ -665,7 +685,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !containsString(features, frameSchema) || len(features) > 5 ||
+	if err != nil || !containsString(features, frameSchema) || len(features) > 6 ||
 		!onlyKnownFeatures(features) {
 		return serverHello{}, errUnsupportedExtension
 	}
@@ -713,7 +733,7 @@ func knownOperationVersion(name string, version uint16) bool {
 
 func onlyKnownFeatures(features []string) bool {
 	for _, feature := range features {
-		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature && feature != wipdwire.CommandSubmitV2Feature {
+		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature && feature != wipdwire.CommandSubmitV2Feature && feature != wipdwire.NamedBatchReadFeature {
 			return false
 		}
 	}

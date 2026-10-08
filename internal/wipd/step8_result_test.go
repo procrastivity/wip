@@ -134,7 +134,7 @@ func TestStep8CapabilityVersionAndIdentityIntersection(t *testing.T) {
 				identitySchemas: []string{identitySchemaV1}, storeSchemas: []string{storeSchemaV1}, features: []string{frameSchema},
 				operations: []operationCapability{{name: id.Name, versions: []uint16{test.version}, identitySchemas: []string{test.schema}}},
 			}
-			selected, _, err := negotiateCapabilities(hello, registry, false, false, false, false)
+			selected, _, err := negotiateCapabilities(hello, registry, false, false, false, false, false)
 			if err != nil || operationCapabilityContains(selected.operations, id, identitySchemaV1) != test.selected {
 				t.Fatalf("%s version=%d schema=%s: %+v %v", id, test.version, test.schema, selected, err)
 			}
