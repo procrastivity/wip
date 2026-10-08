@@ -120,7 +120,7 @@ func UpgradeV18(root string) error {
 	if err = installNamedBatches(db); err != nil {
 		return err
 	}
-	if err = checkSchema(db); err != nil {
+	if err = checkSchemaVersion(db, 19); err != nil {
 		return err
 	}
 	return checkBlobFiles(db, filepath.Join(path, "blobs"))

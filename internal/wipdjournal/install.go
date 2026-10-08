@@ -914,7 +914,7 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if fields["accepted_events"] == nil {
-		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) || batchSweepReceiptNoEvent(entry, raw) {
+		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) || batchSweepReceiptNoEvent(entry, raw) || namedBatchJoinReceiptNoEvent(entry, raw) {
 			return nil, 0, 0, nil
 		}
 		return nil, 0, 0, ErrInvalidTransfer
@@ -956,6 +956,10 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 	if step8 && count != 1 {
 		return nil, 0, 0, ErrInvalidTransfer
 	}
+	namedBatchMembership := operation.NamedBatchMembershipOperation(entry.Command.Request.Operation)
+	if namedBatchMembership && count != 1 {
+		return nil, 0, 0, ErrInvalidTransfer
+	}
 	for position := firstPosition; position <= lastPosition; position++ {
 		var eventID string
 		var record []byte
@@ -995,6 +999,16 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 			}
 			output, outputOK := resultFields["output"].([]byte)
 			if !outputOK || !batchCreateOutputMatches(entry, output, asString(eventFields["subject_id"])) {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+		}
+		if namedBatchMembership {
+			resultFields, resultOK := fields["result"].(map[string]any)
+			if !resultOK {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+			output, outputOK := resultFields["output"].([]byte)
+			if !outputOK || !namedBatchMembershipOutputMatches(entry, output) {
 				return nil, 0, 0, ErrInvalidTransfer
 			}
 		}
@@ -1098,6 +1112,37 @@ func eventMatchesCommand(record []byte, entry Entry) bool {
 			return false
 		}
 	}
+	if operation.NamedBatchMembershipOperation(entry.Command.Request.Operation) {
+		batchID, matterID := "", ""
+		wantKind := "batch.joined"
+		switch input := entry.Command.Request.Input.(type) {
+		case operation.BatchMembershipInput:
+			batchID, matterID = input.BatchID, input.MatterID
+		case operation.BatchDismissInput:
+			batchID = input.BatchID
+		default:
+			return false
+		}
+		if entry.Command.Request.Operation == operation.BatchLeaveV1.Metadata().Operation {
+			wantKind = "batch.left"
+		} else if entry.Command.Request.Operation == operation.BatchDismissV1.Metadata().Operation {
+			wantKind = "batch.dismissed"
+		}
+		if fields["kind"] != wantKind || fields["repo_id"] != nil || fields["subject_id"] != batchID {
+			return false
+		}
+		payload, ok := fields["payload"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if entry.Command.Request.Operation == operation.BatchDismissV1.Metadata().Operation {
+			if !wipdwire.ExactMapKeys(payload) {
+				return false
+			}
+		} else if !wipdwire.ExactMapKeys(payload, "matter_id") || payload["matter_id"] != matterID {
+			return false
+		}
+	}
 	environment, ok := fields["environment"].(map[string]any)
 	return ok && environment["id"] == entry.Command.EnvironmentID && environment["sequence"] == entry.EnvironmentSeq
 }
@@ -1136,9 +1181,20 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		if _, known := step8Definition(entry.Command.Request.Operation); known && (len(eventIDs) != 1 || !step8OutputMatches(entry, rawOutput, "")) {
 			return ErrInvalidTransfer
 		}
+		if operation.NamedBatchMembershipOperation(entry.Command.Request.Operation) && !namedBatchMembershipOutputMatches(entry, rawOutput) {
+			return ErrInvalidTransfer
+		}
 		if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation &&
 			(len(eventIDs) != 1 || !batchCreateOutputMatches(entry, rawOutput, "")) {
 			return ErrInvalidTransfer
+		}
+		if operation.NamedBatchMembershipOperation(entry.Command.Request.Operation) {
+			if entry.Command.Request.Operation == operation.BatchJoinV1.Metadata().Operation && len(eventIDs) == 0 && namedBatchJoinReceiptNoEvent(entry, raw) {
+				return nil
+			}
+			if len(eventIDs) != 1 {
+				return ErrInvalidTransfer
+			}
 		}
 		if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
 			output, err := wipdwire.DecodeCanonicalMap(rawOutput, "outcome")
@@ -1158,7 +1214,7 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 				return ErrInvalidTransfer
 			}
 		}
-		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) {
+		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) && !namedBatchJoinReceiptNoEvent(entry, raw) {
 			return fmt.Errorf("%w: successful effectful fold has no verified events", ErrInvalidTransfer)
 		}
 		if len(eventIDs) == 0 {

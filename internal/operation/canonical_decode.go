@@ -433,6 +433,30 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return BatchCreateInput{Name: name}, nil
+	case BatchJoinV1.Metadata().Operation, BatchLeaveV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "batch_id", "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		batchID, err := commandString(fields, "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		matterID, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		return BatchMembershipInput{BatchID: batchID, MatterID: matterID}, nil
+	case BatchDismissV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		batchID, err := commandString(fields, "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		return BatchDismissInput{BatchID: batchID}, nil
 	case GateDeclareV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "gate", "scale")
 		if err != nil {

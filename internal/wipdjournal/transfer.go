@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -180,7 +181,8 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "batch.created" && fields["kind"] != "claim.released" &&
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "batch.created" &&
+			fields["kind"] != "batch.joined" && fields["kind"] != "batch.left" && fields["kind"] != "batch.dismissed" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
 			fields["kind"] != "dispatch.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
@@ -194,7 +196,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		!transferULID.MatchString(asString(fields["command_id"])) || !transferHash.MatchString(asString(fields["request_hash"])) {
 		return false
 	}
-	if fields["kind"] == "batch.created" {
+	if fields["kind"] == "batch.created" || namedBatchMembershipEvent(asString(fields["kind"])) {
 		if fields["repo_id"] != nil || !transferULID.MatchString(asString(fields["subject_id"])) {
 			return false
 		}
@@ -217,6 +219,15 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	if kind == "batch.created" {
 		payloadName := asString(payload["name"])
 		return wipdwire.ExactMapKeys(payload, "name") && payloadName != "" && payloadName == strings.TrimSpace(payloadName)
+	}
+	if namedBatchMembershipEvent(kind) {
+		switch kind {
+		case "batch.joined", "batch.left":
+			return wipdwire.ExactMapKeys(payload, "matter_id") && transferULID.MatchString(asString(payload["matter_id"])) &&
+				transferULID.MatchString(asString(fields["subject_id"]))
+		case "batch.dismissed":
+			return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+		}
 	}
 	if transferLifecycleEventKind(kind) {
 		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
@@ -380,6 +391,45 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	default:
 		return false
 	}
+}
+
+func namedBatchJoinReceiptNoEvent(entry Entry, raw []byte) bool {
+	input, ok := entry.Command.Request.Input.(operation.BatchMembershipInput)
+	if !ok || entry.Command.Request.Operation != operation.BatchJoinV1.Metadata().Operation ||
+		operation.BatchJoinV1.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || fields["accepted_events"] != nil {
+		return false
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "code", "output", "problem_code") ||
+		result["code"] != string(operation.ResultSucceeded) || result["problem_code"] != nil {
+		return false
+	}
+	output, ok := result["output"].([]byte)
+	if !ok {
+		return false
+	}
+	outputFields, err := wipdwire.DecodeCanonicalMap(output, "batch_id", "matter_id")
+	return err == nil && outputFields["batch_id"] == input.BatchID && outputFields["matter_id"] == input.MatterID
+}
+
+func namedBatchMembershipEvent(kind string) bool {
+	return kind == "batch.joined" || kind == "batch.left" || kind == "batch.dismissed"
+}
+
+func namedBatchMembershipOutputMatches(entry Entry, raw []byte) bool {
+	fields, err := wipdwire.DecodeCanonicalMap(raw, "batch_id", "matter_id")
+	if entry.Command.Request.Operation == operation.BatchDismissV1.Metadata().Operation {
+		fields, err = wipdwire.DecodeCanonicalMap(raw, "batch_id")
+		input, ok := entry.Command.Request.Input.(operation.BatchDismissInput)
+		return err == nil && ok && fields["batch_id"] == input.BatchID
+	}
+	input, ok := entry.Command.Request.Input.(operation.BatchMembershipInput)
+	return err == nil && ok && fields["batch_id"] == input.BatchID && fields["matter_id"] == input.MatterID
 }
 
 func transferGateScale(scale string) bool {

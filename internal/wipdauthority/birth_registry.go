@@ -95,6 +95,25 @@ func NewM6Step9ARegistry() (*operation.Registry, error) {
 	return registry, nil
 }
 
+// NewM6Step9BRegistry extends the explicit Step 9A set with named Batch
+// membership and dismissal transactions; earlier profiles remain narrower.
+func NewM6Step9BRegistry() (*operation.Registry, error) {
+	registry, err := NewM6Step9ARegistry()
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range operation.NamedBatchMembershipCatalogue() {
+		if err = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "named Batch membership requires its authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
+}
+
 func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {

@@ -200,11 +200,17 @@ func (command Command) canonicalValue() (canonicalMap, error) {
 }
 
 func commandIdentityDefinition(id ID) (Definition, bool) {
-	if id == BatchSweepAnonymousV1.Metadata().Operation || id == BatchCreateV1.Metadata().Operation {
-		if id == BatchCreateV1.Metadata().Operation {
-			return BatchCreateV1, true
-		}
+	switch id {
+	case BatchSweepAnonymousV1.Metadata().Operation:
 		return BatchSweepAnonymousV1, true
+	case BatchCreateV1.Metadata().Operation:
+		return BatchCreateV1, true
+	case BatchJoinV1.Metadata().Operation:
+		return BatchJoinV1, true
+	case BatchLeaveV1.Metadata().Operation:
+		return BatchLeaveV1, true
+	case BatchDismissV1.Metadata().Operation:
+		return BatchDismissV1, true
 	}
 	if definition, ok := step8ContractDefinition(id); ok {
 		return definition, true
@@ -269,6 +275,10 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		}, nil
 	case BatchCreateInput:
 		return canonicalMap{"name": input.Name}, nil
+	case BatchMembershipInput:
+		return canonicalMap{"batch_id": input.BatchID, "matter_id": input.MatterID}, nil
+	case BatchDismissInput:
+		return canonicalMap{"batch_id": input.BatchID}, nil
 	case ContentWriteInput:
 		return canonicalMap{"subject_id": input.SubjectID, "kind": input.Kind}, nil
 	case FindingAppendInput:

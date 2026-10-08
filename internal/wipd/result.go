@@ -31,6 +31,18 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				return nil, errMalformedMessage
 			}
 			output = map[string]any{"id": batch.ID, "name": batch.Name}
+		case operation.BatchJoinV1.Metadata().Operation, operation.BatchLeaveV1.Metadata().Operation:
+			membership, ok := result.Output.(operation.BatchMembershipOutput)
+			if !ok || !validRequestID(membership.BatchID) || !validRequestID(membership.MatterID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"batch_id": membership.BatchID, "matter_id": membership.MatterID}
+		case operation.BatchDismissV1.Metadata().Operation:
+			dismissal, ok := result.Output.(operation.BatchDismissOutput)
+			if !ok || !validRequestID(dismissal.BatchID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"batch_id": dismissal.BatchID}
 		case operation.StepCreateV1.Metadata().Operation:
 			step, ok := result.Output.(operation.StepCreateOutput)
 			if !ok || !validRequestID(step.ID) || !validRequestID(step.ParentID) || !validRequestID(step.MatterID) || step.SortKey <= 0 {
@@ -180,6 +192,25 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.BatchCreateOutput{ID: batchID, Name: name}
+		case operation.BatchJoinV1.Metadata().Operation, operation.BatchLeaveV1.Metadata().Operation:
+			if !exactFields(outputFields, "batch_id", "matter_id") {
+				return operation.Result{}, errMalformedMessage
+			}
+			batchID, batchOK := outputFields["batch_id"].(string)
+			matterID, matterOK := outputFields["matter_id"].(string)
+			if !batchOK || !validRequestID(batchID) || !matterOK || !validRequestID(matterID) {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.BatchMembershipOutput{BatchID: batchID, MatterID: matterID}
+		case operation.BatchDismissV1.Metadata().Operation:
+			if !exactFields(outputFields, "batch_id") {
+				return operation.Result{}, errMalformedMessage
+			}
+			batchID, batchOK := outputFields["batch_id"].(string)
+			if !batchOK || !validRequestID(batchID) {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.BatchDismissOutput{BatchID: batchID}
 		case operation.StepCreateV1.Metadata().Operation:
 			if !exactFields(outputFields, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state") {
 				return operation.Result{}, errMalformedMessage

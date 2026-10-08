@@ -120,6 +120,36 @@ type BatchCreateOutput struct {
 
 func (BatchCreateOutput) operationOutput() {}
 
+// BatchMembershipInput identifies one exact named-Batch/Matter pair.
+type BatchMembershipInput struct {
+	BatchID  string
+	MatterID string
+}
+
+func (BatchMembershipInput) operationInput() {}
+
+// BatchMembershipOutput reports the exact pair accepted by join or leave.
+type BatchMembershipOutput struct {
+	BatchID  string
+	MatterID string
+}
+
+func (BatchMembershipOutput) operationOutput() {}
+
+// BatchDismissInput identifies one named Batch to dismiss.
+type BatchDismissInput struct {
+	BatchID string
+}
+
+func (BatchDismissInput) operationInput() {}
+
+// BatchDismissOutput reports the named Batch whose lifetime was closed.
+type BatchDismissOutput struct {
+	BatchID string
+}
+
+func (BatchDismissOutput) operationOutput() {}
+
 // BatchSweepAnonymousOutcome is the closed success outcome vocabulary.
 type BatchSweepAnonymousOutcome string
 
@@ -268,6 +298,46 @@ var BatchCreateV1 = mustDefine[BatchCreateInput, BatchCreateOutput](Metadata{
 	ExternalEffects: []ExternalEffect{},
 })
 
+// BatchJoinV1 adds one Matter to one live named Batch. It is authority-only
+// because membership changes the shared domain aggregate.
+var BatchJoinV1 = mustDefine[BatchMembershipInput, BatchMembershipOutput](Metadata{
+	Operation:       ID{Name: "batch.join", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo},
+	Guards:          []Footprint{FootprintNamedBatchLifecycle},
+	Writes:          []Footprint{FootprintNamedBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimNone,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// BatchLeaveV1 removes one exact existing membership from a live named Batch.
+var BatchLeaveV1 = mustDefine[BatchMembershipInput, BatchMembershipOutput](Metadata{
+	Operation:       ID{Name: "batch.leave", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo},
+	Guards:          []Footprint{FootprintNamedBatchLifecycle},
+	Writes:          []Footprint{FootprintNamedBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimNone,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// BatchDismissV1 explicitly ends a named Batch's durable lifetime.
+var BatchDismissV1 = mustDefine[BatchDismissInput, BatchDismissOutput](Metadata{
+	Operation:       ID{Name: "batch.dismiss", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo},
+	Guards:          []Footprint{FootprintNamedBatchLifecycle},
+	Writes:          []Footprint{FootprintNamedBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimNone,
+	ExternalEffects: []ExternalEffect{},
+})
+
 // ContentWriteOnceV1 and FindingAppendV1 are the claim-scoped content subset
 // used by the online Matter workflow. Their bytes are always staged blobs.
 var ContentWriteOnceV1 = mustDefine[ContentWriteInput, ContentSegmentOutput](Metadata{
@@ -312,4 +382,19 @@ var catalogue = []Definition{
 // are made concrete and migrated behind the in-process boundary.
 func Catalogue() []Definition {
 	return append([]Definition(nil), catalogue...)
+}
+
+// NamedBatchMembershipCatalogue returns the S9-B named Batch mutation set.
+func NamedBatchMembershipCatalogue() []Definition {
+	return []Definition{BatchJoinV1, BatchLeaveV1, BatchDismissV1}
+}
+
+// NamedBatchMembershipOperation identifies the explicit S9-B mutation set.
+func NamedBatchMembershipOperation(id ID) bool {
+	for _, definition := range NamedBatchMembershipCatalogue() {
+		if definition.Metadata().Operation == id {
+			return true
+		}
+	}
+	return false
 }

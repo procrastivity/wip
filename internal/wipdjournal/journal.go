@@ -706,6 +706,11 @@ func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
 	if id == operation.BatchCreateV1.Metadata().Operation {
 		return operation.BatchCreateV1, true
 	}
+	for _, definition := range operation.NamedBatchMembershipCatalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
 	for _, definition := range operation.Catalogue() {
 		if definition.Metadata().Operation == id {
 			return definition, true

@@ -149,5 +149,8 @@ func UpgradeV16(root string) error {
 	if err = installNamedBatches(db); err != nil {
 		return err
 	}
+	if err = installNamedBatchMembership(db); err != nil {
+		return err
+	}
 	return checkSchema(db)
 }

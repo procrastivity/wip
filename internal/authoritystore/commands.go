@@ -96,6 +96,9 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if definition, ok := referenceHistoryDefinition(command.Request.Operation); ok {
 		return s.submitReferenceCommand(ctx, command, encoded, asserted, peer, at, deadline, checkContext, definition)
 	}
+	if _, ok := namedBatchMembershipDefinition(command.Request.Operation); ok {
+		return s.submitNamedBatchMembership(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
@@ -127,6 +130,32 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 		}
 	}
 	return s.submitIdentity(ctx, commandIdentity{command.AuthorityDomainID, command.ExpectedAuthorityEpoch, command.EnvironmentID, command.EnvironmentSequence, command.ID, command.Request.Operation.Name, uint64(command.Request.Operation.Version), command.Request.Context.Repo, encoded, asserted, &command, nil}, peer, at, before, beforeCommit, afterInsert)
+}
+
+func (s *Store) submitNamedBatchMembership(ctx context.Context, command operation.Command, encoded []byte, asserted string,
+	peer tls.ConnectionState, at, deadline time.Time, checkContext bool,
+) (CommandStatus, error) {
+	if command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+		return CommandStatus{}, ErrInvalidProof
+	}
+	var beforeCommit func() error
+	if checkContext {
+		beforeCommit = func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				return context.DeadlineExceeded
+			}
+			return nil
+		}
+	}
+	return s.submitIdentity(ctx, commandIdentity{
+		domain: command.AuthorityDomainID, epoch: command.ExpectedAuthorityEpoch,
+		environment: command.EnvironmentID, sequence: command.EnvironmentSequence,
+		id: command.ID, name: command.Request.Operation.Name, version: uint64(command.Request.Operation.Version),
+		repo: command.Request.Context.Repo, encoded: encoded, hash: asserted, m1: &command,
+	}, peer, at, nil, beforeCommit, nil)
 }
 
 type commandIdentity struct {
@@ -389,7 +418,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 					if !ok {
 						definition, ok = referenceHistoryDefinition(cmd.Request.Operation)
 						if !ok {
-							return out, ErrInvalidProof
+							definition, ok = namedBatchMembershipDefinition(cmd.Request.Operation)
+							if !ok {
+								return out, ErrInvalidProof
+							}
 						}
 					}
 				}
@@ -639,6 +671,25 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 			first, last = position, position
 			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
+		case operation.BatchJoinV1.Metadata().Operation, operation.BatchLeaveV1.Metadata().Operation,
+			operation.BatchDismissV1.Metadata().Operation:
+			fold, foldErr := completeNamedBatchMembershipTx(ctx, tx, cmd, result, subjectID, eventID, occurred,
+				eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo})
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result = fold.result
+			if result.Code == operation.ResultSucceeded {
+				output = fold.output
+				if fold.eventID != "" {
+					position = fold.position
+					first, last = position, position
+					rangeValue = map[string]any{"first_event_id": fold.eventID, "last_event_id": fold.eventID, "event_count": uint64(1)}
+				}
+			} else {
+				subjectID, eventID = "", ""
+				problem = string(result.Problem.Code)
+			}
 		case operation.StepCreateV1.Metadata().Operation:
 			input := cmd.Request.Input.(operation.StepCreateInput)
 			got := result.Output.(operation.StepCreateOutput)

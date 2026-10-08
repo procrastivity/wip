@@ -419,6 +419,28 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 			SubjectID: batchID, EventID: eventID, Occurred: now,
 		})
 	}
+	if app.m6 && operation.NamedBatchMembershipOperation(command.Request.Operation) {
+		now := time.Now().UTC()
+		eventID, err := randomULID(now)
+		if err != nil {
+			return nil, err
+		}
+		var result operation.Result
+		var batchID string
+		switch input := command.Request.Input.(type) {
+		case operation.BatchMembershipInput:
+			batchID = input.BatchID
+			result = operation.Result{Code: operation.ResultSucceeded, Output: operation.BatchMembershipOutput(input)}
+		case operation.BatchDismissInput:
+			batchID = input.BatchID
+			result = operation.Result{Code: operation.ResultSucceeded, Output: operation.BatchDismissOutput(input)}
+		default:
+			return nil, authoritystore.ErrInvalidProof
+		}
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result: result, SubjectID: batchID, EventID: eventID, Occurred: now,
+		})
+	}
 	if app.m6 && operation.Step8Operation(command.Request.Operation) {
 		now := time.Now().UTC()
 		eventID, err := randomULID(now)

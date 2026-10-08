@@ -102,6 +102,17 @@ func (d Definition) ValidateRequest(request Request) error {
 		if strings.TrimSpace(input.Name) == "" || input.Name != strings.TrimSpace(input.Name) {
 			return fmt.Errorf("named Batch name is empty or has surrounding whitespace")
 		}
+	case BatchMembershipInput:
+		if err := validateULID("Batch ID", input.BatchID); err != nil {
+			return err
+		}
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+	case BatchDismissInput:
+		if err := validateULID("Batch ID", input.BatchID); err != nil {
+			return err
+		}
 	case ContentWriteInput:
 		if err := validateULID("content subject ID", input.SubjectID); err != nil {
 			return err
@@ -390,6 +401,14 @@ func (d Definition) ValidateResult(result Result) error {
 			if validateULID("Batch output ID", output.ID) != nil || strings.TrimSpace(output.Name) == "" || output.Name != strings.TrimSpace(output.Name) {
 				return fmt.Errorf("named Batch output is invalid")
 			}
+		case BatchMembershipOutput:
+			if validateULID("Batch output ID", output.BatchID) != nil || validateULID("Matter output ID", output.MatterID) != nil {
+				return fmt.Errorf("named Batch membership output is invalid")
+			}
+		case BatchDismissOutput:
+			if validateULID("Batch output ID", output.BatchID) != nil {
+				return fmt.Errorf("named Batch dismissal output is invalid")
+			}
 		case GateDeclareOutput:
 			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {
 				return fmt.Errorf("gate declaration output is invalid")
@@ -517,6 +536,9 @@ func (d Definition) ValidateResult(result Result) error {
 		if d.metadata.Operation == BatchSweepAnonymousV1.Metadata().Operation && !validBatchSweepRefusal(result.Problem.Code) {
 			return fmt.Errorf("batch.sweep-anonymous@v1 has unknown refusal code %q", result.Problem.Code)
 		}
+		if isNamedBatchMembershipOperation(d.metadata.Operation) && !validNamedBatchRefusal(result.Problem.Code) {
+			return fmt.Errorf("%s has unknown refusal code %q", d.metadata.Operation, result.Problem.Code)
+		}
 	case ResultFailed:
 		if prefix != "internal" {
 			return fmt.Errorf("failed result requires an internal.* problem, got %q", result.Problem.Code)
@@ -529,6 +551,19 @@ func validBatchSweepRefusal(code ProblemCode) bool {
 	switch code {
 	case ProblemBatchSweepTargetMissing, ProblemBatchSweepClaimClose,
 		ProblemBatchSweepNotEligible, ProblemBatchSweepUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+func isNamedBatchMembershipOperation(id ID) bool {
+	return id == BatchJoinV1.Metadata().Operation || id == BatchLeaveV1.Metadata().Operation || id == BatchDismissV1.Metadata().Operation
+}
+
+func validNamedBatchRefusal(code ProblemCode) bool {
+	switch code {
+	case ProblemBatchTargetMissing, ProblemBatchCrossDomain, ProblemBatchDismissed, ProblemBatchMembershipMissing:
 		return true
 	default:
 		return false

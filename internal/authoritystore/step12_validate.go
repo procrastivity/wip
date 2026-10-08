@@ -417,7 +417,9 @@ func parseStep12Event(raw []byte, domain string, position uint64, id, command st
 		return event, ErrInvalidStore
 	}
 	if envelope.Repo == nil {
-		if event.kind != "batch.created" {
+		switch event.kind {
+		case "batch.created", "batch.joined", "batch.left", "batch.dismissed":
+		default:
 			return event, ErrInvalidStore
 		}
 	} else if !ulid.MatchString(event.repo) {

@@ -654,6 +654,10 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 	anonymousBatches := make(map[string]string)
 	namedBatchNames := make(map[string]struct{})
 	sweptBatches := make(map[string]bool)
+	namedBatches := make(map[string]struct{})
+	namedBatchMemberships := make(map[string]bool)
+	dismissedNamedBatches := make(map[string]bool)
+	namedBatchCommands := make(map[string]struct{})
 	activeClaims := make(map[string]acquiredClaimProjection)
 	normalClaimCloses := make(map[string]foldedLifecycleEvent)
 	claimEpochs := make(map[string]uint64)
@@ -869,6 +873,56 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 			}
 			seenIDs[batchID] = struct{}{}
 			namedBatchNames[name] = struct{}{}
+			namedBatches[batchID] = struct{}{}
+		case "batch.joined", "batch.left", "batch.dismissed":
+			payload, payloadOK := fields["payload"].(map[string]any)
+			environment, environmentOK := fields["environment"].(map[string]any)
+			sequence, sequenceOK := environment["sequence"].(uint64)
+			batchID := asString(fields["subject_id"])
+			commandID := asString(fields["command_id"])
+			kindValid := false
+			matterID := ""
+			switch kind {
+			case "batch.joined", "batch.left":
+				matterID = asString(payload["matter_id"])
+				kindValid = payloadOK && wipdwire.ExactMapKeys(payload, "matter_id") && clientULIDPattern.MatchString(matterID)
+			case "batch.dismissed":
+				kindValid = payloadOK && wipdwire.ExactMapKeys(payload)
+			}
+			if fields["schema"] != "wipd.event/1" || fields["event_id"] != record.EventID || fields["domain_id"] != domainID ||
+				!clientULIDPattern.MatchString(commandID) || !validDigest(asString(fields["request_hash"])) ||
+				!environmentOK || !wipdwire.ExactMapKeys(environment, "id", "sequence") ||
+				!clientULIDPattern.MatchString(asString(environment["id"])) || !sequenceOK || sequence == 0 ||
+				!validUTC(asString(fields["acted_at"])) || !validUTC(asString(fields["occurred_at"])) ||
+				fields["repo_id"] != nil || !clientULIDPattern.MatchString(batchID) || !kindValid {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := namedBatches[batchID]; !exists || dismissedNamedBatches[batchID] {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, duplicate := namedBatchCommands[commandID]; duplicate {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			namedBatchCommands[commandID] = struct{}{}
+			if kind == "batch.dismissed" {
+				dismissedNamedBatches[batchID] = true
+				break
+			}
+			if _, exists := matterRepos[matterID]; !exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			pair := batchID + "\x00" + matterID
+			if kind == "batch.joined" {
+				if namedBatchMemberships[pair] {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				namedBatchMemberships[pair] = true
+			} else {
+				if !namedBatchMemberships[pair] {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				delete(namedBatchMemberships, pair)
+			}
 		case "batch.anonymous-created":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)

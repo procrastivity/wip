@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -766,6 +767,278 @@ func TestM6Step9ANamedBatchBirthThroughAuthenticatedProcessAndEnvironmentReopen(
 		reopened.Receipts[command.ID].RequestHash != commandHash ||
 		!bytes.Equal(reopened.Receipts[command.ID].CanonicalReceipt, authorityReceipt.Receipt) {
 		t.Fatalf("Environment named-Batch projection/receipt changed after journal reopen: snapshot=%+v err=%v close=%v", reopened, err, closeErr)
+	}
+}
+
+func TestM6Step9BNamedBatchMembershipThroughAuthenticatedProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authenticated AF_UNIX IPC is Linux-only")
+	}
+	ctx := context.Background()
+	root, err := os.MkdirTemp("/tmp", "s9b-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("WIP_DB_PATH", filepath.Join(root, "legacy", "wip.db"))
+
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step9BRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	fixture.server, err = NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace m6AuthorityHTTPTrace
+	fixture.server.http.Handler = traceM6AuthorityHTTP(fixture.server.http.Handler, &trace)
+	authorityCtx, stopAuthority := context.WithCancel(ctx)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
+	t.Cleanup(func() {
+		stopAuthority()
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil {
+				t.Errorf("M6 S9-B authority server stopped with error: %v", serveErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("M6 S9-B authority server did not stop")
+		}
+	})
+
+	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "environment", m5TestEnv,
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step9b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := m5WipdBinary(t)
+	client, stopDaemon, daemonOutput := startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err = wipd.ConnectM6Step9B(ctx, environment.profileRoot)
+	if err != nil {
+		stopDaemon()
+		t.Fatalf("connect with explicit Step 9-B capability over authenticated AF_UNIX IPC: %v; daemon=%s", err, daemonOutput.String())
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+		stopDaemon()
+	})
+
+	sequence := uint64(1)
+	command := func(idNumber int, request operation.Request) operation.Command {
+		id := m5TwoEnvironmentID(idNumber)
+		return operation.Command{
+			ID: id, AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+			EnvironmentID: m5TestEnv, EnvironmentSequence: sequence, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			CorrelationCommandID: id, Request: request,
+		}
+	}
+	submit := func(idNumber int, request operation.Request) (operation.Command, operation.Result) {
+		t.Helper()
+		item := command(idNumber, request)
+		sequence++
+		result, submitErr := client.ExecuteCommand(ctx, item)
+		if submitErr != nil {
+			hash, _ := item.RequestHash()
+			status, statusErr := fixture.store.QueryCommand(ctx, m5TestDomain, item.ID, hash, 1, fixture.peer, m5TestEnv, time.Now().UTC())
+			anchor, anchorErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+			t.Fatalf("%s through authenticated Step 9-B process = %+v, %v; authorityStatus=%+v statusErr=%v anchor=%+v anchorErr=%v trace=%v daemon=%s",
+				item.Request.Operation, result, submitErr, status, statusErr, anchor, anchorErr, trace.snapshot(), daemonOutput.String())
+		}
+		return item, result
+	}
+	createBatch := func(idNumber int, name string) (operation.Command, string) {
+		t.Helper()
+		item, result := submit(idNumber, operation.Request{
+			Operation: operation.BatchCreateV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+			Input: operation.BatchCreateInput{Name: name},
+		})
+		created, ok := result.Output.(operation.BatchCreateOutput)
+		if result.Code != operation.ResultSucceeded || !ok || created.ID == "" {
+			t.Fatalf("create Batch %q through authenticated process = %+v", name, result)
+		}
+		return item, created.ID
+	}
+	createMatter := func(idNumber int, locator string) string {
+		t.Helper()
+		_, result := submit(idNumber, operation.Request{
+			Operation: operation.MatterCreateV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+			Input: operation.MatterCreateInput{Title: locator, Locator: locator},
+		})
+		created, ok := result.Output.(operation.MatterCreateOutput)
+		if result.Code != operation.ResultSucceeded || !ok || created.ID == "" {
+			t.Fatalf("create Matter %q through authenticated process = %+v", locator, result)
+		}
+		return created.ID
+	}
+	join := func(idNumber int, batchID, matterID string) (operation.Command, operation.Result) {
+		return submit(idNumber, operation.Request{
+			Operation: operation.BatchJoinV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+			Input: operation.BatchMembershipInput{BatchID: batchID, MatterID: matterID},
+		})
+	}
+	leave := func(idNumber int, batchID, matterID string) (operation.Command, operation.Result) {
+		return submit(idNumber, operation.Request{
+			Operation: operation.BatchLeaveV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+			Input: operation.BatchMembershipInput{BatchID: batchID, MatterID: matterID},
+		})
+	}
+	statusFor := func(item operation.Command) authoritystore.CommandStatus {
+		t.Helper()
+		status, statusErr := fixture.store.QueryCommand(ctx, m5TestDomain, item.ID, m5CommandHash(t, item), 1,
+			fixture.peer, m5TestEnv, time.Now().UTC())
+		if statusErr != nil || status.Pending || len(status.Receipt) == 0 || len(status.SignedReceipt) == 0 {
+			t.Fatalf("authority terminal receipt for %s = %+v, %v", item.ID, status, statusErr)
+		}
+		return status
+	}
+	snapshotID := 50
+	assertActive := func(want map[string]bool) {
+		t.Helper()
+		anchor, snapshotErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		snapshot, snapshotErr := fixture.store.PinSnapshot(ctx, m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(),
+			m5TwoEnvironmentID(snapshotID), time.Now().UTC(), time.Minute)
+		snapshotID++
+		if snapshotErr != nil || snapshot.Delta.End.EventCount != anchor.EventCount {
+			t.Fatalf("pin S9-B event prefix: snapshot=%+v err=%v anchor=%+v", snapshot, snapshotErr, anchor)
+		}
+		got := make(map[string]bool)
+		for _, event := range snapshot.Delta.Events {
+			fields, decodeErr := wipdwire.DecodeCanonicalMap(event.Record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				t.Fatalf("decode S9-B event %s: %v", event.EventID, decodeErr)
+			}
+			kind, _ := fields["kind"].(string)
+			if kind != "batch.joined" && kind != "batch.left" && kind != "batch.dismissed" {
+				continue
+			}
+			batchID, _ := fields["subject_id"].(string)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			if fields["repo_id"] != nil || batchID == "" || !payloadOK {
+				t.Fatalf("S9-B event has wrong Batch-subject/null-Repo dimensions: %#v", fields)
+			}
+			if kind == "batch.dismissed" {
+				if !wipdwire.ExactMapKeys(payload) {
+					t.Fatalf("Batch dismissal payload is not empty: %#v", payload)
+				}
+				continue
+			}
+			matterID, _ := payload["matter_id"].(string)
+			if !wipdwire.ExactMapKeys(payload, "matter_id") || matterID == "" {
+				t.Fatalf("Batch membership event does not identify one exact Matter: %#v", fields)
+			}
+			pair := batchID + "\x00" + matterID
+			if kind == "batch.joined" {
+				if got[pair] {
+					t.Fatalf("duplicate membership event for pair %q", pair)
+				}
+				got[pair] = true
+			} else {
+				if !got[pair] {
+					t.Fatalf("leave event has no exact prior pair %q", pair)
+				}
+				delete(got, pair)
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("event-folded named Batch membership pairs=%v; want %v", got, want)
+		}
+	}
+
+	_, batchA := createBatch(70, "S9-B A")
+	_, batchB := createBatch(71, "S9-B B")
+	matterA := createMatter(72, "s9b-matter-a")
+	matterB := createMatter(73, "s9b-matter-b")
+	firstJoinCommand, result := join(74, batchA, matterA)
+	if result.Code != operation.ResultSucceeded || result.Output != (operation.BatchMembershipOutput{BatchID: batchA, MatterID: matterA}) {
+		t.Fatalf("join asymmetric pair A/A = %+v", result)
+	}
+	firstJoinStatus := statusFor(firstJoinCommand)
+	beforeReplay, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedResult, replayErr := client.ExecuteCommand(ctx, firstJoinCommand)
+	replayedStatus := statusFor(firstJoinCommand)
+	afterReplay, anchorErr := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if replayErr != nil || replayedResult.Code != result.Code || replayedResult.Output != result.Output || anchorErr != nil || afterReplay != beforeReplay ||
+		!bytes.Equal(replayedStatus.Receipt, firstJoinStatus.Receipt) || !bytes.Equal(replayedStatus.SignedReceipt, firstJoinStatus.SignedReceipt) {
+		t.Fatalf("same-command authenticated replay changed the result, receipt, or event prefix: result=%+v replay=%+v status=%+v replayStatus=%+v anchor=%+v/%v err=%v",
+			result, replayedResult, firstJoinStatus, replayedStatus, afterReplay, anchorErr, replayErr)
+	}
+	_, result = join(75, batchB, matterB)
+	if result.Code != operation.ResultSucceeded || result.Output != (operation.BatchMembershipOutput{BatchID: batchB, MatterID: matterB}) {
+		t.Fatalf("join asymmetric pair B/B = %+v", result)
+	}
+	assertActive(map[string]bool{batchA + "\x00" + matterA: true, batchB + "\x00" + matterB: true})
+
+	beforeDuplicate, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateCommand, duplicateResult := join(76, batchA, matterA)
+	if duplicateResult.Code != operation.ResultSucceeded || duplicateResult.Output != (operation.BatchMembershipOutput{BatchID: batchA, MatterID: matterA}) {
+		t.Fatalf("fresh duplicate join = %+v", duplicateResult)
+	}
+	duplicateStatus := statusFor(duplicateCommand)
+	duplicateReceipt, err := wipdwire.DecodeCanonicalMap(duplicateStatus.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	duplicateEvents := duplicateReceipt["accepted_events"]
+	if err != nil || duplicateEvents != nil {
+		t.Fatalf("fresh duplicate join receipt unexpectedly has event effects: fields=%#v err=%v", duplicateReceipt, err)
+	}
+	afterDuplicate, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterDuplicate != beforeDuplicate {
+		t.Fatalf("duplicate join changed authority event prefix: before=%+v after=%+v err=%v", beforeDuplicate, afterDuplicate, err)
+	}
+
+	assertActive(map[string]bool{batchA + "\x00" + matterA: true, batchB + "\x00" + matterB: true})
+
+	_, result = leave(78, batchA, matterA)
+	if result.Code != operation.ResultSucceeded || result.Output != (operation.BatchMembershipOutput{BatchID: batchA, MatterID: matterA}) {
+		t.Fatalf("leave exact pair A/A = %+v", result)
+	}
+	assertActive(map[string]bool{batchB + "\x00" + matterB: true})
+	_, result = join(79, batchA, matterA)
+	if result.Code != operation.ResultSucceeded {
+		t.Fatalf("rejoin exact pair after leave = %+v", result)
+	}
+	_, dismissed := submit(80, operation.Request{
+		Operation: operation.BatchDismissV1.Metadata().Operation, Actor: "human", Context: operation.Context{Repo: m5TestRepo},
+		Input: operation.BatchDismissInput{BatchID: batchA},
+	})
+	if dismissed.Code != operation.ResultSucceeded || dismissed.Output != (operation.BatchDismissOutput{BatchID: batchA}) {
+		t.Fatalf("explicit dismissal through authenticated process = %+v", dismissed)
+	}
+	beforeClosedJoin, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedJoin, result := join(81, batchA, matterA)
+	if result.Code != operation.ResultRefused || result.Problem == nil || result.Problem.Code != operation.ProblemBatchDismissed {
+		t.Fatalf("join of explicitly dismissed Batch = %+v", result)
+	}
+	statusFor(closedJoin)
+	afterClosedJoin, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterClosedJoin != beforeClosedJoin {
+		t.Fatalf("dismissed Batch join changed authority event prefix: before=%+v after=%+v err=%v", beforeClosedJoin, afterClosedJoin, err)
+	}
+	if !traceContains(trace.snapshot(), "/wipd/v1/exchange request=command.submit response=submission.accepted,command.terminal") {
+		t.Fatalf("S9-B operations did not traverse authenticated authority submit and terminal response: %v", trace.snapshot())
 	}
 }
 

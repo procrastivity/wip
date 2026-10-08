@@ -177,7 +177,7 @@ func (runtime *Runtime) SupportsClaimJournalClose() bool {
 // SupportsBatchSweepAnonymous reports the explicit M6 Step 7 or later profile and
 // the authority operation capability selected when its command session opened.
 func (runtime *Runtime) SupportsBatchSweepAnonymous() bool {
-	return runtime != nil && (runtime.config.CommandCatalogue == "m6-step7" || runtime.config.CommandCatalogue == "m6-step8" || runtime.config.CommandCatalogue == "m6-step9a") &&
+	return runtime != nil && (runtime.config.CommandCatalogue == "m6-step7" || runtime.config.CommandCatalogue == "m6-step8" || runtime.config.CommandCatalogue == "m6-step9a" || runtime.config.CommandCatalogue == "m6-step9b") &&
 		runtime.client != nil && runtime.client.SupportsOperation(operation.BatchSweepAnonymousV1.Metadata().Operation)
 }
 
@@ -201,7 +201,7 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 		_ = runtime.Close()
 		return nil, nil, err
 	}
-	if runtime.SupportsCommandSubmitV2() && (config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a") {
+	if runtime.SupportsCommandSubmitV2() && (config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b") {
 		if err = registry.Register(operation.GateExemptionRepairV1, func(context.Context, operation.Request) operation.Result {
 			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
 				Code: operation.ProblemExecutionFailed, Message: "repair requires connected authority submission",
@@ -242,7 +242,7 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	for _, definition := range definitions {
 		operations = append(operations, definition.Metadata().Operation)
 	}
-	if config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" {
+	if config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b" {
 		operations = append(operations, operation.GateExemptionRepairV1.Metadata().Operation)
 	}
 	sort.Slice(operations, func(i, j int) bool {
@@ -483,7 +483,7 @@ func validateConfig(config Config) error {
 		config.RepoID == "" || config.ClientStateDirectory == "" || !filepath.IsAbs(config.ClientStateDirectory) {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
-	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" && config.CommandCatalogue != "m6-step7" && config.CommandCatalogue != "m6-step8" && config.CommandCatalogue != "m6-step9a" {
+	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" && config.CommandCatalogue != "m6-step7" && config.CommandCatalogue != "m6-step8" && config.CommandCatalogue != "m6-step9a" && config.CommandCatalogue != "m6-step9b" {
 		return errors.New("wipdremote: unsupported connected command catalogue")
 	}
 	if config.Schema == "wipd.connected-authority-profile/1" {
@@ -506,6 +506,9 @@ func validateConfig(config Config) error {
 }
 
 func registryForConfig(config Config) (*operation.Registry, error) {
+	if config.CommandCatalogue == "m6-step9b" {
+		return wipdauthority.NewM6Step9BRegistry()
+	}
 	if config.CommandCatalogue == "m6-step9a" {
 		return wipdauthority.NewM6Step9ARegistry()
 	}

@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 19
+const schemaVersion = 20
 
 type schemaObject struct {
 	name string
@@ -178,6 +178,9 @@ func CreateEmpty(root string) (*Store, error) {
 		}
 		if err == nil {
 			err = installNamedBatches(db)
+		}
+		if err == nil {
+			err = installNamedBatchMembership(db)
 		}
 		if err == nil {
 			err = initBlobDir(path)
@@ -692,6 +695,15 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 			return fmt.Errorf("M6 Step 9A named Batch migration marker: %v", err)
 		}
 	}
+	if expectedVersion >= 20 {
+		expected["schema_migrations"] = namedBatchMembershipMigrationMarker
+		for _, object := range namedBatchMembershipSchema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 20`).Scan(&name); err != nil || name != "step-9b-named-batch-membership" {
+			return fmt.Errorf("M6 Step 9B named Batch membership migration marker: %v", err)
+		}
+	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		return err
@@ -880,6 +892,11 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 	}
 	if expectedVersion >= 19 {
 		if err := checkNamedBatchState(db); err != nil {
+			return err
+		}
+	}
+	if expectedVersion >= 20 {
+		if err := checkNamedBatchMembershipState(db); err != nil {
 			return err
 		}
 	}

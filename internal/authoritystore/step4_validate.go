@@ -115,13 +115,14 @@ func checkStep4State(db *sql.DB) error {
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
 		batchSweep := version >= 17 && id == operation.BatchSweepAnonymousV1.Metadata().Operation
 		namedBatch := version >= 19 && id == operation.BatchCreateV1.Metadata().Operation
+		namedBatchMembership := version >= 20 && isNamedBatchMembershipOperation(id)
 		dependencyDefinition, knownDependency := dependencyHistoryDefinition(id)
 		dependency := version >= 18 && knownDependency
 		referenceDefinition, knownReference := referenceHistoryDefinition(id)
 		reference := version >= 18 && knownReference
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !dependency && !reference) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !namedBatchMembership && !dependency && !reference) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 && !dependency && !reference {
 			return ErrInvalidStore
@@ -144,6 +145,17 @@ func checkStep4State(db *sql.DB) error {
 			}
 			// Context.Repo fences command domain membership, not endpoint scope.
 			// Check refusals too: they have no event or edge projection to bind it.
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
+		} else if namedBatchMembership {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			definition, defined := namedBatchMembershipDefinition(id)
+			if decodeErr != nil || !defined || definition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+				return ErrInvalidStore
+			}
 			var member int
 			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
 				return ErrInvalidStore
@@ -245,14 +257,15 @@ func checkStep4State(db *sql.DB) error {
 		}
 		if code == "result.succeeded" {
 			gateNoop := step13Gate && s.operation == "gate.declare" && !first.Valid && !last.Valid && r.Range == nil
-			if gateNoop {
+			namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && !first.Valid && !last.Valid && r.Range == nil
+			if gateNoop || namedBatchMembershipNoop {
 				if r.Result.Problem != nil || len(r.Result.Output) == 0 {
 					return ErrInvalidStore
 				}
 			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || dependency || reference || step13Gate && !gateNoop {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -262,12 +275,12 @@ func checkStep4State(db *sql.DB) error {
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
 					return ErrInvalidStore
 				}
-			} else if !gateNoop && (s.operation == "matter.create" || s.operation == "step.create") {
+			} else if !gateNoop && !namedBatchMembershipNoop && (s.operation == "matter.create" || s.operation == "step.create") {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
 					return ErrInvalidStore
 				}
-			} else if !gateNoop {
+			} else if !gateNoop && !namedBatchMembershipNoop {
 				return ErrInvalidStore
 			}
 			// Gate command validation below binds no-op output to the current projection.
@@ -281,10 +294,11 @@ func checkStep4State(db *sql.DB) error {
 		}
 		var eventCount int
 		gateNoop := step13Gate && s.operation == "gate.declare" && code == "result.succeeded" && r.Range == nil
+		namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && code == "result.succeeded" && r.Range == nil
 		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
-			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
-			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && (gateNoop || namedBatchMembershipNoop) && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -542,6 +556,30 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 		if contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
 			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {
 				err = eventErr
+				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if version >= 20 && isNamedBatchMembershipOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
+			event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
+			command, commandErr := operation.DecodeCanonicalCommand(s.command)
+			definition, defined := namedBatchMembershipDefinition(command.Request.Operation)
+			if parseErr != nil || commandErr != nil || !defined || definition.ValidateRequest(command.Request) != nil ||
+				event.hash != s.hash || event.environment != s.env || event.sequence != s.seq || event.acted != command.ActedAt {
+				err = ErrInvalidStore
 				break
 			}
 			var length [8]byte

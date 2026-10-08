@@ -747,6 +747,11 @@ func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) 
 			return definition, true
 		}
 	}
+	for _, definition := range operation.NamedBatchMembershipCatalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
 	return operationDefinition(id)
 }
 
@@ -786,6 +791,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 		return "", ErrCommandStartIdentity
 	}
 	batchSweepNoEvent := false
+	namedBatchJoinNoEvent := false
 	if code == operation.ResultSucceeded {
 		if resultFields["problem_code"] != nil {
 			return "", ErrCommandStartIdentity
@@ -806,6 +812,28 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			if outputErr != nil || !inputOK || !commandStartULID.MatchString(asCommandStartString(output["id"])) ||
 				output["name"] != input.Name || !hasRange || accepted["event_count"] != uint64(1) ||
 				accepted["first_event_id"] != accepted["last_event_id"] {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.BatchJoinV1.Metadata().Operation, operation.BatchLeaveV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "batch_id", "matter_id")
+			input, inputOK := entry.Command.Request.Input.(operation.BatchMembershipInput)
+			if outputErr != nil || !inputOK || output["batch_id"] != input.BatchID || output["matter_id"] != input.MatterID {
+				return "", ErrCommandStartIdentity
+			}
+			if hasRange {
+				if accepted["event_count"] != uint64(1) || accepted["first_event_id"] != accepted["last_event_id"] {
+					return "", ErrCommandStartIdentity
+				}
+			} else if entry.Command.Request.Operation == operation.BatchLeaveV1.Metadata().Operation {
+				return "", ErrCommandStartIdentity
+			} else {
+				namedBatchJoinNoEvent = true
+			}
+		case operation.BatchDismissV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "batch_id")
+			input, inputOK := entry.Command.Request.Input.(operation.BatchDismissInput)
+			if outputErr != nil || !inputOK || output["batch_id"] != input.BatchID || !hasRange ||
+				accepted["event_count"] != uint64(1) || accepted["first_event_id"] != accepted["last_event_id"] {
 				return "", ErrCommandStartIdentity
 			}
 		case operation.StepCreateV1.Metadata().Operation:
@@ -909,7 +937,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			return "", ErrCommandStartIdentity
 		}
 		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation &&
-			entry.Command.Request.Operation != operation.GateDeclareV1.Metadata().Operation && !batchSweepNoEvent {
+			entry.Command.Request.Operation != operation.GateDeclareV1.Metadata().Operation && !batchSweepNoEvent && !namedBatchJoinNoEvent {
 			return "", ErrCommandStartIdentity
 		}
 		if hasRange {
@@ -975,6 +1003,20 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			return operation.Result{}, ErrCommandStartIdentity
 		}
 		typed = operation.BatchCreateOutput{ID: asCommandStartString(output["id"]), Name: asCommandStartString(output["name"])}
+	case operation.BatchJoinV1.Metadata().Operation, operation.BatchLeaveV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "batch_id", "matter_id")
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.BatchMembershipOutput{
+			BatchID: asCommandStartString(output["batch_id"]), MatterID: asCommandStartString(output["matter_id"]),
+		}
+	case operation.BatchDismissV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "batch_id")
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.BatchDismissOutput{BatchID: asCommandStartString(output["batch_id"])}
 	case operation.StepCreateV1.Metadata().Operation:
 		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
 		if err != nil {
