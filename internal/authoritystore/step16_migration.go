@@ -175,5 +175,8 @@ func UpgradeV14(root string) error {
 	if err = installDependencies(db); err != nil {
 		return err
 	}
+	if err = installNamedBatches(db); err != nil {
+		return err
+	}
 	return checkSchema(db)
 }

@@ -25,6 +25,12 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				return nil, errMalformedMessage
 			}
 			output = map[string]any{"id": matter.ID, "locator": matter.Locator, "title": matter.Title}
+		case operation.BatchCreateV1.Metadata().Operation:
+			batch, ok := result.Output.(operation.BatchCreateOutput)
+			if !ok || !validRequestID(batch.ID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"id": batch.ID, "name": batch.Name}
 		case operation.StepCreateV1.Metadata().Operation:
 			step, ok := result.Output.(operation.StepCreateOutput)
 			if !ok || !validRequestID(step.ID) || !validRequestID(step.ParentID) || !validRequestID(step.MatterID) || step.SortKey <= 0 {
@@ -164,6 +170,16 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.MatterCreateOutput{ID: matterID, Locator: locator, Title: title}
+		case operation.BatchCreateV1.Metadata().Operation:
+			if !exactFields(outputFields, "id", "name") {
+				return operation.Result{}, errMalformedMessage
+			}
+			batchID, idOK := outputFields["id"].(string)
+			name, nameOK := outputFields["name"].(string)
+			if !idOK || !validRequestID(batchID) || !nameOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.BatchCreateOutput{ID: batchID, Name: name}
 		case operation.StepCreateV1.Metadata().Operation:
 			if !exactFields(outputFields, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state") {
 				return operation.Result{}, errMalformedMessage

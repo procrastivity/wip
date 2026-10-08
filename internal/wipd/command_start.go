@@ -727,6 +727,9 @@ func validateCommandFold(entry wipdjournal.Entry, start wipdwire.PrefixAnchor, f
 }
 
 func operationDefinition(id operation.ID) (operation.Definition, bool) {
+	if id == operation.BatchCreateV1.Metadata().Operation {
+		return operation.BatchCreateV1, true
+	}
 	for _, definition := range operation.Catalogue() {
 		if definition.Metadata().Operation == id {
 			return definition, true
@@ -795,6 +798,14 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 		case operation.MatterCreateV1.Metadata().Operation:
 			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "id", "locator", "title")
 			if outputErr != nil || !commandStartULID.MatchString(asCommandStartString(output["id"])) {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.BatchCreateV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "id", "name")
+			input, inputOK := entry.Command.Request.Input.(operation.BatchCreateInput)
+			if outputErr != nil || !inputOK || !commandStartULID.MatchString(asCommandStartString(output["id"])) ||
+				output["name"] != input.Name || !hasRange || accepted["event_count"] != uint64(1) ||
+				accepted["first_event_id"] != accepted["last_event_id"] {
 				return "", ErrCommandStartIdentity
 			}
 		case operation.StepCreateV1.Metadata().Operation:
@@ -958,6 +969,12 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		typed = operation.MatterCreateOutput{
 			ID: asCommandStartString(output["id"]), Locator: asCommandStartString(output["locator"]), Title: asCommandStartString(output["title"]),
 		}
+	case operation.BatchCreateV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "id", "name")
+		if err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.BatchCreateOutput{ID: asCommandStartString(output["id"]), Name: asCommandStartString(output["name"])}
 	case operation.StepCreateV1.Metadata().Operation:
 		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
 		if err != nil {

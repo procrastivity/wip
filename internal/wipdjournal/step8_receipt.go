@@ -134,6 +134,48 @@ func step8OutputMatches(entry Entry, raw []byte, edge string) bool {
 	return err == nil && bytes.Equal(raw, encoded)
 }
 
+func batchCreateOutputMatches(entry Entry, raw []byte, batchID string) bool {
+	input, ok := entry.Command.Request.Input.(operation.BatchCreateInput)
+	if !ok || entry.Command.Request.Operation != operation.BatchCreateV1.Metadata().Operation ||
+		operation.BatchCreateV1.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw, "id", "name")
+	if err != nil || !transferULID.MatchString(asString(fields["id"])) || batchID != "" && fields["id"] != batchID || fields["name"] != input.Name {
+		return false
+	}
+	want, err := wipdwire.EncodeCanonical(map[string]any{"id": fields["id"], "name": input.Name})
+	return err == nil && bytes.Equal(raw, want)
+}
+
+func batchCreateInstalledRangeMatches(tx *sql.Tx, entry Entry, ids []string) bool {
+	rows, err := tx.Query(`SELECT event_id,record FROM installed_events ORDER BY position`)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	accepted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		accepted[id] = true
+	}
+	for rows.Next() {
+		var id string
+		var record []byte
+		if err = rows.Scan(&id, &record); err != nil {
+			return false
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			return false
+		}
+		if fields["command_id"] == entry.Command.ID && (!accepted[id] || !eventMatchesCommand(record, entry)) {
+			return false
+		}
+	}
+	return rows.Err() == nil
+}
+
 // Already-pulled effects must belong to the accepted range too. In particular,
 // a zero-effect refusal cannot hide an effect installed by an earlier pull.
 func step8InstalledRangeMatches(tx *sql.Tx, entry Entry, ids []string) bool {

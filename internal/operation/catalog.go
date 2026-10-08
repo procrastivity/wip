@@ -104,6 +104,22 @@ type BatchSweepAnonymousInput struct {
 
 func (BatchSweepAnonymousInput) operationInput() {}
 
+// BatchCreateInput names one domain-scoped Batch. Repo context authenticates
+// the initiating Environment but does not scope the Batch identity.
+type BatchCreateInput struct {
+	Name string
+}
+
+func (BatchCreateInput) operationInput() {}
+
+// BatchCreateOutput is the authority-assigned identity of a named Batch.
+type BatchCreateOutput struct {
+	ID   string
+	Name string
+}
+
+func (BatchCreateOutput) operationOutput() {}
+
 // BatchSweepAnonymousOutcome is the closed success outcome vocabulary.
 type BatchSweepAnonymousOutcome string
 
@@ -233,6 +249,20 @@ var BatchSweepAnonymousV1 = mustDefine[BatchSweepAnonymousInput, BatchSweepAnony
 	RequiredContext: []ContextDimension{ContextRepo},
 	Guards:          []Footprint{FootprintMatterLifecycle, FootprintAnonymousBatchLifecycle},
 	Writes:          []Footprint{FootprintAnonymousBatchLifecycle},
+	BlobInputs:      []BlobSpec{},
+	Claim:           ClaimNone,
+	ExternalEffects: []ExternalEffect{},
+})
+
+// BatchCreateV1 creates one named Batch in the authority domain. The explicit
+// M6 Step 9A profile is the only connected capability that offers it.
+var BatchCreateV1 = mustDefine[BatchCreateInput, BatchCreateOutput](Metadata{
+	Operation:       ID{Name: "batch.create", Version: 1},
+	Access:          AccessMutation,
+	Delivery:        DeliveryAuthority,
+	RequiredContext: []ContextDimension{ContextRepo},
+	Guards:          []Footprint{FootprintNamedBatchLifecycle},
+	Writes:          []Footprint{FootprintNamedBatchLifecycle},
 	BlobInputs:      []BlobSpec{},
 	Claim:           ClaimNone,
 	ExternalEffects: []ExternalEffect{},

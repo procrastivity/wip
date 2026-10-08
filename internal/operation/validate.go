@@ -98,6 +98,10 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("claim close prefix event ID", *prefix.EventID); err != nil {
 			return err
 		}
+	case BatchCreateInput:
+		if strings.TrimSpace(input.Name) == "" || input.Name != strings.TrimSpace(input.Name) {
+			return fmt.Errorf("named Batch name is empty or has surrounding whitespace")
+		}
 	case ContentWriteInput:
 		if err := validateULID("content subject ID", input.SubjectID); err != nil {
 			return err
@@ -381,6 +385,10 @@ func (d Definition) ValidateResult(result Result) error {
 		case BatchSweepAnonymousOutput:
 			if output.Outcome != BatchSweepAnonymousSwept && output.Outcome != BatchSweepAnonymousAlreadySwept {
 				return fmt.Errorf("anonymous Batch sweep output has an unknown outcome")
+			}
+		case BatchCreateOutput:
+			if validateULID("Batch output ID", output.ID) != nil || strings.TrimSpace(output.Name) == "" || output.Name != strings.TrimSpace(output.Name) {
+				return fmt.Errorf("named Batch output is invalid")
 			}
 		case GateDeclareOutput:
 			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {

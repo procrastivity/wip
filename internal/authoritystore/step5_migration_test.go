@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestM6FreshAndExplicitV4ToV18Upgrade(t *testing.T) {
+func TestM6FreshAndExplicitV4ToV19Upgrade(t *testing.T) {
 	s, root := fresh(t)
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 18 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 19 {
 		t.Fatalf("fresh schema version %d: %v", version, err)
 	}
 	if err := s.Close(); err != nil {

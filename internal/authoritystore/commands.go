@@ -99,7 +99,8 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
-	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation) ||
+	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation &&
+		command.Request.Operation != operation.BatchCreateV1.Metadata().Operation) ||
 		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
 		return out, ErrInvalidProof
 	}
@@ -607,6 +608,37 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 			first, last = position, position
 			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
+		case operation.BatchCreateV1.Metadata().Operation:
+			input := cmd.Request.Input.(operation.BatchCreateInput)
+			got := result.Output.(operation.BatchCreateOutput)
+			if got.ID != subjectID || got.Name != input.Name {
+				return out, ErrInvalidProof
+			}
+			var exists int
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM m6_named_batches WHERE domain_id=? AND name=?`, d.ID, input.Name).Scan(&exists); err != nil {
+				return out, err
+			}
+			if exists != 0 {
+				result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+					Code: operation.ProblemCode("refusal.batch-name-exists"), Message: "a live Batch with this name already exists in the authority domain",
+				}}
+				subjectID, eventID, problem = "", "", string(result.Problem.Code)
+				break
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{"id": got.ID, "name": got.Name})
+			if err != nil {
+				return out, err
+			}
+			identity := eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo}
+			position, err = appendCommandEventWithRepo(ctx, tx, identity, nil, occurred, eventID, "batch.created", subjectID, map[string]any{"name": got.Name})
+			if err != nil {
+				return out, err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO m6_named_batches(domain_id,batch_id,name,birth_event_id) VALUES(?,?,?,?)`, d.ID, subjectID, got.Name, eventID); err != nil {
+				return out, writeError(err)
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
 		case operation.StepCreateV1.Metadata().Operation:
 			input := cmd.Request.Input.(operation.StepCreateInput)
 			got := result.Output.(operation.StepCreateOutput)
@@ -777,6 +809,10 @@ type eventIdentity struct {
 }
 
 func appendCommandEvent(ctx context.Context, tx *sql.Tx, c eventIdentity, occurred time.Time, id, kind, subject string, payload map[string]any) (uint64, error) {
+	return appendCommandEventWithRepo(ctx, tx, c, c.repo, occurred, id, kind, subject, payload)
+}
+
+func appendCommandEventWithRepo(ctx context.Context, tx *sql.Tx, c eventIdentity, repo any, occurred time.Time, id, kind, subject string, payload map[string]any) (uint64, error) {
 	var position uint64
 	var previousID, previousDigest string
 	err := tx.QueryRowContext(ctx, `SELECT position,event_id,prefix_digest FROM authority_events WHERE domain_id=? ORDER BY position DESC LIMIT 1`, c.domain).Scan(&position, &previousID, &previousDigest)
@@ -787,7 +823,7 @@ func appendCommandEvent(ctx context.Context, tx *sql.Tx, c eventIdentity, occurr
 		return 0, ErrInvalidProof
 	}
 	position++
-	record, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.event/1", "event_id": id, "domain_id": c.domain, "command_id": c.id, "request_hash": c.hash, "environment": map[string]any{"id": c.environment, "sequence": c.sequence}, "acted_at": c.actedAt, "occurred_at": occurred.UTC().Format(time.RFC3339Nano), "kind": kind, "subject_id": subject, "repo_id": c.repo, "payload": payload})
+	record, err := artifactEncoder.Marshal(map[string]any{"schema": "wipd.event/1", "event_id": id, "domain_id": c.domain, "command_id": c.id, "request_hash": c.hash, "environment": map[string]any{"id": c.environment, "sequence": c.sequence}, "acted_at": c.actedAt, "occurred_at": occurred.UTC().Format(time.RFC3339Nano), "kind": kind, "subject_id": subject, "repo_id": repo, "payload": payload})
 	if err != nil {
 		return 0, err
 	}
@@ -911,6 +947,8 @@ func birthDefinition(id operation.ID) (operation.Definition, bool) {
 		return operation.MatterCreateV1, true
 	case operation.StepCreateV1.Metadata().Operation:
 		return operation.StepCreateV1, true
+	case operation.BatchCreateV1.Metadata().Operation:
+		return operation.BatchCreateV1, true
 	default:
 		return operation.Definition{}, false
 	}

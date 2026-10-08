@@ -652,6 +652,7 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 	stepCounts := make(map[string]int)
 	stepStates := make(map[string]string)
 	anonymousBatches := make(map[string]string)
+	namedBatchNames := make(map[string]struct{})
 	sweptBatches := make(map[string]bool)
 	activeClaims := make(map[string]acquiredClaimProjection)
 	normalClaimCloses := make(map[string]foldedLifecycleEvent)
@@ -843,6 +844,31 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				Locator: event.Payload.Locator, Title: event.Payload.Title, SortKey: event.Payload.SortKey,
 				State: "planned", BirthEventID: event.EventID,
 			})
+		case "batch.created":
+			payload, payloadOK := fields["payload"].(map[string]any)
+			environment, environmentOK := fields["environment"].(map[string]any)
+			sequence, sequenceOK := environment["sequence"].(uint64)
+			actedAt, actedAtOK := fields["acted_at"].(string)
+			occurredAt, occurredAtOK := fields["occurred_at"].(string)
+			batchID := asString(fields["subject_id"])
+			name := asString(payload["name"])
+			if fields["schema"] != "wipd.event/1" || fields["event_id"] != record.EventID || fields["domain_id"] != domainID ||
+				!clientULIDPattern.MatchString(asString(fields["command_id"])) || !validDigest(asString(fields["request_hash"])) ||
+				!environmentOK || !wipdwire.ExactMapKeys(environment, "id", "sequence") ||
+				!clientULIDPattern.MatchString(asString(environment["id"])) || !sequenceOK || sequence == 0 ||
+				!actedAtOK || !validUTC(actedAt) || !occurredAtOK || !validUTC(occurredAt) ||
+				fields["repo_id"] != nil || !payloadOK || !wipdwire.ExactMapKeys(payload, "name") ||
+				!clientULIDPattern.MatchString(batchID) || name == "" || name != strings.TrimSpace(name) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := seenIDs[batchID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := namedBatchNames[name]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			seenIDs[batchID] = struct{}{}
+			namedBatchNames[name] = struct{}{}
 		case "batch.anonymous-created":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)

@@ -379,16 +379,16 @@ func parseStep12Event(raw []byte, domain string, position uint64, id, command st
 	var event step12Event
 	event.domain, event.position, event.id, event.command = domain, position, id, command
 	var envelope struct {
-		Schema      string `cbor:"schema"`
-		ID          string `cbor:"event_id"`
-		Domain      string `cbor:"domain_id"`
-		Command     string `cbor:"command_id"`
-		Hash        string `cbor:"request_hash"`
-		Kind        string `cbor:"kind"`
-		Subject     string `cbor:"subject_id"`
-		Repo        string `cbor:"repo_id"`
-		Acted       string `cbor:"acted_at"`
-		Occurred    string `cbor:"occurred_at"`
+		Schema      string  `cbor:"schema"`
+		ID          string  `cbor:"event_id"`
+		Domain      string  `cbor:"domain_id"`
+		Command     string  `cbor:"command_id"`
+		Hash        string  `cbor:"request_hash"`
+		Kind        string  `cbor:"kind"`
+		Subject     string  `cbor:"subject_id"`
+		Repo        *string `cbor:"repo_id"`
+		Acted       string  `cbor:"acted_at"`
+		Occurred    string  `cbor:"occurred_at"`
 		Environment struct {
 			ID       string `cbor:"id"`
 			Sequence uint64 `cbor:"sequence"`
@@ -406,11 +406,21 @@ func parseStep12Event(raw []byte, domain string, position uint64, id, command st
 		canonicalDecode(fields["payload"], &event.payload) != nil {
 		return event, ErrInvalidStore
 	}
-	event.hash, event.kind, event.subject, event.repo = envelope.Hash, envelope.Kind, envelope.Subject, envelope.Repo
+	event.hash, event.kind, event.subject = envelope.Hash, envelope.Kind, envelope.Subject
+	if envelope.Repo != nil {
+		event.repo = *envelope.Repo
+	}
 	event.acted, event.occurred, event.environment, event.sequence = envelope.Acted, envelope.Occurred, envelope.Environment.ID, envelope.Environment.Sequence
 	if envelope.Schema != "wipd.event/1" || envelope.ID != id || envelope.Domain != domain || envelope.Command != command ||
-		!ulid.MatchString(id) || !ulid.MatchString(command) || !validDigest(event.hash) || !ulid.MatchString(event.repo) ||
+		!ulid.MatchString(id) || !ulid.MatchString(command) || !validDigest(event.hash) ||
 		!ulid.MatchString(event.subject) || !ulid.MatchString(event.environment) || event.sequence == 0 || event.acted == "" {
+		return event, ErrInvalidStore
+	}
+	if envelope.Repo == nil {
+		if event.kind != "batch.created" {
+			return event, ErrInvalidStore
+		}
+	} else if !ulid.MatchString(event.repo) {
 		return event, ErrInvalidStore
 	}
 	if _, err := utcTime(event.occurred); err != nil {

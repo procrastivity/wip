@@ -49,6 +49,7 @@ type Client struct {
 	parameters sessionParameters
 	m6         bool
 	step8      bool
+	step9a     bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -85,7 +86,7 @@ func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, false)
+	return connectProfileCapabilities(ctx, profile, true, false, false)
 }
 
 // ConnectM6Step8 explicitly offers the dependency/reference acceptance set.
@@ -95,7 +96,18 @@ func ConnectM6Step8(ctx context.Context, explicitProfileRoot string) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true)
+	return connectProfileCapabilities(ctx, profile, true, true, false)
+}
+
+// ConnectM6Step9A explicitly offers named Batch birth. It refuses to connect
+// unless the authority negotiates that exact operation; no older profile is
+// retried or used as a fallback.
+func ConnectM6Step9A(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -412,10 +424,10 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
-	return connectProfileCapabilities(ctx, profile, false, false)
+	return connectProfileCapabilities(ctx, profile, false, false, false)
 }
 
-func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8 bool) (*Client, error) {
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -428,6 +440,7 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 		transport: transport,
 		m6:        m6,
 		step8:     step8,
+		step9a:    namedBatch,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -438,6 +451,10 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 	if err := client.negotiate(connectCtx); err != nil {
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: local IPC negotiation: %v", ErrUnavailable, err)
+	}
+	if namedBatch && !operationCapabilityContains(client.hello.operations, operation.BatchCreateV1.Metadata().Operation, identitySchemaV1) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: named Batch birth is not supported by this profile", ErrUnavailable)
 	}
 	return client, nil
 }
@@ -468,6 +485,11 @@ func (c *Client) negotiate(ctx context.Context) error {
 	}, map[string]any{
 		"name": "step.start", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 	}}
+	if c.step9a {
+		operations = append(operations, map[string]any{
+			"name": operation.BatchCreateV1.Metadata().Operation.Name, "versions": []any{uint64(operation.BatchCreateV1.Metadata().Operation.Version)}, "identity_schemas": []any{identitySchemaV1},
+		})
+	}
 	if c.m6 {
 		operations = append(operations, map[string]any{
 			"name": "gate.exemption.repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
@@ -654,7 +676,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
 		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
 		operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation,
-		operation.BatchSweepAnonymousV1.Metadata().Operation:
+		operation.BatchSweepAnonymousV1.Metadata().Operation, operation.BatchCreateV1.Metadata().Operation:
 		return true
 	default:
 		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id)

@@ -217,6 +217,9 @@ func UpgradeV11(root string) error {
 	if err = installDependencies(db); err != nil {
 		return err
 	}
+	if err = installNamedBatches(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}

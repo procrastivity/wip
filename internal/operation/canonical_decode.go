@@ -423,6 +423,16 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return input, nil
+	case BatchCreateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "name")
+		if err != nil {
+			return nil, err
+		}
+		name, err := commandString(fields, "name")
+		if err != nil {
+			return nil, err
+		}
+		return BatchCreateInput{Name: name}, nil
 	case GateDeclareV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "gate", "scale")
 		if err != nil {

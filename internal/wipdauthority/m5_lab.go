@@ -116,12 +116,16 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		}
 		step7SweepRegistered := false
 		step8Registered := false
+		batchCreateRegistered := false
 		for _, definition := range operations {
 			if definition.Metadata().Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
 				step7SweepRegistered = true
 			}
 			if operation.Step8Operation(definition.Metadata().Operation) {
 				step8Registered = true
+			}
+			if definition.Metadata().Operation == operation.BatchCreateV1.Metadata().Operation {
+				batchCreateRegistered = true
 			}
 		}
 		step7OperationCount := 0
@@ -133,6 +137,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				return nil, ErrInvalidLabConfig
 			}
 			maxOperations += len(operation.Step8Catalogue())
+		}
+		if batchCreateRegistered {
+			if !m6 || !step8Registered {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations++
 		}
 		if len(operations) == 0 || len(operations) > maxOperations+step7OperationCount ||
 			m6 && len(operations) != maxOperations+step7OperationCount ||
@@ -155,6 +165,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				continue
 			}
 			if m6 && operation.Step8Operation(id) {
+				continue
+			}
+			if id == operation.BatchCreateV1.Metadata().Operation {
+				if !m6 || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
 				continue
 			}
 			switch id {

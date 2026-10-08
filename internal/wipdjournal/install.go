@@ -44,6 +44,7 @@ type InstallSnapshot struct {
 	ManifestDigest  string
 	Receipts        map[string]InstalledReceipt
 	Step8Projection *Step8Projection
+	NamedBatches    []NamedBatchProjection
 }
 
 // Expectation returns the revision and installed prefix used to condition the
@@ -803,9 +804,14 @@ func loadInstallSnapshot(tx *sql.Tx, identity Identity) (InstallSnapshot, error)
 	if err != nil {
 		return InstallSnapshot{}, err
 	}
+	namedBatches, err := installedNamedBatchProjection(tx, identity.DomainID)
+	if err != nil {
+		return InstallSnapshot{}, err
+	}
 	snapshot := InstallSnapshot{
 		Identity: identity, Revision: state.revision, Anchor: cloneTransferAnchor(state.anchor),
 		ManifestDigest: state.manifestDigest, Receipts: make(map[string]InstalledReceipt), Step8Projection: projection,
+		NamedBatches: namedBatches,
 	}
 	rows, err := tx.Query(`SELECT command_id,request_hash,environment_sequence,journal_position,result_code,canonical_receipt FROM installed_receipts ORDER BY journal_position`)
 	if err != nil {
@@ -897,6 +903,9 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		if _, known := step8Definition(entry.Command.Request.Operation); known && !step8InstalledRangeMatches(tx, entry, nil) {
 			return nil, 0, 0, ErrInvalidTransfer
 		}
+		if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation && !batchCreateInstalledRangeMatches(tx, entry, nil) {
+			return nil, 0, 0, ErrInvalidTransfer
+		}
 		return nil, 0, 0, nil
 	}
 	fields, err := wipdwire.DecodeCanonicalMap(raw,
@@ -977,12 +986,27 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 				return nil, 0, 0, ErrInvalidTransfer
 			}
 		}
+		if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation {
+			eventFields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			resultFields, resultOK := fields["result"].(map[string]any)
+			if decodeErr != nil || !resultOK {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+			output, outputOK := resultFields["output"].([]byte)
+			if !outputOK || !batchCreateOutputMatches(entry, output, asString(eventFields["subject_id"])) {
+				return nil, 0, 0, ErrInvalidTransfer
+			}
+		}
 		ids = append(ids, eventID)
 	}
 	if len(ids) != int(count) || ids[0] != firstID || ids[len(ids)-1] != lastID {
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if step8 && !step8InstalledRangeMatches(tx, entry, ids) {
+		return nil, 0, 0, ErrInvalidTransfer
+	}
+	if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation && !batchCreateInstalledRangeMatches(tx, entry, ids) {
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if entry.Command.Request.Operation == operation.GateExemptionRepairV1.Metadata().Operation {
@@ -1058,6 +1082,22 @@ func eventMatchesCommand(record []byte, entry Entry) bool {
 			return false
 		}
 	}
+	if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation {
+		input, ok := entry.Command.Request.Input.(operation.BatchCreateInput)
+		payload, payloadOK := fields["payload"].(map[string]any)
+		if !ok || !payloadOK || fields["kind"] != "batch.created" || fields["repo_id"] != nil ||
+			!transferULID.MatchString(asString(fields["subject_id"])) || !wipdwire.ExactMapKeys(payload, "name") || payload["name"] != input.Name {
+			return false
+		}
+	}
+	if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation {
+		input, ok := entry.Command.Request.Input.(operation.BatchCreateInput)
+		payload, payloadOK := fields["payload"].(map[string]any)
+		if !ok || !payloadOK || fields["kind"] != "batch.created" || fields["repo_id"] != nil ||
+			!transferULID.MatchString(asString(fields["subject_id"])) || !wipdwire.ExactMapKeys(payload, "name") || payload["name"] != input.Name {
+			return false
+		}
+	}
 	environment, ok := fields["environment"].(map[string]any)
 	return ok && environment["id"] == entry.Command.EnvironmentID && environment["sequence"] == entry.EnvironmentSeq
 }
@@ -1094,6 +1134,10 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 			return ErrInvalidTransfer
 		}
 		if _, known := step8Definition(entry.Command.Request.Operation); known && (len(eventIDs) != 1 || !step8OutputMatches(entry, rawOutput, "")) {
+			return ErrInvalidTransfer
+		}
+		if entry.Command.Request.Operation == operation.BatchCreateV1.Metadata().Operation &&
+			(len(eventIDs) != 1 || !batchCreateOutputMatches(entry, rawOutput, "")) {
 			return ErrInvalidTransfer
 		}
 		if entry.Command.Request.Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
@@ -1225,6 +1269,9 @@ func rebuildOverlay(ctx context.Context, tx *sql.Tx) error {
 	if _, err := installedStep8Projection(tx, domain); err != nil {
 		return err
 	}
+	if _, err := installedNamedBatchProjection(tx, domain); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM environment_overlay`); err != nil {
 		return err
 	}
@@ -1330,6 +1377,9 @@ func checkInstallationDatabase(db *sql.DB, identity Identity) error {
 		return err
 	}
 	if _, err = installedStep8Projection(tx, identity.DomainID); err != nil {
+		return ErrInvalidJournal
+	}
+	if _, err = installedNamedBatchProjection(tx, identity.DomainID); err != nil {
 		return ErrInvalidJournal
 	}
 	return tx.Commit()

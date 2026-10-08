@@ -400,6 +400,25 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
+	if app.m6 && command.Request.Operation == operation.BatchCreateV1.Metadata().Operation {
+		input, ok := command.Request.Input.(operation.BatchCreateInput)
+		if !ok {
+			return nil, authoritystore.ErrInvalidProof
+		}
+		now := time.Now().UTC()
+		batchID, err := randomULID(now)
+		if err != nil {
+			return nil, err
+		}
+		eventID, err := randomULID(now.Add(time.Millisecond))
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result:    operation.Result{Code: operation.ResultSucceeded, Output: operation.BatchCreateOutput{ID: batchID, Name: input.Name}},
+			SubjectID: batchID, EventID: eventID, Occurred: now,
+		})
+	}
 	if app.m6 && operation.Step8Operation(command.Request.Operation) {
 		now := time.Now().UTC()
 		eventID, err := randomULID(now)

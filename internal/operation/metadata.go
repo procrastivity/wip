@@ -71,6 +71,7 @@ const (
 	FootprintAncestorLifecycle       Footprint = "ancestor-lifecycle"
 	FootprintCancelReason            Footprint = "cancel-reason"
 	FootprintAnonymousBatchLifecycle Footprint = "anonymous-batch.lifecycle"
+	FootprintNamedBatchLifecycle     Footprint = "named-batch.lifecycle"
 	FootprintStepParent              Footprint = "step.parent"
 	FootprintStepLocator             Footprint = "matter.step-locators"
 	FootprintStepSortKey             Footprint = "step.sibling-sort-key"

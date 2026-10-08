@@ -180,7 +180,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "batch.created" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
 			fields["kind"] != "dispatch.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
@@ -191,8 +191,14 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "gate.declared" && fields["kind"] != "gate.closed" && fields["kind"] != "gate.dismissed" && fields["kind"] != "gate.exemption-repaired" &&
 			!step8HistoryKind(asString(fields["kind"])) &&
 			!transferLifecycleEventKind(asString(fields["kind"]))) ||
-		!transferULID.MatchString(asString(fields["command_id"])) ||
-		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
+		!transferULID.MatchString(asString(fields["command_id"])) || !transferHash.MatchString(asString(fields["request_hash"])) {
+		return false
+	}
+	if fields["kind"] == "batch.created" {
+		if fields["repo_id"] != nil || !transferULID.MatchString(asString(fields["subject_id"])) {
+			return false
+		}
+	} else if !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
 	}
 	if !canonicalUTC(fields["acted_at"]) || !canonicalUTC(fields["occurred_at"]) {
@@ -208,6 +214,10 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return false
 	}
 	kind := asString(fields["kind"])
+	if kind == "batch.created" {
+		payloadName := asString(payload["name"])
+		return wipdwire.ExactMapKeys(payload, "name") && payloadName != "" && payloadName == strings.TrimSpace(payloadName)
+	}
 	if transferLifecycleEventKind(kind) {
 		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
 	}

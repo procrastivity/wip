@@ -114,13 +114,14 @@ func checkStep4State(db *sql.DB) error {
 		step13Gate := version >= 12 && knownGate
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
 		batchSweep := version >= 17 && id == operation.BatchSweepAnonymousV1.Metadata().Operation
+		namedBatch := version >= 19 && id == operation.BatchCreateV1.Metadata().Operation
 		dependencyDefinition, knownDependency := dependencyHistoryDefinition(id)
 		dependency := version >= 18 && knownDependency
 		referenceDefinition, knownReference := referenceHistoryDefinition(id)
 		reference := version >= 18 && knownReference
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !dependency && !reference) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !dependency && !reference) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 && !dependency && !reference {
 			return ErrInvalidStore
@@ -251,7 +252,7 @@ func checkStep4State(db *sql.DB) error {
 			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || dependency || reference || step13Gate && !gateNoop {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -282,7 +283,7 @@ func checkStep4State(db *sql.DB) error {
 		gateNoop := step13Gate && s.operation == "gate.declare" && code == "result.succeeded" && r.Range == nil
 		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
-			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || namedBatch || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
 			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
@@ -506,6 +507,37 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 				previousID = id
 				continue
 			}
+		}
+		if version >= 19 && (operation.ID{Name: s.operation, Version: uint16(s.version)}) == operation.BatchCreateV1.Metadata().Operation {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			event, eventErr := parseStep12Event(raw, d, pos, id, cmd)
+			input, inputOK := command.Request.Input.(operation.BatchCreateInput)
+			if decodeErr != nil || eventErr != nil || !inputOK || command.Request.Operation != operation.BatchCreateV1.Metadata().Operation ||
+				operation.BatchCreateV1.ValidateRequest(command.Request) != nil || event.hash != s.hash || event.kind != "batch.created" ||
+				event.repo != "" || event.environment != s.env || event.sequence != s.seq || event.acted != command.ActedAt ||
+				!exactKeys(event.payload, "name") {
+				err = ErrInvalidStore
+				break
+			}
+			var name string
+			if artifactDecoder.Unmarshal(event.payload["name"], &name) != nil || name != input.Name {
+				err = ErrInvalidStore
+				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
 		}
 		if contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
 			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {

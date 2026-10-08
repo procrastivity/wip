@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipd"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
@@ -560,4 +563,346 @@ func mustLoadM6TestConfig(t *testing.T, profileRoot string) any {
 		return fmt.Sprintf("config decode error: %v", err)
 	}
 	return config.CommandCatalogue
+}
+
+func TestM6Step9ANamedBatchBirthThroughAuthenticatedProcessAndEnvironmentReopen(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authenticated AF_UNIX IPC is Linux-only")
+	}
+	ctx := context.Background()
+	root, err := os.MkdirTemp("/tmp", "s9a-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("WIP_DB_PATH", filepath.Join(root, "legacy", "wip.db"))
+
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step9ARegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	fixture.server, err = NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace m6AuthorityHTTPTrace
+	fixture.server.http.Handler = traceM6AuthorityHTTP(fixture.server.http.Handler, &trace)
+	authorityCtx, stopAuthority := context.WithCancel(ctx)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
+	t.Cleanup(func() {
+		stopAuthority()
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil {
+				t.Errorf("M6 authority server stopped with error: %v", serveErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("M6 authority server did not stop")
+		}
+	})
+
+	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "environment", m5TestEnv,
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step9a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := m5WipdBinary(t)
+	client, stopDaemon, daemonOutput := startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err = wipd.ConnectM6Step9A(ctx, environment.profileRoot)
+	if err != nil {
+		stopDaemon()
+		t.Fatalf("connect with explicit Step 9-A capability over authenticated AF_UNIX IPC: %v; daemon=%s", err, daemonOutput.String())
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+		stopDaemon()
+	})
+
+	command := operation.Command{
+		ID: m5TwoEnvironmentID(82), AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 1, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: m5TwoEnvironmentID(82),
+		Request: operation.Request{
+			Operation: operation.BatchCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchCreateInput{Name: "M6 release train"},
+		},
+	}
+	commandHash := m5CommandHash(t, command)
+	result, err := client.ExecuteCommand(ctx, command)
+	batch, ok := result.Output.(operation.BatchCreateOutput)
+	if err != nil || result.Code != operation.ResultSucceeded || !ok || batch.ID == "" || batch.Name != "M6 release train" {
+		status, statusErr := fixture.store.QueryCommand(ctx, m5TestDomain, command.ID, commandHash, 1,
+			fixture.peer, m5TestEnv, time.Now().UTC())
+		_ = client.Close()
+		stopDaemon()
+		identity := wipdjournal.Identity{
+			RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1,
+			EnvironmentID: m5TestEnv, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+		}
+		localJournal, openErr := wipdjournal.Open(filepath.Join(environment.profileRoot, "environment-journal"), identity)
+		var localState string
+		if openErr == nil {
+			localSnapshot, snapshotErr := localJournal.InstallSnapshot(ctx)
+			entries, entriesErr := localJournal.Entries()
+			localState = fmt.Sprintf("snapshot(err=%v events=%d receipts=%d named_batches=%d) entries(err=%v count=%d)",
+				snapshotErr, localSnapshot.Anchor.EventCount, len(localSnapshot.Receipts), len(localSnapshot.NamedBatches), entriesErr, len(entries))
+			if closeErr := localJournal.Close(); closeErr != nil {
+				localState += fmt.Sprintf(" close=%v", closeErr)
+			}
+		}
+		t.Fatalf("named Batch create through authenticated process = %+v (%T), %v; authorityReceipt=%t authorityErr=%v localJournal(open=%v %s) trace=%v daemon=%s",
+			result, result.Output, err, len(status.Receipt) > 0, statusErr, openErr, localState, trace.snapshot(), daemonOutput.String())
+	}
+	if !traceContains(trace.snapshot(), "/wipd/v1/exchange request=command.submit response=submission.accepted,command.terminal") {
+		t.Fatalf("named Batch did not complete through authority command submission and terminal response: %v", trace.snapshot())
+	}
+
+	authorityReceipt, err := fixture.store.QueryCommand(ctx, m5TestDomain, command.ID, commandHash, 1,
+		fixture.peer, m5TestEnv, time.Now().UTC())
+	if err != nil || authorityReceipt.Pending || len(authorityReceipt.Receipt) == 0 || len(authorityReceipt.SignedReceipt) == 0 {
+		t.Fatalf("named Batch authority receipt = %+v, %v", authorityReceipt, err)
+	}
+	receiptFields, err := wipdwire.DecodeCanonicalMap(authorityReceipt.Receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	operationFields, operationOK := receiptFields["operation"].(map[string]any)
+	environmentFields, environmentOK := receiptFields["environment"].(map[string]any)
+	resultFields, resultOK := receiptFields["result"].(map[string]any)
+	acceptedEvents, acceptedOK := receiptFields["accepted_events"].(map[string]any)
+	if err != nil || receiptFields["schema"] != "wipd.terminal-receipt/1" || receiptFields["domain_id"] != m5TestDomain ||
+		receiptFields["command_id"] != command.ID || receiptFields["request_hash"] != commandHash ||
+		!operationOK || operationFields["name"] != "batch.create" || operationFields["version"] != uint64(1) ||
+		!environmentOK || environmentFields["id"] != m5TestEnv || environmentFields["sequence"] != uint64(1) ||
+		!resultOK || resultFields["code"] != string(operation.ResultSucceeded) ||
+		!acceptedOK || acceptedEvents["event_count"] != uint64(1) {
+		t.Fatalf("authority receipt does not bind the exact named-Batch command: fields=%#v err=%v", receiptFields, err)
+	}
+	outputBytes, outputOK := resultFields["output"].([]byte)
+	outputFields, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "id", "name")
+	if !outputOK || outputErr != nil || outputFields["id"] != batch.ID || outputFields["name"] != batch.Name {
+		t.Fatalf("authority receipt typed Batch output = %#v, decode error=%v", outputFields, outputErr)
+	}
+
+	anchor, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || anchor.EventCount != 1 || anchor.EventID == "" {
+		t.Fatalf("named Batch authority prefix = %+v, %v; want one birth event", anchor, err)
+	}
+	authoritySnapshot, err := fixture.store.PinSnapshot(ctx, m5TestDomain, 1, authoritystore.EmptyPrefixAnchor(),
+		m5TwoEnvironmentID(83), time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("pin exact named-Batch authority event: %v", err)
+	}
+	if len(authoritySnapshot.Delta.Events) != 1 {
+		t.Fatalf("named-Batch authority snapshot has %d events, want exactly one", len(authoritySnapshot.Delta.Events))
+	}
+	event := authoritySnapshot.Delta.Events[0]
+	eventFields, err := wipdwire.DecodeCanonicalMap(event.Record,
+		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+	eventEnvironment, eventEnvironmentOK := eventFields["environment"].(map[string]any)
+	eventPayload, eventPayloadOK := eventFields["payload"].(map[string]any)
+	if err != nil || event.EventID != anchor.EventID || eventFields["event_id"] != event.EventID ||
+		eventFields["schema"] != "wipd.event/1" || eventFields["domain_id"] != m5TestDomain ||
+		eventFields["command_id"] != command.ID || eventFields["request_hash"] != commandHash ||
+		eventFields["kind"] != "batch.created" || eventFields["subject_id"] != batch.ID || eventFields["repo_id"] != nil ||
+		!eventEnvironmentOK || eventEnvironment["id"] != m5TestEnv || eventEnvironment["sequence"] != uint64(1) ||
+		!eventPayloadOK || eventPayload["name"] != batch.Name ||
+		acceptedEvents["first_event_id"] != event.EventID || acceptedEvents["last_event_id"] != event.EventID {
+		t.Fatalf("authority event/receipt do not bind the exact null-Repo Batch birth: event=%#v receipt=%#v err=%v", eventFields, acceptedEvents, err)
+	}
+
+	if err = client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopDaemon()
+	identity := wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	}
+	journalPath := filepath.Join(environment.profileRoot, "environment-journal")
+	journal, err := wipdjournal.Open(journalPath, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := journal.InstallSnapshot(ctx)
+	if err != nil {
+		_ = journal.Close()
+		t.Fatal(err)
+	}
+	wantProjection := wipdjournal.NamedBatchProjection{
+		DomainID: m5TestDomain, BatchID: batch.ID, Name: batch.Name, BirthEventID: event.EventID,
+	}
+	installedReceipt, receiptOK := installed.Receipts[command.ID]
+	if installed.Identity != identity || installed.Anchor.EventCount != 1 || installed.Anchor.EventID == nil || *installed.Anchor.EventID != event.EventID ||
+		len(installed.NamedBatches) != 1 || installed.NamedBatches[0] != wantProjection ||
+		len(installed.Receipts) != 1 || !receiptOK || installedReceipt.RequestHash != commandHash ||
+		installedReceipt.EnvironmentSeq != 1 || installedReceipt.ResultCode != operation.ResultSucceeded ||
+		!bytes.Equal(installedReceipt.CanonicalReceipt, authorityReceipt.Receipt) {
+		_ = journal.Close()
+		t.Fatalf("Environment install does not exactly match named-Batch authority result: snapshot=%+v receipt=%+v", installed, installedReceipt)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	journal, err = wipdjournal.Open(journalPath, identity)
+	if err != nil {
+		t.Fatalf("reopen installed Environment journal: %v", err)
+	}
+	reopened, err := journal.InstallSnapshot(ctx)
+	closeErr := journal.Close()
+	if err != nil || closeErr != nil || reopened.Identity != identity || reopened.Anchor.EventCount != 1 ||
+		reopened.Anchor.EventID == nil || *reopened.Anchor.EventID != event.EventID || len(reopened.NamedBatches) != 1 ||
+		reopened.NamedBatches[0] != wantProjection || len(reopened.Receipts) != 1 ||
+		reopened.Receipts[command.ID].RequestHash != commandHash ||
+		!bytes.Equal(reopened.Receipts[command.ID].CanonicalReceipt, authorityReceipt.Receipt) {
+		t.Fatalf("Environment named-Batch projection/receipt changed after journal reopen: snapshot=%+v err=%v close=%v", reopened, err, closeErr)
+	}
+}
+
+func TestM6Step9AOlderExplicitProfileRefusesWithoutEffectsOrLegacyFallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("authenticated AF_UNIX IPC is Linux-only")
+	}
+	ctx := context.Background()
+	root, err := os.MkdirTemp("/tmp", "s9a-old-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	legacyPath := filepath.Join(root, "legacy", "wip.db")
+	if err = os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacySentinel := []byte("S9-A legacy-store sentinel; unsupported profile must leave it unchanged\n")
+	if err = os.WriteFile(legacyPath, legacySentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WIP_DB_PATH", legacyPath)
+
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step8Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Registry = registry
+	fixture.server, err = NewM6LabServer(fixture.profile, fixture.serverCert, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace m6AuthorityHTTPTrace
+	fixture.server.http.Handler = traceM6AuthorityHTTP(fixture.server.http.Handler, &trace)
+	authorityCtx, stopAuthority := context.WithCancel(ctx)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- fixture.server.Serve(authorityCtx, fixture.listener) }()
+	t.Cleanup(func() {
+		stopAuthority()
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil {
+				t.Errorf("M6 authority server stopped with error: %v", serveErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("M6 authority server did not stop")
+		}
+	})
+
+	environment, err := prepareM5ProcessEnvironment(t, fixture, root, "environment", m5TestEnv,
+		fixture.environment, fixture.clientCert.Certificate[0], fixture.clientCert.Certificate[1], "m6-step8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := operation.Command{
+		ID: m5TwoEnvironmentID(84), AuthorityDomainID: m5TestDomain, ExpectedAuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, EnvironmentSequence: 1, ActedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CorrelationCommandID: m5TwoEnvironmentID(84),
+		Request: operation.Request{
+			Operation: operation.BatchCreateV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: m5TestRepo}, Input: operation.BatchCreateInput{Name: "unsupported release train"},
+		},
+	}
+	commandHash := m5CommandHash(t, command)
+	beforeAnchor, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || beforeAnchor.EventCount != 0 {
+		t.Fatalf("unexpected authority prestate: anchor=%+v err=%v", beforeAnchor, err)
+	}
+	binary := m5WipdBinary(t)
+	olderClient, stopDaemon, daemonOutput := startWipdForBirthReleaseRecovery(t, binary, environment.profileRoot, true)
+	if err = olderClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustLoadM6TestConfig(t, environment.profileRoot); got != "m6-step8" {
+		stopDaemon()
+		t.Fatalf("negative fixture is not the intended older explicit profile: %v", got)
+	}
+	olderClient, err = wipd.ConnectM6Step8(ctx, environment.profileRoot)
+	if err != nil {
+		stopDaemon()
+		t.Fatalf("connect to supported older Step 8 process profile: %v; daemon=%s", err, daemonOutput.String())
+	}
+	_, executeErr := olderClient.ExecuteCommand(ctx, command)
+	if executeErr == nil || !strings.Contains(executeErr.Error(), "operation.unsupported-version") {
+		_ = olderClient.Close()
+		stopDaemon()
+		t.Fatalf("older authenticated profile did not refuse named Batch before submission: %v", executeErr)
+	}
+	if err = olderClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	connectCtx, cancelConnect := context.WithTimeout(ctx, time.Second)
+	unsupportedClient, connectErr := wipd.ConnectM6Step9A(connectCtx, environment.profileRoot)
+	cancelConnect()
+	if connectErr == nil {
+		_ = unsupportedClient.Close()
+		stopDaemon()
+		t.Fatal("ConnectM6Step9A accepted an older Step 8 profile")
+	}
+	if !errors.Is(connectErr, wipd.ErrUnavailable) || !strings.Contains(connectErr.Error(), "named Batch birth is not supported") {
+		stopDaemon()
+		t.Fatalf("older explicit profile refusal = %v; want fail-closed named-Batch capability refusal", connectErr)
+	}
+	stopDaemon()
+
+	if traceContains(trace.snapshot(), "request=command.submit") {
+		t.Fatalf("older-profile refusal unexpectedly submitted a command to authority: %v", trace.snapshot())
+	}
+	status, err := fixture.store.QueryCommand(ctx, m5TestDomain, command.ID, commandHash, 1,
+		fixture.peer, m5TestEnv, time.Now().UTC())
+	if !errors.Is(err, authoritystore.ErrNotFound) || status.Pending || len(status.Receipt) != 0 || len(status.SignedReceipt) != 0 {
+		t.Fatalf("older-profile refusal left an authority submission/receipt: status=%+v err=%v", status, err)
+	}
+	afterAnchor, err := fixture.store.CurrentPrefixAnchor(ctx, m5TestDomain)
+	if err != nil || afterAnchor != beforeAnchor {
+		t.Fatalf("older-profile refusal changed authority event prefix: before=%+v after=%+v err=%v", beforeAnchor, afterAnchor, err)
+	}
+	journal, err := wipdjournal.Open(filepath.Join(environment.profileRoot, "environment-journal"), wipdjournal.Identity{
+		RepoID: m5TestRepo, DomainID: m5TestDomain, AuthorityEpoch: 1,
+		EnvironmentID: m5TestEnv, OwnerRootSPKI: fixture.profile.OwnerRootSPKI(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := journal.InstallSnapshot(ctx)
+	closeErr := journal.Close()
+	if err != nil || closeErr != nil || installed.Anchor.EventCount != 0 || len(installed.Receipts) != 0 || len(installed.NamedBatches) != 0 {
+		t.Fatalf("older-profile refusal changed Environment install/projection: snapshot=%+v err=%v close=%v", installed, err, closeErr)
+	}
+	gotSentinel, err := os.ReadFile(legacyPath)
+	if err != nil || !bytes.Equal(gotSentinel, legacySentinel) {
+		t.Fatalf("older-profile refusal mutated the legacy-store sentinel: got=%q err=%v", gotSentinel, err)
+	}
 }
