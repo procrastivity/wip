@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,10 +27,40 @@ import (
 )
 
 const (
-	step10VerifierBaseRevision = "aa21e333b6000195d867b4f164fdb18159fb8c3b"
-	step10VerifierModelPin     = "sha256:77fb90f96d7a43cac041cb18fea8b27345e1b43b5b1b661b21cb04cb4ced8388"
-	step10VerifierWorkplanPin  = "sha256:8c4a01850a07a97bd71b19ccbed97853950226d6f82c846fbeea8b5d7ed3ca71"
+	step10VerifierBaseRevision        = "aa21e333b6000195d867b4f164fdb18159fb8c3b"
+	step10VerifierModelCommit         = "7caaf6e07f0b22d778f8431b37b2629a910b9b45"
+	step10VerifierWorkplanCommit      = "92d3bd5dbe9d39203f3722ba916c768002a133ae"
+	step10VerifierModelPin            = "sha256:77fb90f96d7a43cac041cb18fea8b27345e1b43b5b1b661b21cb04cb4ced8388"
+	step10VerifierWorkplanPin         = "sha256:8c4a01850a07a97bd71b19ccbed97853950226d6f82c846fbeea8b5d7ed3ca71"
+	step10VerifierInputManifest       = "manifest.json"
+	step10VerifierInputModel          = "MODEL.md"
+	step10VerifierInputWorkplan       = "step10-workplan.md"
+	step10VerifierInputManifestSchema = "wipd.step10-test-inputs/1"
 )
+
+//go:embed testdata/step10-adversarial-analysis-fixture.txt
+var step10VerifierAdversarialAnalysisFixture []byte
+
+const step10VerifierAdversarialAnalysisFixtureSHA256 = "sha256:fdb89734d33ab2dde1224128b282b741a269a948600db71f9786e5c3ba4b584e"
+
+type step10VerifierInputFilePin struct {
+	Commit           string `json:"commit"`
+	Path             string `json:"path"`
+	CISparseCheckout string `json:"ci_sparse_checkout"`
+	SHA256           string `json:"sha256"`
+}
+
+type step10VerifierInputManifestData struct {
+	Schema                 string                     `json:"schema"`
+	Repository             string                     `json:"repository"`
+	Preparation            string                     `json:"preparation"`
+	CICheckoutAction       string                     `json:"ci_checkout_action"`
+	CIFetchDepth           int                        `json:"ci_fetch_depth"`
+	CICredentialsPersisted bool                       `json:"ci_credentials_persisted"`
+	VerifierNetwork        string                     `json:"verifier_network"`
+	Model                  step10VerifierInputFilePin `json:"model"`
+	Workplan               step10VerifierInputFilePin `json:"workplan"`
+}
 
 type step10VerifierReviewInput struct {
 	Schema                  string   `json:"schema"`
@@ -110,15 +141,13 @@ func step10VerifierInputs(t *testing.T, environment m5ProcessEnvironment, identi
 ) ([]operation.BlobInput, string, string) {
 	t.Helper()
 	root := step10VerifierRepositoryRoot(t)
-	modelPath := filepath.Join(root, ".amp/wipd-run/packets/m6-step-10-implementation-01/implementation-01/contracts/MODEL.md")
-	workplanPath := filepath.Join(root, ".amp/wipd-run/packets/m6-step-10-implementation-01/implementation-01/contracts/step10-workplan.md")
-	reviewPath := filepath.Join(root, ".amp/in/artifacts/m6-step-10-correction-01-review.md")
-	model := step10ReadPinnedFile(t, modelPath, step10VerifierModelPin)
-	workplan := step10ReadPinnedFile(t, workplanPath, step10VerifierWorkplanPin)
-	reviewDocument, err := os.ReadFile(reviewPath)
-	if err != nil || len(reviewDocument) < 512 {
-		t.Fatalf("read substantive same-revision adversarial review %s: bytes=%d error=%v", reviewPath, len(reviewDocument), err)
+	model, workplan, sourceManifest := step10VerifierExternalInputs(t)
+	fixtureDigest := step10BlobDigest(step10VerifierAdversarialAnalysisFixture)
+	if fixtureDigest != step10VerifierAdversarialAnalysisFixtureSHA256 {
+		t.Fatalf("test-only adversarial analysis fixture digest=%s want=%s", fixtureDigest, step10VerifierAdversarialAnalysisFixtureSHA256)
 	}
+	analysis := string(bytes.TrimSpace(step10VerifierAdversarialAnalysisFixture)) +
+		"\n\nPinned external-input provenance (test fixture, not independent review evidence):\n" + string(sourceManifest)
 
 	files, candidateFiles := step10VerifierSnapshotFiles(t, root)
 	if substituteBaseline {
@@ -177,7 +206,7 @@ func step10VerifierInputs(t *testing.T, environment m5ProcessEnvironment, identi
 			"unsupported non-idempotent effects refuse before advertisement",
 			"integrate role-owned gates/sweep without ordinary CLI control-plane verbs",
 		},
-		AdversarialAnalysis: string(reviewDocument), Conclusion: "pass",
+		AdversarialAnalysis: analysis, Conclusion: "pass",
 		Findings: []struct {
 			ID         string `json:"id"`
 			Finding    string `json:"finding"`
@@ -214,9 +243,71 @@ func step10VerifierInputs(t *testing.T, environment m5ProcessEnvironment, identi
 		}
 		blobs = append(blobs, operation.BlobInput{Name: content.name, Digest: staged.Digest, Size: staged.Size})
 	}
-	t.Logf("D106 request pins candidate %s, manifest %s, snapshot %s, review %s",
-		candidateRevision, candidateManifestDigest, step10BlobDigest(snapshot), step10BlobDigest(reviewBytes))
+	t.Logf("D106 request pins candidate %s, manifest %s, snapshot %s, review %s, external-input provenance %s, test-only analysis fixture %s",
+		candidateRevision, candidateManifestDigest, step10BlobDigest(snapshot), step10BlobDigest(reviewBytes),
+		step10BlobDigest(sourceManifest), fixtureDigest)
 	return blobs, candidateRevision, candidateManifestDigest
+}
+
+func step10VerifierExternalInputs(t *testing.T) ([]byte, []byte, []byte) {
+	t.Helper()
+	inputDirectory := os.Getenv("WIPD_STEP10_VERIFIER_INPUTS")
+	if !filepath.IsAbs(inputDirectory) {
+		t.Fatalf("WIPD_STEP10_VERIFIER_INPUTS must name a prepared absolute input directory; run make prepare-step10-verifier-inputs first")
+	}
+	info, err := os.Lstat(inputDirectory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		t.Fatalf("prepared verifier input directory must be a private, non-symlink directory with mode 0700: path=%s info=%v error=%v",
+			inputDirectory, info, err)
+	}
+	entries, err := os.ReadDir(inputDirectory)
+	if err != nil {
+		t.Fatalf("read prepared verifier input directory %s: %v", inputDirectory, err)
+	}
+	wantNames := []string{step10VerifierInputModel, step10VerifierInputManifest, step10VerifierInputWorkplan}
+	if len(entries) != len(wantNames) {
+		t.Fatalf("prepared verifier input directory contains %d entries; want exactly %v", len(entries), wantNames)
+	}
+	for index, name := range wantNames {
+		if entries[index].Name() != name || entries[index].Type()&os.ModeSymlink != 0 {
+			t.Fatalf("prepared verifier input entry %d=%q; want regular %q", index, entries[index].Name(), name)
+		}
+		entryInfo, statErr := os.Lstat(filepath.Join(inputDirectory, name))
+		if statErr != nil || !entryInfo.Mode().IsRegular() {
+			t.Fatalf("prepared verifier input %q is not a regular file: info=%v error=%v", name, entryInfo, statErr)
+		}
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(inputDirectory, step10VerifierInputManifest))
+	if err != nil {
+		t.Fatalf("read prepared verifier source manifest: %v", err)
+	}
+	expectedManifest := step10VerifierInputManifestData{
+		Schema: step10VerifierInputManifestSchema, Repository: "https://github.com/simensen/wip-reboot",
+		Preparation: "detached-commit-checkouts-validated", CICredentialsPersisted: false,
+		CICheckoutAction: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", CIFetchDepth: 1,
+		VerifierNetwork: "denied",
+		Model: step10VerifierInputFilePin{
+			Commit: step10VerifierModelCommit, Path: "MODEL.md", CISparseCheckout: "MODEL.md",
+			SHA256: strings.TrimPrefix(step10VerifierModelPin, "sha256:"),
+		},
+		Workplan: step10VerifierInputFilePin{
+			Commit: step10VerifierWorkplanCommit, Path: "workplans/daemon-operation-parity-continuation.md",
+			CISparseCheckout: "workplans/daemon-operation-parity-continuation.md",
+			SHA256:           strings.TrimPrefix(step10VerifierWorkplanPin, "sha256:"),
+		},
+	}
+	canonicalManifest, err := json.Marshal(expectedManifest)
+	if err != nil {
+		t.Fatalf("encode expected prepared verifier source manifest: %v", err)
+	}
+	canonicalManifest = append(canonicalManifest, '\n')
+	if !bytes.Equal(manifest, canonicalManifest) {
+		t.Fatalf("prepared verifier source manifest differs from pinned source/config identity: got=%s want=%s", manifest, canonicalManifest)
+	}
+	model := step10ReadPinnedFile(t, filepath.Join(inputDirectory, step10VerifierInputModel), step10VerifierModelPin)
+	workplan := step10ReadPinnedFile(t, filepath.Join(inputDirectory, step10VerifierInputWorkplan), step10VerifierWorkplanPin)
+	return model, workplan, manifest
 }
 
 func step10VerifierRepositoryRoot(t *testing.T) string {
@@ -249,7 +340,7 @@ func step10VerifierSnapshotFiles(t *testing.T, root string) (map[string]step10Ve
 		t.Fatal("candidate source snapshot has no tracked files")
 	}
 	changedOutput := step10GitOutput(t, root, "diff", "--name-only", "-z", "--no-renames", step10VerifierBaseRevision, "--")
-	untrackedOutput := step10GitOutput(t, root, "ls-files", "--others", "--exclude-standard", "-z", "--", "internal")
+	untrackedOutput := step10GitOutput(t, root, "ls-files", "--others", "--exclude-standard", "-z", "--", "internal", "scripts", "docs")
 	changed := make(map[string]bool)
 	for _, path := range append(strings.Split(strings.TrimSuffix(string(changedOutput), "\x00"), "\x00"),
 		strings.Split(strings.TrimSuffix(string(untrackedOutput), "\x00"), "\x00")...) {

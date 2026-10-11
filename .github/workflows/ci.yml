@@ -31,8 +31,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the read-only external-source secret
+        env:
+          WIPD_STEP10_INPUT_TOKEN_CONFIGURED: ${{ secrets.WIP_REBOOT_READ_TOKEN != '' }}
+        run: |
+          if [[ "$WIPD_STEP10_INPUT_TOKEN_CONFIGURED" != "true" ]]; then
+            echo "::error::Missing Actions secret WIP_REBOOT_READ_TOKEN; configure the approved read-only simensen/wip-reboot credential."
+            exit 1
+          fi
+      - name: Checkout pinned Model source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: simensen/wip-reboot
+          ref: 7caaf6e07f0b22d778f8431b37b2629a910b9b45
+          token: ${{ secrets.WIP_REBOOT_READ_TOKEN }}
+          path: .step10-input-sources/model
+          sparse-checkout: MODEL.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Checkout pinned Workplan source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: simensen/wip-reboot
+          ref: 92d3bd5dbe9d39203f3722ba916c768002a133ae
+          token: ${{ secrets.WIP_REBOOT_READ_TOKEN }}
+          path: .step10-input-sources/workplan
+          sparse-checkout: workplans/daemon-operation-parity-continuation.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Prepare pinned Step 10 verifier inputs
+        run: |
+          make prepare-step10-verifier-inputs \
+            MODEL_SOURCE_DIR="$GITHUB_WORKSPACE/.step10-input-sources/model" \
+            WORKPLAN_SOURCE_DIR="$GITHUB_WORKSPACE/.step10-input-sources/workplan" \
+            STEP10_INPUT_DIR="$RUNNER_TEMP/wipd-step10-verifier-inputs"
       - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
-      - run: nix develop --command make test
+      - name: Run tests without checkout credentials
+        run: nix develop --command make test
+        env:
+          GOFLAGS: -timeout=45m -count=1
+          WIPD_STEP10_VERIFIER_INPUTS: ${{ runner.temp }}/wipd-step10-verifier-inputs
 
   nix-build:
     runs-on: ubuntu-latest
