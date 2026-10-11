@@ -30,6 +30,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/procrastivity/wip/internal/authoritystore"
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/schedulerhook"
 	"github.com/procrastivity/wip/internal/wipdauthority"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -708,17 +709,22 @@ func TestClaimGrantManifestPinsOnlyAcquiredMatterContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []wipdwire.EventRecord{{EventID: eventID, Record: acquired}}
+	evidenceBytes := []byte("validated hook evidence")
+	evidenceDigest := testDigest(evidenceBytes)
+	evidence := map[string]struct{}{evidenceDigest: {}}
 	manifest := []wipdwire.BlobManifestEntry{
 		{Digest: otherDigest, ByteLength: uint64(len(otherBytes)), Requirement: "lazy"},
 		{Digest: claimDigest, ByteLength: uint64(len(claimBytes)), Requirement: "pin-before-use"},
+		{Digest: evidenceDigest, ByteLength: uint64(len(evidenceBytes)), Requirement: "lazy"},
 	}
-	if err = validateClaimContentManifest(content, records, manifest); err != nil {
-		t.Fatalf("valid domain manifest with unrelated lazy content rejected: %v", err)
+	if err = validateClaimContentManifest(content, records, evidence, manifest); err != nil {
+		t.Fatalf("valid domain manifest with unrelated content and hook evidence rejected: %v", err)
 	}
 
 	for name, mutate := range map[string]func([]wipdwire.BlobManifestEntry){
 		"unrelated content marked required": func(entries []wipdwire.BlobManifestEntry) { entries[0].Requirement = "pin-before-use" },
 		"claimed content left lazy":         func(entries []wipdwire.BlobManifestEntry) { entries[1].Requirement = "lazy" },
+		"hook evidence marked required":     func(entries []wipdwire.BlobManifestEntry) { entries[2].Requirement = "pin-before-use" },
 		"unbacked digest": func(entries []wipdwire.BlobManifestEntry) {
 			entries[0].Digest = testDigest([]byte("not in accepted content"))
 		},
@@ -727,7 +733,7 @@ func TestClaimGrantManifestPinsOnlyAcquiredMatterContent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			candidate := append([]wipdwire.BlobManifestEntry(nil), manifest...)
 			mutate(candidate)
-			if err := validateClaimContentManifest(content, records, candidate); !errors.Is(err, ErrInvalidClientState) {
+			if err := validateClaimContentManifest(content, records, evidence, candidate); !errors.Is(err, ErrInvalidClientState) {
 				t.Fatalf("invalid claim-scoped manifest accepted: %v", err)
 			}
 		})
@@ -1200,6 +1206,79 @@ func TestLifecycleFoldAllowsIncompleteMatterFinishBeforeStepCompletion(t *testin
 	}
 	if _, _, _, err = foldEventRecords(closed[:len(closed)-1], domainID); !errors.Is(err, ErrInvalidClientState) {
 		t.Fatalf("unpaired acquired Dispatch close folded: %v", err)
+	}
+
+	commandID := fmt.Sprintf("%026d", 405)
+	inputDigest := testDigest([]byte("selected verifier hook input"))
+	evidenceDigest := testDigest([]byte("verified source evidence"))
+	typed := schedulerhook.TypedResult{
+		Kind: schedulerhook.KindWork, Version: 1,
+		Work: &schedulerhook.WorkResult{
+			Outcome: schedulerhook.WorkVerified, Revision: operation.SchedulerStep10VerifierRevision,
+			EvidenceRefs: []string{evidenceDigest},
+		},
+	}
+	resultDigest, err := schedulerhook.ResultDigest(schedulerhook.Key{DomainID: domainID, CommandID: commandID}, inputDigest, typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest := testDigest([]byte("candidate manifest"))
+	completionPayload := map[string]any{
+		"effect_key": map[string]any{"domain_id": domainID, "command_id": commandID},
+		"kind":       string(schedulerhook.KindWork), "version": uint64(1),
+		"input_digest": inputDigest, "typed_result": typed, "result_digest": resultDigest,
+		"source_revision": schedulerhook.SelectedSourceRevision{
+			ProtocolRevision:        operation.SchedulerStep10VerifierRevision,
+			BaseRevision:            "aa21e333b6000195d867b4f164fdb18159fb8c3b",
+			CandidateRevision:       "candidate-v1:" + strings.TrimPrefix(manifestDigest, "sha256:"),
+			CandidateManifestSHA256: manifestDigest,
+			CompleteTreeSHA256:      testDigest([]byte("complete tree")),
+			SnapshotSHA256:          testDigest([]byte("source snapshot")),
+		},
+	}
+	verifierCompletion := event(508, 405, 5, "scheduler.hook-completed", matterID, completionPayload)
+	verifierPrefix := append(append([]wipdwire.EventRecord(nil), records[:7]...), verifierCompletion)
+	if _, _, _, err = foldEventRecords(verifierPrefix, domainID); err != nil {
+		t.Fatalf("fold selected Verifier completion and authority-selected source revision: %v", err)
+	}
+	evidence, evidenceErr := schedulerHookEvidenceDigests(verifierPrefix, domainID)
+	if evidenceErr != nil || len(evidence) != 1 {
+		t.Fatalf("collect selected Verifier evidence: evidence=%v err=%v", evidence, evidenceErr)
+	}
+	if _, ok := evidence[evidenceDigest]; !ok {
+		t.Fatalf("selected Verifier evidence digest %q was not retained: %v", evidenceDigest, evidence)
+	}
+	for name, mutate := range map[string]func(map[string]any, map[string]any){
+		"missing source revision": func(payload, _ map[string]any) { delete(payload, "source_revision") },
+		"candidate revision substitution": func(_ map[string]any, source map[string]any) {
+			source["candidate_revision"] = "candidate-v1:" + strings.Repeat("0", 64)
+		},
+		"unknown source revision field": func(_ map[string]any, source map[string]any) { source["unreviewed"] = true },
+	} {
+		t.Run("verifier completion rejects "+name, func(t *testing.T) {
+			candidate := append([]wipdwire.EventRecord(nil), verifierPrefix...)
+			fields, decodeErr := wipdwire.DecodeCanonicalMap(candidate[len(candidate)-1].Record,
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			payload, ok := fields["payload"].(map[string]any)
+			if !ok {
+				t.Fatalf("hook completion payload has type %T", fields["payload"])
+			}
+			var source map[string]any
+			if payload["source_revision"] != nil {
+				source, _ = payload["source_revision"].(map[string]any)
+			}
+			mutate(payload, source)
+			candidate[len(candidate)-1].Record, decodeErr = wipdwire.EncodeCanonical(fields)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if _, _, _, foldErr := foldEventRecords(candidate, domainID); !errors.Is(foldErr, ErrInvalidClientState) {
+				t.Fatalf("invalid selected Verifier source revision folded: %v", foldErr)
+			}
+		})
 	}
 }
 

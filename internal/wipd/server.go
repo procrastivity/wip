@@ -385,6 +385,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.serveClaimAcquire(writer, request, hello, parameters, frame)
 		return
 	}
+	if frame.kind == schedulerResumeFrameKind {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveSchedulerResume(writer, request, hello, parameters, frame)
+		return
+	}
 	if frame.kind == batchSweepFrameKind {
 		<-s.preflightSlots
 		preflightOwned = false
@@ -471,6 +477,9 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 					}
 					if errors.Is(err, ErrOutcomeUnknown) {
 						return dispatchOutcome{problemCode: "transport.outcome-unknown"}
+					}
+					if errors.Is(err, ErrSchedulerRunHeld) {
+						return dispatchOutcome{problemCode: "run.lock-held"}
 					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						return dispatchOutcome{problemCode: "transport.outcome-unknown"}

@@ -78,7 +78,7 @@ func (app *m5LabHandler) serveClaimJournalAck(writer http.ResponseWriter, reques
 		})
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "debug authority claim-journal seal: %v\n", err)
+		fmt.Fprintf(os.Stderr, "debug authority claim-journal ack: %v\n", err)
 		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, claimJournalProblem(err))
 		return
 	}
@@ -140,6 +140,8 @@ func (app *m5LabHandler) currentClaimJournalIdentity(ctx context.Context, domain
 
 func claimJournalProblem(err error) string {
 	switch {
+	case errors.Is(err, authoritystore.ErrStep10OpenBracket):
+		return "claim.release-barrier-incomplete"
 	case errors.Is(err, authoritystore.ErrFenced), errors.Is(err, authoritystore.ErrInvalidProof):
 		return "auth.environment-domain-mismatch"
 	case errors.Is(err, authoritystore.ErrPending), errors.Is(err, authoritystore.ErrPrefixMismatch):

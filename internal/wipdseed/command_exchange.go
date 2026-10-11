@@ -147,6 +147,8 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		maxFrames = 2
 	case "receipt.query":
 		maxFrames = 1
+	case "scheduler.hook-result":
+		maxFrames = 2
 	case "batch.read":
 		maxFrames = 1
 	case "pull.request":
@@ -165,6 +167,9 @@ func (client *CommandExchangeClient) Exchange(ctx context.Context, kind string, 
 		return nil, ErrInvalidClientState
 	}
 	if kind == "batch.read" && !client.SupportsNamedBatchRead() {
+		return nil, errors.New("protocol.unsupported-extension")
+	}
+	if kind == "scheduler.hook-result" && !client.SupportsOperation(operation.SchedulerOrchestrateV1.Metadata().Operation) {
 		return nil, errors.New("protocol.unsupported-extension")
 	}
 	if kind == "command.submit" {

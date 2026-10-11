@@ -102,6 +102,18 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
 	}
+	if operation.Step10Operation(command.Request.Operation) {
+		return s.submitSchedulerHook(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
+	if operation.Step10RoleOperation(command.Request.Operation) {
+		return s.submitStep10Role(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
+	if operation.Step10RunResumeOperation(command.Request.Operation) {
+		return s.submitStep10RunResume(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
+	if operation.Step10RunFinishOperation(command.Request.Operation) {
+		return s.submitStep10RunFinish(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
 	if (command.Request.Operation != operation.MatterCreateV1.Metadata().Operation && command.Request.Operation != operation.StepCreateV1.Metadata().Operation &&
 		command.Request.Operation != operation.BatchCreateV1.Metadata().Operation) ||
 		command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
@@ -213,7 +225,7 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 	}
 	if before != nil {
 		if err = before(tx); err != nil {
-			return out, err
+			return out, fmt.Errorf("%w: command %s before-submit validation", err, c.id)
 		}
 	}
 	var member int
@@ -228,7 +240,7 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 		return out, err
 	}
 	if c.sequence != head+1 {
-		return out, ErrPending
+		return out, fmt.Errorf("%w: command %s sequence=%d head=%d", ErrPending, c.id, c.sequence, head)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO submissions(domain_id,command_id,request_hash,command,epoch,environment_id,environment_sequence,operation_name,operation_version,state) VALUES(?,?,?,?,?,?,?,?,?,'submitted')`, d.ID, c.id, c.hash, c.encoded, d.ActiveEpoch, c.environment, c.sequence, c.name, c.version); err != nil {
 		return out, writeError(err)
@@ -361,6 +373,35 @@ func (s *Store) RecoverCommand(ctx context.Context, command operation.Command, h
 	return owner, nil
 }
 
+// ReleasePendingCommandExecution relinquishes an admitted command whose
+// completion is intentionally owned by a later authenticated protocol phase.
+// The durable submission is untouched and can be claimed by RecoverCommand
+// after the result arrives or after this process restarts.
+func (s *Store) ReleasePendingCommandExecution(owner *Execution) error {
+	if owner == nil || owner.store != s {
+		return ErrNotOwner
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return errors.New("authoritystore: closed")
+	}
+	command := owner.command
+	key := ownerKey(command.AuthorityDomainID, command.ID)
+	if !s.owners[key] || s.executions[key] != owner || owner.completion != nil || owner.completionRunning {
+		return ErrNotOwner
+	}
+	var state, hash string
+	err := s.db.QueryRow(`SELECT state,request_hash FROM submissions WHERE domain_id=? AND command_id=?`,
+		command.AuthorityDomainID, command.ID).Scan(&state, &hash)
+	if err != nil || state != "submitted" || hash != owner.hash {
+		return ErrNotOwner
+	}
+	delete(s.owners, key)
+	delete(s.executions, key)
+	return nil
+}
+
 // ClaimPendingCommandCompletion safely claims an already-evaluated result for
 // another completion attempt. It retains the same execution owner and never
 // reruns the semantic handler.
@@ -394,6 +435,23 @@ func (s *Store) ClaimPendingCommandCompletion(command operation.Command, hash st
 	return owner, *owner.completion, true, nil
 }
 
+// ReleaseClaimedCommandCompletion relinquishes a result-completion claim when
+// a retried authenticated result does not match the exact retained completion.
+func (s *Store) ReleaseClaimedCommandCompletion(owner *Execution) error {
+	if owner == nil || owner.store != s {
+		return ErrNotOwner
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	command := owner.command
+	key := ownerKey(command.AuthorityDomainID, command.ID)
+	if !s.owners[key] || s.executions[key] != owner || owner.completion == nil || !owner.completionRunning {
+		return ErrNotOwner
+	}
+	owner.completionRunning = false
+	return nil
+}
+
 // Signer holds the restricted authority private key outside SQLite. It signs
 // exactly the artifact preimage; the store checks the resulting signature.
 type Signer func(context.Context, []byte) ([]byte, error)
@@ -420,7 +478,21 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 						if !ok {
 							definition, ok = namedBatchMembershipDefinition(cmd.Request.Operation)
 							if !ok {
-								return out, ErrInvalidProof
+								if operation.Step10Operation(cmd.Request.Operation) {
+									definition, ok = operation.SchedulerOrchestrateV1, true
+								} else if operation.Step10RoleOperation(cmd.Request.Operation) {
+									roleDefinition, roleOK := step10RoleDefinition(cmd.Request.Operation)
+									if !roleOK {
+										return out, ErrInvalidProof
+									}
+									definition = roleDefinition
+								} else if operation.Step10RunResumeOperation(cmd.Request.Operation) {
+									definition, ok = operation.SchedulerResumeV1, true
+								} else if operation.Step10RunFinishOperation(cmd.Request.Operation) {
+									definition, ok = operation.RunFinishV1, true
+								} else {
+									return out, ErrInvalidProof
+								}
 							}
 						}
 					}
@@ -432,9 +504,21 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	_, isGate := gateDefinition(cmd.Request.Operation)
 	_, isDependency := dependencyHistoryDefinition(cmd.Request.Operation)
 	_, isReference := referenceHistoryDefinition(cmd.Request.Operation)
-	if !isStep4 && !isGate && !isDependency && !isReference {
+	isStep10Hook := operation.Step10Operation(cmd.Request.Operation)
+	isStep10Role := operation.Step10RoleOperation(cmd.Request.Operation)
+	isStep10Run := operation.Step10RunOperation(cmd.Request.Operation)
+	isStep10 := isStep10Hook || isStep10Role || isStep10Run
+	if !isStep4 && !isGate && !isDependency && !isReference && !isStep10 {
 		if err := definition.ValidateResult(result); err != nil {
 			return out, err
+		}
+	} else if isStep10Hook {
+		if _, err := validateSchedulerHookResult(cmd, result); err != nil {
+			return out, err
+		}
+	} else if isStep10Role || isStep10Run {
+		if definition.ValidateResult(result) != nil || result.Code != operation.ResultSucceeded || result.Problem != nil {
+			return out, ErrInvalidProof
 		}
 	} else if result.Code != operation.ResultSucceeded || result.Problem != nil || (isDependency || isReference) && result.Output != nil {
 		return out, ErrInvalidProof
@@ -448,6 +532,28 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && !dependencyCommand && !referenceCommand && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) ||
 		result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
 		return out, ErrInvalidProof
+	}
+	if isStep10Hook {
+		input := cmd.Request.Input.(operation.SchedulerHookInput)
+		if subjectID != input.MatterID || len(additionalEventIDs) != 0 {
+			return out, ErrInvalidProof
+		}
+	} else if isStep10Role {
+		input := cmd.Request.Input.(operation.RoleLifecycleInput)
+		if subjectID != input.RoleID || len(additionalEventIDs) > 1 ||
+			cmd.Request.Operation == operation.RoleCloseV1.Metadata().Operation && len(additionalEventIDs) != 0 {
+			return out, ErrInvalidProof
+		}
+	} else if isStep10Run {
+		var runID string
+		if input, ok := cmd.Request.Input.(operation.RunFinishInput); ok {
+			runID = input.RunID
+		} else if input, ok := cmd.Request.Input.(operation.RunResumeInput); ok {
+			runID = input.RunID
+		}
+		if runID == "" || subjectID != runID || len(additionalEventIDs) != 0 {
+			return out, ErrInvalidProof
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -487,7 +593,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 		return out, ErrNotOwner
 	}
 	if cmd.EnvironmentSequence != head+1 {
-		return out, ErrPending
+		return out, fmt.Errorf("%w: completion %s sequence=%d head=%d", ErrPending, cmd.ID, cmd.EnvironmentSequence, head)
 	}
 	d, err := domainOwner(ctx, tx, cmd.AuthorityDomainID)
 	if err != nil {
@@ -552,7 +658,7 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 		case operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation,
 			operation.GateDismissV1.Metadata().Operation:
-			fold, foldErr := completeGateTx(ctx, tx, cmd, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
+			fold, foldErr := completeGateTx(ctx, tx, s.blobs, cmd, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
 				result, appendNonemptyEventIDs(eventID, additionalEventIDs), occurred)
 			if foldErr != nil {
 				return out, foldErr
@@ -603,6 +709,78 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			} else {
 				problem = string(result.Problem.Code)
 			}
+		case operation.SchedulerOrchestrateV1.Metadata().Operation:
+			input := cmd.Request.Input.(operation.SchedulerHookInput)
+			if err = validateSchedulerHookContextTx(ctx, tx, cmd, input); err != nil {
+				return out, err
+			}
+			hookResult, hookErr := validateSchedulerHookResult(cmd, result)
+			if hookErr != nil {
+				return out, hookErr
+			}
+			output, err = artifactEncoder.Marshal(result.Output)
+			if err != nil {
+				return out, err
+			}
+			payload := map[string]any{
+				"effect_key": map[string]any{"domain_id": hookResult.Key.DomainID, "command_id": hookResult.Key.CommandID},
+				"kind":       hookResult.Typed.Kind, "version": uint64(hookResult.Typed.Version),
+				"input_digest": hookResult.InputDigest, "typed_result": hookResult.Typed,
+				"result_digest": hookResult.ResultDigest,
+			}
+			if input.Kind == "work" && input.Role == "verifier" && input.Revision == operation.SchedulerStep10VerifierRevision {
+				selected, selectErr := selectStep10SourceRevisionTx(ctx, tx, s.blobs, d.ID, cmd)
+				if selectErr != nil {
+					return out, selectErr
+				}
+				payload["source_revision"] = selected
+			}
+			position, err = appendCommandEvent(ctx, tx,
+				eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
+				occurred, eventID, "scheduler.hook-completed", subjectID, payload)
+			if err != nil {
+				return out, err
+			}
+			if hookResult.Typed.Work != nil {
+				if err = retainSchedulerHookEvidenceTx(ctx, tx, s.blobs, d.ID, position, hookResult.Typed.Work.EvidenceRefs); err != nil {
+					return out, err
+				}
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)}
+		case operation.RoleSpawnV1.Metadata().Operation, operation.RoleCloseV1.Metadata().Operation:
+			fold, foldErr := completeStep10RoleTx(ctx, tx, cmd, eventIdentity{
+				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
+				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
+			}, result, subjectID, eventID, additionalEventIDs, occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result, subjectID = fold.result, fold.subject
+			position = fold.first.(uint64)
+			first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+		case operation.RunFinishV1.Metadata().Operation:
+			fold, foldErr := completeStep10RunFinishTx(ctx, tx, cmd, eventIdentity{
+				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
+				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
+			}, result, subjectID, eventID, occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result, subjectID = fold.result, fold.subject
+			position = fold.first.(uint64)
+			first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
+		case operation.SchedulerResumeV1.Metadata().Operation:
+			fold, foldErr := completeStep10RunResumeTx(ctx, tx, cmd, eventIdentity{
+				domain: d.ID, id: cmd.ID, hash: owner.hash, environment: cmd.EnvironmentID,
+				sequence: cmd.EnvironmentSequence, actedAt: cmd.ActedAt, repo: cmd.Request.Context.Repo,
+			}, result, subjectID, eventID, occurred)
+			if foldErr != nil {
+				return out, foldErr
+			}
+			result, subjectID = fold.result, fold.subject
+			position = fold.first.(uint64)
+			first, last, rangeValue, output = fold.first, fold.last, fold.rangeValue, fold.output
 		case operation.MatterCreateV1.Metadata().Operation:
 			input := cmd.Request.Input.(operation.MatterCreateInput)
 			got := result.Output.(operation.MatterCreateOutput)

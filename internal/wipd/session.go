@@ -213,7 +213,7 @@ func identitySchemaFor(id operation.ID) (string, bool) {
 		operation.BatchSweepAnonymousV1.Metadata().Operation, operation.BatchCreateV1.Metadata().Operation:
 		return identitySchemaV1, true
 	default:
-		if operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.NamedBatchMembershipOperation(id) {
+		if operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.Step10CapabilityOperation(id) || operation.NamedBatchMembershipOperation(id) {
 			return identitySchemaV1, true
 		}
 	}

@@ -68,6 +68,11 @@
             gnumake
             pre-commit
             shellcheck
+            git
+            bash
+            perl
+            iproute2
+            libcap
           ];
 
           shellHook = ''

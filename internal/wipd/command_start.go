@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sync"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/runlock"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
@@ -157,11 +159,15 @@ type ClaimJournalReleaseEnvironment interface {
 // the shared per-domain lane through return, pull, overlay installation, and
 // the caller's guard/write callback.
 type CommandStartCoordinator struct {
-	domainID    string
-	journal     *wipdjournal.Journal
-	lanes       *executionLanes
-	authority   CommandStartAuthority
-	environment CommandStartEnvironment
+	domainID          string
+	journal           *wipdjournal.Journal
+	lanes             *executionLanes
+	authority         CommandStartAuthority
+	environment       CommandStartEnvironment
+	runLockMu         sync.Mutex
+	runLocks          map[string]*runlock.Lock
+	schedulerContinue sync.Mutex
+	schedulerResumeMu sync.Mutex
 }
 
 // NewCommandStartCoordinator composes the connected command-start path with
@@ -174,6 +180,7 @@ func (server *Server) NewCommandStartCoordinator(domainID string, journal *wipdj
 	}
 	return &CommandStartCoordinator{
 		domainID: domainID, journal: journal, lanes: server.executionLanes, authority: authority, environment: environment,
+		runLocks: make(map[string]*runlock.Lock),
 	}, nil
 }
 
@@ -240,12 +247,86 @@ func (coordinator *CommandStartCoordinator) RunConnectedCanonicalTerminal(ctx co
 	if command.Request.Operation.Name == "gate.exemption.repair" {
 		return CommandStartResult{}, ErrCommandStartBlocked
 	}
+	runID, acquired, err := coordinator.retainSchedulerRun(command)
+	if err != nil {
+		return CommandStartResult{}, err
+	}
+	if command.Request.Operation == operation.RoleCloseV1.Metadata().Operation || operation.Step10RunResumeOperation(command.Request.Operation) ||
+		operation.Step10RunFinishOperation(command.Request.Operation) {
+		if err = coordinator.recoverSchedulerRun(ctx, runID); err != nil {
+			if acquired && !errors.Is(err, ErrOutcomeUnknown) {
+				coordinator.releaseSchedulerRun(runID)
+			}
+			return CommandStartResult{}, err
+		}
+	}
+	result, err := coordinator.runConnectedCanonicalTerminal(ctx, command, guardAndWrite)
+	if err != nil {
+		if acquired && !errors.Is(err, ErrOutcomeUnknown) {
+			coordinator.releaseSchedulerRun(runID)
+		}
+		return result, err
+	}
+	if result.Returned && result.ResultCode == operation.ResultSucceeded {
+		if command.Request.Operation == operation.SchedulerOrchestrateV1.Metadata().Operation {
+			if err = coordinator.continueSchedulerHook(ctx, result.Entry, result.SemanticResult); err != nil {
+				return CommandStartResult{}, fmt.Errorf("wipd: continue scheduler hook %s: %w", command.ID, err)
+			}
+		}
+		if operation.Step10RunFinishOperation(command.Request.Operation) {
+			coordinator.releaseSchedulerRun(runID)
+		}
+	}
+	return result, nil
+}
+
+func (coordinator *CommandStartCoordinator) runConnectedCanonicalTerminal(ctx context.Context, command operation.Command,
+	guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error,
+) (CommandStartResult, error) {
 	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
+		if err := coordinator.validateSchedulerHookPrefix(ctx, command); err != nil {
+			return wipdjournal.Entry{}, err
+		}
 		if err := coordinator.validateCanonicalClaimReadiness(ctx, command); err != nil {
 			return wipdjournal.Entry{}, err
 		}
 		return coordinator.journal.PrepareCanonicalCommand(command)
 	}, guardAndWrite, true)
+}
+
+func (coordinator *CommandStartCoordinator) validateSchedulerHookPrefix(ctx context.Context, command operation.Command) error {
+	if !operation.Step10Operation(command.Request.Operation) {
+		return nil
+	}
+	input, ok := command.Request.Input.(operation.SchedulerHookInput)
+	if !ok {
+		return ErrCommandStartIdentity
+	}
+	claimed := wipdwire.PrefixAnchor{
+		EventCount: input.InstalledPrefix.EventCount,
+		EventID:    input.InstalledPrefix.EventID,
+		Digest:     input.InstalledPrefix.Digest,
+	}
+	if prior, err := coordinator.journal.Get(command.ID); err == nil {
+		canonical, encodeErr := command.CanonicalBytes()
+		if encodeErr != nil || !bytes.Equal(prior.CanonicalBytes, canonical) {
+			return wipdjournal.ErrCommandIDConflict
+		}
+		if err = coordinator.journal.ValidateInstalledPrefix(ctx, claimed); err != nil {
+			return ErrCommandStartIdentity
+		}
+		return nil
+	} else if !errors.Is(err, wipdjournal.ErrNotFound) {
+		return err
+	}
+	installed, err := coordinator.journal.InstallSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if !sameCommandStartAnchor(installed.Anchor, claimed) {
+		return ErrCommandStartIdentity
+	}
+	return nil
 }
 
 func (coordinator *CommandStartCoordinator) validateCanonicalClaimReadiness(ctx context.Context, command operation.Command) error {
@@ -260,10 +341,37 @@ func (coordinator *CommandStartCoordinator) validateCanonicalClaimReadiness(ctx 
 			return err
 		}
 	}
-	if definition, ok := operationDefinition(command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
+	if entry, err := coordinator.journal.Get(command.ID); err == nil {
+		canonical, encodeErr := command.CanonicalBytes()
+		if encodeErr != nil || !bytes.Equal(entry.CanonicalBytes, canonical) {
+			return wipdjournal.ErrCommandIDConflict
+		}
+		installed, snapshotErr := coordinator.journal.InstallSnapshot(ctx)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		if receipt, ok := installed.Receipts[command.ID]; ok && receipt.RequestHash == entry.RequestHash &&
+			receipt.EnvironmentSeq == entry.EnvironmentSeq && receipt.JournalPosition == entry.JournalPosition &&
+			receipt.ResultCode == operation.ResultSucceeded {
+			// Exact, installed terminal success is recovery of the original
+			// identity, not a new use of a claim that may now be closed.
+			return nil
+		}
+	} else if !errors.Is(err, wipdjournal.ErrNotFound) {
+		return err
+	}
+	if exactConnectedClaimRequired(command) {
 		return coordinator.journal.ValidateCommandClaimReadiness(ctx, command.Request)
 	}
 	return nil
+}
+
+func exactConnectedClaimRequired(command operation.Command) bool {
+	if input, ok := command.Request.Input.(operation.SchedulerHookInput); ok && operation.Step10Operation(command.Request.Operation) {
+		return input.Kind == "work" || input.Kind == "plan"
+	}
+	definition, ok := operationDefinition(command.Request.Operation)
+	return ok && definition.Metadata().Claim == operation.ClaimExact
 }
 
 func (coordinator *CommandStartCoordinator) runConnected(ctx context.Context, input wipdjournal.CommandInput, guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error, terminal bool) (CommandStartResult, error) {
@@ -423,7 +531,7 @@ func (coordinator *CommandStartCoordinator) runConnectedPrepared(ctx context.Con
 	if err = ctx.Err(); err != nil {
 		return empty, err
 	}
-	if definition, ok := operationDefinition(entry.Command.Request.Operation); ok && definition.Metadata().Claim == operation.ClaimExact {
+	if exactConnectedClaimRequired(entry.Command) {
 		if err = coordinator.journal.ValidateCommandClaimReadiness(ctx, entry.Command.Request); err != nil {
 			return empty, err
 		}
@@ -673,8 +781,11 @@ func validateConnectedCommand(entry wipdjournal.Entry) error {
 	metadata := definition.Metadata()
 	switch metadata.Claim {
 	case operation.ClaimNone:
-		if entry.Command.Request.Claim != nil {
+		if !operation.Step10Operation(entry.Command.Request.Operation) && entry.Command.Request.Claim != nil {
 			return fmt.Errorf("%w: claim supplied to an unclaimed operation", ErrCommandStartBlocked)
+		}
+		if operation.Step10Operation(entry.Command.Request.Operation) && exactConnectedClaimRequired(entry.Command) != (entry.Command.Request.Claim != nil) {
+			return fmt.Errorf("%w: scheduler hook claim does not match its kind", ErrCommandStartBlocked)
 		}
 	case operation.ClaimTargetSet:
 		if entry.Command.Request.Claim != nil || entry.Delivery != operation.DeliveryAuthority {
@@ -741,6 +852,11 @@ func operationDefinition(id operation.ID) (operation.Definition, bool) {
 func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) {
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
+	}
+	for _, definition := range operation.Step10Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
 	}
 	for _, definition := range operation.Step8HistoryCatalogue() {
 		if definition.Metadata().Operation == id {
@@ -836,12 +952,13 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				accepted["event_count"] != uint64(1) || accepted["first_event_id"] != accepted["last_event_id"] {
 				return "", ErrCommandStartIdentity
 			}
-		case operation.StepCreateV1.Metadata().Operation:
+		case operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation:
 			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
 			input, inputOK := entry.Command.Request.Input.(operation.StepCreateInput)
 			sortKey, sortOK := output["sort_key"].(uint64)
 			if outputErr != nil || !inputOK || !sortOK || sortKey == 0 || sortKey > math.MaxInt64 || !commandStartULID.MatchString(asCommandStartString(output["id"])) ||
-				output["parent_id"] != input.ParentID || output["matter_id"] != input.ParentID || output["title"] != input.Title || output["state"] != "planned" ||
+				output["parent_id"] != input.ParentID || !commandStartULID.MatchString(asCommandStartString(output["matter_id"])) ||
+				output["title"] != input.Title || output["state"] != "planned" ||
 				!commandStartStepLocator.MatchString(asCommandStartString(output["locator"])) {
 				return "", ErrCommandStartIdentity
 			}
@@ -862,6 +979,43 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			_, sealedOK := output["became_sealed"].(bool)
 			if outputErr != nil || !inputOK || output["matter_id"] != input.MatterID ||
 				output["state"] != "done" || !sealedOK {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.SchedulerOrchestrateV1.Metadata().Operation:
+			var output operation.SchedulerHookOutput
+			if wipdwire.DecodeCanonical(outputBytes, &output,
+				"kind", "version", "input_digest", "result_digest", "outcome", "revision", "evidence_refs", "problem_code", "steps", "handling") != nil ||
+				!hasRange || accepted["event_count"] != uint64(1) ||
+				operation.SchedulerOrchestrateV1.ValidateResult(operation.Result{Code: operation.ResultSucceeded, Output: output}) != nil {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.RoleSpawnV1.Metadata().Operation, operation.RoleCloseV1.Metadata().Operation:
+			output, outputErr := decodeRoleLifecycleOutput(outputBytes)
+			input, inputOK := entry.Command.Request.Input.(operation.RoleLifecycleInput)
+			count, countOK := accepted["event_count"].(uint64)
+			wantState := "open"
+			if entry.Command.Request.Operation == operation.RoleCloseV1.Metadata().Operation {
+				wantState = "closed"
+			}
+			if outputErr != nil || !inputOK || output.RunID != input.RunID || output.MatterID != input.MatterID ||
+				output.DispatchID != input.DispatchID || output.RoleID != input.RoleID || output.Role != input.Role ||
+				output.State != wantState || !hasRange || !countOK ||
+				(entry.Command.Request.Operation == operation.RoleCloseV1.Metadata().Operation && count != 1) ||
+				(entry.Command.Request.Operation == operation.RoleSpawnV1.Metadata().Operation && count != 1 && count != 2) {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.RunFinishV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")
+			input, inputOK := entry.Command.Request.Input.(operation.RunFinishInput)
+			if outputErr != nil || !inputOK || output["run_id"] != input.RunID || output["state"] != "finished" ||
+				!hasRange || accepted["event_count"] != uint64(1) {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.SchedulerResumeV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")
+			input, inputOK := entry.Command.Request.Input.(operation.RunResumeInput)
+			if outputErr != nil || !inputOK || output["run_id"] != input.RunID || output["state"] != "resumed" ||
+				!hasRange || accepted["event_count"] != uint64(1) {
 				return "", ErrCommandStartIdentity
 			}
 		case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
@@ -989,6 +1143,19 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 	var output map[string]any
 	var typed operation.Output
 	switch entry.Command.Request.Operation {
+	case operation.SchedulerOrchestrateV1.Metadata().Operation:
+		var hook operation.SchedulerHookOutput
+		if err = wipdwire.DecodeCanonical(outputBytes, &hook,
+			"kind", "version", "input_digest", "result_digest", "outcome", "revision", "evidence_refs", "problem_code", "steps", "handling"); err != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = hook
+	case operation.RoleSpawnV1.Metadata().Operation, operation.RoleCloseV1.Metadata().Operation:
+		role, decodeErr := decodeRoleLifecycleOutput(outputBytes)
+		if decodeErr != nil {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = role
 	case operation.MatterCreateV1.Metadata().Operation:
 		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "id", "locator", "title")
 		if err != nil {
@@ -1017,7 +1184,7 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 			return operation.Result{}, ErrCommandStartIdentity
 		}
 		typed = operation.BatchDismissOutput{BatchID: asCommandStartString(output["batch_id"])}
-	case operation.StepCreateV1.Metadata().Operation:
+	case operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation:
 		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
 		if err != nil {
 			return operation.Result{}, ErrCommandStartIdentity
@@ -1052,6 +1219,20 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		typed = operation.MatterFinishOutput{
 			MatterID: asCommandStartString(output["matter_id"]), State: asCommandStartString(output["state"]), BecameSealed: sealed,
 		}
+	case operation.RunFinishV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")
+		input, inputOK := entry.Command.Request.Input.(operation.RunFinishInput)
+		if err != nil || !inputOK || output["run_id"] != input.RunID || output["state"] != "finished" {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.RunFinishOutput{RunID: asCommandStartString(output["run_id"]), State: asCommandStartString(output["state"])}
+	case operation.SchedulerResumeV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")
+		input, inputOK := entry.Command.Request.Input.(operation.RunResumeInput)
+		if err != nil || !inputOK || output["run_id"] != input.RunID || output["state"] != "resumed" {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.RunResumeOutput{RunID: asCommandStartString(output["run_id"]), State: asCommandStartString(output["state"])}
 	case operation.ContentWriteOnceV1.Metadata().Operation, operation.FindingAppendV1.Metadata().Operation:
 		content, decodeErr := decodeCommandContentOutput(entry, outputBytes)
 		if decodeErr != nil {

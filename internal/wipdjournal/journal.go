@@ -700,6 +700,11 @@ func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
 	if definition, known := step8Definition(id); known {
 		return definition, true
 	}
+	for _, definition := range operation.Step10Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
 	}

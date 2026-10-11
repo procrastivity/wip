@@ -20,6 +20,8 @@ func targetClaimsForInput(input operation.Input) []operation.TargetClaim {
 		return input.TargetClaims
 	case operation.ReferenceRebindV2Input:
 		return input.TargetClaims
+	case operation.SchedulerHookInput:
+		return input.TargetClaims
 	default:
 		return nil
 	}

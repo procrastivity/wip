@@ -196,6 +196,24 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 			t.Fatalf("%s is not isolated to explicit m6-step9b", id)
 		}
 	}
+	step10, err := registryForConfig(Config{CommandCatalogue: "m6-step10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.CommandCatalogue = "m6-step10"
+	if err = validateConfig(config); err != nil {
+		t.Fatalf("rejected explicit Step 10 profile: %v", err)
+	}
+	if len(step10.Definitions()) != len(step9b.Definitions())+len(operation.Step10Catalogue()) {
+		t.Fatal("Step 10 widened beyond its isolated scheduler and lifecycle capabilities")
+	}
+	for _, definition := range operation.Step10Catalogue() {
+		id := definition.Metadata().Operation
+		if hasCommand(m5, id) || hasCommand(m6, id) || hasCommand(step7, id) || hasCommand(step8, id) ||
+			hasCommand(step9a, id) || hasCommand(step9b, id) || !hasCommand(step10, id) {
+			t.Fatalf("%s is not isolated to explicit m6-step10", id)
+		}
+	}
 }
 
 func hasCommand(registry *operation.Registry, command operation.ID) bool {

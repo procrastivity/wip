@@ -220,6 +220,24 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 		writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Kind: "command.terminal", Payload: status.Receipt})
 		return
 	}
+	if operation.Step10Operation(command.Request.Operation) {
+		if status.Owner != nil {
+			if err = app.store.ReleasePendingCommandExecution(status.Owner); err != nil {
+				writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+				return
+			}
+		}
+		accepted, encodeErr := wipdwire.EncodeCanonical(wipdwire.SubmissionAccepted{
+			Schema: "wipd.submission-accepted/1", DomainID: command.AuthorityDomainID,
+			Epoch: command.ExpectedAuthorityEpoch, CommandID: command.ID, RequestHash: submit.RequestHash,
+		})
+		if encodeErr != nil {
+			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+			return
+		}
+		writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Kind: "submission.accepted", Payload: accepted})
+		return
+	}
 	owner := status.Owner
 	var completion *authoritystore.CommandCompletion
 	if owner == nil && !repair {
@@ -460,6 +478,27 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 		}
 		return app.completeContinuation(owner, completion)
 	}
+	if app.m6 && operation.Step10RoleOperation(command.Request.Operation) {
+		completion, err := app.step10RoleCompletion(command)
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, completion)
+	}
+	if app.m6 && operation.Step10RunResumeOperation(command.Request.Operation) {
+		completion, err := app.step10RunResumeCompletion(command)
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, completion)
+	}
+	if app.m6 && operation.Step10RunFinishOperation(command.Request.Operation) {
+		completion, err := app.step10RunFinishCompletion(command)
+		if err != nil {
+			return nil, err
+		}
+		return app.completeContinuation(owner, completion)
+	}
 	switch input := command.Request.Input.(type) {
 	case operation.GateDeclareInput, operation.GateCloseInput, operation.GateDismissInput:
 		subject := command.Request.Context.Repo
@@ -654,6 +693,71 @@ func (app *m5LabHandler) step4Completion(command operation.Command) (authorityst
 		completion.AdditionalEventIDs = []string{additional}
 	}
 	return completion, nil
+}
+
+func (app *m5LabHandler) step10RoleCompletion(command operation.Command) (authoritystore.CommandCompletion, error) {
+	input, ok := command.Request.Input.(operation.RoleLifecycleInput)
+	if !ok || !operation.Step10RoleOperation(command.Request.Operation) {
+		return authoritystore.CommandCompletion{}, authoritystore.ErrInvalidProof
+	}
+	now := time.Now().UTC()
+	eventID, err := randomULID(now)
+	if err != nil {
+		return authoritystore.CommandCompletion{}, err
+	}
+	output := operation.RoleLifecycleOutput{
+		RunID: input.RunID, MatterID: input.MatterID, DispatchID: input.DispatchID,
+		RoleID: input.RoleID, Role: input.Role,
+	}
+	completion := authoritystore.CommandCompletion{
+		Result:    operation.Result{Code: operation.ResultSucceeded, Output: output},
+		SubjectID: input.RoleID, EventID: eventID, Occurred: now,
+	}
+	if command.Request.Operation == operation.RoleSpawnV1.Metadata().Operation {
+		additional, idErr := randomULID(now.Add(time.Millisecond))
+		if idErr != nil {
+			return authoritystore.CommandCompletion{}, idErr
+		}
+		completion.AdditionalEventIDs = []string{additional}
+		output.State = "open"
+		completion.Result = operation.Result{Code: operation.ResultSucceeded, Output: output}
+	} else {
+		output.State = "closed"
+		completion.Result = operation.Result{Code: operation.ResultSucceeded, Output: output}
+	}
+	return completion, nil
+}
+
+func (app *m5LabHandler) step10RunFinishCompletion(command operation.Command) (authoritystore.CommandCompletion, error) {
+	input, ok := command.Request.Input.(operation.RunFinishInput)
+	if !ok || !operation.Step10RunOperation(command.Request.Operation) {
+		return authoritystore.CommandCompletion{}, authoritystore.ErrInvalidProof
+	}
+	now := time.Now().UTC()
+	eventID, err := randomULID(now)
+	if err != nil {
+		return authoritystore.CommandCompletion{}, err
+	}
+	return authoritystore.CommandCompletion{
+		Result:    operation.Result{Code: operation.ResultSucceeded, Output: operation.RunFinishOutput{RunID: input.RunID, State: "finished"}},
+		SubjectID: input.RunID, EventID: eventID, Occurred: now,
+	}, nil
+}
+
+func (app *m5LabHandler) step10RunResumeCompletion(command operation.Command) (authoritystore.CommandCompletion, error) {
+	input, ok := command.Request.Input.(operation.RunResumeInput)
+	if !ok || !operation.Step10RunResumeOperation(command.Request.Operation) {
+		return authoritystore.CommandCompletion{}, authoritystore.ErrInvalidProof
+	}
+	now := time.Now().UTC()
+	eventID, err := randomULID(now)
+	if err != nil {
+		return authoritystore.CommandCompletion{}, err
+	}
+	return authoritystore.CommandCompletion{
+		Result:    operation.Result{Code: operation.ResultSucceeded, Output: operation.RunResumeOutput{RunID: input.RunID, State: "resumed"}},
+		SubjectID: input.RunID, EventID: eventID, Occurred: now,
+	}, nil
 }
 
 func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {

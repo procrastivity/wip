@@ -120,6 +120,35 @@ func NewM6Step9CRegistry() (*operation.Registry, error) {
 	return NewM6Step9BRegistry()
 }
 
+// NewM6Step10Registry explicitly adds the isolated engine-only scheduler hook
+// capability to the preserved Step 9C surface. The connected profile selects
+// it only when the owner opts into m6-step10.
+func NewM6Step10Registry() (*operation.Registry, error) {
+	registry, err := NewM6Step9CRegistry()
+	if err != nil {
+		return nil, err
+	}
+	if err = registry.Register(operation.SchedulerOrchestrateV1, func(context.Context, operation.Request) operation.Result {
+		return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+			Code: operation.ProblemExecutionFailed, Message: "scheduler hook result requires its authenticated split-phase receiver",
+		}}
+	}); err != nil {
+		return nil, err
+	}
+	for _, definition := range []operation.Definition{
+		operation.RoleSpawnV1, operation.RoleCloseV1, operation.SchedulerResumeV1, operation.RunFinishV1,
+	} {
+		if err = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "scheduler lifecycle requires its authenticated authority transaction",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
+}
+
 func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {

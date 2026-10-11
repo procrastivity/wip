@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,12 +185,13 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "batch.created" &&
 			fields["kind"] != "batch.joined" && fields["kind"] != "batch.left" && fields["kind"] != "batch.dismissed" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
-			fields["kind"] != "dispatch.closed" &&
+			fields["kind"] != "dispatch.closed" && fields["kind"] != "run.started" && fields["kind"] != "run.resumed" && fields["kind"] != "run.finished" &&
+			fields["kind"] != "role.spawned" && fields["kind"] != "role.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
 			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended" &&
 			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
-			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" &&
+			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" && fields["kind"] != "scheduler.hook-completed" &&
 			fields["kind"] != "gate.declared" && fields["kind"] != "gate.closed" && fields["kind"] != "gate.dismissed" && fields["kind"] != "gate.exemption-repaired" &&
 			!step8HistoryKind(asString(fields["kind"])) &&
 			!transferLifecycleEventKind(asString(fields["kind"]))) ||
@@ -301,6 +303,29 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "dispatch_id", "claim_id", "claim_epoch") &&
 			transferULID.MatchString(dispatchID) && fields["subject_id"] == dispatchID &&
 			transferULID.MatchString(asString(payload["claim_id"])) && epochOK && claimEpoch > 0
+	case "run.started":
+		batchID, batchOK := payload["batch"].(string)
+		locator, locatorOK := payload["locator"].(string)
+		matters, mattersOK := payload["matters"].([]any)
+		if !wipdwire.ExactMapKeys(payload, "batch", "locator", "matters") || !transferULID.MatchString(asString(fields["subject_id"])) ||
+			!batchOK || !transferULID.MatchString(batchID) || !locatorOK || !transferMatterLocator.MatchString(locator) || !mattersOK || len(matters) == 0 {
+			return false
+		}
+		previous := ""
+		for _, value := range matters {
+			matterID := asString(value)
+			if !transferULID.MatchString(matterID) || previous != "" && previous >= matterID {
+				return false
+			}
+			previous = matterID
+		}
+		return true
+	case "run.finished":
+		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+	case "run.resumed":
+		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+	case "role.spawned", "role.closed":
+		return validStep10RoleEvent(kind, asString(fields["subject_id"]), payload)
 	case "matter.created":
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&
@@ -388,6 +413,117 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			transferULID.MatchString(contentID) && transferULID.MatchString(asString(fields["subject_id"])) &&
 			fields["kind"] == wantKind && kindOK && payload["bytes"] == nil && lengthOK && length <= uint64(maxBlobSize) &&
 			transferHash.MatchString(digest) && transferHash.MatchString("sha256:"+sha) && digest == "sha256:"+sha
+	case "scheduler.hook-completed":
+		effectKey, keyOK := payload["effect_key"].(map[string]any)
+		version, versionOK := payload["version"].(uint64)
+		kind := asString(payload["kind"])
+		if !wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest") &&
+			!wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest", "source_revision") ||
+			!keyOK || !wipdwire.ExactMapKeys(effectKey, "domain_id", "command_id") ||
+			effectKey["domain_id"] != domainID || effectKey["command_id"] != fields["command_id"] ||
+			(kind != "work" && kind != "plan" && kind != "ask") || !versionOK || version != 1 ||
+			!transferHash.MatchString(asString(payload["input_digest"])) || !transferHash.MatchString(asString(payload["result_digest"])) ||
+			!transferULID.MatchString(asString(fields["subject_id"])) || !validSchedulerHookTypedResult(payload["typed_result"], kind) {
+			return false
+		}
+		result, resultOK := payload["typed_result"].(map[string]any)
+		work, workOK := result["work"].(map[string]any)
+		revision := asString(work["revision"])
+		selectedVerifier := resultOK && kind == "work" && workOK && revision == operation.SchedulerStep10VerifierRevision
+		sourceRevision, hasSourceRevision := payload["source_revision"]
+		return selectedVerifier == hasSourceRevision && (!selectedVerifier || validSelectedVerifierSourceRevision(sourceRevision, revision))
+	default:
+		return false
+	}
+}
+
+func validSelectedVerifierSourceRevision(value any, protocolRevision string) bool {
+	fields, ok := value.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(fields, "protocol_revision", "base_revision", "candidate_revision", "candidate_manifest_sha256", "complete_tree_sha256", "snapshot_sha256") {
+		return false
+	}
+	protocol, protocolOK := fields["protocol_revision"].(string)
+	base, baseOK := fields["base_revision"].(string)
+	candidate, candidateOK := fields["candidate_revision"].(string)
+	manifest, manifestOK := fields["candidate_manifest_sha256"].(string)
+	completeTree, completeTreeOK := fields["complete_tree_sha256"].(string)
+	snapshot, snapshotOK := fields["snapshot_sha256"].(string)
+	return protocolOK && protocol == protocolRevision && baseOK && base != "" && candidateOK &&
+		manifestOK && transferHash.MatchString(manifest) && candidate == "candidate-v1:"+strings.TrimPrefix(manifest, "sha256:") &&
+		completeTreeOK && transferHash.MatchString(completeTree) && snapshotOK && transferHash.MatchString(snapshot)
+}
+
+func validStep10RoleEvent(kind, subject string, payload map[string]any) bool {
+	keys := []string{"run_id", "matter_id", "dispatch_id", "claim_id", "claim_epoch", "name"}
+	if kind == "role.closed" {
+		keys = append(keys, "reason")
+	}
+	epochText, epochOK := payload["claim_epoch"].(string)
+	epoch, epochErr := strconv.ParseUint(epochText, 10, 64)
+	name := asString(payload["name"])
+	if !wipdwire.ExactMapKeys(payload, keys...) || !transferULID.MatchString(subject) ||
+		!transferULID.MatchString(asString(payload["run_id"])) || !transferULID.MatchString(asString(payload["matter_id"])) ||
+		!transferULID.MatchString(asString(payload["dispatch_id"])) || !transferULID.MatchString(asString(payload["claim_id"])) ||
+		!epochOK || epochErr != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != epochText ||
+		(name != "orchestrator" && name != "coordinator" && name != "researcher" && name != "builder" && name != "verifier") {
+		return false
+	}
+	if kind == "role.closed" {
+		reason := asString(payload["reason"])
+		return reason == "completed" || reason == "reaped"
+	}
+	return true
+}
+
+func validSchedulerHookTypedResult(value any, kind string) bool {
+	result, ok := value.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "kind", "version", "work", "plan", "ask") ||
+		result["kind"] != kind || result["version"] != uint64(1) {
+		return false
+	}
+	switch kind {
+	case "work":
+		work, ok := result["work"].(map[string]any)
+		if !ok || result["plan"] != nil || result["ask"] != nil ||
+			!wipdwire.ExactMapKeys(work, "outcome", "revision", "evidence_refs", "problem_code") {
+			return false
+		}
+		outcome, revision, problem := asString(work["outcome"]), asString(work["revision"]), asString(work["problem_code"])
+		evidence, ok := work["evidence_refs"].([]any)
+		if !ok || revision == "" || (outcome != "completed" && outcome != "failed" && outcome != "verified" && outcome != "not-verified") ||
+			(outcome == "completed" || outcome == "verified") && problem != "" ||
+			(outcome == "failed" || outcome == "not-verified") && problem == "" {
+			return false
+		}
+		for _, ref := range evidence {
+			if !transferHash.MatchString(asString(ref)) {
+				return false
+			}
+		}
+		return true
+	case "plan":
+		plan, ok := result["plan"].(map[string]any)
+		if !ok || result["work"] != nil || result["ask"] != nil ||
+			!wipdwire.ExactMapKeys(plan, "outcome", "steps", "problem_code") {
+			return false
+		}
+		outcome, problem := asString(plan["outcome"]), asString(plan["problem_code"])
+		steps, ok := plan["steps"].([]any)
+		if !ok || len(steps) > 128 || (outcome != "planned" && outcome != "failed") ||
+			(outcome == "planned" && problem != "") || (outcome == "failed" && (problem == "" || len(steps) != 0)) {
+			return false
+		}
+		for _, value := range steps {
+			step, ok := value.(map[string]any)
+			if !ok || !wipdwire.ExactMapKeys(step, "title") || strings.TrimSpace(asString(step["title"])) == "" || len(asString(step["title"])) > 240 {
+				return false
+			}
+		}
+		return true
+	case "ask":
+		ask, ok := result["ask"].(map[string]any)
+		return ok && result["work"] == nil && result["plan"] == nil && wipdwire.ExactMapKeys(ask, "handling") &&
+			(asString(ask["handling"]) == "skip" || asString(ask["handling"]) == "halt")
 	default:
 		return false
 	}

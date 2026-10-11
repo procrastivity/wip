@@ -1493,10 +1493,14 @@ func commandStartReceipt(entry wipdjournal.Entry, code operation.ResultCode, eve
 		case operation.MatterCreateV1.Metadata().Operation:
 			input := entry.Command.Request.Input.(operation.MatterCreateInput)
 			output, _ = wipdwire.EncodeCanonical(map[string]any{"id": eventIDs[0], "locator": input.Locator, "title": input.Title})
-		case operation.StepCreateV1.Metadata().Operation:
+		case operation.StepCreateV1.Metadata().Operation, operation.StepCreateV2.Metadata().Operation:
 			input := entry.Command.Request.Input.(operation.StepCreateInput)
+			matterID := input.ParentID
+			if entry.Command.Request.Operation == operation.StepCreateV2.Metadata().Operation {
+				matterID = commandStartCommandPrefix + "43"
+			}
 			output, _ = wipdwire.EncodeCanonical(map[string]any{
-				"id": eventIDs[0], "parent_id": input.ParentID, "matter_id": input.ParentID,
+				"id": eventIDs[0], "parent_id": input.ParentID, "matter_id": matterID,
 				"locator": "step-01", "title": input.Title, "sort_key": int64(1000), "state": "planned",
 			})
 		case operation.StepStartV1.Metadata().Operation, operation.StepFinishV1.Metadata().Operation:
@@ -1633,6 +1637,59 @@ func TestConnectedLifecycleReceiptsValidateTypedOutputs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStepCreateV2ReceiptSeparatesStageParentFromMatter(t *testing.T) {
+	const (
+		stage  = commandStartCommandPrefix + "42"
+		matter = commandStartCommandPrefix + "43"
+		step   = commandStartCommandPrefix + "80"
+	)
+	claim := &operation.ClaimContext{ID: commandStartCommandPrefix + "3E", Epoch: "1"}
+	command := commandStartCanonicalCommand(commandStartCommandPrefix+"76", 1, "", commandStartCommandPrefix+"76",
+		operation.StepCreateV2.Metadata().Operation, operation.StepCreateInput{ParentID: stage, Title: "Child"}, claim)
+	command.Request.Context.Clone = commandStartCommandPrefix + "47"
+	command.Request.Context.Worktree = commandStartCommandPrefix + "48"
+	entry := wipdjournal.Entry{
+		Command: command, RequestHash: mustCommandStartHash(t, command), EnvironmentSeq: command.EnvironmentSequence,
+		JournalPosition: 1, Delivery: operation.DeliveryClaim, State: wipdjournal.StatePendingReturn,
+	}
+	receipt, err := commandStartReceipt(entry, operation.ResultSucceeded, []string{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := operation.StepCreateOutput{
+		ID: step, ParentID: stage, MatterID: matter, Locator: "step-01", Title: "Child", SortKey: 1000, State: "planned",
+	}
+	code, err := commandReceiptCode(entry, receipt)
+	result, resultErr := commandReceiptResult(entry, receipt)
+	if err != nil || resultErr != nil || code != operation.ResultSucceeded || result.Output != want {
+		t.Fatalf("StepCreateV2 receipt code=%s result=%+v err=%v resultErr=%v; want %+v", code, result, err, resultErr, want)
+	}
+
+	fields, err := wipdwire.DecodeCanonicalMap(receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultFields := fields["result"].(map[string]any)
+	outputFields, err := wipdwire.DecodeCanonicalMap(resultFields["output"].([]byte), "id", "parent_id", "matter_id", "locator", "title", "sort_key", "state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputFields["matter_id"] = "not-a-ulid"
+	resultFields["output"], err = wipdwire.EncodeCanonical(outputFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields["result"] = resultFields
+	malformed, err := wipdwire.EncodeCanonical(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = commandReceiptCode(entry, malformed); err == nil {
+		t.Fatal("accepted StepCreateV2 receipt with malformed Matter identity")
 	}
 }
 

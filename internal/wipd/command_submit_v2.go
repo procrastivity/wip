@@ -2,6 +2,7 @@ package wipd
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
@@ -68,10 +69,43 @@ func (coordinator *CommandStartCoordinator) RunConnectedCanonicalSubmission(ctx 
 	if submit.Schema != wipdwire.CommandSubmitV2Feature || !coordinator.supportsCommandSubmitV2() {
 		return CommandStartResult{}, errUnsupportedExtension
 	}
-	return coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
+	runID, acquired, err := coordinator.retainSchedulerRun(command)
+	if err != nil {
+		return CommandStartResult{}, err
+	}
+	if command.Request.Operation == operation.RoleCloseV1.Metadata().Operation || operation.Step10RunResumeOperation(command.Request.Operation) ||
+		operation.Step10RunFinishOperation(command.Request.Operation) {
+		if err = coordinator.recoverSchedulerRun(ctx, runID); err != nil {
+			if acquired && !errors.Is(err, ErrOutcomeUnknown) {
+				coordinator.releaseSchedulerRun(runID)
+			}
+			return CommandStartResult{}, err
+		}
+	}
+	result, err := coordinator.runConnectedPrepared(ctx, func() (wipdjournal.Entry, error) {
+		if err := coordinator.validateSchedulerHookPrefix(ctx, command); err != nil {
+			return wipdjournal.Entry{}, err
+		}
 		if err := coordinator.validateCanonicalClaimReadiness(ctx, command); err != nil {
 			return wipdjournal.Entry{}, err
 		}
 		return coordinator.journal.PrepareCanonicalSubmission(command, submit.Schema, submit.DetachedProof)
 	}, guardAndWrite, true)
+	if err != nil {
+		if acquired && !errors.Is(err, ErrOutcomeUnknown) {
+			coordinator.releaseSchedulerRun(runID)
+		}
+		return result, err
+	}
+	if result.Returned && result.ResultCode == operation.ResultSucceeded {
+		if command.Request.Operation == operation.SchedulerOrchestrateV1.Metadata().Operation {
+			if err = coordinator.continueSchedulerHook(ctx, result.Entry, result.SemanticResult); err != nil {
+				return CommandStartResult{}, err
+			}
+		}
+		if operation.Step10RunFinishOperation(command.Request.Operation) {
+			coordinator.releaseSchedulerRun(runID)
+		}
+	}
+	return result, nil
 }

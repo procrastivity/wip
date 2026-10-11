@@ -62,9 +62,14 @@ func TestOpenMigratesV8ResolvedClaimAcquireBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = journal.PrepareClaimAcquire(testCommandPrefix+"91", testCommandPrefix+"92", testCommandPrefix+"93",
-		testCommandPrefix+"94", testCommandPrefix+"95", "human", installed.Anchor); err != nil {
+	prepared, err := journal.PrepareClaimAcquire(testCommandPrefix+"91", testCommandPrefix+"92", testCommandPrefix+"93",
+		testCommandPrefix+"94", testCommandPrefix+"95", "human", installed.Anchor)
+	if err != nil {
 		t.Fatalf("claim-acquire barrier after migration: %v", err)
+	}
+	attempts, err := journal.ClaimAcquireAttempts()
+	if err != nil || len(attempts) != 1 || attempts[0].ID != prepared.ID || attempts[0].RequestHash != prepared.RequestHash {
+		t.Fatalf("enumerate retained claim-acquire identity: attempts=%+v error=%v", attempts, err)
 	}
 }
 

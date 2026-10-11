@@ -46,7 +46,13 @@ func (s *Store) submitStep4(ctx context.Context, command operation.Command, cano
 		if input, ok := command.Request.Input.(operation.StageCreateInput); ok {
 			return verifyStep4MatterClaim(ctx, tx, command, input.MatterID)
 		}
-		return validateStep4ClaimTx(ctx, tx, command)
+		if err := validateStep4ClaimTx(ctx, tx, command); err != nil {
+			return err
+		}
+		if input, ok := command.Request.Input.(operation.StepCreateInput); ok && command.Request.Actor == "role:scheduler" {
+			return validateSchedulerPlanStepTx(ctx, tx, command, input)
+		}
+		return nil
 	}
 	var beforeCommit func() error
 	if checkContext {
@@ -874,4 +880,163 @@ func step4OutputBytes(output any) ([]byte, error) {
 		return nil, ErrInvalidProof
 	}
 	return artifactEncoder.Marshal(value)
+}
+
+// validateSchedulerPlanStepTx binds authored Steps to their Plan and a single
+// correction Step to the exact negative Verifier result that requested it.
+func validateSchedulerPlanStepTx(ctx context.Context, tx *sql.Tx, command operation.Command, input operation.StepCreateInput) error {
+	planID := command.CausationCommandID
+	if planID == "" || command.CorrelationCommandID != planID || input.ParentID == "" {
+		return ErrInvalidProof
+	}
+	var raw []byte
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT command,state FROM submissions WHERE domain_id=? AND command_id=? AND operation_name='scheduler.orchestrate' AND operation_version=1`,
+		command.AuthorityDomainID, planID).Scan(&raw, &state); err != nil {
+		return ErrFenced
+	}
+	plan, err := operation.DecodeCanonicalCommand(raw)
+	if err != nil || plan.ID != planID {
+		return ErrInvalidStore
+	}
+	planInput, ok := plan.Request.Input.(operation.SchedulerHookInput)
+	if !ok || operation.SchedulerOrchestrateV1.ValidateRequest(plan.Request) != nil ||
+		plan.EnvironmentID != command.EnvironmentID || plan.Request.Context != command.Request.Context {
+		return ErrFenced
+	}
+	if planInput.Kind == "work" {
+		return validateSchedulerCorrectionStepTx(ctx, tx, command, input, planID, planInput, state)
+	}
+	if planInput.Kind != "plan" || planInput.MatterID != input.ParentID || state != "terminal" {
+		return ErrFenced
+	}
+	var receiptBytes []byte
+	if err = tx.QueryRowContext(ctx, `SELECT receipt FROM terminal_receipts WHERE domain_id=? AND command_id=?`, command.AuthorityDomainID, planID).Scan(&receiptBytes); err != nil {
+		return ErrPending
+	}
+	planReceipt, err := readReceipt(receiptBytes)
+	if err != nil || planReceipt.Result.Code != string(operation.ResultSucceeded) || planReceipt.Result.Problem != nil {
+		return ErrFenced
+	}
+	var output operation.SchedulerHookOutput
+	if artifactDecoder.Unmarshal(planReceipt.Result.Output, &output) != nil || output.Kind != "plan" || output.Outcome != "planned" ||
+		operation.SchedulerOrchestrateV1.ValidateResult(operation.Result{Code: operation.ResultSucceeded, Output: output}) != nil {
+		return ErrFenced
+	}
+	type priorBirth struct {
+		id, state string
+		command   operation.Command
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT command_id,command,state FROM submissions
+		WHERE domain_id=? AND environment_id=? AND operation_name='step.create' AND operation_version=2 ORDER BY environment_sequence`,
+		command.AuthorityDomainID, command.EnvironmentID)
+	if err != nil {
+		return err
+	}
+	var births []priorBirth
+	for rows.Next() {
+		var id, priorState string
+		var priorRaw []byte
+		if err = rows.Scan(&id, &priorRaw, &priorState); err != nil {
+			break
+		}
+		prior, decodeErr := operation.DecodeCanonicalCommand(priorRaw)
+		if decodeErr != nil {
+			err = ErrInvalidStore
+			break
+		}
+		if prior.CausationCommandID == planID {
+			births = append(births, priorBirth{id: id, state: priorState, command: prior})
+		}
+	}
+	err = errors.Join(err, rows.Err(), rows.Close())
+	if err != nil {
+		return err
+	}
+	for index, birth := range births {
+		if birth.id == command.ID {
+			continue
+		}
+		priorInput, valid := birth.command.Request.Input.(operation.StepCreateInput)
+		if !valid || birth.command.CausationCommandID != planID || birth.command.CorrelationCommandID != planID ||
+			birth.command.Request.Actor != "role:scheduler" || birth.command.Request.Context != command.Request.Context ||
+			priorInput.ParentID != input.ParentID || birth.state != "terminal" || index >= len(output.Steps) {
+			return ErrPending
+		}
+		var priorReceiptBytes []byte
+		if err = tx.QueryRowContext(ctx, `SELECT receipt FROM terminal_receipts WHERE domain_id=? AND command_id=?`, command.AuthorityDomainID, birth.id).Scan(&priorReceiptBytes); err != nil {
+			return ErrPending
+		}
+		priorReceipt, receiptErr := readReceipt(priorReceiptBytes)
+		var priorOutput map[string]any
+		outputErr := error(nil)
+		if receiptErr == nil {
+			outputErr = artifactDecoder.Unmarshal(priorReceipt.Result.Output, &priorOutput)
+		}
+		parentID, parentOK := priorOutput["parent_id"].(string)
+		title, titleOK := priorOutput["title"].(string)
+		state, stateOK := priorOutput["state"].(string)
+		if receiptErr != nil || priorReceipt.Result.Code != string(operation.ResultSucceeded) || priorReceipt.Result.Problem != nil || outputErr != nil ||
+			!parentOK || parentID != input.ParentID || !titleOK || title != output.Steps[index].Title || !stateOK || state != "planned" ||
+			priorInput.Title != output.Steps[index].Title {
+			return ErrFenced
+		}
+	}
+	if len(births) >= len(output.Steps) {
+		return ErrConflict
+	}
+	if input.Title != output.Steps[len(births)].Title {
+		return ErrConflict
+	}
+	return nil
+}
+
+func validateSchedulerCorrectionStepTx(ctx context.Context, tx *sql.Tx, command operation.Command,
+	input operation.StepCreateInput, verifierID string, verifierInput operation.SchedulerHookInput, verifierState string,
+) error {
+	if verifierInput.Role != "verifier" || verifierInput.MatterID != input.ParentID || verifierState != "terminal" ||
+		input.Title != "Correct verification findings" {
+		return ErrFenced
+	}
+	var receiptBytes []byte
+	if err := tx.QueryRowContext(ctx, `SELECT receipt FROM terminal_receipts WHERE domain_id=? AND command_id=?`,
+		command.AuthorityDomainID, verifierID).Scan(&receiptBytes); err != nil {
+		return ErrPending
+	}
+	verifierReceipt, err := readReceipt(receiptBytes)
+	if err != nil || verifierReceipt.Result.Code != string(operation.ResultSucceeded) || verifierReceipt.Result.Problem != nil {
+		return ErrFenced
+	}
+	var output operation.SchedulerHookOutput
+	if artifactDecoder.Unmarshal(verifierReceipt.Result.Output, &output) != nil || output.Kind != "work" || output.Outcome != "not-verified" ||
+		operation.SchedulerOrchestrateV1.ValidateResult(operation.Result{Code: operation.ResultSucceeded, Output: output}) != nil {
+		return ErrFenced
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT command_id,command FROM submissions
+		WHERE domain_id=? AND environment_id=? AND operation_name='step.create' AND operation_version=2 ORDER BY environment_sequence`,
+		command.AuthorityDomainID, command.EnvironmentID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err = rows.Scan(&id, &raw); err != nil {
+			break
+		}
+		prior, decodeErr := operation.DecodeCanonicalCommand(raw)
+		if decodeErr != nil {
+			err = ErrInvalidStore
+			break
+		}
+		if prior.CausationCommandID == verifierID && id != command.ID {
+			err = ErrConflict
+			break
+		}
+	}
+	err = errors.Join(err, rows.Err(), rows.Close())
+	if err != nil {
+		return err
+	}
+	return nil
 }

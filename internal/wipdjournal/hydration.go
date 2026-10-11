@@ -464,6 +464,11 @@ func installedClaimMatter(ctx context.Context, db *sql.DB, repoID string, input 
 	switch value := input.(type) {
 	case operation.MatterFinishInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
+	case operation.SchedulerHookInput:
+		if value.Kind != "work" && value.Kind != "plan" {
+			return "", false, nil
+		}
+		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.MatterLocatorRepairInput:
 		targetID, targetKinds[value.MatterID] = value.MatterID, true
 	case operation.NodeLifecycleInput:

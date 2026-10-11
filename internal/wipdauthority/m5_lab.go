@@ -63,7 +63,17 @@ type m5LabHandler struct {
 	operations     []operation.Definition
 	sign           authoritystore.Signer
 	m6             bool
+	step10         bool
 	namedBatchRead bool
+}
+
+func hasStep10Operation(operations []operation.Definition) bool {
+	for _, definition := range operations {
+		if operation.Step10CapabilityOperation(definition.Metadata().Operation) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewM5LabServer exposes the existing M2 enrollment and negotiated exchange
@@ -118,6 +128,7 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		}
 		step7SweepRegistered := false
 		step8Registered := false
+		step10Registered := false
 		batchCreateRegistered := false
 		batchMembershipCount := 0
 		for _, definition := range operations {
@@ -126,6 +137,9 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			}
 			if operation.Step8Operation(definition.Metadata().Operation) {
 				step8Registered = true
+			}
+			if operation.Step10CapabilityOperation(definition.Metadata().Operation) {
+				step10Registered = true
 			}
 			if definition.Metadata().Operation == operation.BatchCreateV1.Metadata().Operation {
 				batchCreateRegistered = true
@@ -143,6 +157,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				return nil, ErrInvalidLabConfig
 			}
 			maxOperations += len(operation.Step8Catalogue())
+		}
+		if step10Registered {
+			if !m6 || !step8Registered || !batchCreateRegistered || batchMembershipCount != len(operation.NamedBatchMembershipCatalogue()) {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations += len(operation.Step10Catalogue())
 		}
 		if batchCreateRegistered {
 			if !m6 || !step8Registered {
@@ -180,6 +200,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				continue
 			}
 			if m6 && operation.Step8Operation(id) {
+				continue
+			}
+			if m6 && operation.Step10CapabilityOperation(id) {
+				if !step10Registered || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
 				continue
 			}
 			if id == operation.BatchCreateV1.Metadata().Operation {
@@ -252,6 +278,13 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 					}
 				}
 			}
+			if step10Registered {
+				for _, definition := range operation.Step10Catalogue() {
+					if !registered[definition.Metadata().Operation] {
+						return nil, ErrInvalidLabConfig
+					}
+				}
+			}
 		}
 		if len(certificate.Certificate) == 0 {
 			return nil, ErrInvalidLabConfig
@@ -290,7 +323,7 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
 		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6, namedBatchRead: config.NamedBatchRead,
-		registry: config.Registry, operations: operations, sign: config.SignArtifact,
+		registry: config.Registry, operations: operations, sign: config.SignArtifact, step10: hasStep10Operation(operations),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", serveHealth)
@@ -481,6 +514,13 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 			return
 		}
 		app.serveCommandSubmit(writer, request, body, frame, environment)
+		return
+	case "scheduler.hook-result":
+		if !app.step10 {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveSchedulerHookResult(writer, request, body, frame, environment)
 		return
 	case "receipt.query":
 		if app.registry == nil {

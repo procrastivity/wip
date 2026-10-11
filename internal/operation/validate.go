@@ -35,7 +35,8 @@ func (d Definition) ValidateRequest(request Request) error {
 			return fmt.Errorf("required %s context is empty", dimension)
 		}
 	}
-	if d.metadata.Claim == ClaimExact || d.metadata.Claim == ClaimImplicitBirth {
+	if d.metadata.Claim == ClaimExact || d.metadata.Claim == ClaimImplicitBirth ||
+		Step10Operation(d.metadata.Operation) && request.Claim != nil {
 		if request.Claim == nil || request.Claim.ID == "" || request.Claim.Epoch == "" {
 			return fmt.Errorf("operation requires an exact claim ID and epoch")
 		}
@@ -52,6 +53,22 @@ func (d Definition) ValidateRequest(request Request) error {
 		}
 	}
 	switch input := request.Input.(type) {
+	case SchedulerHookInput:
+		if err := validateSchedulerHookInput(input, request); err != nil {
+			return err
+		}
+	case RoleLifecycleInput:
+		if err := validateRoleLifecycleRequest(d.metadata.Operation, input, request); err != nil {
+			return err
+		}
+	case RunFinishInput:
+		if err := validateRunFinishRequest(input, request); err != nil {
+			return err
+		}
+	case RunResumeInput:
+		if err := validateRunResumeRequest(input, request); err != nil {
+			return err
+		}
 	case StepLifecycleInput:
 		if err := validateULID("Step ID", input.StepID); err != nil {
 			return err
@@ -455,6 +472,28 @@ func (d Definition) ValidateResult(result Result) error {
 				d.metadata.Operation == ContentWriteOnceV1.Metadata().Operation && output.Kind == "findings" ||
 				d.metadata.Operation == FindingAppendV1.Metadata().Operation && output.Kind != "findings" {
 				return fmt.Errorf("content output has invalid identity, kind, or staged-blob metadata")
+			}
+		case SchedulerHookOutput:
+			if err := validateSchedulerHookOutput(output); err != nil {
+				return err
+			}
+		case RoleLifecycleOutput:
+			wantState := "open"
+			if d.metadata.Operation == RoleCloseV1.Metadata().Operation {
+				wantState = "closed"
+			}
+			if validateULID("Run output ID", output.RunID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
+				validateULID("Dispatch output ID", output.DispatchID) != nil || validateULID("Role output ID", output.RoleID) != nil ||
+				output.Role == "" || output.State != wantState {
+				return fmt.Errorf("role lifecycle output has invalid identity or state")
+			}
+		case RunFinishOutput:
+			if validateULID("Run output ID", output.RunID) != nil || output.State != "finished" {
+				return fmt.Errorf("run finish output has invalid identity or state")
+			}
+		case RunResumeOutput:
+			if validateULID("Run output ID", output.RunID) != nil || output.State != "resumed" {
+				return fmt.Errorf("run resume output has invalid identity or state")
 			}
 		case MatterCreateV2Output:
 			if validateULID("Matter output ID", output.ID) != nil || output.Title == "" ||

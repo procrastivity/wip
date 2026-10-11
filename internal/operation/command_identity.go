@@ -201,6 +201,16 @@ func (command Command) canonicalValue() (canonicalMap, error) {
 
 func commandIdentityDefinition(id ID) (Definition, bool) {
 	switch id {
+	case SchedulerOrchestrateV1.Metadata().Operation:
+		return SchedulerOrchestrateV1, true
+	case RoleSpawnV1.Metadata().Operation:
+		return RoleSpawnV1, true
+	case RoleCloseV1.Metadata().Operation:
+		return RoleCloseV1, true
+	case RunFinishV1.Metadata().Operation:
+		return RunFinishV1, true
+	case SchedulerResumeV1.Metadata().Operation:
+		return SchedulerResumeV1, true
 	case BatchSweepAnonymousV1.Metadata().Operation:
 		return BatchSweepAnonymousV1, true
 	case BatchCreateV1.Metadata().Operation:
@@ -316,6 +326,32 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"matter_id": input.MatterID, "from": input.From, "to": input.To}, nil
 	case ReferenceRebindV2Input:
 		return canonicalMap{"matter_id": input.MatterID, "from": input.From, "to": input.To, "target_claims": canonicalTargetClaims(input.TargetClaims)}, nil
+	case SchedulerHookInput:
+		prefix := input.InstalledPrefix
+		return canonicalMap{
+			"kind": input.Kind, "version": input.Version,
+			"adapter_id": input.AdapterID, "adapter_version": input.AdapterVersion,
+			"run_id": input.RunID, "matter_id": input.MatterID, "target_id": input.TargetID, "target_kind": input.TargetKind,
+			"role": input.Role, "role_id": nullableIdentity(input.RoleID),
+			"dispatch_id": nullableIdentity(input.DispatchID), "revision": input.Revision,
+			"reason": input.Reason, "contention": input.Contention,
+			"blocked": input.Blocked, "failed": input.Failed,
+			"target_claims": canonicalTargetClaims(input.TargetClaims),
+			"installed_prefix_anchor": canonicalMap{
+				"event_count": prefix.EventCount,
+				"event_id":    nullableStringPointer(prefix.EventID), "digest": prefix.Digest,
+			},
+		}, nil
+	case RoleLifecycleInput:
+		return canonicalMap{
+			"run_id": input.RunID, "run_locator": input.RunLocator, "matter_id": input.MatterID,
+			"dispatch_id": input.DispatchID, "role_id": input.RoleID,
+			"role": input.Role, "reason": input.Reason,
+		}, nil
+	case RunFinishInput:
+		return canonicalMap{"run_id": input.RunID}, nil
+	case RunResumeInput:
+		return canonicalMap{"run_id": input.RunID, "run_locator": input.RunLocator}, nil
 	default:
 		return nil, fmt.Errorf("operation: input type %T has no canonical identity schema", input)
 	}

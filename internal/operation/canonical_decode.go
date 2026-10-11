@@ -201,6 +201,105 @@ func commandDecodeClaim(value any) (*ClaimContext, error) {
 
 func commandDecodeInput(id ID, value any) (Input, error) {
 	switch id {
+	case SchedulerOrchestrateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input",
+			"kind", "version", "adapter_id", "adapter_version", "run_id", "matter_id", "target_id", "target_kind",
+			"role", "role_id", "dispatch_id", "revision", "reason", "contention", "blocked", "failed",
+			"target_claims", "installed_prefix_anchor")
+		if err != nil {
+			return nil, err
+		}
+		var input SchedulerHookInput
+		if input.Kind, err = commandString(fields, "kind"); err != nil {
+			return nil, err
+		}
+		if input.Version, err = commandUint(fields, "version"); err != nil {
+			return nil, err
+		}
+		if input.AdapterID, err = commandString(fields, "adapter_id"); err != nil {
+			return nil, err
+		}
+		if input.AdapterVersion, err = commandUint(fields, "adapter_version"); err != nil {
+			return nil, err
+		}
+		if input.TargetKind, err = commandString(fields, "target_kind"); err != nil {
+			return nil, err
+		}
+		for key, target := range map[string]*string{
+			"run_id": &input.RunID, "matter_id": &input.MatterID, "target_id": &input.TargetID,
+			"role": &input.Role, "revision": &input.Revision, "reason": &input.Reason,
+			"contention": &input.Contention, "blocked": &input.Blocked, "failed": &input.Failed,
+		} {
+			if *target, err = commandString(fields, key); err != nil {
+				return nil, err
+			}
+		}
+		if input.RoleID, err = commandNullableString(fields, "role_id"); err != nil {
+			return nil, err
+		}
+		if input.DispatchID, err = commandNullableString(fields, "dispatch_id"); err != nil {
+			return nil, err
+		}
+		if input.TargetClaims, err = commandDecodeTargetClaims(fields["target_claims"]); err != nil {
+			return nil, err
+		}
+		prefix, err := commandMap(fields["installed_prefix_anchor"], "installed_prefix_anchor", "event_count", "event_id", "digest")
+		if err != nil {
+			return nil, err
+		}
+		if input.InstalledPrefix.EventCount, err = commandUint(prefix, "event_count"); err != nil {
+			return nil, err
+		}
+		eventID, err := commandNullableString(prefix, "event_id")
+		if err != nil {
+			return nil, err
+		}
+		if prefix["event_id"] != nil {
+			input.InstalledPrefix.EventID = &eventID
+		}
+		if input.InstalledPrefix.Digest, err = commandString(prefix, "digest"); err != nil {
+			return nil, err
+		}
+		return input, nil
+	case RoleSpawnV1.Metadata().Operation, RoleCloseV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id", "run_locator", "matter_id", "dispatch_id", "role_id", "role", "reason")
+		if err != nil {
+			return nil, err
+		}
+		var input RoleLifecycleInput
+		for key, target := range map[string]*string{
+			"run_id": &input.RunID, "run_locator": &input.RunLocator, "matter_id": &input.MatterID, "dispatch_id": &input.DispatchID,
+			"role_id": &input.RoleID, "role": &input.Role, "reason": &input.Reason,
+		} {
+			if *target, err = commandString(fields, key); err != nil {
+				return nil, err
+			}
+		}
+		return input, nil
+	case RunFinishV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id")
+		if err != nil {
+			return nil, err
+		}
+		runID, err := commandString(fields, "run_id")
+		if err != nil {
+			return nil, err
+		}
+		return RunFinishInput{RunID: runID}, nil
+	case SchedulerResumeV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id", "run_locator")
+		if err != nil {
+			return nil, err
+		}
+		runID, err := commandString(fields, "run_id")
+		if err != nil {
+			return nil, err
+		}
+		runLocator, err := commandString(fields, "run_locator")
+		if err != nil {
+			return nil, err
+		}
+		return RunResumeInput{RunID: runID, RunLocator: runLocator}, nil
 	case MatterCreateV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "title", "requested_locator")
 		if err != nil {

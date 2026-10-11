@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
 func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]byte, error) {
@@ -64,6 +65,18 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 				return nil, errMalformedMessage
 			}
 			output = map[string]any{"matter_id": matter.MatterID, "state": matter.State, "became_sealed": matter.BecameSealed}
+		case operation.RunFinishV1.Metadata().Operation:
+			run, ok := result.Output.(operation.RunFinishOutput)
+			if !ok || !validRequestID(run.RunID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"run_id": run.RunID, "state": run.State}
+		case operation.SchedulerResumeV1.Metadata().Operation:
+			run, ok := result.Output.(operation.RunResumeOutput)
+			if !ok || !validRequestID(run.RunID) {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"run_id": run.RunID, "state": run.State}
 		case operation.BatchSweepAnonymousV1.Metadata().Operation:
 			sweep := result.Output.(operation.BatchSweepAnonymousOutput)
 			output = map[string]any{"outcome": string(sweep.Outcome)}
@@ -91,6 +104,53 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 			fields["output"] = encoded
 			return encodePayload(fields)
 		default:
+			if operation.Step10Operation(id) {
+				hook, ok := result.Output.(operation.SchedulerHookOutput)
+				if !ok {
+					return nil, errMalformedMessage
+				}
+				var steps []any
+				if hook.Steps != nil {
+					steps = make([]any, len(hook.Steps))
+					for index, step := range hook.Steps {
+						steps[index] = map[string]any{"title": step.Title}
+					}
+				}
+				var evidenceRefs []any
+				if hook.EvidenceRefs != nil {
+					evidenceRefs = make([]any, len(hook.EvidenceRefs))
+					for index, ref := range hook.EvidenceRefs {
+						evidenceRefs[index] = ref
+					}
+				}
+				encodedOutput, err := encodePayload(map[string]any{
+					"kind": hook.Kind, "version": hook.Version, "input_digest": hook.InputDigest,
+					"result_digest": hook.ResultDigest, "outcome": hook.Outcome, "revision": hook.Revision,
+					"evidence_refs": evidenceRefs, "problem_code": hook.ProblemCode,
+					"steps": steps, "handling": hook.Handling,
+				})
+				if err != nil {
+					return nil, err
+				}
+				fields["output"] = encodedOutput
+				return encodePayload(fields)
+			}
+			if operation.Step10RoleOperation(id) {
+				role, ok := result.Output.(operation.RoleLifecycleOutput)
+				if !ok || !validRequestID(role.RunID) || !validRequestID(role.MatterID) ||
+					!validRequestID(role.DispatchID) || !validRequestID(role.RoleID) {
+					return nil, errMalformedMessage
+				}
+				encodedOutput, err := encodePayload(map[string]any{
+					"run_id": role.RunID, "matter_id": role.MatterID, "dispatch_id": role.DispatchID,
+					"role_id": role.RoleID, "role": role.Role, "state": role.State,
+				})
+				if err != nil {
+					return nil, err
+				}
+				fields["output"] = encodedOutput
+				return encodePayload(fields)
+			}
 			if operation.Step8Operation(id) {
 				encodedOutput, err := encodeStep8Output(id, result.Output)
 				if err != nil {
@@ -252,6 +312,26 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, errMalformedMessage
 			}
 			result.Output = operation.MatterFinishOutput{MatterID: matterID, State: state, BecameSealed: sealed}
+		case operation.RunFinishV1.Metadata().Operation:
+			if !exactFields(outputFields, "run_id", "state") {
+				return operation.Result{}, errMalformedMessage
+			}
+			runID, runOK := outputFields["run_id"].(string)
+			state, stateOK := outputFields["state"].(string)
+			if !runOK || !validRequestID(runID) || !stateOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.RunFinishOutput{RunID: runID, State: state}
+		case operation.SchedulerResumeV1.Metadata().Operation:
+			if !exactFields(outputFields, "run_id", "state") {
+				return operation.Result{}, errMalformedMessage
+			}
+			runID, runOK := outputFields["run_id"].(string)
+			state, stateOK := outputFields["state"].(string)
+			if !runOK || !validRequestID(runID) || !stateOK {
+				return operation.Result{}, errMalformedMessage
+			}
+			result.Output = operation.RunResumeOutput{RunID: runID, State: state}
 		case operation.BatchSweepAnonymousV1.Metadata().Operation:
 			if !exactFields(outputFields, "outcome") {
 				return operation.Result{}, errMalformedMessage
@@ -288,6 +368,29 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 				return operation.Result{}, err
 			}
 		default:
+			if operation.Step10Operation(id) {
+				var output operation.SchedulerHookOutput
+				if wipdwire.DecodeCanonical(encodedOutput, &output,
+					"kind", "version", "input_digest", "result_digest", "outcome", "revision", "evidence_refs", "problem_code", "steps", "handling") != nil {
+					return operation.Result{}, errMalformedMessage
+				}
+				result.Output = output
+				if definition.ValidateResult(result) != nil {
+					return operation.Result{}, errMalformedMessage
+				}
+				break
+			}
+			if operation.Step10RoleOperation(id) {
+				role, decodeErr := decodeRoleLifecycleOutput(encodedOutput)
+				if decodeErr != nil {
+					return operation.Result{}, decodeErr
+				}
+				result.Output = role
+				if definition.ValidateResult(result) != nil {
+					return operation.Result{}, errMalformedMessage
+				}
+				break
+			}
 			if operation.Step8Operation(id) {
 				result.Output, err = decodeStep8Output(id, encodedOutput)
 				if err != nil {
@@ -327,4 +430,28 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 		return operation.Result{}, fmt.Errorf("%w: invalid M1 result: %v", errMalformedMessage, err)
 	}
 	return result, nil
+}
+
+func decodeRoleLifecycleOutput(encoded []byte) (operation.RoleLifecycleOutput, error) {
+	var output operation.RoleLifecycleOutput
+	fields, err := decodePayload(encoded)
+	if err != nil {
+		return output, err
+	}
+	values, ok := fields.(map[string]any)
+	if !ok || !exactFields(values, "run_id", "matter_id", "dispatch_id", "role_id", "role", "state") {
+		return output, errMalformedMessage
+	}
+	var runOK, matterOK, dispatchOK, roleIDOK, roleOK, stateOK bool
+	output.RunID, runOK = values["run_id"].(string)
+	output.MatterID, matterOK = values["matter_id"].(string)
+	output.DispatchID, dispatchOK = values["dispatch_id"].(string)
+	output.RoleID, roleIDOK = values["role_id"].(string)
+	output.Role, roleOK = values["role"].(string)
+	output.State, stateOK = values["state"].(string)
+	if !runOK || !validRequestID(output.RunID) || !matterOK || !validRequestID(output.MatterID) ||
+		!dispatchOK || !validRequestID(output.DispatchID) || !roleIDOK || !validRequestID(output.RoleID) || !roleOK || !stateOK {
+		return operation.RoleLifecycleOutput{}, errMalformedMessage
+	}
+	return output, nil
 }
