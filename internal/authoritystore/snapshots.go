@@ -442,8 +442,16 @@ func checkStep6State(db *sql.DB) error {
 			return ErrInvalidStore
 		}
 		declared, e := commandBlobLengths(command)
-		declaredLength, ok := declared[r.digest]
-		if e != nil || !ok || declaredLength != length {
+		if e != nil {
+			return ErrInvalidStore
+		}
+		if declaredLength, ok := declared[r.digest]; ok {
+			if declaredLength != length {
+				return ErrInvalidStore
+			}
+			continue
+		}
+		if err = schedulerHookProducedEvidenceAt(db, r.domain, r.position, r.digest); err != nil {
 			return ErrInvalidStore
 		}
 	}

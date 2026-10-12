@@ -13,7 +13,7 @@ import (
 )
 
 func TestRepairV1PrepareDeniedBeforeJournalWrite(t *testing.T) {
-	j, err := Open(filepath.Join(t.TempDir(), "journal"), testIdentity)
+	j, err := Open(filepath.Join(privateTempDir(t), "journal"), testIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestRepairV1PrepareDeniedBeforeJournalWrite(t *testing.T) {
 }
 
 func TestRepairV2RetainedProofRetryCannotDowngrade(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	j, err := Open(root, testIdentity)
 	if err != nil {
 		t.Fatal(err)

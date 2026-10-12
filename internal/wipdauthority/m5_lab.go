@@ -48,20 +48,32 @@ type M5LabConfig struct {
 	Registry                    *operation.Registry
 	ArtifactKeyCertificate      []byte
 	SignArtifact                authoritystore.Signer
+	NamedBatchRead              bool
 }
 
 type m5LabHandler struct {
-	profile    Profile
-	store      *authoritystore.Store
-	repoID     string
-	grant      []byte
-	csrDER     []byte
-	caDER      []byte
-	signLeaf   EnvironmentLeafSigner
-	registry   *operation.Registry
-	operations []operation.Definition
-	sign       authoritystore.Signer
-	m6         bool
+	profile        Profile
+	store          *authoritystore.Store
+	repoID         string
+	grant          []byte
+	csrDER         []byte
+	caDER          []byte
+	signLeaf       EnvironmentLeafSigner
+	registry       *operation.Registry
+	operations     []operation.Definition
+	sign           authoritystore.Signer
+	m6             bool
+	step10         bool
+	namedBatchRead bool
+}
+
+func hasStep10Operation(operations []operation.Definition) bool {
+	for _, definition := range operations {
+		if operation.Step10CapabilityOperation(definition.Metadata().Operation) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewM5LabServer exposes the existing M2 enrollment and negotiated exchange
@@ -116,12 +128,24 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		}
 		step7SweepRegistered := false
 		step8Registered := false
+		step10Registered := false
+		batchCreateRegistered := false
+		batchMembershipCount := 0
 		for _, definition := range operations {
 			if definition.Metadata().Operation == operation.BatchSweepAnonymousV1.Metadata().Operation {
 				step7SweepRegistered = true
 			}
 			if operation.Step8Operation(definition.Metadata().Operation) {
 				step8Registered = true
+			}
+			if operation.Step10CapabilityOperation(definition.Metadata().Operation) {
+				step10Registered = true
+			}
+			if definition.Metadata().Operation == operation.BatchCreateV1.Metadata().Operation {
+				batchCreateRegistered = true
+			}
+			if operation.NamedBatchMembershipOperation(definition.Metadata().Operation) {
+				batchMembershipCount++
 			}
 		}
 		step7OperationCount := 0
@@ -134,9 +158,30 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			}
 			maxOperations += len(operation.Step8Catalogue())
 		}
+		if step10Registered {
+			if !m6 || !step8Registered || !batchCreateRegistered || batchMembershipCount != len(operation.NamedBatchMembershipCatalogue()) {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations += len(operation.Step10Catalogue())
+		}
+		if batchCreateRegistered {
+			if !m6 || !step8Registered {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations++
+		}
+		if batchMembershipCount != 0 {
+			if batchMembershipCount != len(operation.NamedBatchMembershipCatalogue()) || !batchCreateRegistered || !step8Registered {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations += batchMembershipCount
+		}
 		if len(operations) == 0 || len(operations) > maxOperations+step7OperationCount ||
 			m6 && len(operations) != maxOperations+step7OperationCount ||
 			len(config.ArtifactKeyCertificate) == 0 || len(config.ArtifactKeyCertificate) > 1<<20 || config.SignArtifact == nil {
+			return nil, ErrInvalidLabConfig
+		}
+		if config.NamedBatchRead && (!m6 || !batchCreateRegistered || batchMembershipCount != len(operation.NamedBatchMembershipCatalogue())) {
 			return nil, ErrInvalidLabConfig
 		}
 		matterRegistered := false
@@ -155,6 +200,24 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				continue
 			}
 			if m6 && operation.Step8Operation(id) {
+				continue
+			}
+			if m6 && operation.Step10CapabilityOperation(id) {
+				if !step10Registered || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
+				continue
+			}
+			if id == operation.BatchCreateV1.Metadata().Operation {
+				if !m6 || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
+				continue
+			}
+			if operation.NamedBatchMembershipOperation(id) {
+				if !m6 || !batchCreateRegistered || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
 				continue
 			}
 			switch id {
@@ -215,6 +278,13 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 					}
 				}
 			}
+			if step10Registered {
+				for _, definition := range operation.Step10Catalogue() {
+					if !registered[definition.Metadata().Operation] {
+						return nil, ErrInvalidLabConfig
+					}
+				}
+			}
 		}
 		if len(certificate.Certificate) == 0 {
 			return nil, ErrInvalidLabConfig
@@ -240,6 +310,9 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	} else if len(config.ArtifactKeyCertificate) != 0 || config.SignArtifact != nil {
 		return nil, ErrInvalidLabConfig
 	}
+	if config.NamedBatchRead && config.Registry == nil {
+		return nil, ErrInvalidLabConfig
+	}
 	if m6 {
 		// The detached operation has no generic Registry.Dispatch handler. Its
 		// capability is selected only with v2 and its durable private seam owns
@@ -249,8 +322,8 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	app := &m5LabHandler{
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
-		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6,
-		registry: config.Registry, operations: operations, sign: config.SignArtifact,
+		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6, namedBatchRead: config.NamedBatchRead,
+		registry: config.Registry, operations: operations, sign: config.SignArtifact, step10: hasStep10Operation(operations),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", serveHealth)
@@ -425,12 +498,29 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 		}
 		kind = "pull"
 		start = authorityAnchor(pull.Installed)
+	case "batch.read":
+		session.mu.Lock()
+		selected := session.namedBatchRead
+		session.mu.Unlock()
+		if !app.namedBatchRead || !selected {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-extension")
+			return
+		}
+		app.serveNamedBatchRead(writer, request, body, frame)
+		return
 	case "command.submit":
 		if app.registry == nil {
 			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
 			return
 		}
 		app.serveCommandSubmit(writer, request, body, frame, environment)
+		return
+	case "scheduler.hook-result":
+		if !app.step10 {
+			writeLabProblem(writer, frame.RequestID, "protocol.unsupported-kind")
+			return
+		}
+		app.serveSchedulerHookResult(writer, request, body, frame, environment)
 		return
 	case "receipt.query":
 		if app.registry == nil {
@@ -528,7 +618,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
 		return
 	}
-	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations)
+	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations, app.namedBatchRead)
 	if problem != "" {
 		writeLabProblem(writer, frame.RequestID, problem)
 		return
@@ -561,6 +651,7 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 	session.mu.Lock()
 	session.operations = operations
 	session.commandSubmitV2 = containsString(selectedFeatures, wipdwire.CommandSubmitV2Feature)
+	session.namedBatchRead = containsString(selectedFeatures, wipdwire.NamedBatchReadFeature)
 	session.negotiated = true
 	succeeded = true
 	session.mu.Unlock()

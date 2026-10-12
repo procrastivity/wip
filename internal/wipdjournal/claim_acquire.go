@@ -264,6 +264,45 @@ func (j *Journal) ClaimAcquireAttempt(commandID string) (ClaimAcquireAttempt, er
 	return readClaimAcquireAttempt(j.db, commandID)
 }
 
+// ClaimAcquireAttempts returns retained acquisition identities in Environment
+// sequence order so a restarted owner can resolve its exact pending Dispatch
+// rather than allocating a replacement command ID.
+func (j *Journal) ClaimAcquireAttempts() ([]ClaimAcquireAttempt, error) {
+	if j == nil {
+		return nil, ErrClosed
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return nil, ErrClosed
+	}
+	rows, err := j.db.Query(`SELECT command_id FROM claim_acquire_attempts ORDER BY environment_sequence`)
+	if err != nil {
+		return nil, err
+	}
+	var commandIDs []string
+	for rows.Next() {
+		var commandID string
+		if err = rows.Scan(&commandID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		commandIDs = append(commandIDs, commandID)
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	var attempts []ClaimAcquireAttempt
+	for _, commandID := range commandIDs {
+		attempt, readErr := readClaimAcquireAttempt(j.db, commandID)
+		if readErr != nil {
+			return nil, ErrInvalidJournal
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, nil
+}
+
 // HasUnresolvedClaimAcquire reports whether another acquisition submission may
 // have crossed the authority boundary without its terminal receipt installed.
 func (j *Journal) HasUnresolvedClaimAcquire(exceptCommandID string) (bool, error) {

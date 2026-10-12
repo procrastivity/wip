@@ -17,10 +17,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/procrastivity/wip/internal/operation"
+	"github.com/procrastivity/wip/internal/schedulerhook"
 	"github.com/procrastivity/wip/internal/wipdauthority"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -39,6 +41,7 @@ type sessionLimits struct {
 	chunkData       int
 	streamBytes     int
 	commandSubmitV2 bool
+	namedBatchRead  bool
 	operations      []operation.ID
 }
 
@@ -158,6 +161,16 @@ type acquiredClaimProjection struct {
 	Epoch, AcquiredSequence                     uint64
 }
 
+type schedulerRunFoldState struct {
+	BatchID, Locator, OwnerEnvironmentID string
+	Matters                              map[string]struct{}
+}
+
+type schedulerRoleFoldState struct {
+	RunID, MatterID, DispatchID, ClaimID, Name string
+	ClaimEpoch                                 uint64
+}
+
 type lifecycleFoldState struct {
 	stage       string
 	command     foldedLifecycleEvent
@@ -243,6 +256,10 @@ func negotiateRemote(ctx context.Context, client *http.Client, origin string) (s
 }
 
 func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin string, operations []operation.ID) (sessionLimits, error) {
+	return negotiateRemoteCapabilities(ctx, client, origin, operations, false)
+}
+
+func negotiateRemoteCapabilities(ctx context.Context, client *http.Client, origin string, operations []operation.ID, namedBatchRead bool) (sessionLimits, error) {
 	var limits sessionLimits
 	capabilities := make([]any, 0, len(operations))
 	previous := operation.ID{}
@@ -265,6 +282,10 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	features := []any{"wipd.frame/1"}
 	if len(operations) != 0 {
 		features = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+	}
+	if namedBatchRead {
+		features = append(features, wipdwire.NamedBatchReadFeature)
+		sort.Slice(features, func(i, j int) bool { return features[i].(string) < features[j].(string) })
 	}
 	hello := map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
@@ -296,8 +317,12 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 		!equalStringsValue(selection["store_schemas"], "wipd.store/1") {
 		return limits, ErrInvalidClientState
 	}
-	selectedV2 := equalStringsValue(selection["features"], wipdwire.CommandSubmitV2Feature, "wipd.frame/1")
-	if !equalStringsValue(selection["features"], "wipd.frame/1") && !selectedV2 || selectedV2 && len(operations) == 0 {
+	selectedFeatures, selectedFeaturesOK := sortedStrings(selection["features"])
+	selectedV2 := containsString(selectedFeatures, wipdwire.CommandSubmitV2Feature)
+	selectedNamedBatchRead := containsString(selectedFeatures, wipdwire.NamedBatchReadFeature)
+	if !selectedFeaturesOK || !containsString(selectedFeatures, "wipd.frame/1") ||
+		len(selectedFeatures) != 1+boolFeatureCount(selectedV2)+boolFeatureCount(selectedNamedBatchRead) ||
+		selectedV2 && len(operations) == 0 || selectedNamedBatchRead && !namedBatchRead || namedBatchRead && !selectedNamedBatchRead {
 		return limits, ErrInvalidClientState
 	}
 	selectedOperations := operations
@@ -336,9 +361,37 @@ func negotiateRemoteOperations(ctx context.Context, client *http.Client, origin 
 	}
 	limits = sessionLimits{
 		frameBody: int(frameBody), chunkData: int(chunkData), streamBytes: int(streamBytes),
-		commandSubmitV2: selectedV2, operations: append([]operation.ID(nil), selectedOperations...),
+		commandSubmitV2: selectedV2, namedBatchRead: selectedNamedBatchRead, operations: append([]operation.ID(nil), selectedOperations...),
 	}
 	return limits, nil
+}
+
+func boolFeatureCount(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
+}
+
+func sortedStrings(value any) ([]string, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]string, len(items))
+	for index, item := range items {
+		text, ok := item.(string)
+		if !ok || index > 0 && text <= result[index-1] {
+			return nil, false
+		}
+		result[index] = text
+	}
+	return result, true
+}
+
+func containsString(values []string, wanted string) bool {
+	index := sort.SearchStrings(values, wanted)
+	return index < len(values) && values[index] == wanted
 }
 
 func equalNegotiatedOperations(value any, expected []operation.ID) bool {
@@ -423,7 +476,9 @@ func VerifyClaimGrantTransfer(profile wipdauthority.Profile, previous ClientStat
 	allRecords := append(cloneEventRecords(previous.EventRecords), cloneEventRecords(records)...)
 	anchor, _, _, err := foldEventRecords(allRecords, profile.DomainID())
 	content, contentErr := foldContentEvents(allRecords, profile.DomainID())
-	if err != nil || contentErr != nil || !anchorEqual(anchor, end) || validateClaimContentManifest(content, records, manifest.Entries) != nil {
+	evidence, evidenceErr := schedulerHookEvidenceDigests(allRecords, profile.DomainID())
+	if err != nil || contentErr != nil || evidenceErr != nil || !anchorEqual(anchor, end) ||
+		validateClaimContentManifest(content, records, evidence, manifest.Entries) != nil {
 		return wipdjournal.VerifiedTransfer{}, ErrInvalidClientState
 	}
 	return transfer, nil
@@ -567,7 +622,8 @@ func verifyTransferFrames(frames []wipdwire.Frame, kind string, profile wipdauth
 		return zero, ErrInvalidClientState
 	}
 	contentProjections, err := foldContentEvents(records, domainID)
-	if err != nil || validateContentManifest(contentProjections, manifest.Entries) != nil {
+	evidence, evidenceErr := schedulerHookEvidenceDigests(records, domainID)
+	if err != nil || evidenceErr != nil || validateContentManifest(contentProjections, evidence, manifest.Entries) != nil {
 		return zero, ErrInvalidClientState
 	}
 	step8Projection, err := wipdjournal.FoldStep8Projection(records, domainID)
@@ -619,14 +675,14 @@ func foldEventRecordsWithGateProjection(records []wipdwire.EventRecord, domainID
 ) {
 	anchor, projections, steps, err := foldEventRecordsCore(records, domainID)
 	if err != nil {
-		return wipdwire.PrefixAnchor{}, nil, nil, nil, err
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, fmt.Errorf("wipdseed: fold core event history: %w", err)
 	}
 	gates, err := foldStep7GateProjection(records, domainID)
 	if err != nil {
-		return wipdwire.PrefixAnchor{}, nil, nil, nil, err
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, fmt.Errorf("wipdseed: fold Step 7 gate history: %w", err)
 	}
 	if _, err := wipdjournal.FoldStep8Projection(records, domainID); err != nil {
-		return wipdwire.PrefixAnchor{}, nil, nil, nil, ErrInvalidClientState
+		return wipdwire.PrefixAnchor{}, nil, nil, nil, fmt.Errorf("wipdseed: fold Step 8 projection: %w", ErrInvalidClientState)
 	}
 	return anchor, projections, steps, gates, nil
 }
@@ -652,10 +708,17 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 	stepCounts := make(map[string]int)
 	stepStates := make(map[string]string)
 	anonymousBatches := make(map[string]string)
+	namedBatchNames := make(map[string]struct{})
 	sweptBatches := make(map[string]bool)
+	namedBatches := make(map[string]struct{})
+	namedBatchMemberships := make(map[string]bool)
+	dismissedNamedBatches := make(map[string]bool)
+	namedBatchCommands := make(map[string]struct{})
 	activeClaims := make(map[string]acquiredClaimProjection)
 	normalClaimCloses := make(map[string]foldedLifecycleEvent)
 	claimEpochs := make(map[string]uint64)
+	activeRuns := make(map[string]schedulerRunFoldState)
+	activeRoles := make(map[string]schedulerRoleFoldState)
 	var pendingAcquisition *acquisitionFoldState
 	var pendingLifecycle *lifecycleFoldState
 	var pendingClaimRelease *claimReleaseFoldState
@@ -843,6 +906,81 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				Locator: event.Payload.Locator, Title: event.Payload.Title, SortKey: event.Payload.SortKey,
 				State: "planned", BirthEventID: event.EventID,
 			})
+		case "batch.created":
+			payload, payloadOK := fields["payload"].(map[string]any)
+			environment, environmentOK := fields["environment"].(map[string]any)
+			sequence, sequenceOK := environment["sequence"].(uint64)
+			actedAt, actedAtOK := fields["acted_at"].(string)
+			occurredAt, occurredAtOK := fields["occurred_at"].(string)
+			batchID := asString(fields["subject_id"])
+			name := asString(payload["name"])
+			if fields["schema"] != "wipd.event/1" || fields["event_id"] != record.EventID || fields["domain_id"] != domainID ||
+				!clientULIDPattern.MatchString(asString(fields["command_id"])) || !validDigest(asString(fields["request_hash"])) ||
+				!environmentOK || !wipdwire.ExactMapKeys(environment, "id", "sequence") ||
+				!clientULIDPattern.MatchString(asString(environment["id"])) || !sequenceOK || sequence == 0 ||
+				!actedAtOK || !validUTC(actedAt) || !occurredAtOK || !validUTC(occurredAt) ||
+				fields["repo_id"] != nil || !payloadOK || !wipdwire.ExactMapKeys(payload, "name") ||
+				!clientULIDPattern.MatchString(batchID) || name == "" || name != strings.TrimSpace(name) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := seenIDs[batchID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := namedBatchNames[name]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			seenIDs[batchID] = struct{}{}
+			namedBatchNames[name] = struct{}{}
+			namedBatches[batchID] = struct{}{}
+		case "batch.joined", "batch.left", "batch.dismissed":
+			payload, payloadOK := fields["payload"].(map[string]any)
+			environment, environmentOK := fields["environment"].(map[string]any)
+			sequence, sequenceOK := environment["sequence"].(uint64)
+			batchID := asString(fields["subject_id"])
+			commandID := asString(fields["command_id"])
+			kindValid := false
+			matterID := ""
+			switch kind {
+			case "batch.joined", "batch.left":
+				matterID = asString(payload["matter_id"])
+				kindValid = payloadOK && wipdwire.ExactMapKeys(payload, "matter_id") && clientULIDPattern.MatchString(matterID)
+			case "batch.dismissed":
+				kindValid = payloadOK && wipdwire.ExactMapKeys(payload)
+			}
+			if fields["schema"] != "wipd.event/1" || fields["event_id"] != record.EventID || fields["domain_id"] != domainID ||
+				!clientULIDPattern.MatchString(commandID) || !validDigest(asString(fields["request_hash"])) ||
+				!environmentOK || !wipdwire.ExactMapKeys(environment, "id", "sequence") ||
+				!clientULIDPattern.MatchString(asString(environment["id"])) || !sequenceOK || sequence == 0 ||
+				!validUTC(asString(fields["acted_at"])) || !validUTC(asString(fields["occurred_at"])) ||
+				fields["repo_id"] != nil || !clientULIDPattern.MatchString(batchID) || !kindValid {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, exists := namedBatches[batchID]; !exists || dismissedNamedBatches[batchID] {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			if _, duplicate := namedBatchCommands[commandID]; duplicate {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			namedBatchCommands[commandID] = struct{}{}
+			if kind == "batch.dismissed" {
+				dismissedNamedBatches[batchID] = true
+				break
+			}
+			if _, exists := matterRepos[matterID]; !exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			pair := batchID + "\x00" + matterID
+			if kind == "batch.joined" {
+				if namedBatchMemberships[pair] {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				namedBatchMemberships[pair] = true
+			} else {
+				if !namedBatchMemberships[pair] {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				delete(namedBatchMemberships, pair)
+			}
 		case "batch.anonymous-created":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
@@ -1030,6 +1168,138 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 			}
+		case "run.started":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			runID := asString(fields["subject_id"])
+			batchID, batchOK := payload["batch"].(string)
+			locator, locatorOK := payload["locator"].(string)
+			matters, mattersOK := sortedStrings(payload["matters"])
+			claim, claimActive := activeMatterForBatch(activeClaims, batchID, lifecycle.environmentID)
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "batch", "locator", "matters") ||
+				!clientULIDPattern.MatchString(runID) || !clientULIDPattern.MatchString(batchID) || !batchOK ||
+				!locatorOK || locator == "" || !mattersOK || len(matters) == 0 ||
+				!claimActive || claim == "" || !containsString(matters, claim) {
+				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid run.started event", ErrInvalidClientState)
+			}
+			if _, exists := seenIDs[runID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			runMatters := make(map[string]struct{}, len(matters))
+			for index, matterID := range matters {
+				if !clientULIDPattern.MatchString(matterID) || index > 0 && matters[index-1] >= matterID ||
+					anonymousBatches[matterID] != batchID || matterRepos[matterID] != lifecycle.repoID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+				runMatters[matterID] = struct{}{}
+			}
+			batchMatterCount := 0
+			for _, batch := range anonymousBatches {
+				if batch == batchID {
+					batchMatterCount++
+				}
+			}
+			if batchMatterCount != len(runMatters) {
+				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: run.started matter set differs from Batch", ErrInvalidClientState)
+			}
+			seenIDs[runID] = struct{}{}
+			activeRuns[runID] = schedulerRunFoldState{
+				BatchID: batchID, Locator: locator, OwnerEnvironmentID: lifecycle.environmentID, Matters: runMatters,
+			}
+		case "role.spawned":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			roleID := asString(fields["subject_id"])
+			runID, runOK := payload["run_id"].(string)
+			matterID, matterOK := payload["matter_id"].(string)
+			dispatchID, dispatchOK := payload["dispatch_id"].(string)
+			claimID, claimOK := payload["claim_id"].(string)
+			claimEpoch, epochOK := foldedClaimEpoch(payload["claim_epoch"])
+			name, nameOK := payload["name"].(string)
+			run, runActive := activeRuns[runID]
+			claim, claimActive := activeClaims[matterID]
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "run_id", "matter_id", "dispatch_id", "claim_id", "claim_epoch", "name") ||
+				!clientULIDPattern.MatchString(roleID) || !runOK || !matterOK || !dispatchOK || !claimOK || !epochOK || !nameOK ||
+				!runActive || run.OwnerEnvironmentID != lifecycle.environmentID || !containsRunMatter(run, matterID) ||
+				!claimActive || claim.OwnerEnvironmentID != lifecycle.environmentID || claim.ID != claimID ||
+				claim.Epoch != claimEpoch || claim.DispatchID != dispatchID || matterRepos[matterID] != lifecycle.repoID ||
+				!supportedFoldedRole(name) {
+				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid role.spawned event", ErrInvalidClientState)
+			}
+			if _, exists := seenIDs[roleID]; exists {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			for _, role := range activeRoles {
+				if role.DispatchID == dispatchID && role.Name == name {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
+			seenIDs[roleID] = struct{}{}
+			activeRoles[roleID] = schedulerRoleFoldState{
+				RunID: runID, MatterID: matterID, DispatchID: dispatchID, ClaimID: claimID, ClaimEpoch: claimEpoch, Name: name,
+			}
+		case "role.closed":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			roleID := asString(fields["subject_id"])
+			role, roleActive := activeRoles[roleID]
+			runID, runOK := payload["run_id"].(string)
+			matterID, matterOK := payload["matter_id"].(string)
+			dispatchID, dispatchOK := payload["dispatch_id"].(string)
+			claimID, claimOK := payload["claim_id"].(string)
+			claimEpoch, epochOK := foldedClaimEpoch(payload["claim_epoch"])
+			name, nameOK := payload["name"].(string)
+			reason, reasonOK := payload["reason"].(string)
+			claim, claimActive := activeClaims[matterID]
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "run_id", "matter_id", "dispatch_id", "claim_id", "claim_epoch", "name", "reason") ||
+				!roleActive || !runOK || !matterOK || !dispatchOK || !claimOK || !epochOK || !nameOK || !reasonOK ||
+				role.RunID != runID || role.MatterID != matterID || role.DispatchID != dispatchID || role.ClaimID != claimID ||
+				role.ClaimEpoch != claimEpoch || role.Name != name || (reason != "completed" && reason != "reaped") ||
+				!claimActive || claim.OwnerEnvironmentID != lifecycle.environmentID || claim.ID != claimID ||
+				claim.Epoch != claimEpoch || claim.DispatchID != dispatchID || matterRepos[matterID] != lifecycle.repoID {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			delete(activeRoles, roleID)
+		case "run.finished":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			runID := asString(fields["subject_id"])
+			run, runActive := activeRuns[runID]
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload) || !runActive ||
+				run.OwnerEnvironmentID != lifecycle.environmentID {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			for _, role := range activeRoles {
+				if role.RunID == runID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
+			for matterID := range run.Matters {
+				if matterStates[matterID] != "done" {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
+			delete(activeRuns, runID)
+		case "run.resumed":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			runID := asString(fields["subject_id"])
+			run, runActive := activeRuns[runID]
+			_, reusedCommand := seenCommands[lifecycle.commandID]
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload) || !runActive || reusedCommand ||
+				run.OwnerEnvironmentID != lifecycle.environmentID {
+				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid run.resumed event", ErrInvalidClientState)
+			}
+			for _, role := range activeRoles {
+				if role.RunID == runID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
+			for matterID := range run.Matters {
+				if _, claimActive := activeClaims[matterID]; claimActive || matterRepos[matterID] != lifecycle.repoID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
 		case "dispatch.closed":
 			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
 			payload, payloadOK := fields["payload"].(map[string]any)
@@ -1045,6 +1315,11 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 				matterRepos[matterID] != lifecycle.repoID || fields["subject_id"] != dispatchID {
 				return wipdwire.PrefixAnchor{}, nil, nil, fmt.Errorf("%w: invalid acquired dispatch.closed event", ErrInvalidClientState)
 			}
+			for _, role := range activeRoles {
+				if role.DispatchID == dispatchID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
+			}
 			pendingClaimRelease = &claimReleaseFoldState{
 				command: lifecycle, claimID: claimID, matterID: matterID, dispatchID: dispatchID,
 				repoID: lifecycle.repoID, ownerEnvironmentID: lifecycle.environmentID, epoch: claimEpoch,
@@ -1052,6 +1327,21 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 		case "content.created", "content.appended":
 			if _, valid := decodeFoldedLifecycleEvent(fields, record, domainID); !valid {
 				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+		case "scheduler.hook-completed":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			matterID := asString(fields["subject_id"])
+			if !valid || !payloadOK || !validSchedulerHookCompletionPayload(payload, lifecycle.commandID, domainID) ||
+				matterRepos[matterID] != lifecycle.repoID {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
+			kind := asString(payload["kind"])
+			if kind == string(schedulerhook.KindWork) || kind == string(schedulerhook.KindPlan) {
+				claim, active := activeClaims[matterID]
+				if !active || claim.OwnerEnvironmentID != lifecycle.environmentID {
+					return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+				}
 			}
 		case "claim.released":
 			var event claimReleasedEvent
@@ -1213,6 +1503,68 @@ func decodeFoldedLifecycleEvent(fields map[string]any, record wipdwire.EventReco
 	return event, true
 }
 
+func validSchedulerHookCompletionPayload(payload map[string]any, commandID, domainID string) bool {
+	if !wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest") &&
+		!wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest", "source_revision") {
+		return false
+	}
+	effectKey, ok := payload["effect_key"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(effectKey, "domain_id", "command_id") ||
+		effectKey["domain_id"] != domainID || effectKey["command_id"] != commandID {
+		return false
+	}
+	kind, kindOK := payload["kind"].(string)
+	version, versionOK := payload["version"].(uint64)
+	inputDigest, inputOK := payload["input_digest"].(string)
+	resultDigest, resultOK := payload["result_digest"].(string)
+	if !kindOK || !versionOK || version != 1 || !inputOK || !validDigest(inputDigest) || !resultOK || !validDigest(resultDigest) {
+		return false
+	}
+	resultBytes, err := wipdwire.EncodeCanonical(payload["typed_result"])
+	if err != nil {
+		return false
+	}
+	var typed schedulerhook.TypedResult
+	if wipdwire.DecodeCanonical(resultBytes, &typed, "kind", "version", "work", "plan", "ask") != nil ||
+		string(typed.Kind) != kind || uint64(typed.Version) != version {
+		return false
+	}
+	_, hasSourceRevision := payload["source_revision"]
+	selectedVerifier := typed.Kind == schedulerhook.KindWork && typed.Work != nil &&
+		typed.Work.Revision == operation.SchedulerStep10VerifierRevision
+	if selectedVerifier != hasSourceRevision || selectedVerifier &&
+		!validSelectedVerifierSourceRevision(payload["source_revision"], typed.Work.Revision) {
+		return false
+	}
+	key := schedulerhook.Key{DomainID: domainID, CommandID: commandID}
+	computed, err := schedulerhook.ResultDigest(key, inputDigest, typed)
+	if err != nil || computed != resultDigest {
+		return false
+	}
+	output, err := schedulerhook.OperationOutput(schedulerhook.Result{
+		Key: key, InputDigest: inputDigest, Typed: typed, ResultDigest: resultDigest,
+	})
+	return err == nil && operation.SchedulerOrchestrateV1.ValidateResult(operation.Result{
+		Code: operation.ResultSucceeded, Output: output,
+	}) == nil
+}
+
+func validSelectedVerifierSourceRevision(value any, protocolRevision string) bool {
+	fields, ok := value.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(fields, "protocol_revision", "base_revision", "candidate_revision", "candidate_manifest_sha256", "complete_tree_sha256", "snapshot_sha256") {
+		return false
+	}
+	protocol, protocolOK := fields["protocol_revision"].(string)
+	base, baseOK := fields["base_revision"].(string)
+	candidate, candidateOK := fields["candidate_revision"].(string)
+	manifest, manifestOK := fields["candidate_manifest_sha256"].(string)
+	completeTree, completeTreeOK := fields["complete_tree_sha256"].(string)
+	snapshot, snapshotOK := fields["snapshot_sha256"].(string)
+	return protocolOK && protocol == protocolRevision && baseOK && base != "" && candidateOK &&
+		manifestOK && validDigest(manifest) && candidate == "candidate-v1:"+strings.TrimPrefix(manifest, "sha256:") &&
+		completeTreeOK && validDigest(completeTree) && snapshotOK && validDigest(snapshot)
+}
+
 func foldContentEvents(records []wipdwire.EventRecord, domainID string) ([]json.RawMessage, error) {
 	type subject struct {
 		matter string
@@ -1310,11 +1662,11 @@ func foldContentEvents(records []wipdwire.EventRecord, domainID string) ([]json.
 	return raw, nil
 }
 
-func validateContentManifest(content []json.RawMessage, entries []wipdwire.BlobManifestEntry) error {
-	return validateContentManifestForMatter(content, "", entries)
+func validateContentManifest(content []json.RawMessage, evidence map[string]struct{}, entries []wipdwire.BlobManifestEntry) error {
+	return validateContentManifestForMatter(content, "", evidence, entries)
 }
 
-func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.EventRecord, entries []wipdwire.BlobManifestEntry) error {
+func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.EventRecord, evidence map[string]struct{}, entries []wipdwire.BlobManifestEntry) error {
 	matterID := ""
 	for _, record := range records {
 		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
@@ -1332,77 +1684,96 @@ func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.
 	if matterID == "" {
 		return ErrInvalidClientState
 	}
-	allContent := make(map[string]uint64)
-	claimContent := make(map[string]uint64)
-	for _, raw := range content {
-		var projection contentProjection
-		if json.Unmarshal(raw, &projection) != nil {
-			return ErrInvalidClientState
-		}
-		if length, exists := allContent[projection.BlobDigest]; exists && length != projection.ByteLength {
-			return ErrInvalidClientState
-		}
-		allContent[projection.BlobDigest] = projection.ByteLength
-		if projection.MatterID == matterID {
-			if length, exists := claimContent[projection.BlobDigest]; exists && length != projection.ByteLength {
-				return ErrInvalidClientState
-			}
-			claimContent[projection.BlobDigest] = projection.ByteLength
-		}
-	}
-	if len(entries) != len(allContent) {
-		return ErrInvalidClientState
-	}
-	for _, entry := range entries {
-		length, exists := allContent[entry.Digest]
-		if !exists || length != entry.ByteLength {
-			return ErrInvalidClientState
-		}
-		if claimLength, required := claimContent[entry.Digest]; required {
-			if claimLength != entry.ByteLength || entry.Requirement != "pin-before-use" {
-				return ErrInvalidClientState
-			}
-			delete(claimContent, entry.Digest)
-		} else if entry.Requirement != "lazy" {
-			return ErrInvalidClientState
-		}
-		delete(allContent, entry.Digest)
-	}
-	if len(allContent) != 0 || len(claimContent) != 0 {
-		return ErrInvalidClientState
-	}
-	return nil
+	return validateContentManifestForMatter(content, matterID, evidence, entries)
 }
 
-func validateContentManifestForMatter(content []json.RawMessage, matterID string, entries []wipdwire.BlobManifestEntry) error {
+func validateContentManifestForMatter(content []json.RawMessage, matterID string, evidence map[string]struct{}, entries []wipdwire.BlobManifestEntry) error {
 	expected := make(map[string]uint64)
+	claimContent := make(map[string]struct{})
 	for _, raw := range content {
 		var projection contentProjection
 		if json.Unmarshal(raw, &projection) != nil {
 			return ErrInvalidClientState
-		}
-		if matterID != "" && projection.MatterID != matterID {
-			continue
 		}
 		if length, exists := expected[projection.BlobDigest]; exists && length != projection.ByteLength {
 			return ErrInvalidClientState
 		}
 		expected[projection.BlobDigest] = projection.ByteLength
+		if matterID != "" && projection.MatterID == matterID {
+			claimContent[projection.BlobDigest] = struct{}{}
+		}
 	}
-	if len(expected) != len(entries) {
+	if len(expected)+countAdditionalEvidence(expected, evidence) != len(entries) {
 		return ErrInvalidClientState
 	}
 	for _, entry := range entries {
-		length, ok := expected[entry.Digest]
-		if !ok || length != entry.ByteLength {
+		if length, contentBlob := expected[entry.Digest]; contentBlob {
+			if length != entry.ByteLength {
+				return ErrInvalidClientState
+			}
+			if _, required := claimContent[entry.Digest]; required {
+				if entry.Requirement != "pin-before-use" {
+					return ErrInvalidClientState
+				}
+				delete(claimContent, entry.Digest)
+			} else if entry.Requirement != "lazy" {
+				return ErrInvalidClientState
+			}
+			delete(expected, entry.Digest)
+			continue
+		}
+		if _, hookEvidence := evidence[entry.Digest]; !hookEvidence || entry.Requirement != "lazy" {
 			return ErrInvalidClientState
 		}
-		delete(expected, entry.Digest)
 	}
-	if len(expected) != 0 {
+	if len(expected) != 0 || len(claimContent) != 0 {
 		return ErrInvalidClientState
 	}
 	return nil
+}
+
+func countAdditionalEvidence(content map[string]uint64, evidence map[string]struct{}) int {
+	count := 0
+	for digest := range evidence {
+		if _, isContent := content[digest]; !isContent {
+			count++
+		}
+	}
+	return count
+}
+
+func schedulerHookEvidenceDigests(records []wipdwire.EventRecord, domainID string) (map[string]struct{}, error) {
+	evidence := make(map[string]struct{})
+	for _, record := range records {
+		fields, err := wipdwire.DecodeCanonicalMap(record.Record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if err != nil {
+			return nil, ErrInvalidClientState
+		}
+		if fields["kind"] != "scheduler.hook-completed" {
+			continue
+		}
+		commandID, commandOK := fields["command_id"].(string)
+		payload, payloadOK := fields["payload"].(map[string]any)
+		if !commandOK || !payloadOK || !validSchedulerHookCompletionPayload(payload, commandID, domainID) {
+			return nil, ErrInvalidClientState
+		}
+		if payload["kind"] != string(schedulerhook.KindWork) {
+			continue
+		}
+		encoded, err := wipdwire.EncodeCanonical(payload["typed_result"])
+		var typed schedulerhook.TypedResult
+		if err != nil || wipdwire.DecodeCanonical(encoded, &typed, "kind", "version", "work", "plan", "ask") != nil || typed.Work == nil {
+			return nil, ErrInvalidClientState
+		}
+		for _, digest := range typed.Work.EvidenceRefs {
+			if !validDigest(digest) {
+				return nil, ErrInvalidClientState
+			}
+			evidence[digest] = struct{}{}
+		}
+	}
+	return evidence, nil
 }
 
 func sameFoldedLifecycleCommand(left, right foldedLifecycleEvent) bool {
@@ -1542,6 +1913,38 @@ func activeMatterForClaim(active map[string]acquiredClaimProjection, claimID str
 		}
 	}
 	return "", acquiredClaimProjection{}
+}
+
+func activeMatterForBatch(active map[string]acquiredClaimProjection, batchID, environmentID string) (string, bool) {
+	for matterID, claim := range active {
+		if claim.BatchID == batchID && claim.OwnerEnvironmentID == environmentID {
+			return matterID, true
+		}
+	}
+	return "", false
+}
+
+func containsRunMatter(run schedulerRunFoldState, matterID string) bool {
+	_, exists := run.Matters[matterID]
+	return exists
+}
+
+func supportedFoldedRole(name string) bool {
+	switch name {
+	case "orchestrator", "coordinator", "researcher", "builder", "verifier":
+		return true
+	default:
+		return false
+	}
+}
+
+func foldedClaimEpoch(value any) (uint64, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return 0, false
+	}
+	epoch, err := strconv.ParseUint(text, 10, 64)
+	return epoch, err == nil && epoch > 0
 }
 
 func decodeM1Event(data []byte, event *matterCreatedEvent) error {

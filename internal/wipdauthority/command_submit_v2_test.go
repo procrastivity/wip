@@ -3,12 +3,15 @@ package wipdauthority
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/procrastivity/wip/internal/authoritystore"
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -82,6 +85,129 @@ func TestCommandSubmitV2AuthorityProofAndRepairStayPreAdmission(t *testing.T) {
 	if fixture.calls.Load() != 0 {
 		t.Fatal("proof-bearing unsupported operation executed")
 	}
+}
+
+func TestStrictD121MalformedTargetProofBytesAreRejectedByReceiver(t *testing.T) {
+	fixture := newM5CommandFixture(t)
+	registry, err := NewM6Step8Registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.config.Registry = registry
+	fixture.server, err = NewM6LabServer(fixture.profile, fixture.serverCert, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.handler = fixture.server.http.Handler
+	session := negotiateD121DependencyV2(t, fixture)
+	const secondMatter = "01KZ7XHAQT1S46NYPN1PW1DX3F"
+	const firstClaim = "01KZ7XHAQT1S46NYPN1PW1DX40"
+	const secondClaim = "01KZ7XHAQT1S46NYPN1PW1DX41"
+	validClaims := []any{
+		map[string]any{"matter_id": m5TestMatter, "claim_id": firstClaim, "claim_epoch": uint64(1)},
+		map[string]any{"matter_id": secondMatter, "claim_id": secondClaim, "claim_epoch": uint64(1)},
+	}
+	tests := []struct {
+		name   string
+		claims []any
+	}{
+		{name: "malformed-record", claims: []any{
+			map[string]any{"matter_id": m5TestMatter, "claim_id": firstClaim, "claim_epoch": "1"},
+			validClaims[1],
+		}},
+		{name: "duplicate-target", claims: []any{validClaims[0], validClaims[0]}},
+		{name: "noncanonical-order", claims: []any{validClaims[1], validClaims[0]}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := operation.Command{
+				ID: fmt.Sprintf("01KZ7XHAQT1S46NYPN1PW1DX%d", 50+index), AuthorityDomainID: m5TestDomain,
+				ExpectedAuthorityEpoch: 1, EnvironmentID: m5TestEnv, EnvironmentSequence: 1,
+				ActedAt: "2026-09-23T12:00:00Z", CorrelationCommandID: fmt.Sprintf("01KZ7XHAQT1S46NYPN1PW1DX%d", 50+index),
+				Request: operation.Request{
+					Operation: operation.DependencyAddV2.Metadata().Operation, Actor: "human",
+					Context: operation.Context{Repo: m5TestRepo},
+					Input: operation.DependencyAddV2Input{
+						BlockedID: m5TestMatter, BlockerID: secondMatter,
+						TargetClaims: []operation.TargetClaim{
+							{MatterID: m5TestMatter, ClaimID: firstClaim, ClaimEpoch: 1},
+							{MatterID: secondMatter, ClaimID: secondClaim, ClaimEpoch: 1},
+						},
+					},
+				},
+			}
+			canonical, err := command.CanonicalBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			fields, err := wipdwire.DecodeCanonicalMap(canonical,
+				"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id",
+				"operation", "context", "claim", "input", "blobs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			input, ok := fields["input"].(map[string]any)
+			if !ok {
+				t.Fatalf("canonical input has type %T", fields["input"])
+			}
+			input["target_claims"] = test.claims
+			raw, err := wipdwire.EncodeCanonical(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawDigest := sha256.Sum256(append([]byte("wipd/request-hash/v1\x00"), raw...))
+			hash := fmt.Sprintf("sha256:%x", rawDigest[:])
+			// Confirm the bytes handed to the receiver preserve the caller's
+			// proof record order; no local builder has sorted or repaired them.
+			decoded, err := wipdwire.DecodeCanonicalMap(raw,
+				"schema", "command_id", "authority", "environment", "acted_at", "actor", "causation_command_id", "correlation_command_id",
+				"operation", "context", "claim", "input", "blobs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			decodedInput := decoded["input"].(map[string]any)
+			if !reflect.DeepEqual(decodedInput["target_claims"], test.claims) {
+				t.Fatalf("serialized proof order changed before receiver: got=%#v want=%#v", decodedInput["target_claims"], test.claims)
+			}
+			callsBefore := fixture.calls.Load()
+			frames := m5Exchange(t, fixture, session, "command.submit", wipdwire.CommandSubmitV2{
+				Schema: wipdwire.CommandSubmitV2Feature, CanonicalCommand: raw, RequestHash: hash,
+			})
+			assertSubmitV2Problem(t, frames, "protocol.malformed-message")
+			if fixture.calls.Load() != callsBefore {
+				t.Fatalf("receiver invoked the semantic handler for rejected proof bytes: before=%d after=%d", callsBefore, fixture.calls.Load())
+			}
+			if _, err = fixture.store.QueryCommand(context.Background(), m5TestDomain, command.ID, hash, 1, fixture.peer, m5TestEnv, fixture.now); !errors.Is(err, authoritystore.ErrNotFound) {
+				t.Fatalf("malformed proof receiver retained a submission or receipt: %v", err)
+			}
+		})
+	}
+}
+
+func negotiateD121DependencyV2(t *testing.T, fixture *m5CommandFixture) *labConnectionSession {
+	t.Helper()
+	session := &labConnectionSession{}
+	hello, err := wipdwire.EncodeCanonical(map[string]any{
+		"protocol_min": []any{uint64(1), uint64(0)}, "protocol_max": []any{uint64(1), uint64(0)},
+		"identity_schemas": []any{"wipd.command/1"}, "store_schemas": []any{"wipd.store/1"},
+		"operations": []any{map[string]any{
+			"name": "dependency.add", "versions": []any{uint64(2)}, "identity_schemas": []any{"wipd.command/1"},
+		}},
+		"features": []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder, request := m5Request(t, session, fixture.peer, "client.hello", hello, "POST", labNegotiatePath)
+	fixture.handler.ServeHTTP(recorder, request)
+	frames := m5ResponseFrames(t, recorder, 2)
+	if len(frames) != 2 || frames[0].Kind != "server.hello" || !session.negotiated || !session.commandSubmitV2 {
+		t.Fatalf("D121 dependency receiver negotiation: frames=%+v session=%+v", frames, session)
+	}
+	if _, ok := session.operations[operation.DependencyAddV2.Metadata().Operation]; !ok {
+		t.Fatal("authority did not negotiate dependency.add@v2")
+	}
+	return session
 }
 
 func TestCommandSubmitV2LostAdmissionResponseReplaysAfterAuthorityRestart(t *testing.T) {

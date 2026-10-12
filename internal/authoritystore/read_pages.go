@@ -263,8 +263,10 @@ func verifyPageTokenRequestScope(ctx context.Context, tx *sql.Tx, token, domain 
 	if err != nil {
 		return pageTokenClaims{}, ErrInvalidPageToken
 	}
-	if claims.Schema != "wipd.page-token/1" || claims.Issuer != "authority" || claims.DomainID != domain || claims.Epoch != epoch ||
-		claims.QueryName != "matter.list" || claims.QueryVersion != 1 || claims.FilterHash != filterHash || claims.SnapshotID != snapshotID ||
+	if claims.Schema != "wipd.page-token/1" || claims.Issuer != "authority" {
+		return pageTokenClaims{}, ErrInvalidPageToken
+	}
+	if claims.DomainID != domain || claims.Epoch != epoch || claims.FilterHash != filterHash || claims.SnapshotID != snapshotID ||
 		claims.Overlay != "folded-only" {
 		return pageTokenClaims{}, ErrPageTokenScope
 	}

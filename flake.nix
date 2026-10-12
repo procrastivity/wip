@@ -68,6 +68,13 @@
             gnumake
             pre-commit
             shellcheck
+            git
+            bash
+            perl
+          ] ++ lib.optionals stdenv.isLinux [
+            iproute2
+            libcap
+            bubblewrap
           ];
 
           shellHook = ''

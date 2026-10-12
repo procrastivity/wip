@@ -192,7 +192,7 @@ func dependencyProjectionTx(ctx context.Context, tx *sql.Tx) error {
 
 // This definition lookup is for retained history only, not command admission.
 func dependencyHistoryDefinition(id operation.ID) (operation.Definition, bool) {
-	for _, definition := range []operation.Definition{operation.DependencyAddV1, operation.DependencyRemoveV1} {
+	for _, definition := range []operation.Definition{operation.DependencyAddV1, operation.DependencyRemoveV1, operation.DependencyAddV2, operation.DependencyRemoveV2} {
 		if definition.Metadata().Operation == id {
 			return definition, true
 		}
@@ -220,7 +220,15 @@ func validateDependencyHistoryEvent(event step12Event, submission storedSubmissi
 		if event.kind != "dependency.added" || event.subject != input.BlockedID || payload.Blocker != input.BlockerID {
 			return ErrInvalidStore
 		}
+	case operation.DependencyAddV2Input:
+		if event.kind != "dependency.added" || event.subject != input.BlockedID || payload.Blocker != input.BlockerID {
+			return ErrInvalidStore
+		}
 	case operation.DependencyRemoveInput:
+		if event.kind != "dependency.removed" || event.subject != input.BlockedID || payload.Blocker != input.BlockerID {
+			return ErrInvalidStore
+		}
+	case operation.DependencyRemoveV2Input:
 		if event.kind != "dependency.removed" || event.subject != input.BlockedID || payload.Blocker != input.BlockerID {
 			return ErrInvalidStore
 		}
@@ -267,7 +275,7 @@ func checkDependencyCommands(db *sql.DB) error {
 			Blocker string `cbor:"blocker_id"`
 		}
 		names := []string{"blocked_id", "blocker_id"}
-		if command.Request.Operation == operation.DependencyAddV1.Metadata().Operation {
+		if command.Request.Operation == operation.DependencyAddV1.Metadata().Operation || command.Request.Operation == operation.DependencyAddV2.Metadata().Operation {
 			names = append(names, "edge")
 		}
 		if closedPayload(receipt.Result.Output, &output, names...) != nil {
@@ -280,7 +288,7 @@ func checkDependencyCommands(db *sql.DB) error {
 		var edge, blocker string
 		if canonicalDecode(event.payload["edge"], &edge) != nil || canonicalDecode(event.payload["blocker"], &blocker) != nil ||
 			output.Blocked != event.subject || output.Blocker != blocker ||
-			(command.Request.Operation == operation.DependencyAddV1.Metadata().Operation && output.Edge != edge) {
+			((command.Request.Operation == operation.DependencyAddV1.Metadata().Operation || command.Request.Operation == operation.DependencyAddV2.Metadata().Operation) && output.Edge != edge) {
 			return ErrInvalidStore
 		}
 	}

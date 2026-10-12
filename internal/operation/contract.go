@@ -119,6 +119,15 @@ const (
 	ProblemBatchSweepUnsupported   ProblemCode = "refusal.batch-sweep-unsupported-state"
 )
 
+// Named-Batch membership refusals distinguish absent/cross-domain targets,
+// explicit dismissal, and a fresh leave of a missing exact pair.
+const (
+	ProblemBatchTargetMissing     ProblemCode = "refusal.batch-target-missing"
+	ProblemBatchCrossDomain       ProblemCode = "refusal.batch-cross-domain"
+	ProblemBatchDismissed         ProblemCode = "refusal.batch-dismissed"
+	ProblemBatchMembershipMissing ProblemCode = "refusal.batch-membership-missing"
+)
+
 // Problem carries one coded semantic failure.
 type Problem struct {
 	Code    ProblemCode

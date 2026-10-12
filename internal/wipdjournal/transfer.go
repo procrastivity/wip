@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -180,19 +182,27 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
 	if err != nil || fields["schema"] != "wipd.event/1" || fields["event_id"] != eventID || fields["domain_id"] != domainID ||
-		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "claim.released" &&
+		(fields["kind"] != "matter.created" && fields["kind"] != "step.created" && fields["kind"] != "batch.created" &&
+			fields["kind"] != "batch.joined" && fields["kind"] != "batch.left" && fields["kind"] != "batch.dismissed" && fields["kind"] != "claim.released" &&
 			fields["kind"] != "batch.anonymous-created" && fields["kind"] != "claim.acquired" && fields["kind"] != "dispatch.opened" &&
-			fields["kind"] != "dispatch.closed" &&
+			fields["kind"] != "dispatch.closed" && fields["kind"] != "run.started" && fields["kind"] != "run.resumed" && fields["kind"] != "run.finished" &&
+			fields["kind"] != "role.spawned" && fields["kind"] != "role.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
 			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended" &&
 			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
-			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" &&
+			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" && fields["kind"] != "scheduler.hook-completed" &&
 			fields["kind"] != "gate.declared" && fields["kind"] != "gate.closed" && fields["kind"] != "gate.dismissed" && fields["kind"] != "gate.exemption-repaired" &&
 			!step8HistoryKind(asString(fields["kind"])) &&
 			!transferLifecycleEventKind(asString(fields["kind"]))) ||
-		!transferULID.MatchString(asString(fields["command_id"])) ||
-		!transferHash.MatchString(asString(fields["request_hash"])) || !transferULID.MatchString(asString(fields["repo_id"])) {
+		!transferULID.MatchString(asString(fields["command_id"])) || !transferHash.MatchString(asString(fields["request_hash"])) {
+		return false
+	}
+	if fields["kind"] == "batch.created" || namedBatchMembershipEvent(asString(fields["kind"])) {
+		if fields["repo_id"] != nil || !transferULID.MatchString(asString(fields["subject_id"])) {
+			return false
+		}
+	} else if !transferULID.MatchString(asString(fields["repo_id"])) {
 		return false
 	}
 	if !canonicalUTC(fields["acted_at"]) || !canonicalUTC(fields["occurred_at"]) {
@@ -208,6 +218,19 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return false
 	}
 	kind := asString(fields["kind"])
+	if kind == "batch.created" {
+		payloadName := asString(payload["name"])
+		return wipdwire.ExactMapKeys(payload, "name") && payloadName != "" && payloadName == strings.TrimSpace(payloadName)
+	}
+	if namedBatchMembershipEvent(kind) {
+		switch kind {
+		case "batch.joined", "batch.left":
+			return wipdwire.ExactMapKeys(payload, "matter_id") && transferULID.MatchString(asString(payload["matter_id"])) &&
+				transferULID.MatchString(asString(fields["subject_id"]))
+		case "batch.dismissed":
+			return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+		}
+	}
 	if transferLifecycleEventKind(kind) {
 		return validTransferLifecycleEvent(kind, asString(fields["subject_id"]), payload)
 	}
@@ -280,6 +303,29 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "dispatch_id", "claim_id", "claim_epoch") &&
 			transferULID.MatchString(dispatchID) && fields["subject_id"] == dispatchID &&
 			transferULID.MatchString(asString(payload["claim_id"])) && epochOK && claimEpoch > 0
+	case "run.started":
+		batchID, batchOK := payload["batch"].(string)
+		locator, locatorOK := payload["locator"].(string)
+		matters, mattersOK := payload["matters"].([]any)
+		if !wipdwire.ExactMapKeys(payload, "batch", "locator", "matters") || !transferULID.MatchString(asString(fields["subject_id"])) ||
+			!batchOK || !transferULID.MatchString(batchID) || !locatorOK || !transferMatterLocator.MatchString(locator) || !mattersOK || len(matters) == 0 {
+			return false
+		}
+		previous := ""
+		for _, value := range matters {
+			matterID := asString(value)
+			if !transferULID.MatchString(matterID) || previous != "" && previous >= matterID {
+				return false
+			}
+			previous = matterID
+		}
+		return true
+	case "run.finished":
+		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+	case "run.resumed":
+		return wipdwire.ExactMapKeys(payload) && transferULID.MatchString(asString(fields["subject_id"]))
+	case "role.spawned", "role.closed":
+		return validStep10RoleEvent(kind, asString(fields["subject_id"]), payload)
 	case "matter.created":
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&
@@ -367,9 +413,159 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			transferULID.MatchString(contentID) && transferULID.MatchString(asString(fields["subject_id"])) &&
 			fields["kind"] == wantKind && kindOK && payload["bytes"] == nil && lengthOK && length <= uint64(maxBlobSize) &&
 			transferHash.MatchString(digest) && transferHash.MatchString("sha256:"+sha) && digest == "sha256:"+sha
+	case "scheduler.hook-completed":
+		effectKey, keyOK := payload["effect_key"].(map[string]any)
+		version, versionOK := payload["version"].(uint64)
+		kind := asString(payload["kind"])
+		if !wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest") &&
+			!wipdwire.ExactMapKeys(payload, "effect_key", "kind", "version", "input_digest", "typed_result", "result_digest", "source_revision") ||
+			!keyOK || !wipdwire.ExactMapKeys(effectKey, "domain_id", "command_id") ||
+			effectKey["domain_id"] != domainID || effectKey["command_id"] != fields["command_id"] ||
+			(kind != "work" && kind != "plan" && kind != "ask") || !versionOK || version != 1 ||
+			!transferHash.MatchString(asString(payload["input_digest"])) || !transferHash.MatchString(asString(payload["result_digest"])) ||
+			!transferULID.MatchString(asString(fields["subject_id"])) || !validSchedulerHookTypedResult(payload["typed_result"], kind) {
+			return false
+		}
+		result, resultOK := payload["typed_result"].(map[string]any)
+		work, workOK := result["work"].(map[string]any)
+		revision := asString(work["revision"])
+		selectedVerifier := resultOK && kind == "work" && workOK && revision == operation.SchedulerStep10VerifierRevision
+		sourceRevision, hasSourceRevision := payload["source_revision"]
+		return selectedVerifier == hasSourceRevision && (!selectedVerifier || validSelectedVerifierSourceRevision(sourceRevision, revision))
 	default:
 		return false
 	}
+}
+
+func validSelectedVerifierSourceRevision(value any, protocolRevision string) bool {
+	fields, ok := value.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(fields, "protocol_revision", "base_revision", "candidate_revision", "candidate_manifest_sha256", "complete_tree_sha256", "snapshot_sha256") {
+		return false
+	}
+	protocol, protocolOK := fields["protocol_revision"].(string)
+	base, baseOK := fields["base_revision"].(string)
+	candidate, candidateOK := fields["candidate_revision"].(string)
+	manifest, manifestOK := fields["candidate_manifest_sha256"].(string)
+	completeTree, completeTreeOK := fields["complete_tree_sha256"].(string)
+	snapshot, snapshotOK := fields["snapshot_sha256"].(string)
+	return protocolOK && protocol == protocolRevision && baseOK && base != "" && candidateOK &&
+		manifestOK && transferHash.MatchString(manifest) && candidate == "candidate-v1:"+strings.TrimPrefix(manifest, "sha256:") &&
+		completeTreeOK && transferHash.MatchString(completeTree) && snapshotOK && transferHash.MatchString(snapshot)
+}
+
+func validStep10RoleEvent(kind, subject string, payload map[string]any) bool {
+	keys := []string{"run_id", "matter_id", "dispatch_id", "claim_id", "claim_epoch", "name"}
+	if kind == "role.closed" {
+		keys = append(keys, "reason")
+	}
+	epochText, epochOK := payload["claim_epoch"].(string)
+	epoch, epochErr := strconv.ParseUint(epochText, 10, 64)
+	name := asString(payload["name"])
+	if !wipdwire.ExactMapKeys(payload, keys...) || !transferULID.MatchString(subject) ||
+		!transferULID.MatchString(asString(payload["run_id"])) || !transferULID.MatchString(asString(payload["matter_id"])) ||
+		!transferULID.MatchString(asString(payload["dispatch_id"])) || !transferULID.MatchString(asString(payload["claim_id"])) ||
+		!epochOK || epochErr != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != epochText ||
+		(name != "orchestrator" && name != "coordinator" && name != "researcher" && name != "builder" && name != "verifier") {
+		return false
+	}
+	if kind == "role.closed" {
+		reason := asString(payload["reason"])
+		return reason == "completed" || reason == "reaped"
+	}
+	return true
+}
+
+func validSchedulerHookTypedResult(value any, kind string) bool {
+	result, ok := value.(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "kind", "version", "work", "plan", "ask") ||
+		result["kind"] != kind || result["version"] != uint64(1) {
+		return false
+	}
+	switch kind {
+	case "work":
+		work, ok := result["work"].(map[string]any)
+		if !ok || result["plan"] != nil || result["ask"] != nil ||
+			!wipdwire.ExactMapKeys(work, "outcome", "revision", "evidence_refs", "problem_code") {
+			return false
+		}
+		outcome, revision, problem := asString(work["outcome"]), asString(work["revision"]), asString(work["problem_code"])
+		evidence, ok := work["evidence_refs"].([]any)
+		if !ok || revision == "" || (outcome != "completed" && outcome != "failed" && outcome != "verified" && outcome != "not-verified") ||
+			(outcome == "completed" || outcome == "verified") && problem != "" ||
+			(outcome == "failed" || outcome == "not-verified") && problem == "" {
+			return false
+		}
+		for _, ref := range evidence {
+			if !transferHash.MatchString(asString(ref)) {
+				return false
+			}
+		}
+		return true
+	case "plan":
+		plan, ok := result["plan"].(map[string]any)
+		if !ok || result["work"] != nil || result["ask"] != nil ||
+			!wipdwire.ExactMapKeys(plan, "outcome", "steps", "problem_code") {
+			return false
+		}
+		outcome, problem := asString(plan["outcome"]), asString(plan["problem_code"])
+		steps, ok := plan["steps"].([]any)
+		if !ok || len(steps) > 128 || (outcome != "planned" && outcome != "failed") ||
+			(outcome == "planned" && problem != "") || (outcome == "failed" && (problem == "" || len(steps) != 0)) {
+			return false
+		}
+		for _, value := range steps {
+			step, ok := value.(map[string]any)
+			if !ok || !wipdwire.ExactMapKeys(step, "title") || strings.TrimSpace(asString(step["title"])) == "" || len(asString(step["title"])) > 240 {
+				return false
+			}
+		}
+		return true
+	case "ask":
+		ask, ok := result["ask"].(map[string]any)
+		return ok && result["work"] == nil && result["plan"] == nil && wipdwire.ExactMapKeys(ask, "handling") &&
+			(asString(ask["handling"]) == "skip" || asString(ask["handling"]) == "halt")
+	default:
+		return false
+	}
+}
+
+func namedBatchJoinReceiptNoEvent(entry Entry, raw []byte) bool {
+	input, ok := entry.Command.Request.Input.(operation.BatchMembershipInput)
+	if !ok || entry.Command.Request.Operation != operation.BatchJoinV1.Metadata().Operation ||
+		operation.BatchJoinV1.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || fields["accepted_events"] != nil {
+		return false
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "code", "output", "problem_code") ||
+		result["code"] != string(operation.ResultSucceeded) || result["problem_code"] != nil {
+		return false
+	}
+	output, ok := result["output"].([]byte)
+	if !ok {
+		return false
+	}
+	outputFields, err := wipdwire.DecodeCanonicalMap(output, "batch_id", "matter_id")
+	return err == nil && outputFields["batch_id"] == input.BatchID && outputFields["matter_id"] == input.MatterID
+}
+
+func namedBatchMembershipEvent(kind string) bool {
+	return kind == "batch.joined" || kind == "batch.left" || kind == "batch.dismissed"
+}
+
+func namedBatchMembershipOutputMatches(entry Entry, raw []byte) bool {
+	fields, err := wipdwire.DecodeCanonicalMap(raw, "batch_id", "matter_id")
+	if entry.Command.Request.Operation == operation.BatchDismissV1.Metadata().Operation {
+		fields, err = wipdwire.DecodeCanonicalMap(raw, "batch_id")
+		input, ok := entry.Command.Request.Input.(operation.BatchDismissInput)
+		return err == nil && ok && fields["batch_id"] == input.BatchID
+	}
+	input, ok := entry.Command.Request.Input.(operation.BatchMembershipInput)
+	return err == nil && ok && fields["batch_id"] == input.BatchID && fields["matter_id"] == input.MatterID
 }
 
 func transferGateScale(scale string) bool {

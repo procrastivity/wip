@@ -283,6 +283,45 @@ func (j *Journal) ClaimJournalReleaseAttempt(commandID string) (ClaimJournalRele
 	return attempt, nil
 }
 
+// ClaimJournalReleaseAttempts returns exact retained close identities in
+// Environment order for receipt-safe owning-Environment recovery.
+func (j *Journal) ClaimJournalReleaseAttempts() ([]ClaimJournalReleaseCommand, error) {
+	if j == nil {
+		return nil, ErrClosed
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.db == nil {
+		return nil, ErrClosed
+	}
+	rows, err := j.db.Query(`SELECT command_id FROM claim_journal_release_attempts ORDER BY environment_sequence`)
+	if err != nil {
+		return nil, err
+	}
+	var commandIDs []string
+	for rows.Next() {
+		var commandID string
+		if err = rows.Scan(&commandID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		commandIDs = append(commandIDs, commandID)
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	attempts := make([]ClaimJournalReleaseCommand, 0, len(commandIDs))
+	for _, commandID := range commandIDs {
+		attempt, readErr := readClaimJournalReleaseAttempt(j.db.QueryRow(`SELECT command_id,environment_sequence,request_hash,canonical_bytes,claim_id,claim_epoch,matter_id,dispatch_id,journal_id,generation,barrier,state,canonical_receipt,result_code
+			FROM claim_journal_release_attempts WHERE command_id=?`, commandID))
+		if readErr != nil || validateClaimJournalReleaseCommand(j.identity, attempt) != nil {
+			return nil, ErrInvalidJournal
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, nil
+}
+
 // HasPendingClaimJournalRelease reports whether a release attempt is unresolved.
 func (j *Journal) HasPendingClaimJournalRelease() (bool, error) {
 	if j == nil {

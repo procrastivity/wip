@@ -9,7 +9,7 @@ import (
 )
 
 func step8Definition(id operation.ID) (operation.Definition, bool) {
-	for _, d := range []operation.Definition{operation.DependencyAddV1, operation.DependencyRemoveV1, operation.ReferenceBindV1, operation.ReferenceUnbindV1, operation.ReferenceRebindV1} {
+	for _, d := range operation.Step8HistoryCatalogue() {
 		if d.Metadata().Operation == id {
 			return d, true
 		}
@@ -74,13 +74,23 @@ func step8EventMatches(f map[string]any, entry Entry) bool {
 	switch input := entry.Command.Request.Input.(type) {
 	case operation.DependencyAddInput:
 		return kind == "dependency.added" && subject == input.BlockedID && p["blocker"] == input.BlockerID
+	case operation.DependencyAddV2Input:
+		return kind == "dependency.added" && subject == input.BlockedID && p["blocker"] == input.BlockerID
 	case operation.DependencyRemoveInput:
+		return kind == "dependency.removed" && subject == input.BlockedID && p["blocker"] == input.BlockerID
+	case operation.DependencyRemoveV2Input:
 		return kind == "dependency.removed" && subject == input.BlockedID && p["blocker"] == input.BlockerID
 	case operation.ReferenceBindInput:
 		return kind == "reference.added" && subject == input.MatterID && p["ref"] == input.Reference && trackerPushLevel(asString(p["tracker_push_level"]))
+	case operation.ReferenceBindV2Input:
+		return kind == "reference.added" && subject == input.MatterID && p["ref"] == input.Reference && trackerPushLevel(asString(p["tracker_push_level"]))
 	case operation.ReferenceUnbindInput:
 		return kind == "reference.removed" && subject == input.MatterID && p["ref"] == input.Reference && trackerPushLevel(asString(p["tracker_push_level"]))
+	case operation.ReferenceUnbindV2Input:
+		return kind == "reference.removed" && subject == input.MatterID && p["ref"] == input.Reference && trackerPushLevel(asString(p["tracker_push_level"]))
 	case operation.ReferenceRebindInput:
+		return kind == "reference.rebound" && subject == input.MatterID && p["from"] == input.From && p["to"] == input.To && trackerPushLevel(asString(p["tracker_push_level"]))
+	case operation.ReferenceRebindV2Input:
 		return kind == "reference.rebound" && subject == input.MatterID && p["from"] == input.From && p["to"] == input.To && trackerPushLevel(asString(p["tracker_push_level"]))
 	}
 	return false
@@ -95,19 +105,75 @@ func step8OutputMatches(entry Entry, raw []byte, edge string) bool {
 			return false
 		}
 		want = map[string]any{"edge": f["edge"], "blocked_id": input.BlockedID, "blocker_id": input.BlockerID}
+	case operation.DependencyAddV2Input:
+		f, err := wipdwire.DecodeCanonicalMap(raw, "edge", "blocked_id", "blocker_id")
+		if err != nil || !transferULID.MatchString(asString(f["edge"])) || edge != "" && f["edge"] != edge {
+			return false
+		}
+		want = map[string]any{"edge": f["edge"], "blocked_id": input.BlockedID, "blocker_id": input.BlockerID}
 	case operation.DependencyRemoveInput:
+		want = map[string]any{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}
+	case operation.DependencyRemoveV2Input:
 		want = map[string]any{"blocked_id": input.BlockedID, "blocker_id": input.BlockerID}
 	case operation.ReferenceBindInput:
 		want = map[string]any{"matter_id": input.MatterID, "reference": input.Reference}
+	case operation.ReferenceBindV2Input:
+		want = map[string]any{"matter_id": input.MatterID, "reference": input.Reference}
 	case operation.ReferenceUnbindInput:
 		want = map[string]any{"matter_id": input.MatterID, "reference": input.Reference}
+	case operation.ReferenceUnbindV2Input:
+		want = map[string]any{"matter_id": input.MatterID, "reference": input.Reference}
 	case operation.ReferenceRebindInput:
+		want = map[string]any{"matter_id": input.MatterID, "reference": input.To, "previous_reference": input.From}
+	case operation.ReferenceRebindV2Input:
 		want = map[string]any{"matter_id": input.MatterID, "reference": input.To, "previous_reference": input.From}
 	default:
 		return false
 	}
 	encoded, err := wipdwire.EncodeCanonical(want)
 	return err == nil && bytes.Equal(raw, encoded)
+}
+
+func batchCreateOutputMatches(entry Entry, raw []byte, batchID string) bool {
+	input, ok := entry.Command.Request.Input.(operation.BatchCreateInput)
+	if !ok || entry.Command.Request.Operation != operation.BatchCreateV1.Metadata().Operation ||
+		operation.BatchCreateV1.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw, "id", "name")
+	if err != nil || !transferULID.MatchString(asString(fields["id"])) || batchID != "" && fields["id"] != batchID || fields["name"] != input.Name {
+		return false
+	}
+	want, err := wipdwire.EncodeCanonical(map[string]any{"id": fields["id"], "name": input.Name})
+	return err == nil && bytes.Equal(raw, want)
+}
+
+func batchCreateInstalledRangeMatches(tx *sql.Tx, entry Entry, ids []string) bool {
+	rows, err := tx.Query(`SELECT event_id,record FROM installed_events ORDER BY position`)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	accepted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		accepted[id] = true
+	}
+	for rows.Next() {
+		var id string
+		var record []byte
+		if err = rows.Scan(&id, &record); err != nil {
+			return false
+		}
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(record,
+			"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+		if decodeErr != nil {
+			return false
+		}
+		if fields["command_id"] == entry.Command.ID && (!accepted[id] || !eventMatchesCommand(record, entry)) {
+			return false
+		}
+	}
+	return rows.Err() == nil
 }
 
 // Already-pulled effects must belong to the accepted range too. In particular,

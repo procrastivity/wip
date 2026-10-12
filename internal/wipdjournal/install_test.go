@@ -17,7 +17,7 @@ import (
 )
 
 func TestInstallFoldRejectsPhantomReceiptRangeAcrossReopen(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	entry := prepareAndAdmitInstallTestCommand(t, journal, testCommandPrefix+"81")
 	installed, err := journal.InstallSnapshot(context.Background())
@@ -47,7 +47,7 @@ func TestInstallFoldRejectsPhantomReceiptRangeAcrossReopen(t *testing.T) {
 }
 
 func TestInstallFoldReceiptRangeSelectsExactEventsFromMixedDelta(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	entry := prepareAndAdmitInstallTestCommand(t, journal, testCommandPrefix+"86")
 	installed, err := journal.InstallSnapshot(context.Background())
@@ -89,7 +89,7 @@ func TestInstallFoldReceiptRangeSelectsExactEventsFromMixedDelta(t *testing.T) {
 }
 
 func TestInstallFoldAcceptsReceiptRangeAlreadyInInstalledLineage(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	entry := prepareAndAdmitInstallTestCommand(t, journal, testCommandPrefix+"91")
 	installed, err := journal.InstallSnapshot(context.Background())
@@ -128,7 +128,7 @@ func TestInstallFoldAcceptsReceiptRangeAlreadyInInstalledLineage(t *testing.T) {
 }
 
 func TestInstallFoldCommitAndOverlayAreAtomicAcrossFailureAndReopen(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	entry := prepareAndAdmitInstallTestCommand(t, journal, testCommandPrefix+"83")
 	installed, err := journal.InstallSnapshot(context.Background())
@@ -197,7 +197,7 @@ func TestInstallFoldCommitAndOverlayAreAtomicAcrossFailureAndReopen(t *testing.T
 }
 
 func TestAdmissionMarkerAndRecoverableOverlayCommitTogether(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	entry, err := journal.PrepareCommand(commandInput(testCommandPrefix+"84", "atomic-admit", "Atomic admission"))
 	if err != nil {
@@ -252,7 +252,7 @@ func TestAdmissionMarkerAndRecoverableOverlayCommitTogether(t *testing.T) {
 }
 
 func TestSchemaV1JournalUpgradeKeepsRowsPreAdmission(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	input := commandInput(testCommandPrefix+"85", "migration", "Schema upgrade")
 	original, err := journal.PrepareCommand(input)

@@ -61,14 +61,18 @@ project_resources_absent || fail "project collision: $project already has contai
 
 CGO_ENABLED=0 go build -trimpath -o "$tmp_dir/wipd" ./cmd/wipd
 CGO_ENABLED=0 go test -c -trimpath -o "$tmp_dir/wipdauthority.test" ./internal/wipdauthority
-test_filter='^(TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess|TestM5TwoEnvironmentClaimCloseAndFinalPullSpine)$'
+test_filter='^(TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess|TestM5TwoEnvironmentClaimCloseAndFinalPullSpine|TestM5CrossContainerClientProjectionEvidence)$'
 listed_tests="$("$tmp_dir/wipdauthority.test" -test.list "$test_filter")"
 for test_name in \
   TestM5AuthorityBackedMatterAndStepBirthThroughWipdProcess \
-  TestM5TwoEnvironmentClaimCloseAndFinalPullSpine; do
+  TestM5TwoEnvironmentClaimCloseAndFinalPullSpine \
+  TestM5CrossContainerClientProjectionEvidence; do
   grep -Fqx "$test_name" <<<"$listed_tests" \
     || fail "compiled process acceptance binary is missing $test_name"
 done
+worker_test_list="$("$tmp_dir/wipdauthority.test" -test.list '^TestM5CrossContainerAuthorityFixtureWorker$')"
+grep -Fqx TestM5CrossContainerAuthorityFixtureWorker <<<"$worker_test_list" \
+  || fail 'compiled process acceptance binary is missing TestM5CrossContainerAuthorityFixtureWorker'
 
 cleanup_needed=1
 if ! WIP_AUTHORITY_LAB_PROJECT="$project" "$run" up >"$tmp_dir/compose-up.log" 2>&1; then
@@ -215,8 +219,179 @@ run_process_acceptance() {
     "$service" "${project}_$( [[ "$service" == authority-env ]] && printf authority-state || printf client-state )"
 }
 
+run_cross_container_acceptance() {
+  local authority_dir="$state_root/cross-container-authority"
+  local client_dir="$state_root/cross-container-client"
+  local client_tmp_dir="$volume_root/.m5-tmp"
+  local bundle_path="$authority_dir/bundle.json"
+  local stop_path="$authority_dir/stop"
+  local authority_evidence_path="$authority_dir/evidence.json"
+  local authority_log="$authority_dir/worker.log"
+  local client_bundle_path="$client_dir/bundle.json"
+  local client_evidence_path="$client_dir/evidence.json"
+  local bundle_copy="$tmp_dir/cross-container-bundle.json"
+  local authority_evidence_copy="$tmp_dir/cross-container-authority-evidence.json"
+  local client_evidence_copy="$tmp_dir/cross-container-client-evidence.json"
+  local attempts
+
+  docker exec "$authority_id" mkdir -p "$authority_dir"
+  docker exec "$client_id" mkdir -p "$client_dir"
+  docker exec "$client_id" mkdir -p "$client_tmp_dir"
+  docker exec "$authority_id" chmod 700 "$volume_root" "$state_root" "$authority_dir"
+  docker exec "$client_id" chmod 700 "$volume_root" "$state_root" "$client_dir" "$client_tmp_dir"
+  docker cp "$tmp_dir/wipd" "$authority_id:$state_root/wipd" >/dev/null
+  docker cp "$tmp_dir/wipdauthority.test" "$authority_id:$state_root/wipdauthority.test" >/dev/null
+  docker cp "$tmp_dir/wipd" "$client_id:$state_root/wipd" >/dev/null
+  docker cp "$tmp_dir/wipdauthority.test" "$client_id:$state_root/wipdauthority.test" >/dev/null
+
+  docker exec -d \
+    --env "TMPDIR=$authority_dir" \
+    --env "WIP_M5_CROSS_CONTAINER_BUNDLE_OUTPUT=$bundle_path" \
+    --env "WIP_M5_CROSS_CONTAINER_STOP=$stop_path" \
+    --env "WIP_M5_CROSS_CONTAINER_AUTHORITY_EVIDENCE=$authority_evidence_path" \
+    "$authority_id" sh -c '
+      "$1" -test.v -test.run "^TestM5CrossContainerAuthorityFixtureWorker$" -test.count=1 >"$2" 2>&1
+    ' sh "$state_root/wipdauthority.test" "$authority_log"
+
+  for ((attempts = 0; attempts < 120; attempts++)); do
+    if docker exec "$authority_id" test -s "$bundle_path"; then
+      break
+    fi
+    if docker exec "$authority_id" grep -Eq '^--- (FAIL|PASS): TestM5CrossContainerAuthorityFixtureWorker' "$authority_log"; then
+      docker exec "$authority_id" cat "$authority_log" >&2
+      fail 'authority-side cross-container fixture worker exited before publishing its client bundle'
+    fi
+    sleep 0.25
+  done
+  docker exec "$authority_id" test -s "$bundle_path" || {
+    docker exec "$authority_id" cat "$authority_log" >&2 || true
+    fail 'authority-side cross-container fixture worker did not become ready'
+  }
+
+  docker cp "$authority_id:$bundle_path" "$bundle_copy" >/dev/null
+  chmod 644 "$bundle_copy"
+  docker cp "$bundle_copy" "$client_id:$client_bundle_path" >/dev/null
+  if ! docker exec \
+    --env "TMPDIR=$client_tmp_dir" \
+    --env "WIP_M5_WIPD_BINARY=$state_root/wipd" \
+    --env "WIP_M5_CROSS_CONTAINER_BUNDLE=$client_bundle_path" \
+    --env "WIP_M5_CROSS_CONTAINER_CLIENT_EVIDENCE=$client_evidence_path" \
+    "$client_id" "$state_root/wipdauthority.test" \
+    -test.v -test.run '^TestM5TwoEnvironmentClaimCloseAndFinalPullSpine$' -test.count=1 \
+    >"$tmp_dir/client-cross-container-acceptance.log" 2>&1; then
+    cat "$tmp_dir/client-cross-container-acceptance.log" >&2
+    docker exec "$authority_id" touch "$stop_path" || true
+    fail 'client-env cross-container two-Environment M5 acceptance failed'
+  fi
+  grep -F -- '--- PASS: TestM5TwoEnvironmentClaimCloseAndFinalPullSpine (' \
+    "$tmp_dir/client-cross-container-acceptance.log" >/dev/null \
+    || fail 'client-env did not execute the M5 two-Environment acceptance test'
+  docker exec "$client_id" test -s "$client_evidence_path" \
+    || fail 'client-env did not write final convergence evidence'
+
+  docker exec "$authority_id" touch "$stop_path"
+  for ((attempts = 0; attempts < 120; attempts++)); do
+    if docker exec "$authority_id" test -s "$authority_evidence_path"; then
+      break
+    fi
+    sleep 0.25
+  done
+  docker exec "$authority_id" test -s "$authority_evidence_path" || {
+    docker exec "$authority_id" cat "$authority_log" >&2 || true
+    fail 'authority-env did not write the final typed authority evidence'
+  }
+  for ((attempts = 0; attempts < 120; attempts++)); do
+    if docker exec "$authority_id" grep -F -- '--- PASS: TestM5CrossContainerAuthorityFixtureWorker (' "$authority_log" >/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  docker exec "$authority_id" grep -F -- '--- PASS: TestM5CrossContainerAuthorityFixtureWorker (' "$authority_log" >/dev/null \
+    || {
+      docker exec "$authority_id" cat "$authority_log" >&2 || true
+      fail 'authority-env cross-container worker did not pass'
+    }
+
+  docker cp "$authority_id:$authority_evidence_path" "$authority_evidence_copy" >/dev/null
+  docker cp "$client_id:$client_evidence_path" "$client_evidence_copy" >/dev/null
+  jq -n \
+    --slurpfile authority "$authority_evidence_copy" \
+    --slurpfile client "$client_evidence_copy" \
+    '
+      $authority[0] as $a | $client[0] as $c |
+      {
+        authority_as_of: $a.as_of, client_as_of: $c.as_of,
+        authority_manifest: $a.manifest_digest, client_manifest: $c.manifest_digest,
+        authority_event_count: ($a.events | length), client_event_count: ($c.event_records | length),
+        contention: $a.contention_refusal,
+        traffic_kinds: ([$a.traffic[].frame_kind] | unique),
+        traffic_environments: ([$a.traffic[].environment_id] | unique),
+        traffic_endpoints: ([$a.traffic[] | {host, remote_addr}] | unique),
+        overlay_count: $c.overlay_count,
+        authority_matter_projections: $a.matter_projections,
+        environment_a_matter_projections: $c.environment_a_matter_projections,
+        environment_b_matter_projections: $c.environment_b_matter_projections,
+        environment_a_step_projection_count: ($c.environment_a_step_projections | length),
+        environment_a_content_projection_count: ($c.environment_a_content_projections | length),
+        checks: {
+          schemas: ($a.schema == "wipd.m5-cross-container-authority-evidence/2" and
+            $c.schema == "wipd.m5-cross-container-client-evidence/2"),
+          identity: ($a.domain_id == $c.domain_id and $a.authority_epoch == $c.authority_epoch and
+            $a.environment_a == $c.environment_a and $a.environment_b == $c.environment_b),
+          provenance: ($a.source == "authority" and $a.reachability == "reachable" and
+            $a.history_state == "current" and $a.matter_count == 2),
+          as_of: ($a.as_of == $c.as_of),
+          manifest: ($a.manifest_digest == $c.manifest_digest),
+          events: ($a.events == $c.event_records),
+          authority_projection_count: (($a.matter_projections | length) == $a.matter_count and $a.matter_count == 2),
+          both_matter_projections_match_authority: ($a.matter_projections == $c.environment_a_matter_projections and
+            $a.matter_projections == $c.environment_b_matter_projections),
+          client_projection_values_match: ($c.environment_a_matter_projections == $c.environment_b_matter_projections and
+            $c.environment_a_step_projections == $c.environment_b_step_projections and
+            $c.environment_a_content_projections == $c.environment_b_content_projections and
+            ($c.environment_a_step_projections | length) == 2 and
+            ($c.environment_a_content_projections | length) == 4),
+          contention: ($a.contention_refusal.environment_id == $a.environment_b and
+            $a.contention_refusal.matter_id != "" and $a.contention_refusal.prefix_unchanged == true and
+            $a.contention_refusal.before == $a.contention_refusal.after),
+          event_count: ($c.as_of.EventCount == ($c.event_records | length)),
+          overlay_minimum: ($c.overlay_count >= 8),
+          endpoints: all($a.traffic[]; .host == "authority-env:8443" and .remote_addr != "" and
+            (.remote_addr | startswith("127.") | not) and (.remote_addr | startswith("[::1]:") | not)),
+          required_kinds: (all(["claim.acquire", "command.submit", "claim-journal.ack", "claim-journal.seal", "claim.release", "pull.request"][];
+            . as $kind | ([$a.traffic[].frame_kind] | index($kind)) != null)),
+          both_environments: (all([$a.environment_a, $a.environment_b][];
+            . as $environment | ([$a.traffic[].environment_id] | index($environment)) != null))
+        }
+      }
+    ' >"$tmp_dir/convergence.json" \
+    || fail 'could not compare authority and client M5 evidence'
+  jq -e 'all(.checks[]; .)' "$tmp_dir/convergence.json" >/dev/null \
+    || {
+      cat "$tmp_dir/convergence.json" >&2
+      fail 'authority and both Environment pulls do not converge at the exact authority prefix/manifest/projection values'
+    }
+
+  docker exec "$authority_id" rm -f "$bundle_path" "$stop_path" "$authority_evidence_path" "$authority_log" \
+    "$state_root/wipd" "$state_root/wipdauthority.test"
+  docker exec "$client_id" rm -f "$client_bundle_path" "$client_evidence_path" \
+    "$state_root/wipd" "$state_root/wipdauthority.test"
+  docker exec "$client_id" sh -c '[ -z "$(ls -1A "$1")" ]' sh "$client_tmp_dir" \
+    || fail 'client-env retained temporary process acceptance state'
+  docker exec "$client_id" rmdir "$client_tmp_dir"
+  docker exec "$authority_id" sh -c '[ -z "$(ls -1A "$1")" ]' sh "$authority_dir" \
+    || fail 'authority-env retained disposable cross-container fixture state'
+  docker exec "$client_id" sh -c '[ -z "$(ls -1A "$1")" ]' sh "$client_dir" \
+    || fail 'client-env retained disposable cross-container profile or journal state'
+  docker exec "$authority_id" rmdir "$authority_dir"
+  docker exec "$client_id" rmdir "$client_dir"
+  printf 'PASS cross-container M5 claim lifecycle: authority-env=%s client-env=%s endpoint=https://authority-env:8443 internal-network=%s\n' \
+    "${authority_id:0:12}" "${client_id:0:12}" "$network_id"
+  printf 'PASS cross-container M5 traffic and convergence: authenticated claim.acquire/command.submit/journal return/release/final pull; exact event prefix and manifest match\n'
+}
+
 run_process_acceptance "$authority_id" authority-env
-run_process_acceptance "$client_id" client-env
+run_cross_container_acceptance
 
 ordering_filter='^(TestConnectedCommandStartReturnsPendingPrefixBeforeTailAndWrite|TestConnectedCommandStartWithoutPendingPullsBeforeGuard|TestCommandStartPullFailureAndRestartDoNotReturnUnadmittedHead|TestConnectedCommandStartSerializesAdmissionAndPullThroughSharedDomainLane)$'
 ordering_tests="$(go test ./internal/wipd -list "$ordering_filter")" \

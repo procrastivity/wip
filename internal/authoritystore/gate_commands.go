@@ -113,7 +113,7 @@ func appendNonemptyEventIDs(first string, rest []string) []string {
 	return append([]string{first}, rest...)
 }
 
-func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, identity eventIdentity,
+func completeGateTx(ctx context.Context, tx *sql.Tx, blobDir string, command operation.Command, identity eventIdentity,
 	result operation.Result, eventIDs []string, occurred time.Time,
 ) (step4Fold, error) {
 	fold := step4Fold{result: result}
@@ -187,8 +187,14 @@ func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, 
 		if err != nil {
 			return fold, err
 		}
-		if err = authorizeGateActor(string(command.Request.Actor), gate, false); err != nil {
+		if err = authorizeGateCommandActorTx(ctx, tx, command, gate, false); err != nil {
 			return refuse("refusal.gate-owner", err.Error())
+		}
+		if gate == "verified" && command.Request.Actor == "role:verifier" {
+			if err := validateStep10VerifiedGateTx(ctx, tx, blobDir, command, node); err != nil {
+				return refuse("refusal.verification-evidence-incomplete",
+					"the active Verifier command has no complete retained D106 pass at this exact revision and claim")
+			}
 		}
 		if satisfied, err := gateSatisfiedTx(ctx, tx, identity.domain, node, gate); err != nil {
 			return fold, err
@@ -214,7 +220,7 @@ func completeGateTx(ctx context.Context, tx *sql.Tx, command operation.Command, 
 		if err != nil {
 			return fold, err
 		}
-		if err = authorizeGateActor(string(command.Request.Actor), gate, true); err != nil {
+		if err = authorizeGateCommandActorTx(ctx, tx, command, gate, true); err != nil {
 			return refuse("refusal.gate-owner", err.Error())
 		}
 		if lifecycle, err := lifecycleStateTx(ctx, tx, identity.domain, node, kind); err != nil {
@@ -393,9 +399,26 @@ func authorizeGateActor(actor, gate string, dismissal bool) error {
 	if owner == "" || actor != "role:"+owner {
 		return fmt.Errorf("%s can only be closed or dismissed by its owning role; arbitrary roles cannot act on it", gate)
 	}
-	// The accepted authority projection currently has no role-spawn projection;
-	// fail closed rather than treating actor text as proof of an open spawn.
-	return fmt.Errorf("%s requires an active %s role spawn, which this authority projection does not currently represent", gate, owner)
+	return nil
+}
+
+func authorizeGateCommandActorTx(ctx context.Context, tx *sql.Tx, command operation.Command, gate string, dismissal bool) error {
+	if err := authorizeGateActor(string(command.Request.Actor), gate, dismissal); err != nil {
+		return err
+	}
+	actor := string(command.Request.Actor)
+	if !strings.HasPrefix(actor, "role:") {
+		return nil
+	}
+	roleName := strings.TrimPrefix(actor, "role:")
+	active, err := activeRoleForGateTx(ctx, tx, command, roleName)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return fmt.Errorf("%s requires an active %s role spawn for this claim, Dispatch, and Run", gate, roleName)
+	}
+	return nil
 }
 
 func sealedNodesAtScaleTx(ctx context.Context, tx *sql.Tx, domain, repo, scale string) ([]string, error) {

@@ -163,6 +163,13 @@ func (s *Store) SealOwnedClaimJournal(ctx context.Context, identity CurrentClaim
 		claimEpoch != identity.ClaimEpoch || authorityEpoch != identity.AuthorityEpoch || generation != identity.Generation || closed.Valid {
 		return "", 0, ErrFenced
 	}
+	blocked, err := step10ClaimHasUnresolvedWorkTx(ctx, tx, identity.DomainID, identity.ClaimID)
+	if err != nil {
+		return "", 0, err
+	}
+	if blocked {
+		return "", 0, ErrStep10OpenBracket
+	}
 	digest, count, err := barrierDigest(ctx, tx, identity.DomainID, identity.JournalID)
 	if err != nil {
 		return "", 0, err

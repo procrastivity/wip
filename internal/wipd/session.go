@@ -122,7 +122,7 @@ func decodeClientHello(payload []byte) (capabilityHello, error) {
 	return hello, nil
 }
 
-func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose, commandSubmitV2 bool) (serverHello, sessionParameters, error) {
+func negotiateCapabilities(client capabilityHello, registry *operation.Registry, birthRelease, claimAcquire, claimJournalClose, commandSubmitV2, namedBatchRead bool) (serverHello, sessionParameters, error) {
 	const supportedMajor, supportedMinor = uint16(1), uint16(0)
 	if client.protocolMin.major != supportedMajor || client.protocolMin.minor > supportedMinor ||
 		client.protocolMax.major != supportedMajor || client.protocolMax.minor < supportedMinor {
@@ -143,6 +143,9 @@ func negotiateCapabilities(client capabilityHello, registry *operation.Registry,
 	}
 	if commandSubmitV2 {
 		serverFeatures = append(serverFeatures, wipdwire.CommandSubmitV2Feature)
+	}
+	if namedBatchRead {
+		serverFeatures = append(serverFeatures, wipdwire.NamedBatchReadFeature)
 	}
 	sort.Strings(serverFeatures)
 	result := serverHello{
@@ -207,10 +210,10 @@ func identitySchemaFor(id operation.ID) (string, bool) {
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
 		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
 		operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation,
-		operation.BatchSweepAnonymousV1.Metadata().Operation:
+		operation.BatchSweepAnonymousV1.Metadata().Operation, operation.BatchCreateV1.Metadata().Operation:
 		return identitySchemaV1, true
 	default:
-		if operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) {
+		if operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.Step10CapabilityOperation(id) || operation.NamedBatchMembershipOperation(id) {
 			return identitySchemaV1, true
 		}
 	}

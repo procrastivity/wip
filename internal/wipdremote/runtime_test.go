@@ -17,8 +17,24 @@ import (
 	"github.com/procrastivity/wip/internal/operation"
 )
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make test temp directory private: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat private test temp directory: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("test temp directory mode = %04o, want owner-only", info.Mode().Perm())
+	}
+	return dir
+}
+
 func TestSaveConfigExactRetryAndConflict(t *testing.T) {
-	profileRoot := filepath.Join(t.TempDir(), "profile")
+	profileRoot := filepath.Join(privateTempDir(t), "profile")
 	if err := os.Mkdir(profileRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +64,7 @@ func TestSaveConfigExactRetryAndConflict(t *testing.T) {
 		t.Fatalf("conflict changed saved profile = %+v, %v", loaded, err)
 	}
 
-	legacyRoot := filepath.Join(t.TempDir(), "legacy-profile")
+	legacyRoot := filepath.Join(privateTempDir(t), "legacy-profile")
 	legacy := config
 	legacy.Schema = "wipd.connected-authority-profile/1"
 	legacy.OwnerRootPublicKey = nil
@@ -157,6 +173,45 @@ func TestConnectedCommandCatalogueIsExplicitAndClosed(t *testing.T) {
 		id := definition.Metadata().Operation
 		if hasCommand(m5, id) || hasCommand(m6, id) || hasCommand(step7, id) || !hasCommand(step8, id) {
 			t.Fatalf("%s is not isolated to explicit m6-step8", id)
+		}
+	}
+	step9a, err := registryForConfig(Config{CommandCatalogue: "m6-step9a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step9b, err := registryForConfig(Config{CommandCatalogue: "m6-step9b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.CommandCatalogue = "m6-step9b"
+	if err = validateConfig(config); err != nil {
+		t.Fatalf("rejected explicit Step 9-B profile: %v", err)
+	}
+	if len(step9b.Definitions()) != len(step9a.Definitions())+len(operation.NamedBatchMembershipCatalogue()) {
+		t.Fatal("Step 9-B widened beyond its named Batch membership and dismissal operations")
+	}
+	for _, definition := range operation.NamedBatchMembershipCatalogue() {
+		id := definition.Metadata().Operation
+		if hasCommand(m5, id) || hasCommand(m6, id) || hasCommand(step7, id) || hasCommand(step8, id) || hasCommand(step9a, id) || !hasCommand(step9b, id) {
+			t.Fatalf("%s is not isolated to explicit m6-step9b", id)
+		}
+	}
+	step10, err := registryForConfig(Config{CommandCatalogue: "m6-step10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.CommandCatalogue = "m6-step10"
+	if err = validateConfig(config); err != nil {
+		t.Fatalf("rejected explicit Step 10 profile: %v", err)
+	}
+	if len(step10.Definitions()) != len(step9b.Definitions())+len(operation.Step10Catalogue()) {
+		t.Fatal("Step 10 widened beyond its isolated scheduler and lifecycle capabilities")
+	}
+	for _, definition := range operation.Step10Catalogue() {
+		id := definition.Metadata().Operation
+		if hasCommand(m5, id) || hasCommand(m6, id) || hasCommand(step7, id) || hasCommand(step8, id) ||
+			hasCommand(step9a, id) || hasCommand(step9b, id) || !hasCommand(step10, id) {
+			t.Fatalf("%s is not isolated to explicit m6-step10", id)
 		}
 	}
 }

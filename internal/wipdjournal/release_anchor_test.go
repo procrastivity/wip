@@ -247,7 +247,7 @@ func prepareReleaseAnchorFixture(t *testing.T, acquired bool) (*Journal, string,
 			return journal.InstallClaimJournalRelease(context.Background(), mustInstallSnapshot(t, journal).Expectation(), attempt, receipt, transfer)
 		}
 	} else {
-		journal = openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
+		journal = openInstallTestJournal(t, filepath.Join(privateTempDir(t), "journal"))
 		claim = testCommandPrefix + "70"
 		barrier := wipdwire.JournalBarrier{
 			Schema: "wipd.journal-barrier/1", Journal: claim,

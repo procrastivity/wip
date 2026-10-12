@@ -76,7 +76,7 @@ func TestStep8DependencyDomainDirectionCrossRepoAndEndpointTombstones(t *testing
 
 func TestStep8ReferenceBindLifecycleRefreshReopenAndSharedRepo(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	j := openInstallTestJournal(t, root)
 	defer func() { _ = j.Close() }()
 	records := step8ProjectionMatters(t)
@@ -151,7 +151,7 @@ func TestStep8ReferenceBindLifecycleRefreshReopenAndSharedRepo(t *testing.T) {
 
 func TestStep8BoundaryCandidateLifecycleRefreshInstallAndReopen(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	j := openInstallTestJournal(t, root)
 	defer func() { _ = j.Close() }()
 

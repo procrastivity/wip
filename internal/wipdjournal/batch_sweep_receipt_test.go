@@ -17,7 +17,7 @@ func TestBatchSweepNoEventReceiptInstallationIsExact(t *testing.T) {
 	for _, mutation := range []string{"valid", "swept", "unknown-outcome", "output-type", "extra-output", "problem", "other-operation", "wrong-hash", "wrong-environment", "event-range"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			journal := openInstallTestJournal(t, root)
 			defer func() { _ = journal.Close() }()
 			entry := prepareBatchSweepReceiptTestCommand(t, journal)
@@ -90,7 +90,7 @@ func TestBatchSweepNoEventReceiptInstallationIsExact(t *testing.T) {
 }
 
 func TestBatchSweepTerminalReceiptOutcomeMatchesEventRange(t *testing.T) {
-	journal := openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
+	journal := openInstallTestJournal(t, filepath.Join(privateTempDir(t), "journal"))
 	defer func() { _ = journal.Close() }()
 	entry := prepareBatchSweepReceiptTestCommand(t, journal)
 	for _, test := range []struct {
@@ -118,7 +118,7 @@ func TestBatchSweepTerminalReceiptOutcomeMatchesEventRange(t *testing.T) {
 
 func TestBatchSweepReopenRejectsAlreadySweptWithGenuineEventRange(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "journal")
+	root := filepath.Join(privateTempDir(t), "journal")
 	journal := openInstallTestJournal(t, root)
 	defer func() { _ = journal.Close() }()
 	entry := prepareBatchSweepReceiptTestCommand(t, journal)
@@ -186,7 +186,7 @@ func TestBatchSweepInstallRejectsSubstitutedEvent(t *testing.T) {
 	for _, mutation := range []string{"wrong-kind", "wrong-batch", "wrong-repo"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			journal := openInstallTestJournal(t, root)
 			defer func() { _ = journal.Close() }()
 			entry := prepareBatchSweepReceiptTestCommand(t, journal)
@@ -224,7 +224,7 @@ func TestBatchSweepReopenRejectsSubstitutedEvent(t *testing.T) {
 	for _, mutation := range []string{"wrong-kind", "wrong-batch", "wrong-repo"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			journal := openInstallTestJournal(t, root)
 			defer func() { _ = journal.Close() }()
 			entry := prepareBatchSweepReceiptTestCommand(t, journal)

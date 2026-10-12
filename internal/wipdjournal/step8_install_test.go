@@ -47,31 +47,50 @@ func step8InstallFixture(t *testing.T, journal *Journal, d operation.Definition)
 	var input operation.Input
 	kind, subject := "", step8A
 	p, output := map[string]any{}, map[string]any{}
-	switch d.Metadata().Operation {
-	case operation.DependencyAddV1.Metadata().Operation:
+	switch d.Metadata().Operation.Name {
+	case operation.DependencyAddV1.Metadata().Operation.Name:
 		input = operation.DependencyAddInput{BlockedID: step8A, BlockerID: step8B}
+		if d.Metadata().Operation.Version == 2 {
+			input = operation.DependencyAddV2Input{BlockedID: step8A, BlockerID: step8B, TargetClaims: []operation.TargetClaim{
+				{MatterID: step8A, ClaimID: step8A, ClaimEpoch: 3}, {MatterID: step8B, ClaimID: step8B, ClaimEpoch: 8},
+			}}
+		}
 		kind = "dependency.added"
 		p = map[string]any{"edge": step8Edge, "blocker": step8B}
 		output = map[string]any{"edge": step8Edge, "blocked_id": step8A, "blocker_id": step8B}
-	case operation.DependencyRemoveV1.Metadata().Operation:
+	case operation.DependencyRemoveV1.Metadata().Operation.Name:
 		input = operation.DependencyRemoveInput{BlockedID: step8A, BlockerID: step8B}
+		if d.Metadata().Operation.Version == 2 {
+			input = operation.DependencyRemoveV2Input{BlockedID: step8A, BlockerID: step8B, TargetClaims: []operation.TargetClaim{
+				{MatterID: step8A, ClaimID: step8A, ClaimEpoch: 3}, {MatterID: step8B, ClaimID: step8B, ClaimEpoch: 8},
+			}}
+		}
 		kind = "dependency.removed"
 		p = map[string]any{"edge": step8Edge, "blocker": step8B}
 		output = map[string]any{"blocked_id": step8A, "blocker_id": step8B}
 		records = append(records, step8InstallEvent(t, 102, "dependency.added", step8A, testRepoID, p, nil))
-	case operation.ReferenceBindV1.Metadata().Operation:
+	case operation.ReferenceBindV1.Metadata().Operation.Name:
 		input = operation.ReferenceBindInput{MatterID: step8A, Reference: "NEW"}
+		if d.Metadata().Operation.Version == 2 {
+			input = operation.ReferenceBindV2Input{MatterID: step8A, Reference: "NEW", TargetClaims: []operation.TargetClaim{{MatterID: step8A, ClaimID: step8A, ClaimEpoch: 3}}}
+		}
 		kind = "reference.added"
 		p = map[string]any{"ref": "NEW", "tracker_push_level": "off"}
 		output = map[string]any{"matter_id": step8A, "reference": "NEW"}
-	case operation.ReferenceUnbindV1.Metadata().Operation:
+	case operation.ReferenceUnbindV1.Metadata().Operation.Name:
 		input = operation.ReferenceUnbindInput{MatterID: step8A, Reference: "OLD"}
+		if d.Metadata().Operation.Version == 2 {
+			input = operation.ReferenceUnbindV2Input{MatterID: step8A, Reference: "OLD", TargetClaims: []operation.TargetClaim{{MatterID: step8A, ClaimID: step8A, ClaimEpoch: 3}}}
+		}
 		kind = "reference.removed"
 		p = map[string]any{"ref": "OLD", "tracker_push_level": "off"}
 		output = map[string]any{"matter_id": step8A, "reference": "OLD"}
 		records = append(records, step8InstallEvent(t, 102, "reference.bound", step8A, testRepoID, map[string]any{"ref": "OLD"}, nil))
-	case operation.ReferenceRebindV1.Metadata().Operation:
+	case operation.ReferenceRebindV1.Metadata().Operation.Name:
 		input = operation.ReferenceRebindInput{MatterID: step8A, From: "OLD", To: "NEW"}
+		if d.Metadata().Operation.Version == 2 {
+			input = operation.ReferenceRebindV2Input{MatterID: step8A, From: "OLD", To: "NEW", TargetClaims: []operation.TargetClaim{{MatterID: step8A, ClaimID: step8A, ClaimEpoch: 3}}}
+		}
 		kind = "reference.rebound"
 		p = map[string]any{"from": "OLD", "to": "NEW", "tracker_push_level": "off"}
 		output = map[string]any{"matter_id": step8A, "reference": "NEW", "previous_reference": "OLD"}
@@ -92,17 +111,20 @@ func step8InstallReceipt(t *testing.T, entry Entry, eventID string, output map[s
 	}
 	return map[string]any{
 		"schema": "wipd.terminal-receipt/1", "domain_id": testDomainID, "authority_epoch": uint64(7), "identity_schema": "wipd.command/1", "command_id": entry.Command.ID, "request_hash": entry.RequestHash,
-		"operation": map[string]any{"name": entry.Command.Request.Operation.Name, "version": uint64(1)}, "environment": map[string]any{"id": testEnvironmentID, "sequence": entry.EnvironmentSeq},
+		"operation": map[string]any{"name": entry.Command.Request.Operation.Name, "version": uint64(entry.Command.Request.Operation.Version)}, "environment": map[string]any{"id": testEnvironmentID, "sequence": entry.EnvironmentSeq},
 		"result": map[string]any{"code": "result.succeeded", "output": raw, "problem_code": nil}, "accepted_events": map[string]any{"first_event_id": eventID, "last_event_id": eventID, "event_count": uint64(1)},
 	}
 }
 
 func TestStep8TerminalBindingAndAtomicRollback(t *testing.T) {
-	for _, d := range []operation.Definition{operation.DependencyAddV1, operation.DependencyRemoveV1, operation.ReferenceBindV1, operation.ReferenceUnbindV1, operation.ReferenceRebindV1} {
+	for _, d := range []operation.Definition{
+		operation.DependencyAddV1, operation.DependencyRemoveV1, operation.ReferenceBindV1, operation.ReferenceUnbindV1, operation.ReferenceRebindV1,
+		operation.DependencyAddV2, operation.DependencyRemoveV2, operation.ReferenceBindV2, operation.ReferenceUnbindV2, operation.ReferenceRebindV2,
+	} {
 		for _, mutation := range []string{"valid", "kind", "subject", "Repo", "event-hash", "event-sequence", "acted-at", "input", "snapshot", "output", "output-extra", "edge-output", "operation", "range", "no-range", "receipt-hash", "receipt-environment", "effectful-refusal"} {
 			t.Run(d.Metadata().Operation.Name+"/"+mutation, func(t *testing.T) {
 				ctx := context.Background()
-				root := filepath.Join(t.TempDir(), "journal")
+				root := filepath.Join(privateTempDir(t), "journal")
 				journal := openInstallTestJournal(t, root)
 				defer func() { _ = journal.Close() }()
 				entry, records, event, output := step8InstallFixture(t, journal, d)
@@ -224,7 +246,7 @@ func TestStep8ReopenRejectsForgedEventWithRecomputedPrefixAndOverlay(t *testing.
 	for _, mutation := range []string{"kind", "Repo", "reference", "edge-output", "receipt-output"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			j := openInstallTestJournal(t, root)
 			defer func() { _ = j.Close() }()
 			d := operation.ReferenceBindV1
@@ -310,7 +332,7 @@ func TestStep8ReopenRejectsForgedEventWithRecomputedPrefixAndOverlay(t *testing.
 }
 
 func TestStep8JournalSnapshotHasNoMutableCacheAlias(t *testing.T) {
-	j := openInstallTestJournal(t, filepath.Join(t.TempDir(), "journal"))
+	j := openInstallTestJournal(t, filepath.Join(privateTempDir(t), "journal"))
 	defer func() { _ = j.Close() }()
 	_, records, _, _ := step8InstallFixture(t, j, operation.ReferenceUnbindV1)
 	s, err := j.InstallPull(context.Background(), mustStep8Snapshot(t, j).Expectation(), verifiedInstallTestTransfer(t, emptyTransferAnchor(), records))
@@ -329,7 +351,7 @@ func TestStep8TerminalUsesAlreadyPulledWholeCommandLineage(t *testing.T) {
 	for _, mode := range []string{"success", "refusal hides effect", "success hides second effect"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			j := openInstallTestJournal(t, root)
 			defer func() { _ = j.Close() }()
 			entry, records, event, output := step8InstallFixture(t, j, operation.ReferenceBindV1)

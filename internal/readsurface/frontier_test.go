@@ -515,6 +515,9 @@ func TestSealedAtIncludesEnclosingGateClose(t *testing.T) {
 	f.start(matter)
 	f.start(step)
 	finish := f.finish(step)
+	// occurred_at is millisecond precision; make the enclosing close strictly
+	// later instead of relying on scheduler latency to cross a clock tick.
+	time.Sleep(2 * time.Millisecond)
 	gateClose := f.closeGate(matter, "reviewed-local", store.ScaleMatter)
 
 	n, err := f.Node(ctx, step)

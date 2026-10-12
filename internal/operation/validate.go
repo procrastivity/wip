@@ -35,7 +35,8 @@ func (d Definition) ValidateRequest(request Request) error {
 			return fmt.Errorf("required %s context is empty", dimension)
 		}
 	}
-	if d.metadata.Claim == ClaimExact || d.metadata.Claim == ClaimImplicitBirth {
+	if d.metadata.Claim == ClaimExact || d.metadata.Claim == ClaimImplicitBirth ||
+		Step10Operation(d.metadata.Operation) && request.Claim != nil {
 		if request.Claim == nil || request.Claim.ID == "" || request.Claim.Epoch == "" {
 			return fmt.Errorf("operation requires an exact claim ID and epoch")
 		}
@@ -52,6 +53,22 @@ func (d Definition) ValidateRequest(request Request) error {
 		}
 	}
 	switch input := request.Input.(type) {
+	case SchedulerHookInput:
+		if err := validateSchedulerHookInput(input, request); err != nil {
+			return err
+		}
+	case RoleLifecycleInput:
+		if err := validateRoleLifecycleRequest(d.metadata.Operation, input, request); err != nil {
+			return err
+		}
+	case RunFinishInput:
+		if err := validateRunFinishRequest(input, request); err != nil {
+			return err
+		}
+	case RunResumeInput:
+		if err := validateRunResumeRequest(input, request); err != nil {
+			return err
+		}
 	case StepLifecycleInput:
 		if err := validateULID("Step ID", input.StepID); err != nil {
 			return err
@@ -98,6 +115,21 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("claim close prefix event ID", *prefix.EventID); err != nil {
 			return err
 		}
+	case BatchCreateInput:
+		if strings.TrimSpace(input.Name) == "" || input.Name != strings.TrimSpace(input.Name) {
+			return fmt.Errorf("named Batch name is empty or has surrounding whitespace")
+		}
+	case BatchMembershipInput:
+		if err := validateULID("Batch ID", input.BatchID); err != nil {
+			return err
+		}
+		if err := validateULID("Matter ID", input.MatterID); err != nil {
+			return err
+		}
+	case BatchDismissInput:
+		if err := validateULID("Batch ID", input.BatchID); err != nil {
+			return err
+		}
 	case ContentWriteInput:
 		if err := validateULID("content subject ID", input.SubjectID); err != nil {
 			return err
@@ -134,6 +166,10 @@ func (d Definition) ValidateRequest(request Request) error {
 		if err := validateULID("blocker Matter/Step ID", input.BlockerID); err != nil {
 			return err
 		}
+	case DependencyAddV2Input:
+		if err := validateDependencyV2Input(input.BlockedID, input.BlockerID, input.TargetClaims); err != nil {
+			return err
+		}
 	case DependencyRemoveInput:
 		if err := validateULID("blocked Matter/Step ID", input.BlockedID); err != nil {
 			return err
@@ -144,12 +180,20 @@ func (d Definition) ValidateRequest(request Request) error {
 		if input.BlockedID == input.BlockerID {
 			return fmt.Errorf("dependency cannot block itself")
 		}
+	case DependencyRemoveV2Input:
+		if err := validateDependencyV2Input(input.BlockedID, input.BlockerID, input.TargetClaims); err != nil {
+			return err
+		}
 	case ReferenceBindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
 		if strings.TrimSpace(input.Reference) == "" {
 			return fmt.Errorf("tracker reference is empty")
+		}
+	case ReferenceBindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.Reference, input.TargetClaims); err != nil {
+			return err
 		}
 	case ReferenceUnbindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
@@ -158,11 +202,22 @@ func (d Definition) ValidateRequest(request Request) error {
 		if strings.TrimSpace(input.Reference) == "" {
 			return fmt.Errorf("tracker reference is empty")
 		}
+	case ReferenceUnbindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.Reference, input.TargetClaims); err != nil {
+			return err
+		}
 	case ReferenceRebindInput:
 		if err := validateULID("Matter ID", input.MatterID); err != nil {
 			return err
 		}
 		if strings.TrimSpace(input.From) == "" || strings.TrimSpace(input.To) == "" || input.From == input.To {
+			return fmt.Errorf("tracker rebind requires two distinct non-empty references")
+		}
+	case ReferenceRebindV2Input:
+		if err := validateReferenceV2Input(input.MatterID, input.From, input.TargetClaims); err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.To) == "" || input.From == input.To {
 			return fmt.Errorf("tracker rebind requires two distinct non-empty references")
 		}
 	case GateExemptionRepairInput:
@@ -250,6 +305,49 @@ func (d Definition) ValidateRequest(request Request) error {
 	return d.validateBlobs(request.Blobs)
 }
 
+func validateDependencyV2Input(blocked, blocker string, claims []TargetClaim) error {
+	if err := validateULID("blocked Matter/Step ID", blocked); err != nil {
+		return err
+	}
+	if err := validateULID("blocker Matter/Step ID", blocker); err != nil {
+		return err
+	}
+	return validateTargetClaims(claims)
+}
+
+func validateReferenceV2Input(matter, reference string, claims []TargetClaim) error {
+	if err := validateULID("Matter ID", matter); err != nil {
+		return err
+	}
+	if strings.TrimSpace(reference) == "" {
+		return fmt.Errorf("tracker reference is empty")
+	}
+	return validateTargetClaims(claims)
+}
+
+func validateTargetClaims(claims []TargetClaim) error {
+	if len(claims) > 2 {
+		return fmt.Errorf("target claim set exceeds two Matters")
+	}
+	previous := ""
+	for _, claim := range claims {
+		if err := validateULID("target Matter ID", claim.MatterID); err != nil {
+			return err
+		}
+		if err := validateULID("target claim ID", claim.ClaimID); err != nil {
+			return err
+		}
+		if claim.ClaimEpoch == 0 {
+			return fmt.Errorf("target claim epoch must be positive")
+		}
+		if previous != "" && previous >= claim.MatterID {
+			return fmt.Errorf("target claims must be unique and ordered by Matter ID")
+		}
+		previous = claim.MatterID
+	}
+	return nil
+}
+
 func validGateScale(scale string) bool {
 	return scale == "matter" || scale == "stage" || scale == "step"
 }
@@ -316,6 +414,18 @@ func (d Definition) ValidateResult(result Result) error {
 			if output.Outcome != BatchSweepAnonymousSwept && output.Outcome != BatchSweepAnonymousAlreadySwept {
 				return fmt.Errorf("anonymous Batch sweep output has an unknown outcome")
 			}
+		case BatchCreateOutput:
+			if validateULID("Batch output ID", output.ID) != nil || strings.TrimSpace(output.Name) == "" || output.Name != strings.TrimSpace(output.Name) {
+				return fmt.Errorf("named Batch output is invalid")
+			}
+		case BatchMembershipOutput:
+			if validateULID("Batch output ID", output.BatchID) != nil || validateULID("Matter output ID", output.MatterID) != nil {
+				return fmt.Errorf("named Batch membership output is invalid")
+			}
+		case BatchDismissOutput:
+			if validateULID("Batch output ID", output.BatchID) != nil {
+				return fmt.Errorf("named Batch dismissal output is invalid")
+			}
 		case GateDeclareOutput:
 			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {
 				return fmt.Errorf("gate declaration output is invalid")
@@ -338,11 +448,11 @@ func (d Definition) ValidateResult(result Result) error {
 				return fmt.Errorf("dependency output is invalid")
 			}
 			switch d.metadata.Operation {
-			case DependencyAddV1.Metadata().Operation:
+			case DependencyAddV1.Metadata().Operation, DependencyAddV2.Metadata().Operation:
 				if validateULID("dependency edge output ID", output.EdgeID) != nil {
 					return fmt.Errorf("dependency add output is missing its edge identity")
 				}
-			case DependencyRemoveV1.Metadata().Operation:
+			case DependencyRemoveV1.Metadata().Operation, DependencyRemoveV2.Metadata().Operation:
 				if output.EdgeID != "" {
 					return fmt.Errorf("dependency remove output cannot carry an edge identity")
 				}
@@ -351,8 +461,8 @@ func (d Definition) ValidateResult(result Result) error {
 			}
 		case ReferenceOutput:
 			if validateULID("Matter output ID", output.MatterID) != nil || strings.TrimSpace(output.Reference) == "" ||
-				(d.metadata.Operation == ReferenceRebindV1.Metadata().Operation && strings.TrimSpace(output.PreviousReference) == "") ||
-				(d.metadata.Operation != ReferenceRebindV1.Metadata().Operation && output.PreviousReference != "") {
+				((d.metadata.Operation == ReferenceRebindV1.Metadata().Operation || d.metadata.Operation == ReferenceRebindV2.Metadata().Operation) && strings.TrimSpace(output.PreviousReference) == "") ||
+				((d.metadata.Operation != ReferenceRebindV1.Metadata().Operation && d.metadata.Operation != ReferenceRebindV2.Metadata().Operation) && output.PreviousReference != "") {
 				return fmt.Errorf("tracker reference output is invalid")
 			}
 		case ContentSegmentOutput:
@@ -362,6 +472,28 @@ func (d Definition) ValidateResult(result Result) error {
 				d.metadata.Operation == ContentWriteOnceV1.Metadata().Operation && output.Kind == "findings" ||
 				d.metadata.Operation == FindingAppendV1.Metadata().Operation && output.Kind != "findings" {
 				return fmt.Errorf("content output has invalid identity, kind, or staged-blob metadata")
+			}
+		case SchedulerHookOutput:
+			if err := validateSchedulerHookOutput(output); err != nil {
+				return err
+			}
+		case RoleLifecycleOutput:
+			wantState := "open"
+			if d.metadata.Operation == RoleCloseV1.Metadata().Operation {
+				wantState = "closed"
+			}
+			if validateULID("Run output ID", output.RunID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
+				validateULID("Dispatch output ID", output.DispatchID) != nil || validateULID("Role output ID", output.RoleID) != nil ||
+				output.Role == "" || output.State != wantState {
+				return fmt.Errorf("role lifecycle output has invalid identity or state")
+			}
+		case RunFinishOutput:
+			if validateULID("Run output ID", output.RunID) != nil || output.State != "finished" {
+				return fmt.Errorf("run finish output has invalid identity or state")
+			}
+		case RunResumeOutput:
+			if validateULID("Run output ID", output.RunID) != nil || output.State != "resumed" {
+				return fmt.Errorf("run resume output has invalid identity or state")
 			}
 		case MatterCreateV2Output:
 			if validateULID("Matter output ID", output.ID) != nil || output.Title == "" ||
@@ -443,6 +575,9 @@ func (d Definition) ValidateResult(result Result) error {
 		if d.metadata.Operation == BatchSweepAnonymousV1.Metadata().Operation && !validBatchSweepRefusal(result.Problem.Code) {
 			return fmt.Errorf("batch.sweep-anonymous@v1 has unknown refusal code %q", result.Problem.Code)
 		}
+		if isNamedBatchMembershipOperation(d.metadata.Operation) && !validNamedBatchRefusal(result.Problem.Code) {
+			return fmt.Errorf("%s has unknown refusal code %q", d.metadata.Operation, result.Problem.Code)
+		}
 	case ResultFailed:
 		if prefix != "internal" {
 			return fmt.Errorf("failed result requires an internal.* problem, got %q", result.Problem.Code)
@@ -455,6 +590,19 @@ func validBatchSweepRefusal(code ProblemCode) bool {
 	switch code {
 	case ProblemBatchSweepTargetMissing, ProblemBatchSweepClaimClose,
 		ProblemBatchSweepNotEligible, ProblemBatchSweepUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+func isNamedBatchMembershipOperation(id ID) bool {
+	return id == BatchJoinV1.Metadata().Operation || id == BatchLeaveV1.Metadata().Operation || id == BatchDismissV1.Metadata().Operation
+}
+
+func validNamedBatchRefusal(code ProblemCode) bool {
+	switch code {
+	case ProblemBatchTargetMissing, ProblemBatchCrossDomain, ProblemBatchDismissed, ProblemBatchMembershipMissing:
 		return true
 	default:
 		return false

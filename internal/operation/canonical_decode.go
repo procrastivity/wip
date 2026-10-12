@@ -201,6 +201,105 @@ func commandDecodeClaim(value any) (*ClaimContext, error) {
 
 func commandDecodeInput(id ID, value any) (Input, error) {
 	switch id {
+	case SchedulerOrchestrateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input",
+			"kind", "version", "adapter_id", "adapter_version", "run_id", "matter_id", "target_id", "target_kind",
+			"role", "role_id", "dispatch_id", "revision", "reason", "contention", "blocked", "failed",
+			"target_claims", "installed_prefix_anchor")
+		if err != nil {
+			return nil, err
+		}
+		var input SchedulerHookInput
+		if input.Kind, err = commandString(fields, "kind"); err != nil {
+			return nil, err
+		}
+		if input.Version, err = commandUint(fields, "version"); err != nil {
+			return nil, err
+		}
+		if input.AdapterID, err = commandString(fields, "adapter_id"); err != nil {
+			return nil, err
+		}
+		if input.AdapterVersion, err = commandUint(fields, "adapter_version"); err != nil {
+			return nil, err
+		}
+		if input.TargetKind, err = commandString(fields, "target_kind"); err != nil {
+			return nil, err
+		}
+		for key, target := range map[string]*string{
+			"run_id": &input.RunID, "matter_id": &input.MatterID, "target_id": &input.TargetID,
+			"role": &input.Role, "revision": &input.Revision, "reason": &input.Reason,
+			"contention": &input.Contention, "blocked": &input.Blocked, "failed": &input.Failed,
+		} {
+			if *target, err = commandString(fields, key); err != nil {
+				return nil, err
+			}
+		}
+		if input.RoleID, err = commandNullableString(fields, "role_id"); err != nil {
+			return nil, err
+		}
+		if input.DispatchID, err = commandNullableString(fields, "dispatch_id"); err != nil {
+			return nil, err
+		}
+		if input.TargetClaims, err = commandDecodeTargetClaims(fields["target_claims"]); err != nil {
+			return nil, err
+		}
+		prefix, err := commandMap(fields["installed_prefix_anchor"], "installed_prefix_anchor", "event_count", "event_id", "digest")
+		if err != nil {
+			return nil, err
+		}
+		if input.InstalledPrefix.EventCount, err = commandUint(prefix, "event_count"); err != nil {
+			return nil, err
+		}
+		eventID, err := commandNullableString(prefix, "event_id")
+		if err != nil {
+			return nil, err
+		}
+		if prefix["event_id"] != nil {
+			input.InstalledPrefix.EventID = &eventID
+		}
+		if input.InstalledPrefix.Digest, err = commandString(prefix, "digest"); err != nil {
+			return nil, err
+		}
+		return input, nil
+	case RoleSpawnV1.Metadata().Operation, RoleCloseV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id", "run_locator", "matter_id", "dispatch_id", "role_id", "role", "reason")
+		if err != nil {
+			return nil, err
+		}
+		var input RoleLifecycleInput
+		for key, target := range map[string]*string{
+			"run_id": &input.RunID, "run_locator": &input.RunLocator, "matter_id": &input.MatterID, "dispatch_id": &input.DispatchID,
+			"role_id": &input.RoleID, "role": &input.Role, "reason": &input.Reason,
+		} {
+			if *target, err = commandString(fields, key); err != nil {
+				return nil, err
+			}
+		}
+		return input, nil
+	case RunFinishV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id")
+		if err != nil {
+			return nil, err
+		}
+		runID, err := commandString(fields, "run_id")
+		if err != nil {
+			return nil, err
+		}
+		return RunFinishInput{RunID: runID}, nil
+	case SchedulerResumeV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "run_id", "run_locator")
+		if err != nil {
+			return nil, err
+		}
+		runID, err := commandString(fields, "run_id")
+		if err != nil {
+			return nil, err
+		}
+		runLocator, err := commandString(fields, "run_locator")
+		if err != nil {
+			return nil, err
+		}
+		return RunResumeInput{RunID: runID, RunLocator: runLocator}, nil
 	case MatterCreateV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "title", "requested_locator")
 		if err != nil {
@@ -423,6 +522,40 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return input, nil
+	case BatchCreateV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "name")
+		if err != nil {
+			return nil, err
+		}
+		name, err := commandString(fields, "name")
+		if err != nil {
+			return nil, err
+		}
+		return BatchCreateInput{Name: name}, nil
+	case BatchJoinV1.Metadata().Operation, BatchLeaveV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "batch_id", "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		batchID, err := commandString(fields, "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		matterID, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		return BatchMembershipInput{BatchID: batchID, MatterID: matterID}, nil
+	case BatchDismissV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		batchID, err := commandString(fields, "batch_id")
+		if err != nil {
+			return nil, err
+		}
+		return BatchDismissInput{BatchID: batchID}, nil
 	case GateDeclareV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "gate", "scale")
 		if err != nil {
@@ -483,6 +616,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return DependencyAddInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case DependencyAddV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return DependencyAddV2Input{BlockedID: blocked, BlockerID: blocker, TargetClaims: claims}, err
 	case DependencyRemoveV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "blocked_id", "blocker_id")
 		if err != nil {
@@ -497,6 +645,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return DependencyRemoveInput{BlockedID: blocked, BlockerID: blocker}, nil
+	case DependencyRemoveV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "blocked_id", "blocker_id", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		blocked, err := commandString(fields, "blocked_id")
+		if err != nil {
+			return nil, err
+		}
+		blocker, err := commandString(fields, "blocker_id")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return DependencyRemoveV2Input{BlockedID: blocked, BlockerID: blocker, TargetClaims: claims}, err
 	case ReferenceBindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "reference")
 		if err != nil {
@@ -511,6 +674,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceBindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceBindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceBindV2Input{MatterID: matter, Reference: reference, TargetClaims: claims}, err
 	case ReferenceUnbindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "reference")
 		if err != nil {
@@ -525,6 +703,21 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceUnbindInput{MatterID: matter, Reference: reference}, nil
+	case ReferenceUnbindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "reference", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		reference, err := commandString(fields, "reference")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceUnbindV2Input{MatterID: matter, Reference: reference, TargetClaims: claims}, err
 	case ReferenceRebindV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "matter_id", "from", "to")
 		if err != nil {
@@ -543,6 +736,25 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return ReferenceRebindInput{MatterID: matter, From: from, To: to}, nil
+	case ReferenceRebindV2.Metadata().Operation:
+		fields, err := commandMap(value, "input", "matter_id", "from", "to", "target_claims")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		from, err := commandString(fields, "from")
+		if err != nil {
+			return nil, err
+		}
+		to, err := commandString(fields, "to")
+		if err != nil {
+			return nil, err
+		}
+		claims, err := commandDecodeTargetClaims(fields["target_claims"])
+		return ReferenceRebindV2Input{MatterID: matter, From: from, To: to, TargetClaims: claims}, err
 	case GateExemptionRepairV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "node_id", "gate", "event_count", "high_water_event_id", "prefix_digest", "incident_ref", "reason", "evidence_refs")
 		if err != nil {
@@ -658,6 +870,34 @@ func commandStringArray(fields map[string]any, key string) ([]string, error) {
 		result[index] = text
 	}
 	return result, nil
+}
+
+func commandDecodeTargetClaims(value any) ([]TargetClaim, error) {
+	values, ok := value.([]any)
+	if !ok || len(values) > 2 {
+		return nil, fmt.Errorf("operation: target_claims must be an array of at most two records")
+	}
+	claims := make([]TargetClaim, 0, len(values))
+	for index, value := range values {
+		fields, err := commandMap(value, fmt.Sprintf("target_claims[%d]", index), "matter_id", "claim_id", "claim_epoch")
+		if err != nil {
+			return nil, err
+		}
+		matter, err := commandString(fields, "matter_id")
+		if err != nil {
+			return nil, err
+		}
+		id, err := commandString(fields, "claim_id")
+		if err != nil {
+			return nil, err
+		}
+		epoch, err := commandUint(fields, "claim_epoch")
+		if err != nil {
+			return nil, err
+		}
+		claims = append(claims, TargetClaim{MatterID: matter, ClaimID: id, ClaimEpoch: epoch})
+	}
+	return claims, nil
 }
 
 func commandDecodeBlobs(value any) ([]BlobInput, error) {

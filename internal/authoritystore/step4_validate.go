@@ -110,20 +110,66 @@ func checkStep4State(db *sql.DB) error {
 	for _, s := range all {
 		id := operation.ID{Name: s.operation, Version: uint16(s.version)}
 		step4 := operation.Step4Operation(id)
+		step10 := operation.Step10Operation(id)
+		step10Role := operation.Step10RoleOperation(id)
+		step10Run := operation.Step10RunOperation(id)
+		step10Any := step10 || step10Role || step10Run
 		_, knownGate := gateDefinition(id)
 		step13Gate := version >= 12 && knownGate
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
 		batchSweep := version >= 17 && id == operation.BatchSweepAnonymousV1.Metadata().Operation
+		namedBatch := version >= 19 && id == operation.BatchCreateV1.Metadata().Operation
+		namedBatchMembership := version >= 20 && isNamedBatchMembershipOperation(id)
 		dependencyDefinition, knownDependency := dependencyHistoryDefinition(id)
 		dependency := version >= 18 && knownDependency
 		referenceDefinition, knownReference := referenceHistoryDefinition(id)
 		reference := version >= 18 && knownReference
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step13Gate && !privateGateRepair && !batchSweep && !dependency && !reference) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step10Any && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !namedBatchMembership && !dependency && !reference) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
-			!step4 && s.version != 1 {
+			!step4 && s.version != 1 && !dependency && !reference {
 			return ErrInvalidStore
+		}
+		if step10 {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			if decodeErr != nil || operation.SchedulerOrchestrateV1.ValidateRequest(command.Request) != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone == "" || command.Request.Context.Worktree == "" {
+				return ErrInvalidStore
+			}
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
+		}
+		if step10Role {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			definition, defined := step10RoleDefinition(id)
+			if decodeErr != nil || !defined || definition.ValidateRequest(command.Request) != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone == "" || command.Request.Context.Worktree == "" {
+				return ErrInvalidStore
+			}
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
+		}
+		if step10Run {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			var validRequest bool
+			if decodeErr == nil && id == operation.SchedulerResumeV1.Metadata().Operation {
+				validRequest = operation.SchedulerResumeV1.ValidateRequest(command.Request) == nil
+			} else if decodeErr == nil && id == operation.RunFinishV1.Metadata().Operation {
+				validRequest = operation.RunFinishV1.ValidateRequest(command.Request) == nil
+			}
+			if !validRequest || command.Request.Claim != nil || command.Request.Context.Repo == "" ||
+				command.Request.Context.Clone == "" || command.Request.Context.Worktree == "" {
+				return ErrInvalidStore
+			}
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
 		}
 		if reference {
 			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
@@ -143,6 +189,17 @@ func checkStep4State(db *sql.DB) error {
 			}
 			// Context.Repo fences command domain membership, not endpoint scope.
 			// Check refusals too: they have no event or edge projection to bind it.
+			var member int
+			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
+				return ErrInvalidStore
+			}
+		} else if namedBatchMembership {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			definition, defined := namedBatchMembershipDefinition(id)
+			if decodeErr != nil || !defined || definition.ValidateRequest(command.Request) != nil || command.Request.Claim != nil ||
+				command.Request.Context.Repo == "" || command.Request.Context.Clone != "" || command.Request.Context.Worktree != "" {
+				return ErrInvalidStore
+			}
 			var member int
 			if err = db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member); err != nil || member != 1 {
 				return ErrInvalidStore
@@ -244,14 +301,15 @@ func checkStep4State(db *sql.DB) error {
 		}
 		if code == "result.succeeded" {
 			gateNoop := step13Gate && s.operation == "gate.declare" && !first.Valid && !last.Valid && r.Range == nil
-			if gateNoop {
+			namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && !first.Valid && !last.Valid && r.Range == nil
+			if gateNoop || namedBatchMembershipNoop {
 				if r.Result.Problem != nil || len(r.Result.Output) == 0 {
 					return ErrInvalidStore
 				}
 			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
 				return ErrInvalidStore
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
@@ -261,13 +319,65 @@ func checkStep4State(db *sql.DB) error {
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
 					return ErrInvalidStore
 				}
-			} else if !gateNoop && (s.operation == "matter.create" || s.operation == "step.create") {
+			} else if !gateNoop && !namedBatchMembershipNoop && (s.operation == "matter.create" || s.operation == "step.create") {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
 					return ErrInvalidStore
 				}
-			} else if !gateNoop {
+			} else if !gateNoop && !namedBatchMembershipNoop {
 				return ErrInvalidStore
+			}
+			if step10 {
+				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+				var output operation.SchedulerHookOutput
+				if decodeErr != nil || artifactDecoder.Unmarshal(r.Result.Output, &output) != nil {
+					return ErrInvalidStore
+				}
+				if _, validationErr := validateSchedulerHookResult(command, operation.Result{Code: operation.ResultSucceeded, Output: output}); validationErr != nil {
+					return ErrInvalidStore
+				}
+			}
+			if step10Role {
+				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+				definition, defined := step10RoleDefinition(id)
+				var output operation.RoleLifecycleOutput
+				if decodeErr != nil || !defined || artifactDecoder.Unmarshal(r.Result.Output, &output) != nil ||
+					definition.ValidateResult(operation.Result{Code: operation.ResultSucceeded, Output: output}) != nil {
+					return ErrInvalidStore
+				}
+				input := command.Request.Input.(operation.RoleLifecycleInput)
+				if output.RunID != input.RunID || output.MatterID != input.MatterID || output.DispatchID != input.DispatchID ||
+					output.RoleID != input.RoleID || output.Role != input.Role ||
+					(id == operation.RoleSpawnV1.Metadata().Operation && output.State != "open") ||
+					(id == operation.RoleCloseV1.Metadata().Operation && output.State != "closed") {
+					return ErrInvalidStore
+				}
+			}
+			if step10Run {
+				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+				if decodeErr != nil {
+					return ErrInvalidStore
+				}
+				result := operation.Result{Code: operation.ResultSucceeded}
+				if id == operation.SchedulerResumeV1.Metadata().Operation {
+					var output operation.RunResumeOutput
+					if artifactDecoder.Unmarshal(r.Result.Output, &output) != nil || output.RunID != command.Request.Input.(operation.RunResumeInput).RunID {
+						return ErrInvalidStore
+					}
+					result.Output = output
+					if operation.SchedulerResumeV1.ValidateResult(result) != nil {
+						return ErrInvalidStore
+					}
+				} else {
+					var output operation.RunFinishOutput
+					if artifactDecoder.Unmarshal(r.Result.Output, &output) != nil || output.RunID != command.Request.Input.(operation.RunFinishInput).RunID {
+						return ErrInvalidStore
+					}
+					result.Output = output
+					if operation.RunFinishV1.ValidateResult(result) != nil {
+						return ErrInvalidStore
+					}
+				}
 			}
 			// Gate command validation below binds no-op output to the current projection.
 		} else if (code == "result.rejected" || code == "result.refused" || code == "result.failed") && !first.Valid && !last.Valid && r.Range == nil && r.Result.Output == nil && r.Result.Problem != nil {
@@ -280,10 +390,11 @@ func checkStep4State(db *sql.DB) error {
 		}
 		var eventCount int
 		gateNoop := step13Gate && s.operation == "gate.declare" && code == "result.succeeded" && r.Range == nil
+		namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && code == "result.succeeded" && r.Range == nil
 		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
-			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
-			(code == "result.succeeded" && gateNoop && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && (gateNoop || namedBatchMembershipNoop) && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
 		}
 	}
@@ -367,6 +478,14 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 	for _, s := range submissions {
 		byID[ownerKey(s.domain, s.id)] = s
 	}
+	var evidencePositions map[string]uint64
+	var err error
+	if version >= 20 {
+		evidencePositions, err = schedulerHookEvidencePositions(db)
+		if err != nil {
+			return err
+		}
+	}
 	rows, err := db.Query(`SELECT domain_id,position,event_id,command_id,record,prefix_digest FROM authority_events ORDER BY domain_id,position`)
 	if err != nil {
 		return err
@@ -374,6 +493,14 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 	type projected struct{ domain, id, repo, locator, assigned, title, birth, command string }
 	var expected []projected
 	lifecycleEvents := make(map[string][]lifecycleEvent)
+	type roleHistoryRecord struct {
+		event      step12Event
+		submission storedSubmission
+		command    operation.Command
+	}
+	var roleHistory []roleHistoryRecord
+	var runFinishHistory []roleHistoryRecord
+	var runResumeHistory []roleHistoryRecord
 	var domain, previousID string
 	var position uint64
 	prefix := sha256.Sum256([]byte("wipd/event-prefix/v1\x00"))
@@ -466,12 +593,16 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 		if version >= 12 {
 			operationID := operation.ID{Name: s.operation, Version: uint16(s.version)}
 			_, gate := gateDefinition(operationID)
+			step10 := operation.Step10Operation(operationID)
+			step10Role := operation.Step10RoleOperation(operationID)
+			step10Run := operation.Step10RunOperation(operationID)
+			step10Any := step10 || step10Role || step10Run
 			batchSweep := operationID == operation.BatchSweepAnonymousV1.Metadata().Operation
 			_, knownDependency := dependencyHistoryDefinition(operationID)
 			dependency := version >= 18 && knownDependency
 			_, knownReference := referenceHistoryDefinition(operationID)
 			reference := version >= 18 && knownReference
-			if gate || batchSweep || dependency || reference {
+			if gate || step10Any || batchSweep || dependency || reference {
 				event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
 				command, commandErr := operation.DecodeCanonicalCommand(s.command)
 				if parseErr != nil || commandErr != nil || event.hash != s.hash || event.environment != s.env ||
@@ -491,6 +622,22 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 					err = ErrInvalidStore
 					break
 				}
+				if step10 && (validateSchedulerHookHistoryEvent(event, s, command) != nil ||
+					validateSchedulerHookEvidenceReferences(evidencePositions, event, s, pos) != nil) {
+					err = ErrInvalidStore
+					break
+				}
+				if step10Role {
+					roleHistory = append(roleHistory, roleHistoryRecord{event: event, submission: s, command: command})
+				}
+				if step10Run {
+					record := roleHistoryRecord{event: event, submission: s, command: command}
+					if operation.Step10RunResumeOperation(operationID) {
+						runResumeHistory = append(runResumeHistory, record)
+					} else {
+						runFinishHistory = append(runFinishHistory, record)
+					}
+				}
 				var length [8]byte
 				binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
 				h := sha256.New()
@@ -507,9 +654,64 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 				continue
 			}
 		}
+		if version >= 19 && (operation.ID{Name: s.operation, Version: uint16(s.version)}) == operation.BatchCreateV1.Metadata().Operation {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			event, eventErr := parseStep12Event(raw, d, pos, id, cmd)
+			input, inputOK := command.Request.Input.(operation.BatchCreateInput)
+			if decodeErr != nil || eventErr != nil || !inputOK || command.Request.Operation != operation.BatchCreateV1.Metadata().Operation ||
+				operation.BatchCreateV1.ValidateRequest(command.Request) != nil || event.hash != s.hash || event.kind != "batch.created" ||
+				event.repo != "" || event.environment != s.env || event.sequence != s.seq || event.acted != command.ActedAt ||
+				!exactKeys(event.payload, "name") {
+				err = ErrInvalidStore
+				break
+			}
+			var name string
+			if artifactDecoder.Unmarshal(event.payload["name"], &name) != nil || name != input.Name {
+				err = ErrInvalidStore
+				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
 		if contentOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
 			if _, _, _, _, _, eventErr := validContentEventRecord(raw, d, id, s); eventErr != nil {
 				err = eventErr
+				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
+		}
+		if version >= 20 && isNamedBatchMembershipOperation(operation.ID{Name: s.operation, Version: uint16(s.version)}) {
+			event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
+			command, commandErr := operation.DecodeCanonicalCommand(s.command)
+			definition, defined := namedBatchMembershipDefinition(command.Request.Operation)
+			if parseErr != nil || commandErr != nil || !defined || definition.ValidateRequest(command.Request) != nil ||
+				event.hash != s.hash || event.environment != s.env || event.sequence != s.seq || event.acted != command.ActedAt {
+				err = ErrInvalidStore
 				break
 			}
 			var length [8]byte
@@ -741,6 +943,21 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 	_ = rows.Close()
 	if err != nil {
 		return err
+	}
+	for _, record := range roleHistory {
+		if validateStep10RoleHistoryEvent(db, record.event, record.submission, record.command) != nil {
+			return ErrInvalidStore
+		}
+	}
+	for _, record := range runFinishHistory {
+		if validateStep10RunFinishHistoryEvent(db, record.event, record.submission, record.command) != nil {
+			return ErrInvalidStore
+		}
+	}
+	for _, record := range runResumeHistory {
+		if validateStep10RunResumeHistoryEvent(db, record.event, record.submission, record.command) != nil {
+			return ErrInvalidStore
+		}
 	}
 	for _, s := range submissions {
 		if !lifecycleOperation(s.operation) || s.state != "terminal" {

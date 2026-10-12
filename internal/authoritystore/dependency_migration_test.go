@@ -9,8 +9,25 @@ import (
 	"testing"
 )
 
+func dropNamedBatchSchemaForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for index := len(namedBatchMembershipSchema) - 1; index >= 0; index-- {
+		object := namedBatchMembershipSchema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := len(namedBatchSchema) - 1; index >= 0; index-- {
+		object := namedBatchSchema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func dropDependencySchemaForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	dropNamedBatchSchemaForTest(t, db)
 	for index := len(dependencySchema) - 1; index >= 0; index-- {
 		object := dependencySchema[index]
 		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
@@ -62,13 +79,45 @@ func TestDependencyExplicitV17MigrationRetainsHistory(t *testing.T) {
 	if err = errors.Join(checkSchemaVersion(backup, 17), backup.Close()); err != nil {
 		t.Fatal(err)
 	}
+	if store, openErr := OpenExisting(f.root); !errors.Is(openErr, ErrInvalidStore) {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatalf("ordinary open migrated v18: %v", openErr)
+	}
+	if err = UpgradeV18(f.root); err != nil {
+		t.Fatalf("explicit v18 to v19 migration: %v", err)
+	}
+	if store, openErr := OpenExisting(f.root); !errors.Is(openErr, ErrInvalidStore) {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatalf("ordinary open migrated v19: %v", openErr)
+	}
+	if err = UpgradeV19(f.root); err != nil {
+		t.Fatalf("explicit v19 to v20 migration: %v", err)
+	}
+	backup19, err := connect(filepath.Join(f.root, "authority-v19.backup.db"), "ro", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(checkSchemaVersion(backup19, 19), backup19.Close()); err != nil {
+		t.Fatal(err)
+	}
+	backup18, err := connect(filepath.Join(f.root, "authority-v18.backup.db"), "ro", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(checkSchemaVersion(backup18, 18), backup18.Close()); err != nil {
+		t.Fatal(err)
+	}
 	f.s, err = OpenExisting(f.root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.s.Close() }()
 	var version int
-	if err = f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 18 {
+	if err = f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 20 {
 		t.Fatalf("version=%d: %v", version, err)
 	}
 	var retained []byte

@@ -21,9 +21,21 @@ func referenceAuthorityCommand(f *claimTestFixture, id int, sequence uint64, def
 	return command
 }
 
+func referenceV2Command(f *claimTestFixture, id int, sequence uint64, definition operation.Definition,
+	input operation.Input, repo string,
+) operation.Command {
+	command := referenceAuthorityCommand(f, id, sequence, definition, input, repo)
+	command.EnvironmentID = envB
+	return command
+}
+
 func submitReferenceForTest(t *testing.T, f *claimTestFixture, command operation.Command) *Execution {
 	t.Helper()
-	status, err := f.s.SubmitCommand(context.Background(), command, hashCommand(t, command), f.peer, f.now)
+	peer := f.peer
+	if command.EnvironmentID == envB {
+		peer = f.peerB
+	}
+	status, err := f.s.SubmitCommand(context.Background(), command, hashCommand(t, command), peer, f.now)
 	if err != nil || !status.Pending || status.Owner == nil {
 		t.Fatalf("submit reference command: status=%+v error=%v", status, err)
 	}
@@ -79,14 +91,22 @@ func assertReferenceSuccess(t *testing.T, f *claimTestFixture, command operation
 		t.Fatalf("reference event does not bind command/Repo/input: %+v error=%v", event, err)
 	}
 	if wantKind == "reference.rebound" {
-		input := command.Request.Input.(operation.ReferenceRebindInput)
+		var from, to string
+		switch input := command.Request.Input.(type) {
+		case operation.ReferenceRebindInput:
+			from, to = input.From, input.To
+		case operation.ReferenceRebindV2Input:
+			from, to = input.From, input.To
+		default:
+			t.Fatalf("unexpected rebind input %T", command.Request.Input)
+		}
 		var payload struct {
 			From  string `cbor:"from"`
 			To    string `cbor:"to"`
 			Level string `cbor:"tracker_push_level"`
 		}
 		if !step13ClosedPayload(event.payload, &payload, []string{"from", "to", "tracker_push_level"}) ||
-			payload.From != input.From || payload.To != input.To || payload.Level != "off" {
+			payload.From != from || payload.To != to || payload.Level != "off" {
 			t.Fatalf("rebound event payload = %+v", payload)
 		}
 	} else {
@@ -142,9 +162,15 @@ func referenceMatter(command operation.Command) string {
 	switch input := command.Request.Input.(type) {
 	case operation.ReferenceBindInput:
 		return input.MatterID
+	case operation.ReferenceBindV2Input:
+		return input.MatterID
 	case operation.ReferenceUnbindInput:
 		return input.MatterID
+	case operation.ReferenceUnbindV2Input:
+		return input.MatterID
 	case operation.ReferenceRebindInput:
+		return input.MatterID
+	case operation.ReferenceRebindV2Input:
 		return input.MatterID
 	default:
 		return ""
@@ -166,27 +192,102 @@ func referenceAggregateForTest(t *testing.T, f *claimTestFixture, ref string) (s
 	return disposition.String, members, true
 }
 
+func TestStrictD121ReferenceV2RequiresCurrentMatterClaimAndRefusesV1(t *testing.T) {
+	f := newClaimTestFixture(t)
+	defer func() { _ = f.s.Close() }()
+	claimTestBirthStep(t, f, 31, 101)
+	installed := f.anchor(t)
+	allocation := claimTestAllocation(1, installed, 102, 103, 104)
+	f.acquire(t, 11, 3, installed, allocation)
+	proof := []operation.TargetClaim{{MatterID: f.matter, ClaimID: allocation.ClaimID, ClaimEpoch: 1}}
+	command := referenceAuthorityCommand(f, 12, 4, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "STRICT", TargetClaims: proof}, repoA)
+	status := completeReferenceForTest(t, f, command, 105)
+	assertReferenceSuccess(t, f, command, status, "reference.added", "STRICT", "")
+
+	before, projection := f.anchor(t), mustStep13ProjectionForTest(t, f)
+	missing := referenceAuthorityCommand(f, 13, 5, operation.ReferenceUnbindV2,
+		operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: "STRICT"}, repoA)
+	refused := completeReferenceForTest(t, f, missing, 106)
+	assertReferenceRefusal(t, f, missing, refused, "refusal.claim-fenced", before, projection)
+	if len(refused.SignedReceipt) == 0 {
+		t.Fatal("semantic claim refusal did not retain one signed protocol receipt")
+	}
+
+	legacy := referenceAuthorityCommand(f, 14, 6, operation.ReferenceBindV1,
+		operation.ReferenceBindInput{MatterID: f.matter, Reference: "LEGACY"}, repoA)
+	before, projection = f.anchor(t), mustStep13ProjectionForTest(t, f)
+	legacyStatus := completeReferenceForTest(t, f, legacy, 107)
+	assertReferenceRefusal(t, f, legacy, legacyStatus, "refusal.step8-v1-claim-required", before, projection)
+	replay, err := f.s.QueryCommand(context.Background(), domainA, missing.ID, hashCommand(t, missing), 7, f.peer, envA, f.now)
+	if err != nil || !bytes.Equal(replay.Receipt, refused.Receipt) || !bytes.Equal(replay.SignedReceipt, refused.SignedReceipt) {
+		t.Fatalf("terminal refusal replay changed receipt: %+v %v", replay, err)
+	}
+	legacyReplay, err := f.s.QueryCommand(context.Background(), domainA, legacy.ID, hashCommand(t, legacy), 7, f.peer, envA, f.now)
+	if err != nil || !bytes.Equal(legacyReplay.Receipt, legacyStatus.Receipt) || !bytes.Equal(legacyReplay.SignedReceipt, legacyStatus.SignedReceipt) {
+		t.Fatalf("fresh-v1 terminal replay changed after a current claim exists: %+v %v", legacyReplay, err)
+	}
+	rebind := referenceAuthorityCommand(f, 15, 7, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: "STRICT", To: "STRICT-NEW", TargetClaims: proof}, repoA)
+	rebindStatus := completeReferenceForTest(t, f, rebind, 108)
+	assertReferenceSuccess(t, f, rebind, rebindStatus, "reference.rebound", "STRICT-NEW", "STRICT")
+	unbind := referenceAuthorityCommand(f, 16, 8, operation.ReferenceUnbindV2,
+		operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: "STRICT-NEW", TargetClaims: proof}, repoA)
+	unbindStatus := completeReferenceForTest(t, f, unbind, 109)
+	assertReferenceSuccess(t, f, unbind, unbindStatus, "reference.removed", "STRICT-NEW", "")
+	changedProof := missing
+	changedProof.Request.Input = operation.ReferenceUnbindV2Input{
+		MatterID: f.matter, Reference: "STRICT",
+		TargetClaims: proof,
+	}
+	if _, err = f.s.SubmitCommand(context.Background(), changedProof, hashCommand(t, changedProof), f.peer, f.now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-ID changed proof did not conflict with retained refusal: %v", err)
+	}
+}
+
+func TestStrictD121MissingClaimRefusalReplaysAfterLaterAcquisition(t *testing.T) {
+	f := newClaimTestFixture(t)
+	defer func() { _ = f.s.Close() }()
+	command := referenceAuthorityCommand(f, 11, 2, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "LATER"}, repoA)
+	before, projection := f.anchor(t), mustStep13ProjectionForTest(t, f)
+	status := completeReferenceForTest(t, f, command, 101)
+	assertReferenceRefusal(t, f, command, status, "refusal.claim-fenced", before, projection)
+	installed := f.anchor(t)
+	allocation := claimTestAllocation(1, installed, 102, 103, 104)
+	f.acquire(t, 12, 3, installed, allocation)
+	afterAcquire := f.anchor(t)
+	replay, err := f.s.QueryCommand(context.Background(), domainA, command.ID, hashCommand(t, command), 7, f.peer, envA, f.now)
+	if err != nil || !bytes.Equal(replay.Receipt, status.Receipt) || !bytes.Equal(replay.SignedReceipt, status.SignedReceipt) {
+		t.Fatalf("same-ID refusal changed after later claim acquisition: %+v %v", replay, err)
+	}
+	if after := f.anchor(t); after != afterAcquire {
+		t.Fatalf("terminal replay changed the post-acquisition event prefix: before=%+v after=%+v", afterAcquire, after)
+	}
+}
+
 func TestReferenceAuthoritySharesAcrossMatterReposAndFinalUnbindHasNoCandidate(t *testing.T) {
 	f := newDependencyCrossRepoHistoryFixture(t)
 	defer func() { _ = f.s.Close() }()
+	_, claims := acquireStep8TargetClaims(t, f, f.matter, claimTestID(21))
 	ref := "  provider-neutral:ticket/17#part  "
-	bind := referenceAuthorityCommand(f, 13, 4, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: ref}, repoA)
-	first := completeReferenceForTest(t, f, bind, 103)
+	bind := referenceV2Command(f, 13, 3, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: ref, TargetClaims: claims[:1]}, repoA)
+	first := completeReferenceForTest(t, f, bind, 600)
 	assertReferenceSuccess(t, f, bind, first, "reference.added", ref, "")
 
 	// A second distinct reference on the same Matter proves bind is additive,
 	// not the legacy singleton replacement represented by reference.bound.
 	otherRef := "ticket/other"
-	additive := referenceAuthorityCommand(f, 14, 5, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: otherRef}, repoA)
-	additiveStatus := completeReferenceForTest(t, f, additive, 104)
+	additive := referenceV2Command(f, 14, 4, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: otherRef, TargetClaims: claims[:1]}, repoA)
+	additiveStatus := completeReferenceForTest(t, f, additive, 601)
 	assertReferenceSuccess(t, f, additive, additiveStatus, "reference.added", otherRef, "")
 
 	sharedMatter := claimTestID(21)
-	shared := referenceAuthorityCommand(f, 15, 6, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: sharedMatter, Reference: ref}, repoB)
-	sharedStatus := completeReferenceForTest(t, f, shared, 105)
+	shared := referenceV2Command(f, 15, 5, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: sharedMatter, Reference: ref, TargetClaims: claims[1:]}, repoB)
+	sharedStatus := completeReferenceForTest(t, f, shared, 602)
 	assertReferenceSuccess(t, f, shared, sharedStatus, "reference.added", ref, "")
 	if disposition, members, exists := referenceAggregateForTest(t, f, ref); !exists || disposition != "" || members != 2 {
 		t.Fatalf("cross-Matter/cross-Repo aggregate = %q/%d exists=%t; want two planned members", disposition, members, exists)
@@ -195,16 +296,16 @@ func TestReferenceAuthoritySharesAcrossMatterReposAndFinalUnbindHasNoCandidate(t
 		t.Fatalf("same-Matter additive aggregate = %q/%d exists=%t; want one member", disposition, members, exists)
 	}
 
-	unboundFirst := referenceAuthorityCommand(f, 16, 7, operation.ReferenceUnbindV1,
-		operation.ReferenceUnbindInput{MatterID: f.matter, Reference: ref}, repoA)
-	unboundFirstStatus := completeReferenceForTest(t, f, unboundFirst, 106)
+	unboundFirst := referenceV2Command(f, 16, 6, operation.ReferenceUnbindV2,
+		operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: ref, TargetClaims: claims[:1]}, repoA)
+	unboundFirstStatus := completeReferenceForTest(t, f, unboundFirst, 603)
 	assertReferenceSuccess(t, f, unboundFirst, unboundFirstStatus, "reference.removed", ref, "")
 	if _, members, exists := referenceAggregateForTest(t, f, ref); !exists || members != 1 {
 		t.Fatalf("shared aggregate after one unbind has members=%d exists=%t; want one", members, exists)
 	}
-	unboundFinal := referenceAuthorityCommand(f, 17, 8, operation.ReferenceUnbindV1,
-		operation.ReferenceUnbindInput{MatterID: sharedMatter, Reference: ref}, repoB)
-	finalStatus := completeReferenceForTest(t, f, unboundFinal, 107)
+	unboundFinal := referenceV2Command(f, 17, 7, operation.ReferenceUnbindV2,
+		operation.ReferenceUnbindV2Input{MatterID: sharedMatter, Reference: ref, TargetClaims: claims[1:]}, repoB)
+	finalStatus := completeReferenceForTest(t, f, unboundFinal, 604)
 	assertReferenceSuccess(t, f, unboundFinal, finalStatus, "reference.removed", ref, "")
 	if _, _, exists := referenceAggregateForTest(t, f, ref); exists {
 		t.Fatal("final unbind retained a shared-reference aggregate")
@@ -223,7 +324,7 @@ func TestReferenceAuthoritySharesAcrossMatterReposAndFinalUnbindHasNoCandidate(t
 	}
 	f.s = reopened
 	t.Cleanup(func() { _ = f.s.Close() })
-	replay, err := reopened.QueryCommand(context.Background(), domainA, unboundFinal.ID, hashCommand(t, unboundFinal), 7, f.peer, envA, f.now)
+	replay, err := reopened.QueryCommand(context.Background(), domainA, unboundFinal.ID, hashCommand(t, unboundFinal), 7, f.peerB, envB, f.now)
 	if err != nil || !bytes.Equal(replay.Receipt, finalStatus.Receipt) || !bytes.Equal(replay.SignedReceipt, finalStatus.SignedReceipt) {
 		t.Fatalf("reopened reference receipt replay changed: status=%+v error=%v", replay, err)
 	}
@@ -235,10 +336,11 @@ func TestReferenceAuthoritySharesAcrossMatterReposAndFinalUnbindHasNoCandidate(t
 func TestReferenceAuthorityRefusalsAreAtomicAndContextRepoIsDomainMember(t *testing.T) {
 	f := newDependencyCrossRepoHistoryFixture(t)
 	defer func() { _ = f.s.Close() }()
+	_, claims := acquireStep8TargetClaims(t, f, f.matter)
 	existingRef, destinationRef := "existing/ref", "destination/ref"
-	bind := referenceAuthorityCommand(f, 13, 4, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: existingRef}, repoA)
-	completeReferenceForTest(t, f, bind, 103)
+	bind := referenceV2Command(f, 13, 2, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: existingRef, TargetClaims: claims}, repoA)
+	completeReferenceForTest(t, f, bind, 600)
 
 	refusals := []struct {
 		id, sequence, event int
@@ -246,41 +348,41 @@ func TestReferenceAuthorityRefusalsAreAtomicAndContextRepoIsDomainMember(t *test
 		input               operation.Input
 		repo, problem       string
 	}{
-		{14, 5, 104, operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: f.matter, Reference: existingRef}, repoA, "refusal.reference-exists"},
-		{15, 6, 105, operation.ReferenceUnbindV1, operation.ReferenceUnbindInput{MatterID: f.matter, Reference: "missing/ref"}, repoA, "refusal.reference-missing"},
-		{16, 7, 106, operation.ReferenceRebindV1, operation.ReferenceRebindInput{MatterID: f.matter, From: "missing/ref", To: destinationRef}, repoA, "refusal.reference-missing"},
+		{14, 3, 601, operation.ReferenceBindV2, operation.ReferenceBindV2Input{MatterID: f.matter, Reference: existingRef, TargetClaims: claims}, repoA, "refusal.reference-exists"},
+		{15, 4, 602, operation.ReferenceUnbindV2, operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: "missing/ref", TargetClaims: claims}, repoA, "refusal.reference-missing"},
+		{16, 5, 603, operation.ReferenceRebindV2, operation.ReferenceRebindV2Input{MatterID: f.matter, From: "missing/ref", To: destinationRef, TargetClaims: claims}, repoA, "refusal.reference-missing"},
 	}
 	for _, test := range refusals {
-		command := referenceAuthorityCommand(f, test.id, uint64(test.sequence), test.definition, test.input, test.repo)
+		command := referenceV2Command(f, test.id, uint64(test.sequence), test.definition, test.input, test.repo)
 		before, projection := f.anchor(t), mustStep13ProjectionForTest(t, f)
 		status := completeReferenceForTest(t, f, command, test.event)
 		assertReferenceRefusal(t, f, command, status, test.problem, before, projection)
 	}
 
-	addDestination := referenceAuthorityCommand(f, 17, 8, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: destinationRef}, repoA)
-	completeReferenceForTest(t, f, addDestination, 107)
-	conflict := referenceAuthorityCommand(f, 18, 9, operation.ReferenceRebindV1,
-		operation.ReferenceRebindInput{MatterID: f.matter, From: existingRef, To: destinationRef}, repoA)
+	addDestination := referenceV2Command(f, 17, 6, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: destinationRef, TargetClaims: claims}, repoA)
+	completeReferenceForTest(t, f, addDestination, 604)
+	conflict := referenceV2Command(f, 18, 7, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: existingRef, To: destinationRef, TargetClaims: claims}, repoA)
 	before, projection := f.anchor(t), mustStep13ProjectionForTest(t, f)
-	conflictStatus := completeReferenceForTest(t, f, conflict, 108)
+	conflictStatus := completeReferenceForTest(t, f, conflict, 605)
 	assertReferenceRefusal(t, f, conflict, conflictStatus, "refusal.reference-destination-exists", before, projection)
 
-	wrongRepo := referenceAuthorityCommand(f, 19, 10, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: "wrong/repo"}, repoB)
+	wrongRepo := referenceV2Command(f, 19, 8, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "wrong/repo", TargetClaims: claims}, repoB)
 	before, projection = f.anchor(t), mustStep13ProjectionForTest(t, f)
-	wrongRepoStatus := completeReferenceForTest(t, f, wrongRepo, 109)
+	wrongRepoStatus := completeReferenceForTest(t, f, wrongRepo, 606)
 	assertReferenceRefusal(t, f, wrongRepo, wrongRepoStatus, "refusal.reference-matter", before, projection)
 
-	wrongDomain := referenceAuthorityCommand(f, 20, 11, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: domainB, Reference: "wrong/domain"}, repoA)
+	wrongDomain := referenceV2Command(f, 20, 9, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: domainB, Reference: "wrong/domain", TargetClaims: claims}, repoA)
 	before, projection = f.anchor(t), mustStep13ProjectionForTest(t, f)
-	wrongDomainStatus := completeReferenceForTest(t, f, wrongDomain, 110)
+	wrongDomainStatus := completeReferenceForTest(t, f, wrongDomain, 607)
 	assertReferenceRefusal(t, f, wrongDomain, wrongDomainStatus, "refusal.reference-matter", before, projection)
 
-	outsideRepo := referenceAuthorityCommand(f, 21, 12, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: "outside/domain"}, claimTestID(990))
-	if _, err := f.s.SubmitCommand(context.Background(), outsideRepo, hashCommand(t, outsideRepo), f.peer, f.now); !errors.Is(err, ErrFenced) {
+	outsideRepo := referenceV2Command(f, 21, 10, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "outside/domain", TargetClaims: claims}, claimTestID(990))
+	if _, err := f.s.SubmitCommand(context.Background(), outsideRepo, hashCommand(t, outsideRepo), f.peerB, f.now); !errors.Is(err, ErrFenced) {
 		t.Fatalf("non-member Context.Repo admitted: %v", err)
 	}
 	var submissions int
@@ -292,22 +394,23 @@ func TestReferenceAuthorityRefusalsAreAtomicAndContextRepoIsDomainMember(t *test
 func TestReferenceRebindIsOneFoldAndReactivationKeepsBirthIdentity(t *testing.T) {
 	f := newDependencyCrossRepoHistoryFixture(t)
 	defer func() { _ = f.s.Close() }()
+	_, claims := acquireStep8TargetClaims(t, f, f.matter)
 	from, to := "source/ref", "destination/ref"
 	for _, item := range []struct {
 		id, sequence, event int
 		definition          operation.Definition
 		input               operation.Input
 	}{
-		{13, 4, 103, operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: f.matter, Reference: from}},
-		{14, 5, 104, operation.ReferenceBindV1, operation.ReferenceBindInput{MatterID: f.matter, Reference: to}},
-		{15, 6, 105, operation.ReferenceUnbindV1, operation.ReferenceUnbindInput{MatterID: f.matter, Reference: to}},
+		{13, 2, 600, operation.ReferenceBindV2, operation.ReferenceBindV2Input{MatterID: f.matter, Reference: from, TargetClaims: claims}},
+		{14, 3, 601, operation.ReferenceBindV2, operation.ReferenceBindV2Input{MatterID: f.matter, Reference: to, TargetClaims: claims}},
+		{15, 4, 602, operation.ReferenceUnbindV2, operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: to, TargetClaims: claims}},
 	} {
-		command := referenceAuthorityCommand(f, item.id, uint64(item.sequence), item.definition, item.input, repoA)
+		command := referenceV2Command(f, item.id, uint64(item.sequence), item.definition, item.input, repoA)
 		completeReferenceForTest(t, f, command, item.event)
 	}
-	rebind := referenceAuthorityCommand(f, 16, 7, operation.ReferenceRebindV1,
-		operation.ReferenceRebindInput{MatterID: f.matter, From: from, To: to}, repoA)
-	status := completeReferenceForTest(t, f, rebind, 106)
+	rebind := referenceV2Command(f, 16, 5, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: from, To: to, TargetClaims: claims}, repoA)
+	status := completeReferenceForTest(t, f, rebind, 603)
 	assertReferenceSuccess(t, f, rebind, status, "reference.rebound", to, from)
 	var fromRow, toRow step13Reference
 	if err := f.s.db.QueryRow(`SELECT domain_id,matter_id,ref,coalesce(removed_event_id,''),birth_event_id,last_event_id FROM m6_tracker_references WHERE domain_id=? AND matter_id=? AND ref=?`,
@@ -318,8 +421,8 @@ func TestReferenceRebindIsOneFoldAndReactivationKeepsBirthIdentity(t *testing.T)
 		domainA, f.matter, to).Scan(&toRow.domain, &toRow.matter, &toRow.ref, &toRow.removed, &toRow.birth, &toRow.last); err != nil {
 		t.Fatal(err)
 	}
-	if fromRow.removed != claimTestID(106) || fromRow.last != claimTestID(106) ||
-		toRow.removed != "" || toRow.birth != claimTestID(104) || toRow.last != claimTestID(106) {
+	if fromRow.removed != claimTestID(603) || fromRow.last != claimTestID(603) ||
+		toRow.removed != "" || toRow.birth != claimTestID(601) || toRow.last != claimTestID(603) {
 		t.Fatalf("rebind/re-activation identity: source=%+v destination=%+v", fromRow, toRow)
 	}
 	if _, _, exists := referenceAggregateForTest(t, f, from); exists {
@@ -342,9 +445,353 @@ func TestReferenceRebindIsOneFoldAndReactivationKeepsBirthIdentity(t *testing.T)
 	}
 	f.s = reopened
 	t.Cleanup(func() { _ = f.s.Close() })
-	replay, err := reopened.QueryCommand(context.Background(), domainA, rebind.ID, hashCommand(t, rebind), 7, f.peer, envA, f.now)
+	replay, err := reopened.QueryCommand(context.Background(), domainA, rebind.ID, hashCommand(t, rebind), 7, f.peerB, envB, f.now)
 	if err != nil || !bytes.Equal(replay.Receipt, status.Receipt) || !bytes.Equal(replay.SignedReceipt, status.SignedReceipt) {
 		t.Fatalf("reopened rebind receipt changed: status=%+v error=%v", replay, err)
+	}
+}
+
+func TestStrictD121ReferenceRebindTargetsOnlyItsMatterAcrossAsymmetricMemberships(t *testing.T) {
+	f := newDependencyCrossRepoHistoryFixture(t)
+	defer func() { _ = f.s.Close() }()
+	peerF, claims := acquireStep8TargetClaims(t, f, f.matter, claimTestID(21), claimTestID(22))
+	claimFor := func(matter string) operation.TargetClaim {
+		t.Helper()
+		for _, claim := range claims {
+			if claim.MatterID == matter {
+				return claim
+			}
+		}
+		t.Fatalf("missing claim for Matter %s", matter)
+		return operation.TargetClaim{}
+	}
+	claimM1, claimM2, claimM3 := claimFor(f.matter), claimFor(claimTestID(21)), claimFor(claimTestID(22))
+
+	start := step12Command(f, 800, 4, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: f.matter}, claimM1.ClaimID)
+	start.EnvironmentID = envB
+	startPending, err := f.s.SubmitCommand(context.Background(), start, hashCommand(t, start), peerF, f.now)
+	if err != nil || startPending.Owner == nil {
+		t.Fatalf("submit active M1 lifecycle: status=%+v error=%v", startPending, err)
+	}
+	started, err := f.s.CompleteConnectedLifecycle(context.Background(), startPending.Owner,
+		[]string{claimTestID(900), claimTestID(901)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete active M1 lifecycle: %v", err)
+	}
+	claimTestAcknowledge(t, f, claimTestID(81), 1, started)
+
+	secondStart := step12Command(f, 807, 5, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: claimTestID(22)}, claimM3.ClaimID)
+	secondStart.EnvironmentID = envB
+	secondStart.Request.Context.Repo = repoC
+	secondStartPending, err := f.s.SubmitCommand(context.Background(), secondStart, hashCommand(t, secondStart), peerF, f.now)
+	if err != nil || secondStartPending.Owner == nil {
+		t.Fatalf("submit M3 lifecycle start: status=%+v error=%v", secondStartPending, err)
+	}
+	secondStarted, err := f.s.CompleteConnectedLifecycle(context.Background(), secondStartPending.Owner,
+		[]string{claimTestID(902), claimTestID(903)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete M3 lifecycle start: %v", err)
+	}
+	claimTestAcknowledge(t, f, claimTestID(83), 1, secondStarted)
+	referenceSequence, event := uint64(6), 904
+	bind := func(id int, matter, reference string, claim operation.TargetClaim, repo string) CommandStatus {
+		t.Helper()
+		command := referenceV2Command(f, id, referenceSequence, operation.ReferenceBindV2,
+			operation.ReferenceBindV2Input{MatterID: matter, Reference: reference, TargetClaims: []operation.TargetClaim{claim}}, repo)
+		referenceSequence++
+		status := completeReferenceForTest(t, f, command, event)
+		event++
+		assertReferenceSuccess(t, f, command, status, "reference.added", reference, "")
+		return status
+	}
+	bind(801, f.matter, "R", claimM1, repoA)
+	bind(802, claimTestID(22), "R", claimM3, repoC)
+	finish := step12Command(f, 803, referenceSequence, operation.MatterFinishV1,
+		operation.MatterFinishInput{MatterID: claimTestID(22)}, claimM3.ClaimID)
+	finish.EnvironmentID = envB
+	finish.Request.Context.Repo = repoC
+	finishPending, err := f.s.SubmitCommand(context.Background(), finish, hashCommand(t, finish), peerF, f.now)
+	if err != nil || finishPending.Owner == nil {
+		t.Fatalf("submit sealed M3 lifecycle: status=%+v error=%v", finishPending, err)
+	}
+	finished, err := f.s.CompleteConnectedLifecycle(context.Background(), finishPending.Owner,
+		[]string{claimTestID(event), claimTestID(event + 1)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete sealed M3 lifecycle: %v", err)
+	}
+	referenceSequence++
+	event += 2
+	claimTestReceipt(t, finished, "result.succeeded", map[string]any{
+		"matter_id": claimTestID(22), "state": "done", "became_sealed": true,
+	}, event-2)
+	bind(804, claimTestID(21), "S", claimM2, repoB)
+
+	beforeAnchor, beforeProjection := f.anchor(t), mustStep13ProjectionForTest(t, f)
+	invalidProof := referenceV2Command(f, 805, referenceSequence, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: "R", To: "S", TargetClaims: []operation.TargetClaim{{MatterID: f.matter, ClaimID: claimM1.ClaimID, ClaimEpoch: claimM1.ClaimEpoch + 1}}}, repoA)
+	referenceSequence++
+	invalid := completeReferenceForTest(t, f, invalidProof, event)
+	assertReferenceRefusal(t, f, invalidProof, invalid, "refusal.claim-fenced", beforeAnchor, beforeProjection)
+	if after := mustStep13ProjectionForTest(t, f); !sameStep13Projection(after, beforeProjection) {
+		t.Fatalf("invalid M1 proof changed memberships/candidates: before=%+v after=%+v", beforeProjection, after)
+	}
+
+	rebind := referenceV2Command(f, 806, referenceSequence, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: "R", To: "S", TargetClaims: []operation.TargetClaim{claimM1}}, repoA)
+	referenceSequence++
+	rebound := completeReferenceForTest(t, f, rebind, event+1)
+	assertReferenceSuccess(t, f, rebind, rebound, "reference.rebound", "S", "R")
+	projection := mustStep13ProjectionForTest(t, f)
+	if len(projection.references) != 4 || len(projection.candidates) != 0 {
+		t.Fatalf("candidate-policy-off rebind projection = %+v; want four retained membership records and no candidates", projection)
+	}
+	for _, want := range []struct {
+		matter, ref, removed string
+	}{
+		{f.matter, "R", claimTestID(event + 1)},
+		{f.matter, "S", ""},
+		{claimTestID(21), "S", ""},
+		{claimTestID(22), "R", ""},
+	} {
+		var removed sql.NullString
+		if err := f.s.db.QueryRow(`SELECT removed_event_id FROM m6_tracker_references WHERE domain_id=? AND matter_id=? AND ref=?`,
+			domainA, want.matter, want.ref).Scan(&removed); err != nil || removed.String != want.removed || removed.Valid != (want.removed != "") {
+			t.Fatalf("membership %s/%s removed=%q valid=%t, want %q: %v", want.matter, want.ref, removed.String, removed.Valid, want.removed, err)
+		}
+	}
+	for _, want := range []struct {
+		ref         string
+		disposition string
+		members     int64
+	}{
+		{"R", "completed", 1}, {"S", "active", 2},
+	} {
+		if disposition, members, exists := referenceAggregateForTest(t, f, want.ref); !exists || disposition != want.disposition || members != want.members {
+			t.Fatalf("aggregate %s = %q/%d exists=%t, want %q/%d", want.ref, disposition, members, exists, want.disposition, want.members)
+		}
+	}
+	if len(peerF.PeerCertificates) == 0 {
+		t.Fatal("F-owned unrelated Matter claims were not established")
+	}
+}
+
+func TestStrictD121ReferenceRebindEmitsAsymmetricCandidatesWithEnabledPolicy(t *testing.T) {
+	f := newDependencyCrossRepoHistoryFixture(t)
+	defer func() { _ = f.s.Close() }()
+	peerF, claims := acquireStep8TargetClaims(t, f, claimTestID(21), claimTestID(22))
+	f.clone, f.worktree = claimTestID(23), claimTestID(22)
+	sequence, standDownSequence, allocationIndex, eventIndex := uint64(4), uint64(1), 3, 600
+	claimM1 := acquireStrictD121ClaimAtEpoch(t, f, peerF, f.matter, repoA, 1,
+		&sequence, &standDownSequence, &allocationIndex, &eventIndex)
+	claimM2, claimM3 := claims[0], claims[1]
+	startM1 := step12Command(f, 810, 5, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: f.matter}, claimM1.ClaimID)
+	startedM1, err := f.s.SubmitCommand(context.Background(), startM1, hashCommand(t, startM1), f.peer, f.now)
+	if err != nil || startedM1.Owner == nil {
+		t.Fatalf("submit E-owned M1 lifecycle start: status=%+v error=%v", startedM1, err)
+	}
+	started, err := f.s.CompleteConnectedLifecycle(context.Background(), startedM1.Owner,
+		[]string{claimTestID(603), claimTestID(604)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete E-owned M1 lifecycle start: %v", err)
+	}
+	claimTestAcknowledge(t, f, claimTestID(83), 1, started)
+	startM3 := step12Command(f, 811, 3, operation.MatterStartV1,
+		operation.NodeLifecycleInput{NodeID: claimTestID(22)}, claimM3.ClaimID)
+	startM3.EnvironmentID = envB
+	startM3.Request.Context.Repo = repoC
+	startedM3, err := f.s.SubmitCommand(context.Background(), startM3, hashCommand(t, startM3), peerF, f.now)
+	if err != nil || startedM3.Owner == nil {
+		t.Fatalf("submit F-owned M3 lifecycle start: status=%+v error=%v", startedM3, err)
+	}
+	started, err = f.s.CompleteConnectedLifecycle(context.Background(), startedM3.Owner,
+		[]string{claimTestID(605), claimTestID(606)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete F-owned M3 lifecycle start: %v", err)
+	}
+	claimTestAcknowledge(t, f, claimTestID(82), 1, started)
+	refSequence, event := uint64(6), 607
+	bind := func(id int, matter, reference, repo string, proof operation.TargetClaim) {
+		t.Helper()
+		command := referenceAuthorityCommand(f, id, refSequence, operation.ReferenceBindV2,
+			operation.ReferenceBindV2Input{MatterID: matter, Reference: reference, TargetClaims: []operation.TargetClaim{proof}}, repo)
+		refSequence++
+		status := completeReferenceForTest(t, f, command, event)
+		event++
+		assertReferenceSuccess(t, f, command, status, "reference.added", reference, "")
+	}
+	bind(812, f.matter, "R", repoA, claimM1)
+	bindM3 := referenceV2Command(f, 813, 4, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: claimTestID(22), Reference: "R", TargetClaims: []operation.TargetClaim{claimM3}}, repoC)
+	boundM3 := completeReferenceForTest(t, f, bindM3, event)
+	event++
+	assertReferenceSuccess(t, f, bindM3, boundM3, "reference.added", "R", "")
+	finishM3 := step12Command(f, 814, 5, operation.MatterFinishV1,
+		operation.MatterFinishInput{MatterID: claimTestID(22)}, claimM3.ClaimID)
+	finishM3.EnvironmentID = envB
+	finishM3.Request.Context.Repo = repoC
+	finishPending, err := f.s.SubmitCommand(context.Background(), finishM3, hashCommand(t, finishM3), peerF, f.now)
+	if err != nil || finishPending.Owner == nil {
+		t.Fatalf("submit F-owned M3 finish: status=%+v error=%v", finishPending, err)
+	}
+	finished, err := f.s.CompleteConnectedLifecycle(context.Background(), finishPending.Owner,
+		[]string{claimTestID(event), claimTestID(event + 1)}, f.now, signWith(f.key))
+	if err != nil {
+		t.Fatalf("complete F-owned M3 finish: %v", err)
+	}
+	event += 2
+	claimTestReceipt(t, finished, "result.succeeded", map[string]any{
+		"matter_id": claimTestID(22), "state": "done", "became_sealed": true,
+	}, event-2)
+	bindM2 := referenceV2Command(f, 815, 6, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: claimTestID(21), Reference: "S", TargetClaims: []operation.TargetClaim{claimM2}}, repoB)
+	boundM2 := completeReferenceForTest(t, f, bindM2, event)
+	event++
+	assertReferenceSuccess(t, f, bindM2, boundM2, "reference.added", "S", "")
+	var openClaimID, ownerEnvironment string
+	var claimEpoch uint64
+	if err = f.s.db.QueryRow(`SELECT claim_id,claim_epoch,owner_environment_id FROM claims WHERE domain_id=? AND matter_id=? AND close_command_id IS NULL`,
+		domainA, claimTestID(21)).Scan(&openClaimID, &claimEpoch, &ownerEnvironment); err != nil ||
+		openClaimID != claimM2.ClaimID || claimEpoch != claimM2.ClaimEpoch || ownerEnvironment != envB {
+		t.Fatalf("unrelated F-owned S claim changed: id=%s epoch=%d owner=%s error=%v", openClaimID, claimEpoch, ownerEnvironment, err)
+	}
+	beforeAnchor, beforeProjection := f.anchor(t), mustStep13ProjectionForTest(t, f)
+	invalidProof := referenceAuthorityCommand(f, 816, refSequence, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: "R", To: "S", TargetClaims: []operation.TargetClaim{{MatterID: f.matter, ClaimID: claimM1.ClaimID, ClaimEpoch: claimM1.ClaimEpoch + 1}}}, repoA)
+	refSequence++
+	invalid := completeReferenceForTest(t, f, invalidProof, event)
+	assertReferenceRefusal(t, f, invalidProof, invalid, "refusal.claim-fenced", beforeAnchor, beforeProjection)
+	if after := mustStep13ProjectionForTest(t, f); !sameStep13Projection(after, beforeProjection) {
+		t.Fatalf("invalid E-owned M1 proof changed membership/candidates: before=%+v after=%+v", beforeProjection, after)
+	}
+	rebind := referenceAuthorityCommand(f, 817, refSequence, operation.ReferenceRebindV2,
+		operation.ReferenceRebindV2Input{MatterID: f.matter, From: "R", To: "S", TargetClaims: []operation.TargetClaim{claimM1}}, repoA)
+	rebound := completeReferenceForTest(t, f, rebind, event+1)
+	assertReferenceSuccess(t, f, rebind, rebound, "reference.rebound", "S", "R")
+	projection := mustStep13ProjectionForTest(t, f)
+	if len(projection.references) != 4 || len(projection.candidates) != 0 {
+		t.Fatalf("candidate-policy-on rebind projection has %d memberships and %d candidates: %+v", len(projection.references), len(projection.candidates), projection)
+	}
+	nodes, err := step13Nodes(f.s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := step13Events(f.s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidateEventFound bool
+	for index := range events {
+		if events[index].id == claimTestID(event+1) {
+			configEvent := step13TestEvent(int(events[index].position), "config.set", repoA,
+				map[string]any{"key": "tracker.push-level", "value": "boundary"})
+			configEvent.id = claimTestID(event)
+			events[index].position++
+			events = append(events, step13Event{})
+			copy(events[index+1:], events[index:len(events)-1])
+			events[index] = configEvent
+			index++
+			level, marshalErr := artifactEncoder.Marshal("boundary")
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			events[index].payload["tracker_push_level"] = level
+			candidateEventFound = true
+		}
+	}
+	if !candidateEventFound {
+		t.Fatalf("missing retained rebind event %s", claimTestID(event+1))
+	}
+	candidateProjection, err := deriveStep13Projection(nodes, events)
+	if err != nil {
+		t.Fatalf("derive policy-enabled asymmetric rebind candidates: %v", err)
+	}
+	wantCandidates := map[string]string{"R": `{"disposition":"completed"}`, "S": `{"disposition":"active"}`}
+	if len(candidateProjection.candidates) != 2 {
+		t.Fatalf("policy-enabled asymmetric rebind emitted %d candidates: %+v", len(candidateProjection.candidates), candidateProjection.candidates)
+	}
+	for _, candidate := range candidateProjection.candidates {
+		if candidate.kind != "state" || candidate.repo != repoA || candidate.subject != f.matter || candidate.event != claimTestID(event+1) ||
+			candidate.payload != wantCandidates[candidate.ref] {
+			t.Fatalf("unexpected R/S candidate from asymmetric rebind: %+v", candidate)
+		}
+		delete(wantCandidates, candidate.ref)
+	}
+	if len(wantCandidates) != 0 {
+		t.Fatalf("missing exact rebind candidates: %v", wantCandidates)
+	}
+	for _, want := range []struct{ matter, ref, removed string }{
+		{f.matter, "R", claimTestID(event + 1)},
+		{f.matter, "S", ""},
+		{claimTestID(21), "S", ""},
+		{claimTestID(22), "R", ""},
+	} {
+		var removed sql.NullString
+		if err = f.s.db.QueryRow(`SELECT removed_event_id FROM m6_tracker_references WHERE domain_id=? AND matter_id=? AND ref=?`,
+			domainA, want.matter, want.ref).Scan(&removed); err != nil || removed.String != want.removed || removed.Valid != (want.removed != "") {
+			t.Fatalf("asymmetric membership %s/%s removed=%q valid=%t, want %q: %v", want.matter, want.ref, removed.String, removed.Valid, want.removed, err)
+		}
+	}
+}
+
+func TestStrictD121UnbindReplayPreservesForeignReplacementMembership(t *testing.T) {
+	f := newClaimTestFixture(t)
+	defer func() {
+		if f.s != nil {
+			_ = f.s.Close()
+		}
+	}()
+	claimTestBirthStep(t, f, 31, 101)
+	installed := f.anchor(t)
+	oldClaim := claimTestAllocation(1, installed, 102, 103, 104)
+	f.acquire(t, 11, 3, installed, oldClaim)
+	oldProof := []operation.TargetClaim{{MatterID: f.matter, ClaimID: oldClaim.ClaimID, ClaimEpoch: 1}}
+	bind := referenceAuthorityCommand(f, 12, 4, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "REPLACED", TargetClaims: oldProof}, repoA)
+	bound := completeReferenceForTest(t, f, bind, 105)
+	assertReferenceSuccess(t, f, bind, bound, "reference.added", "REPLACED", "")
+	unbind := referenceAuthorityCommand(f, 13, 5, operation.ReferenceUnbindV2,
+		operation.ReferenceUnbindV2Input{MatterID: f.matter, Reference: "REPLACED", TargetClaims: oldProof}, repoA)
+	unbindHash := hashCommand(t, unbind)
+	removed := completeReferenceForTest(t, f, unbind, 106)
+	assertReferenceSuccess(t, f, unbind, removed, "reference.removed", "REPLACED", "")
+
+	peerF := dependencyEnvironmentB(t, f)
+	f.peerB = peerF
+	authorizedStandDownForStrictD121(t, f, peerF, 700, 1, 0x7b, oldClaim, 1, claimTestID(51), repoA, 107)
+	replacementStart := f.anchor(t)
+	raw, replacementHash := f.command(t, 701, 2, "claim.acquire", nil, map[string]any{
+		"matter_id": f.matter, "worktree_id": f.worktree, "dispatch_mode": "anonymous-matter",
+		"requested_dispatch_id": claimTestID(751),
+	}, envB)
+	pending, err := f.s.SubmitClaimAcquire(context.Background(), raw, replacementHash, replacementStart, peerF, f.now)
+	if err != nil || pending.Owner == nil {
+		t.Fatalf("submit replacement reference claim: status=%+v error=%v", pending, err)
+	}
+	replacement := claimTestAllocation(2, replacementStart, 109, 110, 111)
+	if _, _, err = f.s.CompleteClaimAcquire(context.Background(), pending.Owner, replacement, f.now, signWith(f.key)); err != nil {
+		t.Fatalf("complete replacement reference claim: %v", err)
+	}
+	newBind := referenceV2Command(f, 702, 3, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "REPLACED", TargetClaims: []operation.TargetClaim{{MatterID: f.matter, ClaimID: replacement.ClaimID, ClaimEpoch: 2}}}, repoA)
+	newBound := completeReferenceForTest(t, f, newBind, 112)
+	assertReferenceSuccess(t, f, newBind, newBound, "reference.added", "REPLACED", "")
+	before, projection := f.anchor(t), mustStep13ProjectionForTest(t, f)
+	replay, err := f.s.SubmitCommand(context.Background(), unbind, unbindHash, f.peer, f.now)
+	if err != nil || replay.Pending || !bytes.Equal(replay.Receipt, removed.Receipt) || !bytes.Equal(replay.SignedReceipt, removed.SignedReceipt) {
+		t.Fatalf("E unbind replay changed terminal receipt/range: status=%+v error=%v", replay, err)
+	}
+	if after := f.anchor(t); after != before {
+		t.Fatalf("E unbind replay appended events after F replacement: before=%+v after=%+v", before, after)
+	}
+	if after := mustStep13ProjectionForTest(t, f); !sameStep13Projection(after, projection) {
+		t.Fatalf("E unbind replay changed F membership: before=%+v after=%+v", projection, after)
+	}
+	if len(projection.references) != 1 || projection.references[0].matter != f.matter ||
+		projection.references[0].ref != "REPLACED" || projection.references[0].removed != "" || len(projection.candidates) != 0 {
+		t.Fatalf("replacement membership projection = %+v", projection)
 	}
 }
 
@@ -368,15 +815,16 @@ func TestReferenceAdmissionIsClaimNoneAndLifecycleRefreshReopens(t *testing.T) {
 		t.Fatalf("ClaimNone rejection wrote %d journal entries: %v", journalEntries, err)
 	}
 
-	bind := referenceAuthorityCommand(f, 12, 2, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: "lifecycle/ref"}, repoA)
-	bindStatus := completeReferenceForTest(t, f, bind, 101)
+	anchor := f.anchor(t)
+	allocation := claimTestAllocation(1, anchor, 102, 103, 104)
+	f.acquire(t, 13, 2, anchor, allocation)
+	claims := []operation.TargetClaim{{MatterID: f.matter, ClaimID: allocation.ClaimID, ClaimEpoch: 1}}
+	bind := referenceAuthorityCommand(f, 12, 3, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: "lifecycle/ref", TargetClaims: claims}, repoA)
+	bindStatus := completeReferenceForTest(t, f, bind, 105)
 	if disposition, members, exists := referenceAggregateForTest(t, f, "lifecycle/ref"); !exists || disposition != "" || members != 1 {
 		t.Fatalf("bound planned Matter aggregate = %q/%d exists=%t", disposition, members, exists)
 	}
-	anchor := f.anchor(t)
-	allocation := claimTestAllocation(1, anchor, 102, 103, 104)
-	f.acquire(t, 13, 3, anchor, allocation)
 	start := step12Command(f, 14, 4, operation.MatterStartV1,
 		operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
 	started := completeLifecycleCommand(t, f, start, []string{claimTestID(107)})
@@ -489,14 +937,15 @@ func TestOpenExistingRejectsReferenceSnapshotSubstitutionWithRebuiltCandidateOve
 	anchor := f.anchor(t)
 	allocation := claimTestAllocation(1, anchor, 101, 102, 103)
 	f.acquire(t, 11, 2, anchor, allocation)
+	claims := []operation.TargetClaim{{MatterID: f.matter, ClaimID: allocation.ClaimID, ClaimEpoch: 1}}
 	start := step12Command(f, 12, 3, operation.MatterStartV1,
 		operation.NodeLifecycleInput{NodeID: f.matter}, allocation.ClaimID)
 	started := completeLifecycleCommand(t, f, start, []string{claimTestID(104)})
 	claimTestAcknowledge(t, f, allocation.JournalID, 1, started)
 
 	const reference = "active/ref"
-	bind := referenceAuthorityCommand(f, 13, 4, operation.ReferenceBindV1,
-		operation.ReferenceBindInput{MatterID: f.matter, Reference: reference}, repoA)
+	bind := referenceAuthorityCommand(f, 13, 4, operation.ReferenceBindV2,
+		operation.ReferenceBindV2Input{MatterID: f.matter, Reference: reference, TargetClaims: claims}, repoA)
 	status := completeReferenceForTest(t, f, bind, 105)
 	assertReferenceSuccess(t, f, bind, status, "reference.added", reference, "")
 	if disposition, members, exists := referenceAggregateForTest(t, f, reference); !exists || disposition != "active" || members != 1 {

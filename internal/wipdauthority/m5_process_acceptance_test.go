@@ -1234,7 +1234,9 @@ func startWipdForBirthReleaseRecovery(t *testing.T, binary, profileRoot string, 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		var client *wipd.Client
 		var err error
-		if len(m6) > 0 && m6[0] {
+		if len(m6) > 1 && m6[1] {
+			client, err = wipd.ConnectM6Step10(ctx, profileRoot)
+		} else if len(m6) > 0 && m6[0] {
 			client, err = wipd.ConnectM6(ctx, profileRoot)
 		} else {
 			client, err = wipd.Connect(ctx, profileRoot)

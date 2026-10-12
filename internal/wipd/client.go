@@ -49,6 +49,10 @@ type Client struct {
 	parameters sessionParameters
 	m6         bool
 	step8      bool
+	step9a     bool
+	step9b     bool
+	step9c     bool
+	step10     bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -85,7 +89,7 @@ func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, false)
+	return connectProfileCapabilities(ctx, profile, true, false, false, false, false, false)
 }
 
 // ConnectM6Step8 explicitly offers the dependency/reference acceptance set.
@@ -95,7 +99,48 @@ func ConnectM6Step8(ctx context.Context, explicitProfileRoot string) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true)
+	return connectProfileCapabilities(ctx, profile, true, true, false, false, false, false)
+}
+
+// ConnectM6Step9A explicitly offers named Batch birth. It refuses to connect
+// unless the authority negotiates that exact operation; no older profile is
+// retried or used as a fallback.
+func ConnectM6Step9A(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, false, false, false)
+}
+
+// ConnectM6Step9B explicitly offers named Batch membership and dismissal. It
+// requires the full S9-B capability set and never falls back to an older one.
+func ConnectM6Step9B(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, false, false)
+}
+
+// ConnectM6Step9C requires the explicit named-Batch read feature in addition
+// to the complete S9-A/S9-B operation set; it never falls back.
+func ConnectM6Step9C(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, false)
+}
+
+// ConnectM6Step10 explicitly offers the isolated engine-only hook operation
+// on top of the complete Step 9C profile; ordinary Connect paths never offer it.
+func ConnectM6Step10(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, true)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -412,10 +457,10 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
-	return connectProfileCapabilities(ctx, profile, false, false)
+	return connectProfileCapabilities(ctx, profile, false, false, false, false, false, false)
 }
 
-func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8 bool) (*Client, error) {
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead, selectStep10 bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -428,6 +473,10 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 		transport: transport,
 		m6:        m6,
 		step8:     step8,
+		step9a:    namedBatch,
+		step9b:    namedBatchMembership,
+		step9c:    namedBatchRead,
+		step10:    selectStep10,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -438,6 +487,26 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 	if err := client.negotiate(connectCtx); err != nil {
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: local IPC negotiation: %v", ErrUnavailable, err)
+	}
+	if namedBatch && !operationCapabilityContains(client.hello.operations, operation.BatchCreateV1.Metadata().Operation, identitySchemaV1) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: named Batch birth is not supported by this profile", ErrUnavailable)
+	}
+	if namedBatchMembership {
+		for _, definition := range operation.NamedBatchMembershipCatalogue() {
+			if !operationCapabilityContains(client.hello.operations, definition.Metadata().Operation, identitySchemaV1) {
+				transport.CloseIdleConnections()
+				return nil, fmt.Errorf("%w: named Batch membership is not supported by this profile", ErrUnavailable)
+			}
+		}
+	}
+	if namedBatchRead && !containsString(client.hello.features, wipdwire.NamedBatchReadFeature) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: named Batch read is not supported by this profile", ErrUnavailable)
+	}
+	if selectStep10 && !operationCapabilityContains(client.hello.operations, operation.SchedulerOrchestrateV1.Metadata().Operation, identitySchemaV1) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: scheduler hooks are not supported by this profile", ErrUnavailable)
 	}
 	return client, nil
 }
@@ -468,6 +537,27 @@ func (c *Client) negotiate(ctx context.Context) error {
 	}, map[string]any{
 		"name": "step.start", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
 	}}
+	if c.step9a {
+		operations = append(operations, map[string]any{
+			"name": operation.BatchCreateV1.Metadata().Operation.Name, "versions": []any{uint64(operation.BatchCreateV1.Metadata().Operation.Version)}, "identity_schemas": []any{identitySchemaV1},
+		})
+	}
+	if c.step9b {
+		for _, definition := range operation.NamedBatchMembershipCatalogue() {
+			id := definition.Metadata().Operation
+			operations = append(operations, map[string]any{
+				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+			})
+		}
+	}
+	if c.step10 {
+		for _, definition := range operation.Step10Catalogue() {
+			id := definition.Metadata().Operation
+			operations = append(operations, map[string]any{
+				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+			})
+		}
+	}
 	if c.m6 {
 		operations = append(operations, map[string]any{
 			"name": "gate.exemption.repair", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
@@ -517,6 +607,10 @@ func (c *Client) negotiate(ctx context.Context) error {
 	features := []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, frameSchema}
 	if c.m6 {
 		features = []any{birthReleaseFeature, claimAcquireFeature, claimJournalCloseFeature, wipdwire.CommandSubmitV2Feature, frameSchema}
+	}
+	if c.step9c {
+		features = append(features, wipdwire.NamedBatchReadFeature)
+		sort.Slice(features, func(i, j int) bool { return features[i].(string) < features[j].(string) })
 	}
 	payload, err := encodePayload(map[string]any{
 		"protocol_min":     []any{uint64(1), uint64(0)},
@@ -615,7 +709,7 @@ func decodeServerHello(payload []byte) (serverHello, error) {
 		return serverHello{}, errUnsupportedExtension
 	}
 	features, err := parseSortedIDs(fields["features"])
-	if err != nil || !containsString(features, frameSchema) || len(features) > 5 ||
+	if err != nil || !containsString(features, frameSchema) || len(features) > 6 ||
 		!onlyKnownFeatures(features) {
 		return serverHello{}, errUnsupportedExtension
 	}
@@ -654,16 +748,16 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.MatterFinishV1.Metadata().Operation, operation.ContentWriteOnceV1.Metadata().Operation,
 		operation.FindingAppendV1.Metadata().Operation, operation.GateExemptionRepairV1.Metadata().Operation,
 		operation.GateDeclareV1.Metadata().Operation, operation.GateCloseV1.Metadata().Operation, operation.GateDismissV1.Metadata().Operation,
-		operation.BatchSweepAnonymousV1.Metadata().Operation:
+		operation.BatchSweepAnonymousV1.Metadata().Operation, operation.BatchCreateV1.Metadata().Operation:
 		return true
 	default:
-		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id)
+		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.Step10CapabilityOperation(id) || operation.NamedBatchMembershipOperation(id)
 	}
 }
 
 func onlyKnownFeatures(features []string) bool {
 	for _, feature := range features {
-		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature && feature != wipdwire.CommandSubmitV2Feature {
+		if feature != frameSchema && feature != birthReleaseFeature && feature != claimAcquireFeature && feature != claimJournalCloseFeature && feature != wipdwire.CommandSubmitV2Feature && feature != wipdwire.NamedBatchReadFeature {
 			return false
 		}
 	}

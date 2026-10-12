@@ -13,9 +13,9 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # shell files at all, so this list is the only shell gate — `make lint`,
 # and so CI's lint job, checks it in full.
 ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy contrib/online-authority-proof/run contrib/online-authority-proof/runtime-test contrib/online-authority-proof/test-policy
-SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh $(ORB_SHELLCHECK_FILES)
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh scripts/prepare-step10-verifier-inputs.sh $(ORB_SHELLCHECK_FILES)
 
-.PHONY: fmt lint test check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
+.PHONY: fmt lint test check prepare-step10-verifier-inputs orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
 
 fmt:
 	gofumpt -w .
@@ -26,6 +26,15 @@ lint:
 
 test:
 	go test ./...
+
+# The process acceptance consumes only a fresh, hash-checked directory. The
+# callers acquire the exact external commits first; this target never fetches
+# or consults credentials.
+prepare-step10-verifier-inputs:
+	@test -n "$(MODEL_SOURCE_DIR)" || { echo "error: MODEL_SOURCE_DIR is required" >&2; exit 1; }
+	@test -n "$(WORKPLAN_SOURCE_DIR)" || { echo "error: WORKPLAN_SOURCE_DIR is required" >&2; exit 1; }
+	@test -n "$(STEP10_INPUT_DIR)" || { echo "error: STEP10_INPUT_DIR is required" >&2; exit 1; }
+	@scripts/prepare-step10-verifier-inputs.sh "$(MODEL_SOURCE_DIR)" "$(WORKPLAN_SOURCE_DIR)" "$(STEP10_INPUT_DIR)"
 
 check: lint test
 

@@ -9,22 +9,24 @@ import (
 func encodeStep8Output(id operation.ID, output operation.Output) ([]byte, error) {
 	var fields map[string]any
 	switch id {
-	case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation:
+	case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation,
+		operation.DependencyAddV2.Metadata().Operation, operation.DependencyRemoveV2.Metadata().Operation:
 		value, ok := output.(operation.DependencyOutput)
 		if !ok {
 			return nil, errMalformedMessage
 		}
 		fields = map[string]any{"blocked_id": value.BlockedID, "blocker_id": value.BlockerID}
-		if id == operation.DependencyAddV1.Metadata().Operation {
+		if id == operation.DependencyAddV1.Metadata().Operation || id == operation.DependencyAddV2.Metadata().Operation {
 			fields["edge"] = value.EdgeID
 		}
-	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceRebindV1.Metadata().Operation:
+	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceRebindV1.Metadata().Operation,
+		operation.ReferenceBindV2.Metadata().Operation, operation.ReferenceUnbindV2.Metadata().Operation, operation.ReferenceRebindV2.Metadata().Operation:
 		value, ok := output.(operation.ReferenceOutput)
 		if !ok {
 			return nil, errMalformedMessage
 		}
 		fields = map[string]any{"matter_id": value.MatterID, "reference": value.Reference}
-		if id == operation.ReferenceRebindV1.Metadata().Operation {
+		if id == operation.ReferenceRebindV1.Metadata().Operation || id == operation.ReferenceRebindV2.Metadata().Operation {
 			fields["previous_reference"] = value.PreviousReference
 		}
 	default:
@@ -38,18 +40,20 @@ func decodeStep8Output(id operation.ID, raw []byte) (operation.Output, error) {
 	var fields map[string]any
 	var err error
 	switch id {
-	case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation:
+	case operation.DependencyAddV1.Metadata().Operation, operation.DependencyRemoveV1.Metadata().Operation,
+		operation.DependencyAddV2.Metadata().Operation, operation.DependencyRemoveV2.Metadata().Operation:
 		keys := []string{"blocked_id", "blocker_id"}
-		if id == operation.DependencyAddV1.Metadata().Operation {
+		if id == operation.DependencyAddV1.Metadata().Operation || id == operation.DependencyAddV2.Metadata().Operation {
 			keys = append(keys, "edge")
 		}
 		fields, err = wipdwire.DecodeCanonicalMap(raw, keys...)
 		output = operation.DependencyOutput{
 			EdgeID: asCommandStartString(fields["edge"]), BlockedID: asCommandStartString(fields["blocked_id"]), BlockerID: asCommandStartString(fields["blocker_id"]),
 		}
-	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceRebindV1.Metadata().Operation:
+	case operation.ReferenceBindV1.Metadata().Operation, operation.ReferenceUnbindV1.Metadata().Operation, operation.ReferenceRebindV1.Metadata().Operation,
+		operation.ReferenceBindV2.Metadata().Operation, operation.ReferenceUnbindV2.Metadata().Operation, operation.ReferenceRebindV2.Metadata().Operation:
 		keys := []string{"matter_id", "reference"}
-		if id == operation.ReferenceRebindV1.Metadata().Operation {
+		if id == operation.ReferenceRebindV1.Metadata().Operation || id == operation.ReferenceRebindV2.Metadata().Operation {
 			keys = append(keys, "previous_reference")
 		}
 		fields, err = wipdwire.DecodeCanonicalMap(raw, keys...)
@@ -82,13 +86,27 @@ func validateStep8Receipt(entry wipdjournal.Entry, raw []byte, count uint64) err
 			return ErrCommandStartIdentity
 		}
 		want = operation.DependencyOutput{EdgeID: value.EdgeID, BlockedID: input.BlockedID, BlockerID: input.BlockerID}
+	case operation.DependencyAddV2Input:
+		value, ok := output.(operation.DependencyOutput)
+		if !ok {
+			return ErrCommandStartIdentity
+		}
+		want = operation.DependencyOutput{EdgeID: value.EdgeID, BlockedID: input.BlockedID, BlockerID: input.BlockerID}
 	case operation.DependencyRemoveInput:
+		want = operation.DependencyOutput{BlockedID: input.BlockedID, BlockerID: input.BlockerID}
+	case operation.DependencyRemoveV2Input:
 		want = operation.DependencyOutput{BlockedID: input.BlockedID, BlockerID: input.BlockerID}
 	case operation.ReferenceBindInput:
 		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
+	case operation.ReferenceBindV2Input:
+		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
 	case operation.ReferenceUnbindInput:
 		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
+	case operation.ReferenceUnbindV2Input:
+		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.Reference}
 	case operation.ReferenceRebindInput:
+		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.To, PreviousReference: input.From}
+	case operation.ReferenceRebindV2Input:
 		want = operation.ReferenceOutput{MatterID: input.MatterID, Reference: input.To, PreviousReference: input.From}
 	default:
 		return ErrCommandStartIdentity

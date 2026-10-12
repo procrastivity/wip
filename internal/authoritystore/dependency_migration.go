@@ -128,5 +128,5 @@ func UpgradeV17(root string) error {
 	if err = installDependencies(db); err != nil {
 		return err
 	}
-	return checkSchema(db)
+	return checkSchemaVersion(db, 18)
 }

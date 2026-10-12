@@ -26,7 +26,7 @@ func TestCommandSubmitRetryUsesRestartedDurableEnvelope(t *testing.T) {
 				RepoID: "01KZ7XHAQT1S46NYPN1PW1DX3B", DomainID: "01KZ7XHAQT1S46NYPN1PW1DX3A",
 				AuthorityEpoch: 1, EnvironmentID: "01KZ7XHAQT1S46NYPN1PW1DX3C",
 			}
-			root := filepath.Join(t.TempDir(), "journal")
+			root := filepath.Join(privateTempDir(t), "journal")
 			journal, err := wipdjournal.Open(root, identity)
 			if err != nil {
 				t.Fatal(err)

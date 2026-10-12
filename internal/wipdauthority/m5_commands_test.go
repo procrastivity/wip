@@ -62,6 +62,10 @@ type m5CommandFixture struct {
 }
 
 func newM5CommandFixture(t *testing.T) *m5CommandFixture {
+	return newM5CommandFixtureAt(t, "127.0.0.1:0", "127.0.0.1", "127.0.0.1")
+}
+
+func newM5CommandFixtureAt(t *testing.T, listenAddress, originHost, certificateHost string) *m5CommandFixture {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -167,12 +171,12 @@ func newM5CommandFixture(t *testing.T) *m5CommandFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	tlsFixture := newAuthorityTLSFixture(t, listener, m5TestDomain, 1, ownerID)
+	tlsFixture := newAuthorityTLSFixtureWithHosts(t, listener, originHost, certificateHost, m5TestDomain, 1, ownerID)
 	profile := tlsFixture.profile
 	profile, err = profile.WithM5LabRepoID(m5TestRepo)
 	if err != nil {

@@ -31,6 +31,7 @@ type labConnectionSession struct {
 	failed          bool
 	operations      map[operation.ID]struct{}
 	commandSubmitV2 bool
+	namedBatchRead  bool
 }
 
 func labConnectionContext(ctx context.Context, _ net.Conn) context.Context {
@@ -42,7 +43,7 @@ func connectionSession(request *http.Request) *labConnectionSession {
 	return session
 }
 
-func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []byte, map[operation.ID]struct{}, string) {
+func negotiateLab(payload []byte, supported []operation.Definition, namedBatchRead bool) ([]byte, []byte, map[operation.ID]struct{}, string) {
 	fields, err := wipdwire.DecodeCanonicalMap(payload,
 		"protocol_min", "protocol_max", "identity_schemas", "operations", "store_schemas", "features")
 	if err != nil {
@@ -119,6 +120,10 @@ func negotiateLab(payload []byte, supported []operation.Definition) ([]byte, []b
 	selectedFeatures := []any{"wipd.frame/1"}
 	if containsString(features, wipdwire.CommandSubmitV2Feature) {
 		selectedFeatures = []any{wipdwire.CommandSubmitV2Feature, "wipd.frame/1"}
+	}
+	if namedBatchRead && containsString(features, wipdwire.NamedBatchReadFeature) {
+		selectedFeatures = append(selectedFeatures, wipdwire.NamedBatchReadFeature)
+		sort.Slice(selectedFeatures, func(i, j int) bool { return selectedFeatures[i].(string) < selectedFeatures[j].(string) })
 	}
 	serverHello, err := wipdwire.EncodeCanonical(map[string]any{
 		"selected_protocol": []any{uint64(1), uint64(0)},

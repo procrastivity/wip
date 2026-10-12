@@ -640,10 +640,10 @@ func appendClaimJournalEntryTx(ctx context.Context, tx *sql.Tx, journal string, 
 		return err
 	}
 	if position != uint64(count)+1 || pending != 0 {
-		return ErrPending
+		return fmt.Errorf("%w: claim journal position=%d count=%d pending=%d", ErrPending, position, count, pending)
 	}
 	if count > 0 && c.Sequence <= lastSeq {
-		return ErrPending
+		return fmt.Errorf("%w: claim journal environment sequence=%d last=%d", ErrPending, c.Sequence, lastSeq)
 	}
 	if count == 0 {
 		var head uint64
@@ -651,7 +651,7 @@ func appendClaimJournalEntryTx(ctx context.Context, tx *sql.Tx, journal string, 
 			return err
 		}
 		if c.Sequence != head+1 {
-			return ErrPending
+			return fmt.Errorf("%w: first claim journal sequence=%d environment head=%d", ErrPending, c.Sequence, head)
 		}
 	}
 	var existing int
@@ -1292,6 +1292,16 @@ func (s *Store) CompleteClaimLifecycle(ctx context.Context, owner *Execution, ne
 				}
 			}
 		case "claim.release":
+			if !implicitRelease {
+				blocked, blockErr := step10ClaimHasUnresolvedWorkTx(ctx, tx, c.domain, id)
+				if blockErr != nil {
+					return CommandStatus{}, blockErr
+				}
+				if blocked {
+					problem = "refusal.claim-release-barrier"
+					break
+				}
+			}
 			b := c.barrier
 			if x.implicit {
 				var count, receipts, unresolved, quarantined uint64
