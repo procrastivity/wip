@@ -21,7 +21,7 @@ const (
 	step10VerifierBaseTreeSHA256 = "2048c7caefc9db94d4cebaf2640aa54bca5e45339b17e06b1620b15aa3e9e25a"
 	step10VerifierModelSHA256    = "sha256:77fb90f96d7a43cac041cb18fea8b27345e1b43b5b1b661b21cb04cb4ced8388"
 	step10VerifierPlanSHA256     = "sha256:8c4a01850a07a97bd71b19ccbed97853950226d6f82c846fbeea8b5d7ed3ca71"
-	step10VerifierFlakeSHA256    = "0dae0a11fbae01a38511369b64069a3ec05a00b9aa110f1f29d45827c2efbf62"
+	step10VerifierFlakeSHA256    = "073c3f869b9c5253d3192f7ba3ab0831a66586d64001f5ab17b6fa0148848207"
 	step10VerifierLockSHA256     = "c2b6e06a956dba6fd13a924da802a8923cf731fdd7caf0e37e6a5f281460a51e"
 	step10VerifierNetworkMode    = "bubblewrap-user,pid,ipc,uts,network namespaces; namespace loopback is explicitly down for bootstrap and non-loopback checks and up only for five allowlisted process checks; setup CAP_NET_ADMIN is cleared from effective, permitted, inheritable, and ambient sets before every command; only the isolated bounding set retains it, with no_new_privs preventing regain; no host interfaces or external routes"
 )
