@@ -23,6 +23,21 @@ The process test embeds this manifest in its review input, so the durable review
 digest binds the actual input provenance without changing the verifier's fixed
 five-blob contract.
 
+The CI test job installs Nix and prepares the verifier flake inputs before the
+external-source secret checkouts. It runs
+`nix flake archive --json --no-write-lock-file .` using ordinary public network
+access; `WIP_REBOOT_READ_TOKEN` is not passed to Nix. This is required because
+`verifierLockedInputs` checks the local Nix database for the fixed CA of every
+non-root `flake.lock` node, including nested inputs that a normal dev-shell
+evaluation may not retain. The preparation step checks each exact CA record in
+`/nix/var/nix/db/db.sqlite` and confirms that its store path appears in the
+archive JSON. CI stops before the private checkouts if any locked input is
+missing. The archive operation does not change `flake.lock` or alter verifier
+assertions. The private checkouts still use depth 1 and
+`persist-credentials: false`; the separate test step receives only the
+prepared pinned input directory, and the verifier's checks remain offline and
+isolated.
+
 The primary checkout of this repository in the CI `test` job is different: it
 uses `fetch-depth: 0` so the complete Git history, including the pinned base
 `aa21e333b6000195d867b4f164fdb18159fb8c3b`, is available to the unchanged

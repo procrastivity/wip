@@ -34,6 +34,64 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+      - name: Archive and verify locked verifier flake inputs
+        run: |
+          nix flake archive --json --no-write-lock-file . > "$RUNNER_TEMP/step10-flake-archive.json"
+          python3 - "$RUNNER_TEMP/step10-flake-archive.json" flake.lock <<'PY'
+          import base64
+          import json
+          import sqlite3
+          import sys
+          from pathlib import Path
+
+          alphabet = "0123456789abcdfghijklmnpqrsvwxyz"
+
+          def nix_base32(data):
+              bits = int.from_bytes(data, "little")
+              return "".join(alphabet[(bits >> bit) & 31]
+                             for bit in range(((len(data) * 8 - 1) // 5) * 5, -1, -5))
+
+          archive = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          lock = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          archived_paths = set()
+
+          def collect_paths(node):
+              if not isinstance(node, dict):
+                  raise SystemExit("nix flake archive returned a malformed input tree")
+              path = node.get("path")
+              if not isinstance(path, str) or not path.startswith("/nix/store/"):
+                  raise SystemExit(f"archived flake input has a non-store path: {path!r}")
+              archived_paths.add(path)
+              inputs = node.get("inputs", {})
+              if not isinstance(inputs, dict):
+                  raise SystemExit("nix flake archive returned malformed inputs")
+              for child in inputs.values():
+                  collect_paths(child)
+
+          collect_paths(archive)
+          nodes = [(name, node) for name, node in sorted(lock["nodes"].items()) if name != "root"]
+          if not nodes:
+              raise SystemExit("flake.lock contains no locked inputs")
+
+          db = sqlite3.connect("file:/nix/var/nix/db/db.sqlite?mode=ro", uri=True)
+          try:
+              for name, node in nodes:
+                  nar_hash = node.get("locked", {}).get("narHash", "")
+                  if not nar_hash.startswith("sha256-"):
+                      raise SystemExit(f"locked input {name} has no SHA-256 NAR hash")
+                  digest = base64.b64decode(nar_hash.removeprefix("sha256-"), validate=True)
+                  ca = "fixed:r:sha256:" + nix_base32(digest)
+                  rows = [row[0] for row in db.execute(
+                      "SELECT path FROM ValidPaths WHERE ca=? ORDER BY path", (ca,))]
+                  matching = [path for path in rows if path in archived_paths]
+                  if not matching:
+                      raise SystemExit(f"locked input {name} CA {ca} is not registered by flake archive")
+                  print(f"{name}: ca={ca} path={','.join(matching)}")
+          finally:
+              db.close()
+          print(f"ALL_LOCKED_FLAKE_INPUTS_REGISTERED={len(nodes)}")
+          PY
       - name: Require the read-only external-source secret
         env:
           WIPD_STEP10_INPUT_TOKEN_CONFIGURED: ${{ secrets.WIP_REBOOT_READ_TOKEN != '' }}
@@ -70,7 +128,6 @@ jobs:
             MODEL_SOURCE_DIR="$GITHUB_WORKSPACE/.step10-input-sources/model" \
             WORKPLAN_SOURCE_DIR="$GITHUB_WORKSPACE/.step10-input-sources/workplan" \
             STEP10_INPUT_DIR="$RUNNER_TEMP/wipd-step10-verifier-inputs"
-      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
       - name: Run tests without checkout credentials
         run: nix develop --command make test
         env:
