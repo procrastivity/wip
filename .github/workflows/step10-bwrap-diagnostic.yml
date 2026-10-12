@@ -1,0 +1,23 @@
+name: Step 10 bubblewrap diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostic/step10-bwrap-loopback-probe-01
+
+permissions:
+  contents: read
+
+jobs:
+  loopback-probe:
+    name: Minimal bubblewrap loopback probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+      - name: Run minimal pinned bubblewrap diagnostic
+        run: nix develop --command bash .github/scripts/step10-bwrap-loopback-probe.sh
