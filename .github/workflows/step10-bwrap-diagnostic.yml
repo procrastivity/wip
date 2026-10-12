@@ -20,4 +20,4 @@ jobs:
           persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
       - name: Run minimal pinned bubblewrap diagnostic
-        run: nix develop --command bash .github/scripts/step10-bwrap-loopback-probe.sh
+        run: nix develop --command nix shell --inputs-from . nixpkgs#strace --command bash .github/scripts/step10-bwrap-loopback-probe.sh
