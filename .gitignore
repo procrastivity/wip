@@ -17,3 +17,6 @@
 .direnv/
 
 .DS_Store
+
+# Step 10 verifier inputs from `make step10-verifier-inputs-local`
+/.step10-local/

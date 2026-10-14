@@ -50,8 +50,42 @@ candidate manifest binds the workflow bytes and therefore this primary checkout
 setting; `ci_fetch_depth` in the source provenance manifest remains `1` for the
 external inputs.
 
-To use the same validation path locally, provide two explicit detached source
-checkouts at the commits above and a fresh output path:
+## Running the test locally
+
+`make check` runs this test, and the test needs three host conditions. The
+test checks all three before it starts any process work. When one is missing,
+it fails at once and names the fix:
+
+- **Test deadline.** A full run takes about twelve minutes, so Go's default
+  ten-minute package timeout always stops it. Set
+  `GOFLAGS='-timeout=45m -count=1'`.
+- **Pinned inputs.** Set `WIPD_STEP10_VERIFIER_INPUTS` to a prepared input
+  directory.
+- **Bubblewrap sandbox.** The test runs the Nix `bwrap` from the dev shell. It
+  must create a user and network namespace and use `CAP_NET_ADMIN` in it. On
+  Ubuntu 23.10 and later, `kernel.apparmor_restrict_unprivileged_userns=1`
+  blocks this unless an AppArmor profile gives the Nix `bwrap` the `userns`
+  permission. GitHub-hosted runners block it, so CI and the release
+  workflow skip this one test for now.
+
+When a local clone of `wip-reboot` already holds both pinned commits, prepare
+the inputs from it, with no network access or credentials:
+
+```sh
+make step10-verifier-inputs-local          # WIP_REBOOT_DIR defaults to ../wip-reboot
+GOFLAGS='-timeout=45m -count=1' \
+  WIPD_STEP10_VERIFIER_INPUTS="$PWD/.step10-local/inputs" make check
+```
+
+The target clones the two commits into the ignored `.step10-local/` directory
+and runs the same preparation script as CI. To leave the test out, as CI does:
+
+```sh
+GOFLAGS='-skip=^TestStep10PinnedPlanThroughAuthenticatedEnvironmentAndAuthorityProcesses$' make check
+```
+
+To use the same validation path with other checkouts, provide two explicit
+detached source checkouts at the commits above and a fresh output path:
 
 ```sh
 tmp="$(mktemp -d)"

@@ -35,6 +35,7 @@ func TestStep10PinnedPlanThroughAuthenticatedEnvironmentAndAuthorityProcesses(t 
 	}
 	ctx := context.Background()
 	policyMode := os.Getenv("WIPD_STEP10_POLICY_TEST")
+	step10ProcessPreflight(t, policyMode)
 	fixture := newM5CommandFixture(t)
 	registry, err := NewM6Step10Registry()
 	if err != nil {
@@ -1184,8 +1185,7 @@ func TestStep10PinnedPlanThroughAuthenticatedEnvironmentAndAuthorityProcesses(t 
 	if got := step10HookSubmissionCount(t, filepath.Join(fixture.root, "authority.db")); got != hookSubmissionsBeforeResume+1 {
 		t.Fatalf("correction path executed an unexpected number of additional hooks: before=%d after=%d", hookSubmissionsBeforeResume, got)
 	}
-	if checkID := os.Getenv("WIPD_STEP10_VERIFIER_CHECK"); checkID == "focused-step10" ||
-		checkID == "changed-package-regressions" || checkID == "repository-check" {
+	if checkID, nested := step10NestedVerifierCheck(); nested {
 		t.Logf("non-recursive D106 boundary inside %s: production Resume, reaped-Role close-before-release, fresh-claim correction Builder and next-Verifier selection completed; enclosing acceptance runs D106/C", checkID)
 		return
 	}
