@@ -117,6 +117,9 @@ const (
 	FootprintDependencyGraph         Footprint = "dependency.graph"
 	FootprintDependencyEdge          Footprint = "dependency.edge"
 	FootprintMatterTrackerReferences Footprint = "matter.tracker-references"
+	FootprintRepoMembership          Footprint = "repo.membership"
+	FootprintEnvironmentIdentity     Footprint = "environment.identity"
+	FootprintRepoRouteIndex          Footprint = "repo.route-index"
 )
 
 // BlobSpec statically names one accepted staged blob input.
@@ -392,6 +395,9 @@ func validateTransportType(root reflect.Type, role string) error {
 			reflect.Float32, reflect.Float64:
 			return nil
 		case reflect.Pointer, reflect.Slice, reflect.Array:
+			if t == reflect.TypeOf(CanonicalBytes(nil)) {
+				return nil
+			}
 			if role == "input" && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) && t.Elem().Kind() == reflect.Uint8 {
 				return fmt.Errorf("input %s carries raw bytes; declare a staged BlobInput instead", path)
 			}

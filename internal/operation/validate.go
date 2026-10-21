@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"encoding/base64"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -129,6 +130,25 @@ func (d Definition) ValidateRequest(request Request) error {
 	case BatchDismissInput:
 		if err := validateULID("Batch ID", input.BatchID); err != nil {
 			return err
+		}
+	case RepoRouteBindInput:
+		if !validNormalizedRouteKey(input.NormalizedKey) {
+			return fmt.Errorf("repo.route-bind@v1 requires a normalized remote Repo key")
+		}
+	case RepoCreateLocalInput:
+		if !validCreateDomainGrantArtifact(input.GrantArtifact) {
+			return fmt.Errorf("repo.create-local@v1 requires a canonical bounded create-domain grant")
+		}
+	case EnvironmentAttachOnceInput:
+		if request.Context.Clone != "" || request.Context.Worktree != "" || !validCanonicalAttachGrant(input.GrantArtifact) {
+			return fmt.Errorf("environment.attach-once@v1 requires a canonical grant, Repo-only context, and closed checkout proof")
+		}
+		if _, err := DecodeAttachCheckoutProof(input.CheckoutProof); err != nil {
+			return err
+		}
+	case RepoAdoptRemoteInput:
+		if !validNormalizedRouteKey(input.NormalizedKey) {
+			return fmt.Errorf("repo.adopt-remote@v1 requires a normalized remote Repo key")
 		}
 	case ContentWriteInput:
 		if err := validateULID("content subject ID", input.SubjectID); err != nil {
@@ -393,6 +413,12 @@ func (d Definition) ValidateResult(result Result) error {
 			return fmt.Errorf("output type is %T, want %s", result.Output, d.outputType)
 		}
 		switch output := result.Output.(type) {
+		case RouteResolveOutput:
+			if validateULID("route target domain ID", output.DomainID) != nil || output.Epoch == 0 ||
+				strings.TrimSpace(output.ConnectionProfile) == "" || output.ConnectionProfile != strings.TrimSpace(output.ConnectionProfile) ||
+				output.RepoID != nil && validateULID("route-bound Repo ID", *output.RepoID) != nil {
+				return fmt.Errorf("route.resolve output has invalid target or authority identity")
+			}
 		case StepLifecycleOutput:
 			if validateULID("Step output ID", output.StepID) != nil || validateULID("Matter output ID", output.MatterID) != nil ||
 				!validLifecycleState(output.State) {
@@ -425,6 +451,24 @@ func (d Definition) ValidateResult(result Result) error {
 		case BatchDismissOutput:
 			if validateULID("Batch output ID", output.BatchID) != nil {
 				return fmt.Errorf("named Batch dismissal output is invalid")
+			}
+		case RepoRouteBindOutput:
+			if validateULID("route-bound Repo ID", output.RepoID) != nil || validateULID("route-bound domain ID", output.DomainID) != nil || output.Epoch == 0 {
+				return fmt.Errorf("repo route binding output has invalid authority identity")
+			}
+		case RepoCreateLocalOutput:
+			if validateULID("created Repo ID", output.RepoID) != nil || validateULID("created domain ID", output.DomainID) != nil || output.Epoch == 0 {
+				return fmt.Errorf("repo.create-local@v1 output has invalid authority identity")
+			}
+		case EnvironmentAttachOnceOutput:
+			if validateULID("attached Repo ID", output.RepoID) != nil || validateULID("attached domain ID", output.DomainID) != nil || output.Epoch == 0 ||
+				validateULID("attached Environment ID", output.EnvironmentID) != nil || validateULID("attached Clone ID", output.CloneID) != nil ||
+				validateULID("attached Worktree ID", output.WorktreeID) != nil {
+				return fmt.Errorf("environment.attach-once@v1 output has invalid identity")
+			}
+		case RepoAdoptRemoteOutput:
+			if validateULID("adopted Repo ID", output.RepoID) != nil || validateULID("adopted domain ID", output.DomainID) != nil || output.Epoch == 0 {
+				return fmt.Errorf("repo.adopt-remote@v1 output has invalid authority identity")
 			}
 		case GateDeclareOutput:
 			if strings.TrimSpace(output.Gate) == "" || !validGateScale(output.Scale) {
@@ -578,12 +622,61 @@ func (d Definition) ValidateResult(result Result) error {
 		if isNamedBatchMembershipOperation(d.metadata.Operation) && !validNamedBatchRefusal(result.Problem.Code) {
 			return fmt.Errorf("%s has unknown refusal code %q", d.metadata.Operation, result.Problem.Code)
 		}
+		if (d.metadata.Operation == RepoRouteBindV1.Metadata().Operation || d.metadata.Operation == RepoAdoptRemoteV1.Metadata().Operation) &&
+			!validRepoRouteBindRefusal(result.Problem.Code) {
+			return fmt.Errorf("%s has unknown refusal code %q", d.metadata.Operation, result.Problem.Code)
+		}
 	case ResultFailed:
 		if prefix != "internal" {
 			return fmt.Errorf("failed result requires an internal.* problem, got %q", result.Problem.Code)
 		}
 	}
 	return nil
+}
+
+func validNormalizedRouteKey(key string) bool {
+	if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "*?#") ||
+		strings.Contains(key, "://") || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") ||
+		strings.HasSuffix(key, ".git") || !strings.Contains(key, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func validCanonicalAttachGrant(artifact string) bool {
+	if artifact == "" || len(artifact) > 1<<20 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(artifact)
+	if err != nil || len(decoded) > 1<<20 {
+		return false
+	}
+	return base64.RawURLEncoding.EncodeToString(decoded) == artifact
+}
+
+func validCreateDomainGrantArtifact(artifact string) bool {
+	if artifact == "" || len(artifact) > 5462 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(artifact)
+	if err != nil || len(decoded) > 4096 {
+		return false
+	}
+	return base64.RawURLEncoding.EncodeToString(decoded) == artifact
+}
+
+func validRepoRouteBindRefusal(code ProblemCode) bool {
+	switch code {
+	case ProblemRouteKeyBoundElsewhere, ProblemRouteRepoHasKey, ProblemRouteIdentityFenced:
+		return true
+	default:
+		return false
+	}
 }
 
 func validBatchSweepRefusal(code ProblemCode) bool {

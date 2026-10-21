@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +67,26 @@ func TestExperimentalProfileStatusIsLocalAndDoesNotTouchLegacyStore(t *testing.T
 	got, err := os.ReadFile(legacyPath)
 	if err != nil || string(got) != string(sentinel) {
 		t.Fatalf("legacy store sentinel = %q, err %v; want unchanged %q", got, err, sentinel)
+	}
+}
+
+func TestD115LifecycleCommandsUseExplicitAttemptIDFlags(t *testing.T) {
+	root := cli.NewRootCommand(&iostreams.Streams{Out: io.Discard, Err: io.Discard}, buildinfo.Info{Version: "test"})
+	for _, verb := range []string{"import-proof", "submit", "status", "cancel"} {
+		command, _, err := root.Find([]string{"repo", "create-local", verb})
+		if err != nil {
+			t.Fatalf("find repo create-local %s: %v", verb, err)
+		}
+		if command.Flags().Lookup("attempt-id") == nil {
+			t.Errorf("repo create-local %s has no --attempt-id flag", verb)
+		}
+		if command.Args == nil {
+			t.Errorf("repo create-local %s does not validate positional arguments", verb)
+			continue
+		}
+		if err := command.Args(command, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"}); err == nil {
+			t.Errorf("repo create-local %s accepted positional attempt ID", verb)
+		}
 	}
 }
 

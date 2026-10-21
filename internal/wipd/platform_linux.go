@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -120,30 +121,58 @@ func verifySocketPath(root, socket string, expectedRoot directoryIdentity, expec
 }
 
 func peerEffectiveUID(connection net.Conn) (uint64, error) {
+	peer, err := authenticatedPeerProcess(connection)
+	if err != nil {
+		return 0, err
+	}
+	uid := peer.uid
+	_ = peer.Close()
+	return uid, nil
+}
+
+func authenticatedPeerProcess(connection net.Conn) (*PeerProcess, error) {
 	unixConnection, ok := connection.(*net.UnixConn)
 	if !ok {
-		return 0, ErrPeerCredentials
+		return nil, ErrPeerCredentials
 	}
 	rawConnection, err := unixConnection.SyscallConn()
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
+		return nil, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
 	}
-	var peerUID uint32
+	var credentials *unix.Ucred
+	var pidfd int
 	var credentialErr error
 	if err := rawConnection.Control(func(fd uintptr) {
-		credentials, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		peerCredentials, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 		if err != nil {
 			credentialErr = err
 			return
 		}
-		peerUID = credentials.Uid
+		credentials = peerCredentials
+		pidfd, err = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PEERPIDFD)
+		if err != nil {
+			credentialErr = err
+		}
 	}); err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
+		return nil, fmt.Errorf("%w: %v", ErrPeerCredentials, err)
 	}
 	if credentialErr != nil {
-		return 0, fmt.Errorf("%w: %v", ErrPeerCredentials, credentialErr)
+		return nil, fmt.Errorf("%w: %v", ErrPeerCredentials, credentialErr)
 	}
-	return uint64(peerUID), nil
+	if credentials == nil || credentials.Pid <= 0 || pidfd < 0 {
+		return nil, ErrPeerCredentials
+	}
+	file := os.NewFile(uintptr(pidfd), "wipd-peer-pidfd-"+strconv.Itoa(int(credentials.Pid)))
+	if file == nil {
+		_ = unix.Close(pidfd)
+		return nil, ErrPeerCredentials
+	}
+	peer := &PeerProcess{uid: uint64(credentials.Uid), pid: int(credentials.Pid), pidfd: file}
+	if err := peer.checkAlive(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return peer, nil
 }
 
 func acquireProcessLock(path string) (*os.File, error) {

@@ -42,6 +42,9 @@ func appendCanonical(dst *[]byte, value any) error {
 		}
 		appendCBORHead(dst, 3, uint64(len(value)))
 		*dst = append(*dst, value...)
+	case CanonicalBytes:
+		appendCBORHead(dst, 2, uint64(len(value)))
+		*dst = append(*dst, value...)
 	case uint64:
 		appendCBORHead(dst, 0, value)
 	case int64:

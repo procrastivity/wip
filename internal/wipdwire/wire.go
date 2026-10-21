@@ -84,6 +84,16 @@ type SubmissionAccepted struct {
 	RequestHash string `cbor:"request_hash"`
 }
 
+// SignedCommandTerminal carries both the logical terminal receipt and the
+// authority's portable signed wrapper for the attach receipt verifier.
+type SignedCommandTerminal struct {
+	Schema        string `cbor:"schema"`
+	CommandID     string `cbor:"command_id"`
+	RequestHash   string `cbor:"request_hash"`
+	Receipt       []byte `cbor:"receipt"`
+	SignedReceipt []byte `cbor:"signed_receipt"`
+}
+
 // ReceiptQuery is a read-only lookup scoped to one command identity.
 type ReceiptQuery struct {
 	Schema      string `cbor:"schema"`

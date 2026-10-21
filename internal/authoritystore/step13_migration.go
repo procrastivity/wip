@@ -223,6 +223,15 @@ func UpgradeV11(root string) error {
 	if err = installNamedBatchMembership(db); err != nil {
 		return err
 	}
+	if err = installRouteIndex(db); err != nil {
+		return err
+	}
+	if err = installD115(db); err != nil {
+		return err
+	}
+	if err = installEnvironmentAttach(db); err != nil {
+		return err
+	}
 	if err = checkSchema(db); err != nil {
 		return err
 	}
@@ -232,5 +241,11 @@ func UpgradeV11(root string) error {
 	if err = checkStep14State(db); err != nil {
 		return err
 	}
-	return checkStep15State(db)
+	if err = checkStep15State(db); err != nil {
+		return err
+	}
+	if err = checkRouteIndexState(db); err != nil {
+		return err
+	}
+	return checkBlobFiles(db, filepath.Join(path, "blobs"))
 }

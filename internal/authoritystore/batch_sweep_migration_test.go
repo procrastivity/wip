@@ -13,6 +13,12 @@ import (
 
 func dropBatchSweepSchemaForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	for index := len(environmentAttachSchema) - 1; index >= 0; index-- {
+		object := environmentAttachSchema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatalf("drop environment attach object %s: %v", object.name, err)
+		}
+	}
 	dropDependencySchemaForTest(t, db)
 	for index := len(batchSweepSchema) - 1; index >= 0; index-- {
 		object := batchSweepSchema[index]

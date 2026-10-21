@@ -556,6 +556,50 @@ func commandDecodeInput(id ID, value any) (Input, error) {
 			return nil, err
 		}
 		return BatchDismissInput{BatchID: batchID}, nil
+	case RepoRouteBindV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "normalized_key")
+		if err != nil {
+			return nil, err
+		}
+		key, err := commandString(fields, "normalized_key")
+		if err != nil {
+			return nil, err
+		}
+		return RepoRouteBindInput{NormalizedKey: key}, nil
+	case RepoCreateLocalV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "grant_artifact")
+		if err != nil {
+			return nil, err
+		}
+		grant, err := commandString(fields, "grant_artifact")
+		if err != nil {
+			return nil, err
+		}
+		return RepoCreateLocalInput{GrantArtifact: grant}, nil
+	case EnvironmentAttachOnceV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "grant_artifact", "checkout_proof")
+		if err != nil {
+			return nil, err
+		}
+		grant, err := commandString(fields, "grant_artifact")
+		if err != nil {
+			return nil, err
+		}
+		proof, ok := fields["checkout_proof"].([]byte)
+		if !ok {
+			return nil, fmt.Errorf("operation: attach checkout proof is not a byte string")
+		}
+		return EnvironmentAttachOnceInput{GrantArtifact: grant, CheckoutProof: CanonicalBytes(proof)}, nil
+	case RepoAdoptRemoteV1.Metadata().Operation:
+		fields, err := commandMap(value, "input", "normalized_key")
+		if err != nil {
+			return nil, err
+		}
+		key, err := commandString(fields, "normalized_key")
+		if err != nil {
+			return nil, err
+		}
+		return RepoAdoptRemoteInput{NormalizedKey: key}, nil
 	case GateDeclareV1.Metadata().Operation:
 		fields, err := commandMap(value, "input", "gate", "scale")
 		if err != nil {

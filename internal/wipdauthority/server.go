@@ -23,8 +23,9 @@ var ErrInvalidListener = errors.New("wipdauthority: server and listener are requ
 // Server exposes only the stateless M2 process-readiness endpoint. It has no
 // authority-store dependency and does not create or bootstrap domain state.
 type Server struct {
-	profile Profile
-	http    *http.Server
+	profile       Profile
+	listenAddress string
+	http          *http.Server
 }
 
 // NewServer binds the listener identity to an explicit profile and its
@@ -99,7 +100,7 @@ func newServer(profile Profile, certificate tls.Certificate, handler http.Handle
 	// boundary is h2-only, so keep ALPN exact; VerifyConnection rejects peers
 	// that do not negotiate h2 before net/http can parse their request.
 	httpServer.TLSConfig.NextProtos = []string{"h2"}
-	return &Server{profile: profile, http: httpServer}, nil
+	return &Server{profile: profile, listenAddress: profile.address, http: httpServer}, nil
 }
 
 // ListenAndServe binds TCP only to the exact host and port in the explicit
@@ -108,7 +109,7 @@ func (server *Server) ListenAndServe(ctx context.Context) error {
 	if server == nil || server.http == nil {
 		return ErrInvalidListener
 	}
-	listener, err := net.Listen("tcp", server.profile.address)
+	listener, err := net.Listen("tcp", server.listenAddress)
 	if err != nil {
 		return err
 	}

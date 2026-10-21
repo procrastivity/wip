@@ -107,6 +107,85 @@ func TestValidAuthorityEventPinsM6LifecyclePayloadShapes(t *testing.T) {
 	}
 }
 
+func TestValidAuthorityEventPinsStep11AttachPayload(t *testing.T) {
+	subject := testIdentity.RepoID
+	payload := map[string]any{
+		"repo_id": testIdentity.RepoID, "environment_id": testIdentity.EnvironmentID,
+		"normalized_repo_key": "github.com/acme/widget", "clone_id": testCommandPrefix + "51", "worktree_id": testCommandPrefix + "52",
+		"common_dir_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"git_dir_digest":    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"worktree_name":     "widget", "grant_id": testCommandPrefix + "53",
+		"grant_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
+	if !validAuthorityEvent(m6LifecycleEventRecord(t, "environment.checkout-attached/1", subject, payload), testIdentity.DomainID, testCommandPrefix+"70") {
+		t.Fatal("rejected a valid Step 11 attach event")
+	}
+	payload["worktree_name"] = ""
+	if !validAuthorityEvent(m6LifecycleEventRecord(t, "environment.checkout-attached/1", subject, payload), testIdentity.DomainID, testCommandPrefix+"70") {
+		t.Fatal("rejected a main-checkout Step 11 attach event with no named worktree")
+	}
+	payload["caller_path"] = "/untrusted"
+	if validAuthorityEvent(m6LifecycleEventRecord(t, "environment.checkout-attached/1", subject, payload), testIdentity.DomainID, testCommandPrefix+"70") {
+		t.Fatal("accepted an attach event with an unknown proof field")
+	}
+}
+
+func TestVerifyTransferRejectsMalformedStep11AttachIdentityAndTypes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any, map[string]any)
+	}{
+		{
+			name: "payload Environment differs from envelope",
+			mutate: func(_, payload map[string]any) {
+				payload["environment_id"] = testCommandPrefix + "54"
+			},
+		},
+		{
+			name: "payload Repo differs from envelope",
+			mutate: func(fields, _ map[string]any) {
+				fields["repo_id"] = testCommandPrefix + "55"
+			},
+		},
+		{
+			name: "worktree name is not a string",
+			mutate: func(_ map[string]any, payload map[string]any) {
+				payload["worktree_name"] = uint64(1)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := map[string]any{
+				"repo_id": testIdentity.RepoID, "environment_id": testIdentity.EnvironmentID,
+				"normalized_repo_key": "github.com/acme/widget", "clone_id": testCommandPrefix + "51", "worktree_id": testCommandPrefix + "52",
+				"common_dir_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"git_dir_digest":    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"worktree_name":     "", "grant_id": testCommandPrefix + "53",
+				"grant_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			}
+			fields, err := wipdwire.DecodeCanonicalMap(m6LifecycleEventRecord(t,
+				"environment.checkout-attached/1", testIdentity.RepoID, payload),
+				"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
+			if err != nil {
+				t.Fatal(err)
+			}
+			decodedPayload := fields["payload"].(map[string]any)
+			test.mutate(fields, decodedPayload)
+			fields["payload"] = decodedPayload
+			record, err := wipdwire.EncodeCanonical(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			records := []wipdwire.EventRecord{{EventID: testCommandPrefix + "70", Record: record}}
+			end := hydrationEventAnchor(records)
+			manifest := hydrationManifest(testIdentity, end, []wipdwire.BlobManifestEntry{})
+			if _, err = VerifyTransfer(testIdentity.DomainID, testIdentity.AuthorityEpoch, emptyTransferAnchor(), end, records, manifest); err == nil {
+				t.Fatal("accepted canonical malformed Step 11 attach transfer")
+			}
+		})
+	}
+}
+
 func m6LifecycleEventRecord(t *testing.T, kind, subject string, payload map[string]any) []byte {
 	t.Helper()
 	record, err := wipdwire.EncodeCanonical(map[string]any{

@@ -163,6 +163,20 @@ func EnrollAndSeed(ctx context.Context, profile wipdauthority.Profile, roots *x5
 	if profile.M5LabRepoID() != repoID {
 		return empty, wipdauthority.ErrRepoBindingMismatch
 	}
+	if _, statErr := os.Lstat(filepath.Join(directory, environmentCredentialName)); statErr == nil {
+		credential, certificate, loadErr := LoadEnvironmentCredential(directory, profile, ownerRoot, caDelegation, time.Now().UTC())
+		if loadErr != nil {
+			return empty, loadErr
+		}
+		defer clear(credential.PrivateKeyPKCS8)
+		defer clear(certificate.PrivateKey.(ed25519.PrivateKey))
+		if err := reconcilePendingCredential(directory, credential); err != nil {
+			return empty, err
+		}
+		return seedUsingEnvironmentCredential(ctx, profile, roots, repoID, directory, credential, certificate)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return empty, statErr
+	}
 	trustedEnvironmentCA, err := wipdauthority.VerifyEnvironmentCADelegation(profile, ownerRoot, caDelegation, time.Now().UTC())
 	if err != nil {
 		return empty, ErrInvalidClientState
@@ -255,6 +269,77 @@ func EnrollAndSeed(ctx context.Context, profile wipdauthority.Profile, roots *x5
 		return seed, err
 	}
 	return seed, nil
+}
+
+func seedUsingEnvironmentCredential(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, repoID, directory string, credential EnvironmentCredential, certificate tls.Certificate) (ClientState, error) {
+	var empty ClientState
+	seedClient, err := profile.HTTPClientWithCertificate(roots, &certificate)
+	if err != nil {
+		return empty, err
+	}
+	defer seedClient.CloseIdleConnections()
+	limits, err := negotiateRemote(ctx, seedClient, profile.Origin())
+	if err != nil {
+		return empty, err
+	}
+	seedRequest := wipdwire.SeedRequest{
+		Schema: "wipd.seed-request/1", DomainID: profile.DomainID(), Epoch: profile.Epoch(), StoreSchema: "wipd.store/1",
+	}
+	seedFrame, seedRequestID, err := encodeRequestFrame("seed.request", seedRequest)
+	if err != nil {
+		return empty, err
+	}
+	if !withinSessionFrame(seedFrame, limits) {
+		return empty, ErrInvalidClientState
+	}
+	seedFrames, err := postFramesWithinSession(ctx, seedClient, profile.Origin()+"/wipd/v1/exchange", seedFrame, seedRequestID, maxClientTransferEvents+3, limits)
+	if err != nil {
+		return empty, err
+	}
+	seed, err := verifyTransferFrames(seedFrames, "seed", profile, repoID, credential.EnvironmentID, credential.SPKIDigest, emptyWireAnchor(), nil)
+	if err != nil {
+		return empty, err
+	}
+	seed.PrivateKeyPKCS8 = bytes.Clone(credential.PrivateKeyPKCS8)
+	seed.CertificateDER = clone2D(credential.CertificateDER)
+	if err = installState(directory, seed); err != nil {
+		clear(seed.PrivateKeyPKCS8)
+		return empty, err
+	}
+	return seed, nil
+}
+
+// SeedRepoFromEnvironmentCredential initializes the canonical M2 client state
+// for one receipt-authorized Repo using the existing Environment credential.
+// It never enrolls, creates a credential, or changes Environment identity.
+func SeedRepoFromEnvironmentCredential(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool,
+	ownerRoot ed25519.PublicKey, caDelegation []byte, repoID, credentialDirectory, stateDirectory string,
+) (ClientState, error) {
+	var empty ClientState
+	if ctx == nil || roots == nil || !clientULIDPattern.MatchString(repoID) || stateDirectory == "" {
+		return empty, ErrInvalidClientState
+	}
+	if _, statErr := os.Lstat(filepath.Join(stateDirectory, stateName)); statErr == nil {
+		state, loadErr := loadInstalledClientStateModeWithCredential(
+			stateDirectory, profile, true, credentialDirectory, repoID,
+		)
+		if loadErr != nil || state.RepoID != repoID {
+			clear(state.PrivateKeyPKCS8)
+			return empty, ErrInvalidClientState
+		}
+		state.PrivateKeyPKCS8 = nil
+		state.CertificateDER = nil
+		return state, nil
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return empty, statErr
+	}
+	credential, certificate, err := LoadEnvironmentCredential(credentialDirectory, profile, ownerRoot, caDelegation, time.Now().UTC())
+	if err != nil {
+		return empty, err
+	}
+	defer clear(credential.PrivateKeyPKCS8)
+	defer clear(certificate.PrivateKey.(ed25519.PrivateKey))
+	return seedUsingEnvironmentCredential(ctx, profile, roots, repoID, stateDirectory, credential, certificate)
 }
 
 func validatePrepared(identity PreparedIdentity) (ed25519.PrivateKey, *x509.CertificateRequest, string, error) {
@@ -519,6 +604,9 @@ func emptyManifestDigest() string {
 
 func installState(directory string, state ClientState) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	if err := validateStateCredential(directory, state); err != nil {
 		return err
 	}
 	data, err := json.Marshal(state)

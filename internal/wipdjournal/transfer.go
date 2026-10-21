@@ -178,6 +178,24 @@ func verifyManifest(manifest wipdwire.BlobManifest) error {
 	return nil
 }
 
+func validTransferNormalizedRepoKey(key string) bool {
+	if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "*?#") ||
+		strings.Contains(key, "://") || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") ||
+		strings.HasSuffix(key, ".git") || !strings.Contains(key, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func validTransferWorktreeName(name string) bool {
+	return name == "" || name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00\r\n") && strings.TrimSpace(name) == name
+}
+
 func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 	fields, err := wipdwire.DecodeCanonicalMap(record,
 		"schema", "event_id", "domain_id", "command_id", "request_hash", "environment", "acted_at", "occurred_at", "kind", "subject_id", "repo_id", "payload")
@@ -189,6 +207,7 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 			fields["kind"] != "role.spawned" && fields["kind"] != "role.closed" &&
 			fields["kind"] != "matter.started" && fields["kind"] != "step.started" && fields["kind"] != "step.finished" &&
 			fields["kind"] != "matter.finished" && fields["kind"] != "batch.swept" && fields["kind"] != "content.created" && fields["kind"] != "content.appended" &&
+			fields["kind"] != "environment.checkout-attached/1" &&
 			fields["kind"] != "stage.created" && fields["kind"] != "step.inserted" && fields["kind"] != "step.reordered" &&
 			fields["kind"] != "step.replaced" && fields["kind"] != "step.removed" &&
 			fields["kind"] != "matter.locator-repair-required" && fields["kind"] != "matter.locator-repaired" && fields["kind"] != "scheduler.hook-completed" &&
@@ -330,6 +349,22 @@ func validAuthorityEvent(record []byte, domainID, eventID string) bool {
 		return wipdwire.ExactMapKeys(payload, "id", "locator", "title") &&
 			transferULID.MatchString(asString(payload["id"])) && fields["subject_id"] == payload["id"] &&
 			asString(payload["locator"]) != "" && asString(payload["title"]) != ""
+	case "environment.checkout-attached/1":
+		environmentID, environmentOK := environment["id"].(string)
+		repoID, repoOK := fields["repo_id"].(string)
+		payloadEnvironmentID, payloadEnvironmentOK := payload["environment_id"].(string)
+		payloadRepoID, payloadRepoOK := payload["repo_id"].(string)
+		worktreeName, worktreeNameOK := payload["worktree_name"].(string)
+		return wipdwire.ExactMapKeys(payload, "repo_id", "environment_id", "normalized_repo_key", "clone_id", "worktree_id",
+			"common_dir_digest", "git_dir_digest", "worktree_name", "grant_id", "grant_digest") &&
+			environmentOK && repoOK && payloadEnvironmentOK && payloadRepoOK && worktreeNameOK &&
+			payloadEnvironmentID == environmentID && payloadRepoID == repoID &&
+			transferULID.MatchString(asString(fields["subject_id"])) && fields["subject_id"] == repoID &&
+			transferULID.MatchString(asString(payload["repo_id"])) && transferULID.MatchString(asString(payload["environment_id"])) &&
+			transferULID.MatchString(asString(payload["clone_id"])) && transferULID.MatchString(asString(payload["worktree_id"])) &&
+			transferULID.MatchString(asString(payload["grant_id"])) && transferHash.MatchString(asString(payload["common_dir_digest"])) &&
+			transferHash.MatchString(asString(payload["git_dir_digest"])) && transferHash.MatchString(asString(payload["grant_digest"])) &&
+			validTransferNormalizedRepoKey(asString(payload["normalized_repo_key"])) && validTransferWorktreeName(worktreeName)
 	case "stage.created":
 		title := asString(payload["title"])
 		return wipdwire.ExactMapKeys(payload, "matter_id", "locator", "title", "sort_key") &&

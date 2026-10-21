@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/procrastivity/wip/internal/d115"
 	"github.com/procrastivity/wip/internal/operation"
 )
 
@@ -53,6 +55,7 @@ type CommandCompletion struct {
 type CommandStatus struct {
 	Pending                bool
 	Receipt, SignedReceipt []byte
+	Operation              string
 	Owner                  *Execution
 }
 
@@ -62,17 +65,39 @@ func ownerKey(domain, id string) string { return domain + "/" + id }
 // completed TLS state supplied by the eventual authenticated adapter; neither
 // actor text nor a forwarded certificate is proof of Environment identity.
 func (s *Store) SubmitCommand(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at time.Time) (CommandStatus, error) {
-	return s.submitCommand(ctx, command, asserted, peer, at, time.Time{}, false)
+	return s.submitCommand(ctx, command, asserted, peer, at, time.Time{}, false, nil)
 }
 
 // SubmitCommandWithDeadline performs a final deadline and context check after
 // the submission row is staged in its transaction and immediately before
 // commit. A zero deadline means the caller has no transport deadline.
 func (s *Store) SubmitCommandWithDeadline(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at, deadline time.Time) (CommandStatus, error) {
-	return s.submitCommand(ctx, command, asserted, peer, at, deadline, true)
+	return s.submitCommand(ctx, command, asserted, peer, at, deadline, true, nil)
 }
 
-func (s *Store) submitCommand(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at, deadline time.Time, checkContext bool) (CommandStatus, error) {
+// SubmitEnvironmentAttachCommandWithDeadline binds the authenticated TLS peer
+// and the configured authority certificate to the durable M2 submission.
+func (s *Store) SubmitEnvironmentAttachCommandWithDeadline(ctx context.Context, command operation.Command, asserted string,
+	peer tls.ConnectionState, authoritySPKIDigest string, at, deadline time.Time,
+) (CommandStatus, error) {
+	if command.Request.Operation != operation.EnvironmentAttachOnceV1.Metadata().Operation || !validDigest(authoritySPKIDigest) ||
+		peerLeafSPKIDigest(peer) == "" {
+		return CommandStatus{}, ErrInvalidProof
+	}
+	binding := &attachSubmissionBinding{environmentSPKI: peerLeafSPKIDigest(peer), authoritySPKI: authoritySPKIDigest}
+	return s.submitCommand(ctx, command, asserted, peer, at, deadline, true, binding)
+}
+
+type attachSubmissionBinding struct{ environmentSPKI, authoritySPKI string }
+
+func peerLeafSPKIDigest(peer tls.ConnectionState) string {
+	if len(peer.PeerCertificates) == 0 || len(peer.PeerCertificates[0].RawSubjectPublicKeyInfo) == 0 {
+		return ""
+	}
+	return digestBytes(peer.PeerCertificates[0].RawSubjectPublicKeyInfo)
+}
+
+func (s *Store) submitCommand(ctx context.Context, command operation.Command, asserted string, peer tls.ConnectionState, at, deadline time.Time, checkContext bool, attachBinding *attachSubmissionBinding) (CommandStatus, error) {
 	var out CommandStatus
 	if err := operation.VerifyRequestHash(command, asserted); err != nil {
 		return out, err
@@ -83,6 +108,47 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	}
 	if connectedLifecycleOperation(command.Request.Operation) {
 		return s.submitConnectedLifecycle(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
+	}
+	if command.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+		if attachBinding == nil || command.Request.Context.Repo == "" {
+			return out, ErrInvalidProof
+		}
+		input, ok := command.Request.Input.(operation.EnvironmentAttachOnceInput)
+		if !ok {
+			return out, ErrInvalidProof
+		}
+		proof, proofErr := operation.DecodeAttachCheckoutProof(input.CheckoutProof)
+		if proofErr != nil {
+			return out, ErrInvalidProof
+		}
+		beforeAttach := func(*sql.Tx) error {
+			if proof.EnvironmentSPKIDigest != attachBinding.environmentSPKI {
+				return ErrInvalidProof
+			}
+			return nil
+		}
+		beforeCommit := func() error {
+			if checkContext {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !deadline.IsZero() && !time.Now().Before(deadline) {
+					return context.DeadlineExceeded
+				}
+			}
+			return nil
+		}
+		afterInsert := func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO environment_attach_submission_bindings(domain_id,command_id,environment_spki_digest,authority_spki_digest) VALUES(?,?,?,?)`,
+				command.AuthorityDomainID, command.ID, attachBinding.environmentSPKI, attachBinding.authoritySPKI)
+			return err
+		}
+		return s.submitIdentity(ctx, commandIdentity{
+			domain: command.AuthorityDomainID, epoch: command.ExpectedAuthorityEpoch,
+			environment: command.EnvironmentID, sequence: command.EnvironmentSequence,
+			id: command.ID, name: command.Request.Operation.Name, version: uint64(command.Request.Operation.Version),
+			repo: command.Request.Context.Repo, encoded: encoded, hash: asserted, m1: &command,
+		}, peer, at, beforeAttach, beforeCommit, afterInsert)
 	}
 	if contentOperation(command.Request.Operation) {
 		return s.submitConnectedContent(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
@@ -101,6 +167,58 @@ func (s *Store) submitCommand(ctx context.Context, command operation.Command, as
 	}
 	if step4Definition, ok := step4Definition(command.Request.Operation); ok {
 		return s.submitStep4(ctx, command, encoded, asserted, peer, at, deadline, checkContext, step4Definition)
+	}
+	if command.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation ||
+		command.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+		if command.Request.Context.Repo == "" || command.Request.Context.Clone == "" {
+			return out, ErrInvalidProof
+		}
+		var beforeCommit func() error
+		if checkContext {
+			beforeCommit = func() error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !deadline.IsZero() && !time.Now().Before(deadline) {
+					return context.DeadlineExceeded
+				}
+				return nil
+			}
+		}
+		before := func(tx *sql.Tx) error {
+			var normalizedKey string
+			switch command.Request.Operation {
+			case operation.RepoRouteBindV1.Metadata().Operation:
+				input, ok := command.Request.Input.(operation.RepoRouteBindInput)
+				if !ok {
+					return ErrInvalidProof
+				}
+				normalizedKey = input.NormalizedKey
+			case operation.RepoAdoptRemoteV1.Metadata().Operation:
+				input, ok := command.Request.Input.(operation.RepoAdoptRemoteInput)
+				if !ok {
+					return ErrInvalidProof
+				}
+				normalizedKey = input.NormalizedKey
+			}
+			var registered int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM environment_checkout_attachments
+				WHERE domain_id=? AND environment_id=? AND repo_id=? AND clone_id=? AND worktree_id=? AND normalized_repo_key=?`,
+				command.AuthorityDomainID, command.EnvironmentID, command.Request.Context.Repo,
+				command.Request.Context.Clone, command.Request.Context.Worktree, normalizedKey).Scan(&registered); err != nil {
+				return err
+			}
+			if registered != 1 {
+				return ErrFenced
+			}
+			return nil
+		}
+		return s.submitIdentity(ctx, commandIdentity{
+			domain: command.AuthorityDomainID, epoch: command.ExpectedAuthorityEpoch,
+			environment: command.EnvironmentID, sequence: command.EnvironmentSequence,
+			id: command.ID, name: command.Request.Operation.Name, version: uint64(command.Request.Operation.Version),
+			repo: command.Request.Context.Repo, encoded: encoded, hash: asserted, m1: &command,
+		}, peer, at, before, beforeCommit, nil)
 	}
 	if operation.Step10Operation(command.Request.Operation) {
 		return s.submitSchedulerHook(ctx, command, encoded, asserted, peer, at, deadline, checkContext)
@@ -221,7 +339,10 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 		return out, ErrConflict
 	}
 	if priorHash != "" { // replay never re-enters semantic guards
-		return s.status(ctx, tx, operation.Command{ID: c.id, AuthorityDomainID: c.domain})
+		return s.status(ctx, tx, operation.Command{
+			ID: c.id, AuthorityDomainID: c.domain,
+			Request: operation.Request{Operation: operation.ID{Name: c.name, Version: uint16(c.version)}},
+		})
 	}
 	if before != nil {
 		if err = before(tx); err != nil {
@@ -271,7 +392,7 @@ func (s *Store) submitIdentity(ctx context.Context, c commandIdentity, peer tls.
 }
 
 func (s *Store) status(ctx context.Context, tx *sql.Tx, command operation.Command) (CommandStatus, error) {
-	var out CommandStatus
+	out := CommandStatus{Operation: command.Request.Operation.Name}
 	err := tx.QueryRowContext(ctx, `SELECT receipt,wrapper FROM terminal_receipts WHERE domain_id=? AND command_id=?`, command.AuthorityDomainID, command.ID).Scan(&out.Receipt, &out.SignedReceipt)
 	if errors.Is(err, sql.ErrNoRows) {
 		out.Pending = true
@@ -311,7 +432,7 @@ func (s *Store) QueryCommand(ctx context.Context, domain, id, hash string, epoch
 		return repair, repairErr
 	}
 	var stored, env string
-	err = tx.QueryRowContext(ctx, `SELECT request_hash,environment_id FROM submissions WHERE domain_id=? AND command_id=? AND operation_name!='gate.exemption.repair'`, domain, id).Scan(&stored, &env)
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,environment_id,operation_name FROM submissions WHERE domain_id=? AND command_id=? AND operation_name!='gate.exemption.repair'`, domain, id).Scan(&stored, &env, &out.Operation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -459,6 +580,20 @@ type Signer func(context.Context, []byte) ([]byte, error)
 // CompleteCommand commits one supported birth fold. A successful Matter or Step
 // create writes its exact event range and projection with the receipt.
 func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result operation.Result, subjectID, eventID string, occurred time.Time, sign Signer, additionalEventIDs ...string) (CommandStatus, error) {
+	return s.completeCommand(ctx, owner, result, subjectID, eventID, occurred, sign, "", additionalEventIDs...)
+}
+
+// CompleteCommandForServingSPKI binds deferred attach completion to the
+// authority key currently serving the authenticated exchange.
+func (s *Store) CompleteCommandForServingSPKI(ctx context.Context, owner *Execution, result operation.Result,
+	subjectID, eventID string, occurred time.Time, sign Signer, servingSPKI string, additionalEventIDs ...string,
+) (CommandStatus, error) {
+	return s.completeCommand(ctx, owner, result, subjectID, eventID, occurred, sign, servingSPKI, additionalEventIDs...)
+}
+
+func (s *Store) completeCommand(ctx context.Context, owner *Execution, result operation.Result,
+	subjectID, eventID string, occurred time.Time, sign Signer, servingSPKI string, additionalEventIDs ...string,
+) (CommandStatus, error) {
 	var out CommandStatus
 	if owner == nil || owner.store != s || sign == nil {
 		return out, ErrNotOwner
@@ -478,7 +613,13 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 						if !ok {
 							definition, ok = namedBatchMembershipDefinition(cmd.Request.Operation)
 							if !ok {
-								if operation.Step10Operation(cmd.Request.Operation) {
+								if cmd.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation {
+									definition, ok = operation.RepoRouteBindV1, true
+								} else if cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+									definition, ok = operation.RepoAdoptRemoteV1, true
+								} else if cmd.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+									definition, ok = operation.EnvironmentAttachOnceV1, true
+								} else if operation.Step10Operation(cmd.Request.Operation) {
 									definition, ok = operation.SchedulerOrchestrateV1, true
 								} else if operation.Step10RoleOperation(cmd.Request.Operation) {
 									roleDefinition, roleOK := step10RoleDefinition(cmd.Request.Operation)
@@ -504,11 +645,14 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	_, isGate := gateDefinition(cmd.Request.Operation)
 	_, isDependency := dependencyHistoryDefinition(cmd.Request.Operation)
 	_, isReference := referenceHistoryDefinition(cmd.Request.Operation)
+	isRouteIndexMutation := cmd.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation ||
+		cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation
+	isEnvironmentAttach := cmd.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation
 	isStep10Hook := operation.Step10Operation(cmd.Request.Operation)
 	isStep10Role := operation.Step10RoleOperation(cmd.Request.Operation)
 	isStep10Run := operation.Step10RunOperation(cmd.Request.Operation)
 	isStep10 := isStep10Hook || isStep10Role || isStep10Run
-	if !isStep4 && !isGate && !isDependency && !isReference && !isStep10 {
+	if !isStep4 && !isGate && !isDependency && !isReference && !isStep10 && !isEnvironmentAttach {
 		if err := definition.ValidateResult(result); err != nil {
 			return out, err
 		}
@@ -529,7 +673,10 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if (dependencyCommand || referenceCommand) && (subjectID != "" || !ulid.MatchString(eventID) || len(additionalEventIDs) != 0) {
 		return out, ErrInvalidProof
 	}
-	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && !dependencyCommand && !referenceCommand && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) ||
+	if isRouteIndexMutation && (subjectID != "" || eventID != "" || len(additionalEventIDs) != 0) {
+		return out, ErrInvalidProof
+	}
+	if occurred.IsZero() || (result.Code == operation.ResultSucceeded && !gateNoop && !dependencyCommand && !referenceCommand && !isRouteIndexMutation && !isEnvironmentAttach && (!ulid.MatchString(subjectID) || !ulid.MatchString(eventID))) ||
 		result.Code != operation.ResultSucceeded && (subjectID != "" || eventID != "") {
 		return out, ErrInvalidProof
 	}
@@ -602,6 +749,104 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 	if d.ActiveEpoch != cmd.ExpectedAuthorityEpoch {
 		return out, ErrFenced
 	}
+	var first, last any
+	var rangeValue any
+	var output any
+	var problem any
+	var position uint64
+	if isEnvironmentAttach {
+		if result.Code != operation.ResultSucceeded {
+			return out, ErrInvalidProof
+		}
+		input, ok := cmd.Request.Input.(operation.EnvironmentAttachOnceInput)
+		if !ok {
+			return out, ErrInvalidProof
+		}
+		var environmentSPKI, authoritySPKI string
+		if err = tx.QueryRowContext(ctx, `SELECT environment_spki_digest,authority_spki_digest FROM environment_attach_submission_bindings WHERE domain_id=? AND command_id=?`,
+			d.ID, cmd.ID).Scan(&environmentSPKI, &authoritySPKI); err != nil {
+			return out, err
+		}
+		proof, proofErr := operation.DecodeAttachCheckoutProof(input.CheckoutProof)
+		if proofErr != nil || proof.EnvironmentID != cmd.EnvironmentID || proof.EnvironmentSPKIDigest != environmentSPKI {
+			return out, ErrInvalidProof
+		}
+		var grant attachGrant
+		var grantErr error
+		if !validDigest(servingSPKI) || servingSPKI != authoritySPKI {
+			grantErr = ErrFenced
+		} else {
+			grant, grantErr = validateEnvironmentAttachGrantTx(ctx, tx, input.GrantArtifact, proof, d, authoritySPKI, time.Now().UTC())
+			if grantErr == nil && grant.RepoID != cmd.Request.Context.Repo {
+				grantErr = ErrFenced
+			}
+		}
+		if grantErr != nil {
+			if !errors.Is(grantErr, ErrInvalidProof) && !errors.Is(grantErr, ErrFenced) && !errors.Is(grantErr, ErrConflict) &&
+				!errors.Is(grantErr, ErrRouteKeyBoundElsewhere) && !errors.Is(grantErr, ErrRouteRepoHasKey) {
+				return out, grantErr
+			}
+			result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+				Code: operation.ProblemCode("refusal.environment-attach-invalid"), Message: "the attach grant or registered route is no longer eligible",
+			}}
+			problem = string(result.Problem.Code)
+			output = nil
+		} else {
+			cloneID, idErr := d115.NewULID(time.Now().UTC())
+			if idErr != nil {
+				return out, idErr
+			}
+			worktreeID, idErr := d115.NewULID(time.Now().UTC())
+			if idErr != nil {
+				return out, idErr
+			}
+			attachedEventID, idErr := d115.NewULID(time.Now().UTC())
+			if idErr != nil {
+				return out, idErr
+			}
+			position, err = appendCommandEvent(ctx, tx, eventIdentity{d.ID, cmd.ID, owner.hash, cmd.EnvironmentID, cmd.EnvironmentSequence, cmd.ActedAt, cmd.Request.Context.Repo},
+				time.Now().UTC(), attachedEventID, "environment.checkout-attached/1", cmd.Request.Context.Repo, map[string]any{
+					"repo_id": grant.RepoID, "environment_id": grant.Environment, "normalized_repo_key": grant.RouteKey,
+					"clone_id": cloneID, "worktree_id": worktreeID, "common_dir_digest": proof.CommonDirDigest,
+					"git_dir_digest": proof.GitDirDigest, "worktree_name": proof.WorktreeName,
+					"grant_id": grant.ID, "grant_digest": grant.Digest,
+				})
+			if err != nil {
+				return out, err
+			}
+			rawGrant, decodeErr := base64.RawURLEncoding.DecodeString(input.GrantArtifact)
+			if decodeErr != nil {
+				return out, ErrInvalidProof
+			}
+			defer clear(rawGrant)
+			if _, err = tx.ExecContext(ctx, `INSERT INTO environment_attach_grant_consumptions(domain_id,grant_id,grant_digest,grant_artifact,owner_key_id,command_id,request_hash,environment_id,environment_spki_digest,repo_id,normalized_repo_key,clone_id,worktree_id,authority_epoch,committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				d.ID, grant.ID, grant.Digest, rawGrant, d.OwnerKeyID, cmd.ID, owner.hash, cmd.EnvironmentID, environmentSPKI,
+				grant.RepoID, grant.RouteKey, cloneID, worktreeID, d.ActiveEpoch, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+				return out, writeError(err)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO environment_checkout_attachments(domain_id,environment_id,repo_id,normalized_repo_key,common_dir_digest,git_dir_digest,worktree_name,clone_id,worktree_id,command_id,event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+				d.ID, cmd.EnvironmentID, grant.RepoID, grant.RouteKey, proof.CommonDirDigest, proof.GitDirDigest, proof.WorktreeName,
+				cloneID, worktreeID, cmd.ID, attachedEventID); err != nil {
+				return out, writeError(err)
+			}
+			result.Output = operation.EnvironmentAttachOnceOutput{
+				RepoID: grant.RepoID, DomainID: d.ID, Epoch: d.ActiveEpoch,
+				EnvironmentID: grant.Environment, CloneID: cloneID, WorktreeID: worktreeID,
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{
+				"repo_id": grant.RepoID, "domain_id": d.ID, "authority_epoch": d.ActiveEpoch,
+				"environment_id": grant.Environment, "clone_id": cloneID, "worktree_id": worktreeID,
+			})
+			if err != nil {
+				return out, err
+			}
+			first, last = position, position
+			rangeValue = map[string]any{"first_event_id": attachedEventID, "last_event_id": attachedEventID, "event_count": uint64(1)}
+		}
+		if err = operation.EnvironmentAttachOnceV1.ValidateResult(result); err != nil {
+			return out, ErrInvalidProof
+		}
+	}
 	if (isDependency || isReference) && cmd.Request.Operation.Version == 1 {
 		result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
 			Code:    operation.ProblemCode("refusal.step8-v1-claim-required"),
@@ -633,11 +878,51 @@ func (s *Store) CompleteCommand(ctx context.Context, owner *Execution, result op
 			}
 		}
 	}
-	var first, last any
-	var rangeValue any
-	var output any
-	var problem any
-	var position uint64
+	if isRouteIndexMutation && result.Code == operation.ResultSucceeded {
+		var normalizedKey string
+		if cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+			normalizedKey = cmd.Request.Input.(operation.RepoAdoptRemoteInput).NormalizedKey
+		} else {
+			normalizedKey = cmd.Request.Input.(operation.RepoRouteBindInput).NormalizedKey
+		}
+		if cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+			err = adoptRepoRouteTx(ctx, tx, normalizedKey, cmd.Request.Context.Repo, d.ID)
+		} else {
+			err = bindRepoRouteTx(ctx, tx, normalizedKey, cmd.Request.Context.Repo, d.ID)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrRouteKeyBoundElsewhere):
+				result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+					Code: operation.ProblemRouteKeyBoundElsewhere, Message: "the normalized remote key belongs to another Repo",
+				}}
+			case errors.Is(err, ErrRouteRepoHasKey):
+				result = operation.Result{Code: operation.ResultRefused, Problem: &operation.Problem{
+					Code: operation.ProblemRouteRepoHasKey, Message: "this Repo is already bound to another normalized remote key",
+				}}
+			default:
+				return out, err
+			}
+			problem = string(result.Problem.Code)
+		} else {
+			if cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+				result.Output = operation.RepoAdoptRemoteOutput{RepoID: cmd.Request.Context.Repo, DomainID: d.ID, Epoch: d.ActiveEpoch}
+			} else {
+				result.Output = operation.RepoRouteBindOutput{RepoID: cmd.Request.Context.Repo, DomainID: d.ID, Epoch: d.ActiveEpoch}
+			}
+			output, err = artifactEncoder.Marshal(map[string]any{"repo_id": cmd.Request.Context.Repo, "domain_id": d.ID, "epoch": d.ActiveEpoch})
+			if err != nil {
+				return out, err
+			}
+		}
+		definition := operation.RepoRouteBindV1
+		if cmd.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+			definition = operation.RepoAdoptRemoteV1
+		}
+		if err = definition.ValidateResult(result); err != nil {
+			return out, ErrInvalidProof
+		}
+	}
 	if result.Code == operation.ResultSucceeded {
 		switch cmd.Request.Operation {
 		case operation.MatterCreateV2.Metadata().Operation, operation.StageCreateV1.Metadata().Operation,

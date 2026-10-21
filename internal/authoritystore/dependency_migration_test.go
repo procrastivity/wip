@@ -5,12 +5,31 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
 
 func dropNamedBatchSchemaForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
+	for index := len(d115Schema) - 1; index >= 0; index-- {
+		object := d115Schema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := len(environmentAttachSchema) - 1; index >= 0; index-- {
+		object := environmentAttachSchema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := len(routeIndexSchema) - 1; index >= 0; index-- {
+		object := routeIndexSchema[index]
+		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for index := len(namedBatchMembershipSchema) - 1; index >= 0; index-- {
 		object := namedBatchMembershipSchema[index]
 		if _, err := db.Exec(`DROP ` + object.kind + ` IF EXISTS ` + object.name); err != nil {
@@ -111,13 +130,57 @@ func TestDependencyExplicitV17MigrationRetainsHistory(t *testing.T) {
 	if err = errors.Join(checkSchemaVersion(backup18, 18), backup18.Close()); err != nil {
 		t.Fatal(err)
 	}
+	if store, openErr := OpenExisting(f.root); !errors.Is(openErr, ErrInvalidStore) {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatalf("ordinary open migrated v20: %v", openErr)
+	}
+	backupPath := filepath.Join(f.root, "authority-v20.backup.db")
+	resumeDB, err := connect(filepath.Join(f.root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = resumeDB.Exec(`VACUUM INTO ?`, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = installRouteIndex(resumeDB); err != nil {
+		t.Fatalf("simulate interruption after route-index migration: %v", err)
+	}
+	if err = resumeDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	interruptedDB, err := connect(filepath.Join(f.root, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkSchemaVersion(interruptedDB, 21); err != nil {
+		_ = interruptedDB.Close()
+		t.Fatalf("validate interrupted schema 21: %v", err)
+	}
+	if err = installD115(interruptedDB); err != nil {
+		t.Fatalf("simulate interruption after D115 migration: %v", err)
+	}
+	if err = interruptedDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV20(f.root); err != nil {
+		t.Fatalf("resume explicit Step 11 migration from schema 22: %v", err)
+	}
+	backup20, err := connect(filepath.Join(f.root, "authority-v20.backup.db"), "rw", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(checkSchemaVersion(backup20, 20), backup20.Close()); err != nil {
+		t.Fatal(err)
+	}
 	f.s, err = OpenExisting(f.root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.s.Close() }()
 	var version int
-	if err = f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 20 {
+	if err = f.s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatalf("version=%d: %v", version, err)
 	}
 	var retained []byte
@@ -132,6 +195,41 @@ func TestDependencyExplicitV17MigrationRetainsHistory(t *testing.T) {
 	}
 	if err = UpgradeV17(f.root); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("repeat upgrade = %v", err)
+	}
+	resumeRoot := filepath.Join(f.root, "resume-from-v21")
+	if err = os.Mkdir(resumeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(filepath.Join(resumeRoot, "blobs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v20Bytes, err := os.ReadFile(filepath.Join(f.root, "authority-v20.backup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(resumeRoot, "authority.db"), v20Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumeDB, err = connect(filepath.Join(resumeRoot, "authority.db"), "rw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = installRouteIndex(resumeDB); err != nil {
+		_ = resumeDB.Close()
+		t.Fatalf("simulate interruption at schema 21: %v", err)
+	}
+	if err = resumeDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpgradeV20(resumeRoot); err != nil {
+		t.Fatalf("resume explicit migration from schema 21: %v", err)
+	}
+	resumed, err := OpenExisting(resumeRoot)
+	if err != nil {
+		t.Fatalf("open store resumed from schema 21: %v", err)
+	}
+	if err = resumed.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -203,6 +203,9 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 			*request.TLS, occurred, eventID, app.sign, deadline)
 	} else if repair {
 		status, err = app.store.SubmitGateExemptionRepairV2(admissionCtx, command, submit.RequestHash, submit.DetachedProof, *request.TLS, time.Now().UTC(), deadline)
+	} else if command.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+		status, err = app.store.SubmitEnvironmentAttachCommandWithDeadline(admissionCtx, command, submit.RequestHash,
+			*request.TLS, app.authoritySPKIDigest, time.Now().UTC(), deadline)
 	} else {
 		status, err = app.store.SubmitCommandWithDeadline(admissionCtx, command, submit.RequestHash, *request.TLS, time.Now().UTC(), deadline)
 	}
@@ -217,7 +220,12 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
 			return
 		}
-		writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Kind: "command.terminal", Payload: status.Receipt})
+		payload, kind, encodeErr := commandTerminalPayload(status, command.ID, submit.RequestHash)
+		if encodeErr != nil {
+			writeLabProblem(writer, frame.RequestID, "authority.unavailable")
+			return
+		}
+		writeLabFrame(writer, wipdwire.Frame{RequestID: frame.RequestID, Kind: kind, Payload: payload})
 		return
 	}
 	if operation.Step10Operation(command.Request.Operation) {
@@ -300,7 +308,21 @@ func (app *m5LabHandler) serveCommandSubmit(writer http.ResponseWriter, request 
 	select {
 	case result := <-executed:
 		if result.err == nil {
-			writeLabFrameContinuation(writer, wipdwire.Frame{RequestID: frame.RequestID, Sequence: 1, Kind: "command.terminal", Payload: result.terminal})
+			if app.afterTerminalCommit != nil && command.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+				app.afterTerminalCommit(request.Context(), command)
+			}
+			terminal := authoritystore.CommandStatus{Receipt: result.terminal, Operation: command.Request.Operation.Name}
+			if terminal.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation.Name {
+				terminal, err = app.store.QueryCommand(context.Background(), command.AuthorityDomainID, command.ID,
+					submit.RequestHash, command.ExpectedAuthorityEpoch, *request.TLS, command.EnvironmentID, time.Now().UTC())
+				if err != nil || terminal.Pending {
+					return
+				}
+			}
+			payload, kind, encodeErr := commandTerminalPayload(terminal, command.ID, submit.RequestHash)
+			if encodeErr == nil {
+				writeLabFrameContinuation(writer, wipdwire.Frame{RequestID: frame.RequestID, Sequence: 1, Kind: kind, Payload: payload})
+			}
 		}
 	case <-admissionCtx.Done():
 		// Once SubmitCommand committed, cancellation ends only this wait. The
@@ -418,6 +440,23 @@ func writeReadOnlyFinal(ctx context.Context, arbiter *labExchangeArbiter, writer
 }
 
 func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, command operation.Command) ([]byte, error) {
+	if app.m6 && command.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result: operation.Result{Code: operation.ResultSucceeded}, Occurred: time.Now().UTC(),
+		})
+	}
+	if app.m6 && (command.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation ||
+		command.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation) {
+		var output operation.Output
+		if command.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation {
+			output = operation.RepoRouteBindOutput{RepoID: command.Request.Context.Repo, DomainID: command.AuthorityDomainID, Epoch: command.ExpectedAuthorityEpoch}
+		} else {
+			output = operation.RepoAdoptRemoteOutput{RepoID: command.Request.Context.Repo, DomainID: command.AuthorityDomainID, Epoch: command.ExpectedAuthorityEpoch}
+		}
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{
+			Result: operation.Result{Code: operation.ResultSucceeded, Output: output}, Occurred: time.Now().UTC(),
+		})
+	}
 	if app.m6 && command.Request.Operation == operation.BatchCreateV1.Metadata().Operation {
 		input, ok := command.Request.Input.(operation.BatchCreateInput)
 		if !ok {
@@ -498,6 +537,12 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 			return nil, err
 		}
 		return app.completeContinuation(owner, completion)
+	}
+	if command.Request.Operation == operation.RepoRouteBindV1.Metadata().Operation {
+		result := operation.Result{Code: operation.ResultSucceeded, Output: operation.RepoRouteBindOutput{
+			RepoID: command.Request.Context.Repo, DomainID: command.AuthorityDomainID, Epoch: command.ExpectedAuthorityEpoch,
+		}}
+		return app.completeContinuation(owner, authoritystore.CommandCompletion{Result: result, Occurred: time.Now().UTC()})
 	}
 	switch input := command.Request.Input.(type) {
 	case operation.GateDeclareInput, operation.GateCloseInput, operation.GateDismissInput:
@@ -590,8 +635,8 @@ func (app *m5LabHandler) executeSubmitted(owner *authoritystore.Execution, comma
 }
 
 func (app *m5LabHandler) completeContinuation(owner *authoritystore.Execution, completion authoritystore.CommandCompletion) ([]byte, error) {
-	status, err := app.store.CompleteCommand(context.Background(), owner, completion.Result,
-		completion.SubjectID, completion.EventID, completion.Occurred, app.sign, completion.AdditionalEventIDs...)
+	status, err := app.store.CompleteCommandForServingSPKI(context.Background(), owner, completion.Result,
+		completion.SubjectID, completion.EventID, completion.Occurred, app.sign, app.authoritySPKIDigest, completion.AdditionalEventIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -804,8 +849,27 @@ func (app *m5LabHandler) serveReceiptQuery(writer http.ResponseWriter, request *
 			wipdwire.Frame{RequestID: frame.RequestID, Kind: "receipt.pending", Payload: payload}, "")
 		return
 	}
+	payload, kind, encodeErr := commandTerminalPayload(status, query.CommandID, query.RequestHash)
+	if encodeErr != nil {
+		writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID, wipdwire.Frame{}, "authority.unavailable")
+		return
+	}
 	writeReadOnlyFinal(ctx, arbiter, writer, frame.RequestID,
-		wipdwire.Frame{RequestID: frame.RequestID, Kind: "command.terminal", Payload: status.Receipt}, "")
+		wipdwire.Frame{RequestID: frame.RequestID, Kind: kind, Payload: payload}, "")
+}
+
+func commandTerminalPayload(status authoritystore.CommandStatus, commandID, requestHash string) ([]byte, string, error) {
+	if status.Operation != operation.EnvironmentAttachOnceV1.Metadata().Operation.Name {
+		return status.Receipt, "command.terminal", nil
+	}
+	if len(status.Receipt) == 0 || len(status.SignedReceipt) == 0 || commandID == "" || requestHash == "" {
+		return nil, "", errors.New("wipdauthority: attach terminal receipt is incomplete")
+	}
+	payload, err := wipdwire.EncodeCanonical(wipdwire.SignedCommandTerminal{
+		Schema: "wipd.signed-command-terminal/1", CommandID: commandID, RequestHash: requestHash,
+		Receipt: status.Receipt, SignedReceipt: status.SignedReceipt,
+	})
+	return payload, "command.terminal", err
 }
 
 func (app *m5LabHandler) serveBirthJournalAck(writer http.ResponseWriter, request *http.Request, body *bufio.Reader, frame wipdwire.Frame, environment authoritystore.EnvironmentCertificate) {

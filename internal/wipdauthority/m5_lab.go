@@ -49,22 +49,29 @@ type M5LabConfig struct {
 	ArtifactKeyCertificate      []byte
 	SignArtifact                authoritystore.Signer
 	NamedBatchRead              bool
+	// AfterCommandTerminalCommit is a lab-only fault-injection seam. It runs
+	// after an attach M2 terminal is durable and before its response is written.
+	AfterCommandTerminalCommit func(context.Context, operation.Command)
 }
 
 type m5LabHandler struct {
-	profile        Profile
-	store          *authoritystore.Store
-	repoID         string
-	grant          []byte
-	csrDER         []byte
-	caDER          []byte
-	signLeaf       EnvironmentLeafSigner
-	registry       *operation.Registry
-	operations     []operation.Definition
-	sign           authoritystore.Signer
-	m6             bool
-	step10         bool
-	namedBatchRead bool
+	profile               Profile
+	store                 *authoritystore.Store
+	authoritySPKIDigest   string
+	repoID                string
+	grant                 []byte
+	csrDER                []byte
+	caDER                 []byte
+	signLeaf              EnvironmentLeafSigner
+	afterEnrollmentCommit func(context.Context)
+	afterTerminalCommit   func(context.Context, operation.Command)
+	registry              *operation.Registry
+	operations            []operation.Definition
+	sign                  authoritystore.Signer
+	m6                    bool
+	step10                bool
+	namedBatchRead        bool
+	prebinding            bool
 }
 
 func hasStep10Operation(operations []operation.Definition) bool {
@@ -80,7 +87,7 @@ func hasStep10Operation(operations []operation.Definition) bool {
 // records for one exact Repo in the disposable M5 lab. NewServer remains
 // health-only.
 func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
-	return newLabServer(profile, certificate, config, false)
+	return newLabServer(profile, certificate, config, false, nil)
 }
 
 // NewM6LabServer creates the explicit M6 acceptance path. It preserves the
@@ -88,10 +95,21 @@ func NewM5LabServer(profile Profile, certificate tls.Certificate, config M5LabCo
 // and Step 5 catalogues. The Step 7 sweep is admitted only when its explicit
 // candidate definition is present in the supplied M6 registry.
 func NewM6LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig) (*Server, error) {
-	return newLabServer(profile, certificate, config, true)
+	return newLabServer(profile, certificate, config, true, nil)
 }
 
-func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConfig, m6 bool) (*Server, error) {
+// NewM6D115LabServer is a same-store acceptance seam for a Repo created by a
+// real D115 create-local transaction. Unlike NewM6LabServer it does not rely
+// on the M5 genesis-consumption table; the exact retained D115 receipt is the
+// required Repo/domain provenance. Ordinary lab callers retain the M5 gate.
+func NewM6D115LabServer(profile Profile, certificate tls.Certificate, config M5LabConfig, d115Receipt []byte) (*Server, error) {
+	if len(d115Receipt) == 0 {
+		return nil, ErrInvalidLabConfig
+	}
+	return newLabServer(profile, certificate, config, true, d115Receipt)
+}
+
+func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConfig, m6 bool, d115Receipt []byte) (*Server, error) {
 	if config.Store == nil || !ulidPattern.MatchString(config.RepoID) || len(config.EnrollmentGrant) == 0 || len(config.EnrollmentGrant) > 4096 ||
 		len(config.ExpectedCSRDER) == 0 || len(config.ExpectedCSRDER) > 16_384 || len(config.EnvironmentCACertificateDER) == 0 || config.SignEnvironmentLeaf == nil {
 		return nil, ErrInvalidLabConfig
@@ -108,9 +126,17 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 	if err != nil || repoDomain != profile.domainID {
 		return nil, ErrRepoMembershipMismatch
 	}
-	genesisRepoID, err := config.Store.M5LabGenesisRepoID(context.Background(), profile.domainID)
-	if err != nil || genesisRepoID != config.RepoID || profile.M5LabRepoID() != genesisRepoID {
-		return nil, ErrRepoBindingMismatch
+	if len(d115Receipt) == 0 {
+		genesisRepoID, genesisErr := config.Store.M5LabGenesisRepoID(context.Background(), profile.domainID)
+		if genesisErr != nil || genesisRepoID != config.RepoID || profile.M5LabRepoID() != genesisRepoID {
+			return nil, ErrRepoBindingMismatch
+		}
+	} else {
+		receipt, receiptErr := config.Store.VerifyD115CreateDomainReceipt(context.Background(), d115Receipt)
+		if receiptErr != nil || receipt.DomainID != profile.domainID || receipt.RepoID != config.RepoID ||
+			profile.M5LabRepoID() != receipt.RepoID {
+			return nil, ErrRepoBindingMismatch
+		}
 	}
 	ca, err := x509.ParseCertificate(config.EnvironmentCACertificateDER)
 	if err != nil || !ca.IsCA || !ca.BasicConstraintsValid || !ca.MaxPathLenZero || ca.MaxPathLen != 0 {
@@ -129,6 +155,8 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		step7SweepRegistered := false
 		step8Registered := false
 		step10Registered := false
+		step11Registered := false
+		step11Count := 0
 		batchCreateRegistered := false
 		batchMembershipCount := 0
 		for _, definition := range operations {
@@ -140,6 +168,10 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			}
 			if operation.Step10CapabilityOperation(definition.Metadata().Operation) {
 				step10Registered = true
+			}
+			if operation.Step11Operation(definition.Metadata().Operation) {
+				step11Registered = true
+				step11Count++
 			}
 			if definition.Metadata().Operation == operation.BatchCreateV1.Metadata().Operation {
 				batchCreateRegistered = true
@@ -163,6 +195,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 				return nil, ErrInvalidLabConfig
 			}
 			maxOperations += len(operation.Step10Catalogue())
+		}
+		if step11Registered {
+			if !m6 || !step10Registered || step11Count != len(operation.Step11Catalogue()) {
+				return nil, ErrInvalidLabConfig
+			}
+			maxOperations += len(operation.Step11Catalogue())
 		}
 		if batchCreateRegistered {
 			if !m6 || !step8Registered {
@@ -204,6 +242,12 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 			}
 			if m6 && operation.Step10CapabilityOperation(id) {
 				if !step10Registered || !step8Registered {
+					return nil, ErrInvalidLabConfig
+				}
+				continue
+			}
+			if operation.Step11Operation(id) {
+				if !m6 || !step11Registered {
 					return nil, ErrInvalidLabConfig
 				}
 				continue
@@ -285,6 +329,13 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 					}
 				}
 			}
+			if step11Registered {
+				for _, definition := range operation.Step11Catalogue() {
+					if !registered[definition.Metadata().Operation] {
+						return nil, ErrInvalidLabConfig
+					}
+				}
+			}
 		}
 		if len(certificate.Certificate) == 0 {
 			return nil, ErrInvalidLabConfig
@@ -323,8 +374,17 @@ func newLabServer(profile Profile, certificate tls.Certificate, config M5LabConf
 		profile: profile, store: config.Store, repoID: config.RepoID,
 		grant: bytes.Clone(config.EnrollmentGrant), csrDER: bytes.Clone(config.ExpectedCSRDER),
 		caDER: bytes.Clone(config.EnvironmentCACertificateDER), signLeaf: config.SignEnvironmentLeaf, m6: m6, namedBatchRead: config.NamedBatchRead,
-		registry: config.Registry, operations: operations, sign: config.SignArtifact, step10: hasStep10Operation(operations),
+		afterTerminalCommit: config.AfterCommandTerminalCommit,
+		registry:            config.Registry, operations: operations, sign: config.SignArtifact, step10: hasStep10Operation(operations),
 	}
+	if len(certificate.Certificate) == 0 {
+		return nil, ErrInvalidLabConfig
+	}
+	serverLeaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil || len(serverLeaf.RawSubjectPublicKeyInfo) == 0 {
+		return nil, ErrInvalidLabConfig
+	}
+	app.authoritySPKIDigest = digestSPKI(serverLeaf.RawSubjectPublicKeyInfo)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", serveHealth)
 	mux.HandleFunc(labEnrollPath, app.serveEnroll)
@@ -377,7 +437,12 @@ func (app *m5LabHandler) serveEnroll(writer http.ResponseWriter, request *http.R
 		writeLabProblem(writer, frame.RequestID, "auth.grant-invalid")
 		return
 	}
-	if err = app.verifyRoute(request.Context()); err != nil {
+	if app.prebinding {
+		err = app.verifyDomain(request.Context())
+	} else {
+		err = app.verifyRoute(request.Context())
+	}
+	if err != nil {
 		writeLabProblem(writer, frame.RequestID, "auth.authority-binding-mismatch")
 		return
 	}
@@ -418,6 +483,9 @@ func (app *m5LabHandler) serveEnroll(writer http.ResponseWriter, request *http.R
 			}
 			writeLabProblem(writer, frame.RequestID, code)
 			return
+		}
+		if app.afterEnrollmentCommit != nil {
+			app.afterEnrollmentCommit(request.Context())
 		}
 	}
 	response := wipdwire.EnrollmentIssued{
@@ -471,6 +539,10 @@ func (app *m5LabHandler) serveExchange(writer http.ResponseWriter, request *http
 	}
 	if frame.Sequence != 0 {
 		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
+		return
+	}
+	if app.prebinding || frame.Kind == "query.request" {
+		app.servePrebindingRouteQuery(writer, request, frame, session)
 		return
 	}
 	kind := ""
@@ -582,8 +654,13 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		http.Error(writer, "bad request", http.StatusBadRequest)
 		return
 	}
+	frame, err := readSingleFrame(request.Body)
+	if err != nil || frame.Sequence != 0 || frame.Kind != "client.hello" {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+		return
+	}
 	if _, err := app.authenticateEnvironment(request); err != nil {
-		writeLabProblem(writer, "00000000000000000000000000", "auth.environment-domain-mismatch")
+		writeLabProblem(writer, frame.RequestID, "auth.environment-domain-mismatch")
 		return
 	}
 	session := connectionSession(request)
@@ -609,15 +686,6 @@ func (app *m5LabHandler) serveNegotiate(writer http.ResponseWriter, request *htt
 		}
 		session.mu.Unlock()
 	}()
-	frame, err := readSingleFrame(request.Body)
-	if err != nil {
-		http.Error(writer, "bad request", http.StatusBadRequest)
-		return
-	}
-	if frame.Sequence != 0 || frame.Kind != "client.hello" {
-		writeLabProblem(writer, frame.RequestID, "protocol.out-of-order")
-		return
-	}
 	hello, parameters, operations, problem := negotiateLab(frame.Payload, app.operations, app.namedBatchRead)
 	if problem != "" {
 		writeLabProblem(writer, frame.RequestID, problem)
@@ -669,7 +737,12 @@ func (app *m5LabHandler) authenticateEnvironment(request *http.Request) (authori
 	if err != nil || certificate.DomainID != app.profile.domainID {
 		return authoritystore.EnvironmentCertificate{}, errors.New("untrusted Environment certificate")
 	}
-	if err = app.verifyRoute(request.Context()); err != nil {
+	if app.prebinding {
+		err = app.verifyDomain(request.Context())
+	} else {
+		err = app.verifyRoute(request.Context())
+	}
+	if err != nil {
 		return authoritystore.EnvironmentCertificate{}, err
 	}
 	return certificate, nil
@@ -681,13 +754,20 @@ type labFrameRecord struct {
 }
 
 func (app *m5LabHandler) verifyRoute(ctx context.Context) error {
-	domain, err := app.store.LookupDomain(ctx, app.profile.domainID)
-	if err != nil || domain.ActiveEpoch != app.profile.epoch || domain.OwnerKeyID != app.profile.OwnerRootSPKI() {
-		return ErrAuthorityBindingMismatch
+	if err := app.verifyDomain(ctx); err != nil {
+		return err
 	}
 	repoDomain, err := app.store.RepoDomain(ctx, app.repoID)
 	if err != nil || repoDomain != app.profile.domainID {
 		return ErrRepoMembershipMismatch
+	}
+	return nil
+}
+
+func (app *m5LabHandler) verifyDomain(ctx context.Context) error {
+	domain, err := app.store.LookupDomain(ctx, app.profile.domainID)
+	if err != nil || domain.ActiveEpoch != app.profile.epoch || domain.OwnerKeyID != app.profile.OwnerRootSPKI() {
+		return ErrAuthorityBindingMismatch
 	}
 	return nil
 }

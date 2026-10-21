@@ -673,7 +673,7 @@ func validateInput(identity Identity, input CommandInput) (operation.DeliveryCla
 	if input.CausationCommandID == "" && correlation == "" {
 		correlation = input.ID
 	}
-	if input.Request.Context.Repo != identity.RepoID {
+	if input.Request.Context.Repo != identity.RepoID && !step11EnvironmentOperation(input.Request.Operation) {
 		return "", "", ErrInvalidCommand
 	}
 	definition, found := journalOperationDefinition(input.Request.Operation)
@@ -694,6 +694,11 @@ func validateInput(identity Identity, input CommandInput) (operation.DeliveryCla
 		return "", "", fmt.Errorf("%w: %v", ErrInvalidCommand, err)
 	}
 	return metadata.Delivery, correlation, nil
+}
+
+func step11EnvironmentOperation(id operation.ID) bool {
+	return id == operation.EnvironmentAttachOnceV1.Metadata().Operation ||
+		id == operation.RepoRouteBindV1.Metadata().Operation || id == operation.RepoAdoptRemoteV1.Metadata().Operation
 }
 
 func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
@@ -717,6 +722,11 @@ func journalOperationDefinition(id operation.ID) (operation.Definition, bool) {
 		}
 	}
 	for _, definition := range operation.Catalogue() {
+		if definition.Metadata().Operation == id {
+			return definition, true
+		}
+	}
+	for _, definition := range operation.Step11Catalogue() {
 		if definition.Metadata().Operation == id {
 			return definition, true
 		}
@@ -767,7 +777,8 @@ func (j *Journal) verifyEntries(entries []Entry) error {
 
 func (j *Journal) verifyEntry(entry Entry) error {
 	if entry.Command.AuthorityDomainID != j.identity.DomainID || entry.Command.ExpectedAuthorityEpoch != j.identity.AuthorityEpoch ||
-		entry.Command.EnvironmentID != j.identity.EnvironmentID || entry.Command.Request.Context.Repo != j.identity.RepoID {
+		entry.Command.EnvironmentID != j.identity.EnvironmentID ||
+		entry.Command.Request.Context.Repo != j.identity.RepoID && !step11EnvironmentOperation(entry.Command.Request.Operation) {
 		return ErrInvalidJournal
 	}
 	input := CommandInput{

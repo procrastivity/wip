@@ -1,6 +1,7 @@
 package wipd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/procrastivity/wip/internal/d115"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdjournal"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -35,6 +37,165 @@ type Server struct {
 	commandStart           *CommandStartCoordinator
 	namedBatchReadMu       sync.RWMutex
 	namedBatchReader       NamedBatchReader
+	routeResolveMu         sync.RWMutex
+	routeResolver          RouteResolver
+	routeMutationMu        sync.RWMutex
+	routeMutations         RouteMutationHandler
+	d115CreateMu           sync.RWMutex
+	d115Lifecycle          D115LifecycleHandler
+	attachMu               sync.RWMutex
+	attachLifecycle        AttachLifecycleHandler
+}
+
+// RouteResolver runs the local, read-only route.resolve request using the
+// kernel-authenticated process attached to the IPC connection.
+type RouteResolver interface {
+	ResolveRoute(context.Context, *PeerProcess) (operation.RouteResolveOutput, error)
+}
+
+// RouteMutationHandler forwards the authenticated peer's registered-checkout
+// route mutation through the configured authority command exchange.
+type RouteMutationHandler interface {
+	ExecuteRouteCommand(context.Context, *PeerProcess, operation.Command) (operation.Result, error)
+}
+
+// ConfigureRouteMutations installs the authenticated route-bind/adoption path
+// before Serve. The handler must derive live checkout evidence from peer.
+func (s *Server) ConfigureRouteMutations(handler RouteMutationHandler) error {
+	if s == nil || handler == nil {
+		return errors.New("wipd: route mutation handler is required")
+	}
+	s.routeMutationMu.Lock()
+	defer s.routeMutationMu.Unlock()
+	if s.routeMutations != nil {
+		return errors.New("wipd: route mutation handler is already configured")
+	}
+	s.routeMutations = handler
+	return nil
+}
+
+func (s *Server) routeMutationHandler() RouteMutationHandler {
+	if s == nil {
+		return nil
+	}
+	s.routeMutationMu.RLock()
+	defer s.routeMutationMu.RUnlock()
+	return s.routeMutations
+}
+
+// D115LifecycleHandler implements the prepare/import/explicit-submit local
+// create-domain lifecycle. The authenticated peer is the only source of local
+// checkout correlation.
+type D115LifecycleHandler interface {
+	Prepare(context.Context, *PeerProcess, string) (D115LocalAttempt, error)
+	ImportProof(context.Context, string, []byte) (D115LocalAttempt, error)
+	Submit(context.Context, *PeerProcess, string) ([]byte, error)
+	Status(context.Context, string) (D115LocalAttempt, error)
+	Cancel(context.Context, string) (D115LocalAttempt, error)
+}
+
+// D115LocalAttempt is the restricted local-IPC attempt projection.
+type D115LocalAttempt struct {
+	AttemptID      string
+	State          string
+	SigningRequest []byte
+	Receipt        []byte
+}
+
+// AttachLocalAttempt is the deliberately narrow local view of one durable
+// Environment attach intent. It never returns grant or checkout path bytes.
+type AttachLocalAttempt struct {
+	AttemptID     string
+	State         string
+	Receipt       []byte
+	SignedReceipt []byte
+}
+
+// AttachLifecycleHandler owns durable same-intent create/resume and receipt
+// installation for an authenticated local checkout peer.
+type AttachLifecycleHandler interface {
+	AttachOnce(context.Context, *PeerProcess, string) (AttachLocalAttempt, error)
+	AttachStatus(context.Context, *PeerProcess, string) (AttachLocalAttempt, error)
+}
+
+// ConfigureAttachLifecycle installs the Step 11 attach owner before Serve.
+func (s *Server) ConfigureAttachLifecycle(handler AttachLifecycleHandler) error {
+	if s == nil || handler == nil {
+		return errors.New("wipd: attach lifecycle handler is required")
+	}
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if s.attachLifecycle != nil {
+		return errors.New("wipd: attach lifecycle is already configured")
+	}
+	s.attachLifecycle = handler
+	return nil
+}
+
+func (s *Server) attachLifecycleHandler() AttachLifecycleHandler {
+	if s == nil {
+		return nil
+	}
+	s.attachMu.RLock()
+	defer s.attachMu.RUnlock()
+	return s.attachLifecycle
+}
+
+// D115SubmitDispositionError carries the durable command disposition for a
+// submit that did not return a receipt.
+type D115SubmitDispositionError struct{ Disposition string }
+
+func (err *D115SubmitDispositionError) Error() string {
+	if err == nil {
+		return "wipd: D115 submit disposition unavailable"
+	}
+	return "wipd: D115 submit disposition: " + err.Disposition
+}
+
+// ConfigureD115Lifecycle installs the owner-mediated D115 lifecycle before Serve.
+func (s *Server) ConfigureD115Lifecycle(handler D115LifecycleHandler) error {
+	if s == nil || handler == nil {
+		return errors.New("wipd: D115 lifecycle handler is required")
+	}
+	s.d115CreateMu.Lock()
+	defer s.d115CreateMu.Unlock()
+	if s.d115Lifecycle != nil {
+		return errors.New("wipd: D115 path is already configured")
+	}
+	s.d115Lifecycle = handler
+	return nil
+}
+
+// RouteResolverFunc adapts a function to RouteResolver.
+type RouteResolverFunc func(context.Context, *PeerProcess) (operation.RouteResolveOutput, error)
+
+// ResolveRoute implements RouteResolver by invoking f with the authenticated peer.
+func (f RouteResolverFunc) ResolveRoute(ctx context.Context, peer *PeerProcess) (operation.RouteResolveOutput, error) {
+	return f(ctx, peer)
+}
+
+// ConfigureRouteResolve installs the trusted local route resolver before Serve.
+// It is independent of Repo-bound command runtime and journal configuration.
+func (s *Server) ConfigureRouteResolve(resolver RouteResolver) error {
+	if s == nil || resolver == nil {
+		return errors.New("wipd: route resolver is required")
+	}
+	s.routeResolveMu.Lock()
+	defer s.routeResolveMu.Unlock()
+	if s.routeResolver != nil {
+		return errors.New("wipd: route resolver is already configured")
+	}
+	s.routeResolver = resolver
+	return nil
+}
+
+func (s *Server) routeResolvePath() RouteResolver {
+	if s == nil {
+		return nil
+	}
+	s.routeResolveMu.RLock()
+	defer s.routeResolveMu.RUnlock()
+	return s.routeResolver
 }
 
 // NamedBatchReader executes only the authenticated batch.read@v1 authority
@@ -71,6 +232,24 @@ func (s *Server) connectedCommandStart() *CommandStartCoordinator {
 	s.commandStartMu.RLock()
 	defer s.commandStartMu.RUnlock()
 	return s.commandStart
+}
+
+// ConnectedCommandsConfigured reports whether the daemon has the durable
+// connected-command journal and return path configured.
+func (s *Server) ConnectedCommandsConfigured() bool {
+	return s.connectedCommandStart() != nil
+}
+
+// RunConnectedCanonicalTerminal executes one exact authority command through
+// the daemon's shared journal receipt barrier.
+func (s *Server) RunConnectedCanonicalTerminal(ctx context.Context, command operation.Command,
+	guardAndWrite func(context.Context, CommandStartSnapshot, operation.Command) error,
+) (CommandStartResult, error) {
+	coordinator := s.connectedCommandStart()
+	if coordinator == nil {
+		return CommandStartResult{}, ErrCommandStartBlocked
+	}
+	return coordinator.RunConnectedCanonicalTerminal(ctx, command, guardAndWrite)
 }
 
 // ConfigureNamedBatchRead enables the explicit Step 09 read capability. It
@@ -190,8 +369,9 @@ func (s *Server) Serve(ctx context.Context, daemon *Daemon) error {
 			break
 		}
 
-		state := &connectionSession{ctx: serveCtx}
-		connectionCtx := context.WithValue(serveCtx, sessionContextKey{}, state)
+		connectionCtx := context.WithValue(serveCtx, peerProcessContextKey{}, peerProcessForConnection(connection))
+		state := &connectionSession{ctx: connectionCtx}
+		connectionCtx = context.WithValue(connectionCtx, sessionContextKey{}, state)
 		connectionsMu.Lock()
 		if serveCtx.Err() != nil {
 			connectionsMu.Unlock()
@@ -245,9 +425,224 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.serveNegotiate(writer, request)
 	case exchangePath:
 		s.serveExchange(writer, request)
+	case "/wipd/v1/create-local/prepare", "/wipd/v1/create-local/import-proof", "/wipd/v1/create-local/submit", "/wipd/v1/create-local/status", "/wipd/v1/create-local/cancel":
+		s.serveD115Lifecycle(writer, request)
+	case "/wipd/v1/environment/attach-once", "/wipd/v1/environment/attach-status":
+		s.serveAttachLifecycle(writer, request)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (s *Server) serveAttachLifecycle(writer http.ResponseWriter, request *http.Request) {
+	const maxAttachIPCBytes = 1 << 20
+	if request.ContentLength < 1 || request.ContentLength > maxAttachIPCBytes || len(request.TransferEncoding) != 0 ||
+		request.Header.Get("Content-Type") != "application/cbor" || request.Header.Get("Accept") != "application/cbor" {
+		http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAttachIPCBytes))
+	if err != nil || int64(len(body)) != request.ContentLength {
+		http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+		return
+	}
+	defer clear(body)
+	peer := PeerProcessFromContext(request.Context())
+	if peer == nil {
+		http.Error(writer, "route.discovery-unavailable", http.StatusForbidden)
+		return
+	}
+	handler := s.attachLifecycleHandler()
+	if handler == nil {
+		http.Error(writer, "protocol.unsupported-extension", http.StatusNotImplemented)
+		return
+	}
+	var attempt AttachLocalAttempt
+	if request.URL.Path == "/wipd/v1/environment/attach-once" {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "grant_artifact")
+		grant, ok := fields["grant_artifact"].(string)
+		if decodeErr != nil || fields["schema"] != "wipd.environment-attach-once/1" || !ok || grant == "" || len(grant) > 1<<20 {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		attempt, err = handler.AttachOnce(request.Context(), peer, grant)
+	} else {
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id")
+		attemptID, ok := fields["attempt_id"].(string)
+		if decodeErr != nil || fields["schema"] != "wipd.environment-attach-status/1" || !ok || !d115.ValidULID(attemptID) {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		attempt, err = handler.AttachStatus(request.Context(), peer, attemptID)
+	}
+	if err != nil {
+		http.Error(writer, "environment.attach-refused", http.StatusConflict)
+		return
+	}
+	if !d115.ValidULID(attempt.AttemptID) || attempt.State == "" || len(attempt.Receipt) > maxAttachIPCBytes || len(attempt.SignedReceipt) > maxAttachIPCBytes {
+		http.Error(writer, "authority.invalid-response", http.StatusServiceUnavailable)
+		return
+	}
+	var receipt any
+	if len(attempt.Receipt) != 0 {
+		receipt = bytes.Clone(attempt.Receipt)
+	}
+	var signedReceipt any
+	if len(attempt.SignedReceipt) != 0 {
+		signedReceipt = bytes.Clone(attempt.SignedReceipt)
+	}
+	response, err := wipdwire.EncodeCanonical(map[string]any{
+		"schema": "wipd.environment-attach-state/1", "attempt_id": attempt.AttemptID, "state": attempt.State, "receipt": receipt, "signed_receipt": signedReceipt,
+	})
+	if err != nil || len(response) > maxAttachIPCBytes {
+		http.Error(writer, "authority.invalid-response", http.StatusServiceUnavailable)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/cbor")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response)
+}
+
+func (s *Server) serveD115Lifecycle(writer http.ResponseWriter, request *http.Request) {
+	if request.ContentLength < 1 || request.ContentLength > 8192 || len(request.TransferEncoding) != 0 ||
+		request.Header.Get("Content-Type") != "application/cbor" || request.Header.Get("Accept") != "application/cbor" {
+		http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 8192))
+	if err != nil || int64(len(body)) != request.ContentLength {
+		http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+		return
+	}
+	defer clear(body)
+	peer := PeerProcessFromContext(request.Context())
+	if peer == nil {
+		http.Error(writer, "route.discovery-unavailable", http.StatusForbidden)
+		return
+	}
+	handler := s.d115LifecyclePathHandler()
+	if handler == nil {
+		http.Error(writer, "protocol.unsupported-extension", http.StatusNotImplemented)
+		return
+	}
+	var response []byte
+	var attempt D115LocalAttempt
+	var attemptID string
+	switch request.URL.Path {
+	case "/wipd/v1/create-local/prepare":
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "operation", "grant_artifact")
+		grant, ok := fields["grant_artifact"].(string)
+		if decodeErr != nil || fields["schema"] != "wipd.create-local-prepare/1" || fields["operation"] != "repo.create-local@v1" || !ok || grant == "" || len(grant) > 5462 {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		attempt, err = handler.Prepare(request.Context(), peer, grant)
+	case "/wipd/v1/create-local/import-proof":
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id", "proof_artifact")
+		id, idOK := fields["attempt_id"].(string)
+		proof, proofOK := fields["proof_artifact"].([]byte)
+		if decodeErr != nil || fields["schema"] != "wipd.create-local-import-proof/1" || !idOK || !d115.ValidULID(id) || !proofOK || len(proof) > 2048 {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		attempt, err = handler.ImportProof(request.Context(), id, proof)
+	case "/wipd/v1/create-local/submit":
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id")
+		id, idOK := fields["attempt_id"].(string)
+		if decodeErr != nil || fields["schema"] != "wipd.create-local-submit/1" || !idOK || !d115.ValidULID(id) {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		attemptID = id
+		response, err = handler.Submit(request.Context(), peer, id)
+	case "/wipd/v1/create-local/status", "/wipd/v1/create-local/cancel":
+		fields, decodeErr := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id")
+		id, idOK := fields["attempt_id"].(string)
+		expected := "wipd.create-local-status/1"
+		if strings.HasSuffix(request.URL.Path, "/cancel") {
+			expected = "wipd.create-local-cancel/1"
+		}
+		if decodeErr != nil || fields["schema"] != expected || !idOK || !d115.ValidULID(id) {
+			http.Error(writer, "protocol.malformed-message", http.StatusBadRequest)
+			return
+		}
+		if expected == "wipd.create-local-cancel/1" {
+			attempt, err = handler.Cancel(request.Context(), id)
+		} else {
+			attempt, err = handler.Status(request.Context(), id)
+		}
+	}
+	if err != nil {
+		var disposition *D115SubmitDispositionError
+		if request.URL.Path == "/wipd/v1/create-local/submit" && errors.As(err, &disposition) && validD115SubmitDisposition(disposition.Disposition) {
+			response, err = wipdwire.EncodeCanonical(map[string]any{
+				"schema": "wipd.create-local-disposition/1", "attempt_id": attemptID, "disposition": disposition.Disposition,
+			})
+			if err == nil {
+				writer.Header().Set("Content-Type", "application/cbor")
+				writer.Header().Set("Cache-Control", "no-store")
+				writer.WriteHeader(http.StatusOK)
+				_, _ = writer.Write(response)
+				return
+			}
+		}
+		http.Error(writer, "create-local.refused", http.StatusConflict)
+		return
+	}
+	if response == nil {
+		if request.URL.Path == "/wipd/v1/create-local/submit" {
+			http.Error(writer, "authority.invalid-response", http.StatusServiceUnavailable)
+			return
+		}
+		schema := "wipd.create-local-state/1"
+		if request.URL.Path == "/wipd/v1/create-local/prepare" {
+			schema = "wipd.create-local-prepared/1"
+		}
+		fields := map[string]any{"schema": schema, "attempt_id": attempt.AttemptID, "state": attempt.State}
+		if schema == "wipd.create-local-prepared/1" {
+			if len(attempt.SigningRequest) > 0 {
+				fields["signing_request"] = attempt.SigningRequest
+			} else {
+				fields["signing_request"] = nil
+			}
+		}
+		if schema == "wipd.create-local-state/1" {
+			if len(attempt.Receipt) > 0 {
+				fields["receipt"] = attempt.Receipt
+			} else {
+				fields["receipt"] = nil
+			}
+		}
+		response, err = wipdwire.EncodeCanonical(fields)
+		if err != nil {
+			http.Error(writer, "authority.invalid-response", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if len(response) == 0 || len(response) > 8192 {
+		http.Error(writer, "authority.invalid-response", http.StatusServiceUnavailable)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/cbor")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response)
+}
+
+func validD115SubmitDisposition(disposition string) bool {
+	switch disposition {
+	case "definitely-unsent", "outcome-unknown", "receipt-durable", "refused":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) d115LifecyclePathHandler() D115LifecycleHandler {
+	s.d115CreateMu.RLock()
+	defer s.d115CreateMu.RUnlock()
+	return s.d115Lifecycle
 }
 
 func (s *Server) serveNegotiate(writer http.ResponseWriter, request *http.Request) {
@@ -403,6 +798,12 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 		s.serveNamedBatchRead(writer, request, hello, parameters, frame)
 		return
 	}
+	if frame.kind == "query.request" {
+		<-s.preflightSlots
+		preflightOwned = false
+		s.serveRouteResolve(writer, request, hello, parameters, frame)
+		return
+	}
 	if frame.kind != "command.submit" {
 		abortHTTP2Stream()
 	}
@@ -459,9 +860,27 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 	gate := &dispatchGate{cancel: cancelDispatch}
 	dispatchDone := make(chan struct{})
 	dispatchOutcomes := make(chan dispatchOutcome, 1)
+	authenticatedPeer := PeerProcessFromContext(request.Context())
 	go func() {
 		defer close(dispatchDone)
 		outcome := func() dispatchOutcome {
+			if isStep11RouteMutation(command.Request.Operation) {
+				handler := s.routeMutationHandler()
+				if handler == nil || authenticatedPeer == nil {
+					return dispatchOutcome{problemCode: "auth.environment-domain-mismatch"}
+				}
+				if !gate.begin(request.Context()) {
+					return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
+				}
+				result, err := handler.ExecuteRouteCommand(state.ctx, authenticatedPeer, command)
+				if err != nil {
+					if errors.Is(err, ErrOutcomeUnknown) {
+						return dispatchOutcome{problemCode: "transport.outcome-unknown"}
+					}
+					return dispatchOutcome{problemCode: "authority.unavailable"}
+				}
+				return dispatchOutcome{result: result}
+			}
 			if coordinator := s.connectedCommandStart(); coordinator != nil {
 				if !gate.begin(request.Context()) {
 					return dispatchOutcome{problemCode: "transport.cancelled-before-submission"}
@@ -587,6 +1006,62 @@ func (s *Server) serveExchange(writer http.ResponseWriter, request *http.Request
 			return
 		}
 	}
+}
+
+func isStep11RouteMutation(id operation.ID) bool {
+	return id == operation.RepoRouteBindV1.Metadata().Operation || id == operation.RepoAdoptRemoteV1.Metadata().Operation
+}
+
+func (s *Server) serveRouteResolve(writer http.ResponseWriter, request *http.Request, hello serverHello, parameters sessionParameters, frame frameRecord) {
+	id := operation.RouteResolveV1.Metadata().Operation
+	if !operationCapabilityContains(hello.operations, id, identitySchemaV1) {
+		s.writeProblem(writer, frame.requestID, 0, string(operation.ProblemUnsupportedVersion), uint32(parameters.maxFrameBody))
+		return
+	}
+	var envelope wipdwire.QueryRequest
+	if wipdwire.DecodeCanonical(frame.payload, &envelope, "schema", "query", "query_payload", "deadline") != nil ||
+		envelope.Schema != "wipd.query-request/1" || envelope.Query.Name != id.Name || envelope.Query.Version != id.Version ||
+		len(envelope.QueryPayload) != 0 || envelope.Deadline != nil {
+		s.writeProblem(writer, frame.requestID, 0, "protocol.malformed-message", uint32(parameters.maxFrameBody))
+		return
+	}
+	peer := PeerProcessFromContext(request.Context())
+	if peer == nil {
+		s.writeProblem(writer, frame.requestID, 0, "route.discovery-unavailable", uint32(parameters.maxFrameBody))
+		return
+	}
+	resolver := s.routeResolvePath()
+	if resolver == nil {
+		s.writeProblem(writer, frame.requestID, 0, "protocol.unsupported-extension", uint32(parameters.maxFrameBody))
+		return
+	}
+	output, err := resolver.ResolveRoute(request.Context(), peer)
+	if err != nil {
+		code := "query.route-unresolved"
+		if errors.Is(err, ErrUnsupportedCheckoutContext) {
+			code = "route.discovery-unavailable"
+		}
+		s.writeProblem(writer, frame.requestID, 0, code, uint32(parameters.maxFrameBody))
+		return
+	}
+	result := operation.Result{Code: operation.ResultSucceeded, Output: output}
+	if err = operation.RouteResolveV1.ValidateResult(result); err != nil {
+		s.writeProblem(writer, frame.requestID, 0, "authority.invalid-response", uint32(parameters.maxFrameBody))
+		return
+	}
+	payload, err := wipdwire.EncodeCanonical(map[string]any{
+		"repo_id": output.RepoID, "domain_id": output.DomainID, "authority_epoch": output.Epoch,
+		"connection_profile": output.ConnectionProfile,
+	})
+	if err != nil {
+		s.writeProblem(writer, frame.requestID, 0, "authority.invalid-response", uint32(parameters.maxFrameBody))
+		return
+	}
+	wire, err := encodeFrame(frameRecord{requestID: frame.requestID, sequence: 0, kind: "response.end", payload: payload}, uint32(parameters.maxFrameBody))
+	if err != nil {
+		abortHTTP2Stream()
+	}
+	_, _ = writer.Write(wire)
 }
 
 type frameReadResult struct {

@@ -135,20 +135,22 @@ func (d *Daemon) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	peerUID, err := peerEffectiveUID(connection)
+	peer, err := authenticatedPeerProcess(connection)
 	if err != nil {
 		_ = connection.Close()
 		return nil, err
 	}
-	if peerUID != d.profileID.owner {
+	if peer.uid != d.profileID.owner {
+		_ = peer.Close()
 		_ = connection.Close()
 		return nil, ErrPeerUIDMismatch
 	}
 	if err := verifySocketPath(d.profile, d.socket, d.profileID, d.socketID); err != nil {
+		_ = peer.Close()
 		_ = connection.Close()
 		return nil, err
 	}
-	return connection, nil
+	return &peerProcessConn{Conn: connection, peer: peer}, nil
 }
 
 // Close releases resources in reverse startup order. The lock file is retained

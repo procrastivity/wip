@@ -59,6 +59,89 @@ type Profile struct {
 	labRepoID     string
 }
 
+// ProvisioningProfile pins the domainless D115 endpoint to the authority's
+// immutable provisioning realm; it carries no operator trust or domain ID.
+type ProvisioningProfile struct {
+	origin        string
+	host          string
+	address       string
+	realmID       string
+	authoritySPKI [sha256.Size]byte
+}
+
+// NewProvisioningProfile validates the explicit domainless D115 endpoint.
+func NewProvisioningProfile(origin, realmID, authoritySPKIPin string) (ProvisioningProfile, error) {
+	var profile ProvisioningProfile
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(origin, "#") {
+		return profile, fmt.Errorf("%w: invalid D115 HTTPS origin", ErrInvalidProfile)
+	}
+	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
+	if err != nil || port == 0 || strconv.FormatUint(port, 10) != parsed.Port() || !canonicalDomainIDPattern.MatchString(realmID) {
+		return profile, fmt.Errorf("%w: invalid D115 provisioning realm or port", ErrInvalidProfile)
+	}
+	pin, err := parseSPKIDigest(authoritySPKIPin)
+	if err != nil {
+		return profile, fmt.Errorf("%w: authority SPKI pin: %v", ErrInvalidProfile, err)
+	}
+	profile = ProvisioningProfile{origin: origin, host: parsed.Hostname(), address: parsed.Host, realmID: realmID, authoritySPKI: pin}
+	return profile, nil
+}
+
+// RealmID returns the immutable realm bound to this domainless profile.
+func (profile ProvisioningProfile) RealmID() string { return profile.realmID }
+
+// Origin returns the exact configured domainless HTTPS origin.
+func (profile ProvisioningProfile) Origin() string { return profile.origin }
+
+// HTTPClient creates a TLS 1.3/h2 client pinned to the configured realm and key.
+func (profile ProvisioningProfile) HTTPClient(roots *x509.CertPool) (*http.Client, error) {
+	if roots == nil || profile.realmID == "" {
+		return nil, ErrInvalidProfile
+	}
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, ServerName: profile.host,
+		RootCAs: roots, NextProtos: []string{"h2"},
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if state.NegotiatedProtocol != "h2" || len(state.PeerCertificates) == 0 {
+				return ErrHTTP2Required
+			}
+			return verifyProvisioningCertificate(profile, state.PeerCertificates[0], time.Now())
+		},
+	}
+	transport := &http2.Transport{TLSClientConfig: tlsConfig, DisableCompression: true}
+	return &http.Client{Transport: provisioningProfileTransport{profile: profile, transport: transport}, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirectForbidden }}, nil
+}
+
+type provisioningProfileTransport struct {
+	profile   ProvisioningProfile
+	transport *http2.Transport
+}
+
+func (transport provisioningProfileTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Scheme != "https" || request.URL.Host != transport.profile.address || request.URL.User != nil || request.URL.RawQuery != "" || request.URL.Fragment != "" {
+		return nil, ErrOriginMismatch
+	}
+	return transport.transport.RoundTrip(request)
+}
+
+func verifyProvisioningCertificate(profile ProvisioningProfile, certificate *x509.Certificate, now time.Time) error {
+	if certificate == nil || now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) ||
+		certificate.VerifyHostname(profile.host) != nil || !hasServerAuthenticationEKU(certificate) ||
+		!criticalSubjectAlternativeName(certificate) || len(certificate.URIs) != 1 {
+		return ErrAuthorityBindingMismatch
+	}
+	gotPin := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
+	if subtle.ConstantTimeCompare(gotPin[:], profile.authoritySPKI[:]) != 1 {
+		return ErrAuthorityPinMismatch
+	}
+	if certificate.URIs[0] == nil || certificate.URIs[0].String() != "wipd://provisioning-realm/"+profile.realmID {
+		return ErrAuthorityBindingMismatch
+	}
+	return nil
+}
+
 // NewProfile requires every M2 trust value. Pins use the repository's
 // canonical sha256:<lowercase-hex> digest spelling; no trust-on-first-use or
 // default origin is provided.
@@ -110,6 +193,11 @@ func (profile Profile) Epoch() uint64 { return profile.epoch }
 // OwnerRootSPKI returns the canonical SHA-256 digest of the configured owner-root SPKI.
 func (profile Profile) OwnerRootSPKI() string {
 	return "sha256:" + hex.EncodeToString(profile.ownerRootSPKI[:])
+}
+
+// AuthoritySPKI returns the configured authority key pin in canonical digest form.
+func (profile Profile) AuthoritySPKI() string {
+	return "sha256:" + hex.EncodeToString(profile.authoritySPKI[:])
 }
 
 // WithM5LabRepoID binds the lab-only Repo value supplied by the trusted

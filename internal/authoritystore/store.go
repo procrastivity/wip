@@ -24,7 +24,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-const schemaVersion = 20
+const schemaVersion = 23
 
 type schemaObject struct {
 	name string
@@ -181,6 +181,15 @@ func CreateEmpty(root string) (*Store, error) {
 		}
 		if err == nil {
 			err = installNamedBatchMembership(db)
+		}
+		if err == nil {
+			err = installRouteIndex(db)
+		}
+		if err == nil {
+			err = installD115(db)
+		}
+		if err == nil {
+			err = installEnvironmentAttach(db)
 		}
 		if err == nil {
 			err = initBlobDir(path)
@@ -704,6 +713,33 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 			return fmt.Errorf("M6 Step 9B named Batch membership migration marker: %v", err)
 		}
 	}
+	if expectedVersion >= 21 {
+		expected["schema_migrations"] = routeIndexMigrationMarker
+		for _, object := range routeIndexSchema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 21`).Scan(&name); err != nil || name != "m6-step-11-normalized-repo-route-index" {
+			return fmt.Errorf("M6 Step 11 route-index migration marker: %v", err)
+		}
+	}
+	if expectedVersion >= 22 {
+		expected["schema_migrations"] = d115MigrationMarker
+		for _, object := range d115Schema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 22`).Scan(&name); err != nil || name != "d115-create-domain-trust-and-replay" {
+			return fmt.Errorf("D115 migration marker: %v", err)
+		}
+	}
+	if expectedVersion >= 23 {
+		expected["schema_migrations"] = environmentAttachMigrationMarker
+		for _, object := range environmentAttachSchema {
+			expected[object.name] = object
+		}
+		if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 23`).Scan(&name); err != nil || name != "m6-environment-attach-grants" {
+			return fmt.Errorf("environment attach migration marker: %v", err)
+		}
+	}
 	objects, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		return err
@@ -897,6 +933,21 @@ func checkSchemaVersion(db *sql.DB, expectedVersion int) error {
 	}
 	if expectedVersion >= 20 {
 		if err := checkNamedBatchMembershipState(db); err != nil {
+			return err
+		}
+	}
+	if expectedVersion >= 21 {
+		if err := checkRouteIndexState(db); err != nil {
+			return err
+		}
+	}
+	if expectedVersion >= 22 {
+		if err := checkD115State(db); err != nil {
+			return err
+		}
+	}
+	if expectedVersion >= 23 {
+		if err := checkEnvironmentAttachState(db); err != nil {
 			return err
 		}
 	}

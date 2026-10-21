@@ -221,6 +221,14 @@ func commandIdentityDefinition(id ID) (Definition, bool) {
 		return BatchLeaveV1, true
 	case BatchDismissV1.Metadata().Operation:
 		return BatchDismissV1, true
+	case RepoRouteBindV1.Metadata().Operation:
+		return RepoRouteBindV1, true
+	case RepoCreateLocalV1.Metadata().Operation:
+		return RepoCreateLocalV1, true
+	case EnvironmentAttachOnceV1.Metadata().Operation:
+		return EnvironmentAttachOnceV1, true
+	case RepoAdoptRemoteV1.Metadata().Operation:
+		return RepoAdoptRemoteV1, true
 	}
 	if definition, ok := step8ContractDefinition(id); ok {
 		return definition, true
@@ -289,6 +297,14 @@ func canonicalInput(input Input) (canonicalMap, error) {
 		return canonicalMap{"batch_id": input.BatchID, "matter_id": input.MatterID}, nil
 	case BatchDismissInput:
 		return canonicalMap{"batch_id": input.BatchID}, nil
+	case RepoRouteBindInput:
+		return canonicalMap{"normalized_key": input.NormalizedKey}, nil
+	case RepoCreateLocalInput:
+		return canonicalMap{"grant_artifact": input.GrantArtifact}, nil
+	case EnvironmentAttachOnceInput:
+		return canonicalMap{"grant_artifact": input.GrantArtifact, "checkout_proof": input.CheckoutProof}, nil
+	case RepoAdoptRemoteInput:
+		return canonicalMap{"normalized_key": input.NormalizedKey}, nil
 	case ContentWriteInput:
 		return canonicalMap{"subject_id": input.SubjectID, "kind": input.Kind}, nil
 	case FindingAppendInput:

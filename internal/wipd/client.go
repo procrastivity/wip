@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/procrastivity/wip/internal/d115"
 	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdprofile"
 	"github.com/procrastivity/wip/internal/wipdwire"
@@ -38,6 +39,12 @@ var (
 	ErrUnavailable = errors.New("transport.unavailable")
 	// ErrOutcomeUnknown reports a lost response after possible dispatch.
 	ErrOutcomeUnknown = errors.New("transport.outcome-unknown")
+	// ErrD115DefinitelyUnsent reports an explicit local proof that no D115
+	// request byte could have reached the authority for this exchange.
+	ErrD115DefinitelyUnsent = errors.New("create-local.definitely-unsent")
+	// ErrD115ReceiptDurable reports that success is durable locally but final
+	// receipt installation still needs recovery.
+	ErrD115ReceiptDurable = errors.New("create-local.receipt-durable")
 )
 
 // Client is an authenticated local IPC session. It owns no database handle
@@ -53,6 +60,8 @@ type Client struct {
 	step9b     bool
 	step9c     bool
 	step10     bool
+	step11     bool
+	routeOnly  bool
 	candidate  *daemonCandidate
 	started    bool
 }
@@ -89,7 +98,7 @@ func ConnectM6(ctx context.Context, explicitProfileRoot string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, false, false, false, false, false)
+	return connectProfileCapabilities(ctx, profile, true, false, false, false, false, false, false)
 }
 
 // ConnectM6Step8 explicitly offers the dependency/reference acceptance set.
@@ -99,7 +108,7 @@ func ConnectM6Step8(ctx context.Context, explicitProfileRoot string) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, false, false, false, false)
+	return connectProfileCapabilities(ctx, profile, true, true, false, false, false, false, false)
 }
 
 // ConnectM6Step9A explicitly offers named Batch birth. It refuses to connect
@@ -110,7 +119,7 @@ func ConnectM6Step9A(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, false, false, false)
+	return connectProfileCapabilities(ctx, profile, true, true, true, false, false, false, false)
 }
 
 // ConnectM6Step9B explicitly offers named Batch membership and dismissal. It
@@ -120,7 +129,7 @@ func ConnectM6Step9B(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, true, false, false)
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, false, false, false)
 }
 
 // ConnectM6Step9C requires the explicit named-Batch read feature in addition
@@ -130,7 +139,7 @@ func ConnectM6Step9C(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, false)
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, false, false)
 }
 
 // ConnectM6Step10 explicitly offers the isolated engine-only hook operation
@@ -140,7 +149,48 @@ func ConnectM6Step10(ctx context.Context, explicitProfileRoot string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
 	}
-	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, true)
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, true, false)
+}
+
+// ConnectM6Step11 offers the complete Step 10 profile plus the explicit
+// authority-owned Repo route-binding operation; older profiles never inherit it.
+func ConnectM6Step11(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: profile verification: %v", ErrUnavailable, err)
+	}
+	return connectProfileCapabilities(ctx, profile, true, true, true, true, true, true, true)
+}
+
+// ConnectRouteResolve opens the standalone prebinding profile's read-only
+// route capability without selecting Repo-bound M6 commands.
+func ConnectRouteResolve(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, err
+	}
+	return connectProfileCapabilitiesWithRouteResolve(ctx, profile, false, false, false, false, false, false, false, true)
+}
+
+// ConnectAttachLifecycle explicitly negotiates Step 11's attach lifecycle and
+// read-only route discovery without offering Repo-bound command execution.
+func ConnectAttachLifecycle(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, err
+	}
+	return connectProfileCapabilitiesWithRouteResolve(ctx, profile, false, false, false, false, false, false, true, true)
+}
+
+// ConnectStep11Routes opens the prebinding daemon's authenticated route
+// mutation and route-resolution surface without requiring unrelated Step 9/10
+// capabilities that this profile does not advertise.
+func ConnectStep11Routes(ctx context.Context, explicitProfileRoot string) (*Client, error) {
+	profile, err := wipdprofile.Resolve(explicitProfileRoot)
+	if err != nil {
+		return nil, err
+	}
+	return connectProfileCapabilitiesWithRouteResolve(ctx, profile, true, false, false, false, false, false, true, false)
 }
 
 // Activate first connects to a ready daemon. Only when the profile socket is
@@ -327,6 +377,71 @@ func (c *Client) ExecuteCommandV2(ctx context.Context, command operation.Command
 	return c.executeCommand(ctx, command, true, proof)
 }
 
+// ResolveRoute asks the daemon to discover the caller's current checkout and
+// resolve it through the configured read-only Step 11 route path. No path,
+// remote URL, or identity is accepted from the caller.
+func (c *Client) ResolveRoute(ctx context.Context) (operation.RouteResolveOutput, error) {
+	var empty operation.RouteResolveOutput
+	if c == nil || c.httpClient == nil {
+		return empty, &ExchangeError{Code: "transport.unavailable", Err: ErrUnavailable}
+	}
+	id := operation.RouteResolveV1.Metadata().Operation
+	if !c.step11 && !c.routeOnly || !operationCapabilityContains(c.hello.operations, id, identitySchemaV1) {
+		return empty, &ExchangeError{Code: string(operation.ProblemUnsupportedVersion)}
+	}
+	requestID, err := newFrameRequestID()
+	if err != nil {
+		return empty, &ExchangeError{Code: "transport.unavailable", Err: err}
+	}
+	payload, err := wipdwire.EncodeCanonical(wipdwire.QueryRequest{
+		Schema: "wipd.query-request/1", Query: wipdwire.QueryOperation{Name: id.Name, Version: id.Version},
+		QueryPayload: []byte{},
+	})
+	if err != nil {
+		return empty, &ExchangeError{Code: "protocol.malformed-message", Err: err}
+	}
+	wire, err := encodeFrame(frameRecord{requestID: requestID, sequence: 0, kind: "query.request", payload: payload}, uint32(c.parameters.maxFrameBody))
+	if err != nil {
+		return empty, &ExchangeError{Code: "protocol.frame-too-large", Err: err}
+	}
+	response, err := c.post(ctx, exchangePath, wire)
+	if err != nil {
+		return empty, uncertainExchange(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.ProtoMajor != 2 || response.StatusCode != http.StatusOK {
+		return empty, uncertainExchange(fmt.Errorf("unexpected HTTP/%d.%d status %s", response.ProtoMajor, response.ProtoMinor, response.Status))
+	}
+	frame, err := readFrame(response.Body, uint32(c.parameters.maxFrameBody))
+	if err != nil || frame.requestID != requestID || frame.sequence != 0 {
+		return empty, uncertainExchange(errors.Join(err, errWrongCorrelation))
+	}
+	if frame.kind == "problem" {
+		code, decodeErr := problemCodeFromPayload(frame.payload)
+		if decodeErr != nil {
+			return empty, uncertainExchange(decodeErr)
+		}
+		if _, readErr := readFrame(response.Body, uint32(c.parameters.maxFrameBody)); !errors.Is(readErr, io.EOF) {
+			return empty, uncertainExchange(errOutOfOrder)
+		}
+		return empty, &ExchangeError{Code: code}
+	}
+	if frame.kind != "response.end" {
+		return empty, uncertainExchange(errUnsupportedKind)
+	}
+	var output operation.RouteResolveOutput
+	if err = wipdwire.DecodeCanonical(frame.payload, &output, "repo_id", "domain_id", "authority_epoch", "connection_profile"); err != nil {
+		return empty, uncertainExchange(err)
+	}
+	if err = operation.RouteResolveV1.ValidateResult(operation.Result{Code: operation.ResultSucceeded, Output: output}); err != nil {
+		return empty, uncertainExchange(err)
+	}
+	if _, err = readFrame(response.Body, uint32(c.parameters.maxFrameBody)); !errors.Is(err, io.EOF) {
+		return empty, uncertainExchange(errOutOfOrder)
+	}
+	return output, nil
+}
+
 func (c *Client) executeCommand(ctx context.Context, command operation.Command, version2 bool, proof []byte) (operation.Result, error) {
 	if c == nil || c.httpClient == nil {
 		return operation.Result{}, &ExchangeError{Code: "transport.unavailable", Err: ErrUnavailable}
@@ -457,10 +572,14 @@ func (c *Client) Close() error {
 }
 
 func connectProfile(ctx context.Context, profile wipdprofile.Profile) (*Client, error) {
-	return connectProfileCapabilities(ctx, profile, false, false, false, false, false, false)
+	return connectProfileCapabilities(ctx, profile, false, false, false, false, false, false, false)
 }
 
-func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead, selectStep10 bool) (*Client, error) {
+func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead, selectStep10, selectStep11 bool) (*Client, error) {
+	return connectProfileCapabilitiesWithRouteResolve(ctx, profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead, selectStep10, selectStep11, false)
+}
+
+func connectProfileCapabilitiesWithRouteResolve(ctx context.Context, profile wipdprofile.Profile, m6, step8, namedBatch, namedBatchMembership, namedBatchRead, selectStep10, selectStep11, selectRouteResolve bool) (*Client, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	transport := &http2.Transport{
@@ -477,6 +596,8 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 		step9b:    namedBatchMembership,
 		step9c:    namedBatchRead,
 		step10:    selectStep10,
+		step11:    selectStep11,
+		routeOnly: selectRouteResolve,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -508,6 +629,18 @@ func connectProfileCapabilities(ctx context.Context, profile wipdprofile.Profile
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: scheduler hooks are not supported by this profile", ErrUnavailable)
 	}
+	if selectStep11 {
+		for _, definition := range operation.Step11Catalogue() {
+			if !operationCapabilityContains(client.hello.operations, definition.Metadata().Operation, identitySchemaV1) {
+				transport.CloseIdleConnections()
+				return nil, fmt.Errorf("%w: Step 11 operation %s is not supported by this profile", ErrUnavailable, definition.Metadata().Operation)
+			}
+		}
+	}
+	if selectRouteResolve && !operationCapabilityContains(client.hello.operations, operation.RouteResolveV1.Metadata().Operation, identitySchemaV1) {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: route.resolve is not supported by this profile", ErrUnavailable)
+	}
 	return client, nil
 }
 
@@ -522,21 +655,26 @@ func (c *Client) negotiate(ctx context.Context) error {
 		matterVersions = append(matterVersions, uint64(2))
 		stepVersions = append(stepVersions, uint64(2))
 	}
-	operations := []any{map[string]any{
-		"name": "content.write-once", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "finding.append", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "matter.create", "versions": matterVersions, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "matter.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "step.create", "versions": stepVersions, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "step.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
-	}, map[string]any{
-		"name": "step.start", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
-	}}
+	var operations []any
+	if c.routeOnly {
+		operations = []any{}
+	} else {
+		operations = []any{map[string]any{
+			"name": "content.write-once", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "finding.append", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "matter.create", "versions": matterVersions, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "matter.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.create", "versions": stepVersions, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.finish", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}, map[string]any{
+			"name": "step.start", "versions": []any{uint64(1)}, "identity_schemas": []any{identitySchemaV1},
+		}}
+	}
 	if c.step9a {
 		operations = append(operations, map[string]any{
 			"name": operation.BatchCreateV1.Metadata().Operation.Name, "versions": []any{uint64(operation.BatchCreateV1.Metadata().Operation.Version)}, "identity_schemas": []any{identitySchemaV1},
@@ -557,6 +695,20 @@ func (c *Client) negotiate(ctx context.Context) error {
 				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
 			})
 		}
+	}
+	if c.step11 {
+		for _, definition := range operation.Step11Catalogue() {
+			id := definition.Metadata().Operation
+			operations = append(operations, map[string]any{
+				"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+			})
+		}
+	}
+	if c.routeOnly && !c.step11 {
+		id := operation.RouteResolveV1.Metadata().Operation
+		operations = append(operations, map[string]any{
+			"name": id.Name, "versions": []any{uint64(id.Version)}, "identity_schemas": []any{identitySchemaV1},
+		})
 	}
 	if c.m6 {
 		operations = append(operations, map[string]any{
@@ -600,6 +752,11 @@ func (c *Client) negotiate(ctx context.Context) error {
 				})
 			}
 		}
+		sort.Slice(operations, func(i, j int) bool {
+			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
+		})
+	}
+	if c.routeOnly {
 		sort.Slice(operations, func(i, j int) bool {
 			return operations[i].(map[string]any)["name"].(string) < operations[j].(map[string]any)["name"].(string)
 		})
@@ -751,7 +908,7 @@ func knownOperationVersion(name string, version uint16) bool {
 		operation.BatchSweepAnonymousV1.Metadata().Operation, operation.BatchCreateV1.Metadata().Operation:
 		return true
 	default:
-		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.Step10CapabilityOperation(id) || operation.NamedBatchMembershipOperation(id)
+		return operation.Step4Operation(id) || operation.Step5Operation(id) || operation.Step8Operation(id) || operation.Step10CapabilityOperation(id) || operation.Step11Operation(id) || operation.NamedBatchMembershipOperation(id)
 	}
 }
 
@@ -806,6 +963,278 @@ func (c *Client) post(ctx context.Context, path string, wire []byte) (*http.Resp
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
+	return c.httpClient.Do(request)
+}
+
+// D115Attempt is the safe local IPC projection of a pre-domain attempt.
+type D115Attempt struct {
+	AttemptID      string
+	State          string
+	SigningRequest []byte
+	Receipt        []byte
+}
+
+// D115Prepare durably prepares an attempt and returns its pinned signing request.
+func (c *Client) D115Prepare(ctx context.Context, grantArtifact string) (D115Attempt, error) {
+	if grantArtifact == "" || len(grantArtifact) > 5462 {
+		return D115Attempt{}, errors.New("wipd: invalid D115 grant artifact")
+	}
+	return c.d115AttemptCall(ctx, "/wipd/v1/create-local/prepare", map[string]any{
+		"schema": "wipd.create-local-prepare/1", "operation": "repo.create-local@v1", "grant_artifact": grantArtifact,
+	}, "prepared")
+}
+
+// AttachOnce submits or resumes the exact local intent for a closed owner
+// grant. The authenticated daemon derives all checkout and Environment fields.
+func (c *Client) AttachOnce(ctx context.Context, grantArtifact string) (AttachLocalAttempt, error) {
+	if c == nil || c.httpClient == nil || ctx == nil || !c.step11 || grantArtifact == "" || len(grantArtifact) > 1<<20 {
+		return AttachLocalAttempt{}, errors.New("wipd: invalid attach request")
+	}
+	return c.attachAttemptCall(ctx, "/wipd/v1/environment/attach-once", map[string]any{
+		"schema": "wipd.environment-attach-once/1", "grant_artifact": grantArtifact,
+	}, true)
+}
+
+// AttachStatus retrieves only the safe disposition and exact retained receipt
+// for an existing local attach intent; it never submits or recovers it.
+func (c *Client) AttachStatus(ctx context.Context, attemptID string) (AttachLocalAttempt, error) {
+	if c == nil || c.httpClient == nil || ctx == nil || !c.step11 || !d115.ValidULID(attemptID) {
+		return AttachLocalAttempt{}, errors.New("wipd: invalid attach status request")
+	}
+	return c.attachAttemptCall(ctx, "/wipd/v1/environment/attach-status", map[string]any{
+		"schema": "wipd.environment-attach-status/1", "attempt_id": attemptID,
+	}, false)
+}
+
+func (c *Client) attachAttemptCall(ctx context.Context, path string, request map[string]any, mayHaveSubmitted bool) (AttachLocalAttempt, error) {
+	var empty AttachLocalAttempt
+	wire, err := wipdwire.EncodeCanonical(request)
+	if err != nil {
+		return empty, err
+	}
+	response, err := c.d115Post(ctx, path, wire)
+	if err != nil {
+		if mayHaveSubmitted {
+			return empty, errors.Join(ErrOutcomeUnknown, err)
+		}
+		return empty, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || len(body) > 1<<20 {
+		clear(body)
+		if mayHaveSubmitted {
+			return empty, errors.Join(ErrOutcomeUnknown, readErr, closeErr)
+		}
+		return empty, errors.Join(readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/cbor" {
+		diagnostic := strings.TrimSpace(string(body))
+		clear(body)
+		if mayHaveSubmitted && response.StatusCode >= http.StatusInternalServerError {
+			return empty, errors.Join(ErrOutcomeUnknown, errors.New("wipd: attach response unavailable"))
+		}
+		return empty, errors.New("wipd: attach request refused: " + diagnostic)
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id", "state", "receipt", "signed_receipt")
+	clear(body)
+	if err != nil || fields["schema"] != "wipd.environment-attach-state/1" {
+		return empty, errors.Join(ErrOutcomeUnknown, err)
+	}
+	id, idOK := fields["attempt_id"].(string)
+	state, stateOK := fields["state"].(string)
+	if !idOK || !d115.ValidULID(id) || !stateOK || state == "" {
+		return empty, errors.New("wipd: malformed attach state")
+	}
+	attempt := AttachLocalAttempt{AttemptID: id, State: state}
+	if value := fields["receipt"]; value != nil {
+		attempt.Receipt, idOK = value.([]byte)
+		if !idOK {
+			return empty, errors.Join(ErrOutcomeUnknown, errors.New("wipd: malformed attach receipt"))
+		}
+		attempt.Receipt = bytes.Clone(attempt.Receipt)
+	}
+	if value := fields["signed_receipt"]; value != nil {
+		attempt.SignedReceipt, idOK = value.([]byte)
+		if !idOK {
+			return empty, errors.Join(ErrOutcomeUnknown, errors.New("wipd: malformed signed attach receipt"))
+		}
+		attempt.SignedReceipt = bytes.Clone(attempt.SignedReceipt)
+	}
+	if (len(attempt.Receipt) == 0) != (len(attempt.SignedReceipt) == 0) {
+		return empty, errors.Join(ErrOutcomeUnknown, errors.New("wipd: incomplete attach receipt pair"))
+	}
+	return attempt, nil
+}
+
+// D115ImportProof imports a detached owner proof without submitting it.
+func (c *Client) D115ImportProof(ctx context.Context, commandID string, proof []byte) (D115Attempt, error) {
+	if !d115.ValidULID(commandID) {
+		return D115Attempt{}, errors.New("wipd: invalid D115 attempt ID")
+	}
+	return c.d115AttemptCall(ctx, "/wipd/v1/create-local/import-proof", map[string]any{
+		"schema": "wipd.create-local-import-proof/1", "attempt_id": commandID, "proof_artifact": proof,
+	}, "state")
+}
+
+// D115Status returns durable attempt status without triggering recovery.
+func (c *Client) D115Status(ctx context.Context, commandID string) (D115Attempt, error) {
+	if !d115.ValidULID(commandID) {
+		return D115Attempt{}, errors.New("wipd: invalid D115 attempt ID")
+	}
+	return c.d115AttemptCall(ctx, "/wipd/v1/create-local/status", map[string]any{
+		"schema": "wipd.create-local-status/1", "attempt_id": commandID,
+	}, "state")
+}
+
+// D115Cancel explicitly cancels an attempt that has never possibly been sent.
+func (c *Client) D115Cancel(ctx context.Context, commandID string) (D115Attempt, error) {
+	if !d115.ValidULID(commandID) {
+		return D115Attempt{}, errors.New("wipd: invalid D115 attempt ID")
+	}
+	return c.d115AttemptCall(ctx, "/wipd/v1/create-local/cancel", map[string]any{
+		"schema": "wipd.create-local-cancel/1", "attempt_id": commandID,
+	}, "state")
+}
+
+// D115Submit explicitly submits imported exact bytes and returns the terminal receipt.
+func (c *Client) D115Submit(ctx context.Context, commandID string) (d115.Receipt, error) {
+	if c == nil || c.httpClient == nil || ctx == nil || !d115.ValidULID(commandID) {
+		return d115.Receipt{}, errors.New("wipd: invalid D115 client")
+	}
+	wire, err := wipdwire.EncodeCanonical(map[string]any{"schema": "wipd.create-local-submit/1", "attempt_id": commandID})
+	if err != nil {
+		return d115.Receipt{}, err
+	}
+	response, err := c.d115Post(ctx, "/wipd/v1/create-local/submit", wire)
+	if err != nil {
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 8193))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || len(body) > 8192 {
+		clear(body)
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/cbor" {
+		clear(body)
+		if response.StatusCode >= http.StatusInternalServerError {
+			return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, errors.New("wipd: D115 submit response unavailable"))
+		}
+		return d115.Receipt{}, errors.New("wipd: D115 submit refused")
+	}
+	receipt, err := d115.DecodeReceipt(body)
+	if err == nil {
+		clear(body)
+		if receipt.CommandID != commandID {
+			return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, errors.New("wipd: D115 receipt command ID mismatch"))
+		}
+		return receipt, nil
+	}
+	fields, dispositionErr := wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id", "disposition")
+	clear(body)
+	if dispositionErr != nil || fields["schema"] != "wipd.create-local-disposition/1" || fields["attempt_id"] != commandID {
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, err, dispositionErr)
+	}
+	disposition, ok := fields["disposition"].(string)
+	if !ok {
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, errors.New("wipd: invalid D115 submit disposition"))
+	}
+	switch disposition {
+	case "definitely-unsent":
+		return d115.Receipt{}, ErrD115DefinitelyUnsent
+	case "outcome-unknown":
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, errors.New("wipd: D115 command outcome unknown"))
+	case "receipt-durable":
+		return d115.Receipt{}, ErrD115ReceiptDurable
+	case "refused":
+		return d115.Receipt{}, errors.New("wipd: D115 submit refused")
+	default:
+		return d115.Receipt{}, errors.Join(ErrOutcomeUnknown, errors.New("wipd: unknown D115 submit disposition"))
+	}
+}
+
+func (c *Client) d115AttemptCall(ctx context.Context, path string, request map[string]any, responseKind string) (D115Attempt, error) {
+	if c == nil || c.httpClient == nil || ctx == nil {
+		return D115Attempt{}, errors.New("wipd: invalid D115 client")
+	}
+	wire, err := wipdwire.EncodeCanonical(request)
+	if err != nil {
+		return D115Attempt{}, err
+	}
+	response, err := c.d115Post(ctx, path, wire)
+	if err != nil {
+		return D115Attempt{}, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 8193))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || len(body) > 8192 {
+		clear(body)
+		return D115Attempt{}, errors.Join(ErrOutcomeUnknown, readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/cbor" {
+		clear(body)
+		return D115Attempt{}, errors.New("wipd: D115 local operation refused")
+	}
+	var fields map[string]any
+	var decodeErr error
+	if responseKind == "prepared" {
+		fields, decodeErr = wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id", "state", "signing_request")
+	} else {
+		fields, decodeErr = wipdwire.DecodeCanonicalMap(body, "schema", "attempt_id", "state", "receipt")
+	}
+	clear(body)
+	if decodeErr != nil {
+		return D115Attempt{}, decodeErr
+	}
+	id, idOK := fields["attempt_id"].(string)
+	state, stateOK := fields["state"].(string)
+	schema, schemaOK := fields["schema"].(string)
+	if !idOK || id == "" || !stateOK || state == "" || !schemaOK {
+		return D115Attempt{}, errors.New("wipd: invalid D115 local response")
+	}
+	result := D115Attempt{AttemptID: id, State: state}
+	if responseKind == "prepared" {
+		if schema != "wipd.create-local-prepared/1" {
+			return D115Attempt{}, errors.New("wipd: invalid D115 prepare response")
+		}
+		if value := fields["signing_request"]; value != nil {
+			data, ok := value.([]byte)
+			if !ok {
+				return D115Attempt{}, errors.New("wipd: invalid signing request response")
+			}
+			request, requestErr := d115.DecodeOwnerSigningRequest(data)
+			if requestErr != nil || request.CommandID != id {
+				return D115Attempt{}, errors.Join(ErrOutcomeUnknown, requestErr, errors.New("wipd: signing request command ID mismatch"))
+			}
+			result.SigningRequest = data
+		}
+	} else {
+		if schema != "wipd.create-local-state/1" {
+			return D115Attempt{}, errors.New("wipd: invalid D115 state response")
+		}
+		if value := fields["receipt"]; value != nil {
+			data, ok := value.([]byte)
+			if !ok {
+				return D115Attempt{}, errors.New("wipd: invalid receipt response")
+			}
+			receipt, receiptErr := d115.DecodeReceipt(data)
+			if receiptErr != nil || receipt.CommandID != id {
+				return D115Attempt{}, errors.Join(ErrOutcomeUnknown, receiptErr, errors.New("wipd: receipt command ID mismatch"))
+			}
+			result.Receipt = data
+		}
+	}
+	return result, nil
+}
+
+func (c *Client) d115Post(ctx context.Context, path string, wire []byte) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://wipd"+path, bytes.NewReader(wire))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/cbor")
+	request.Header.Set("Accept", "application/cbor")
 	return c.httpClient.Do(request)
 }
 

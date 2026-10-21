@@ -186,7 +186,7 @@ func (runtime *Runtime) SupportsBatchSweepAnonymous() bool {
 // SupportsNamedBatchRead reports the explicit local profile and authority
 // feature selection required for batch.read@v1.
 func (runtime *Runtime) SupportsNamedBatchRead() bool {
-	return runtime != nil && (runtime.config.CommandCatalogue == "m6-step9c" || runtime.config.CommandCatalogue == "m6-step10") &&
+	return runtime != nil && (runtime.config.CommandCatalogue == "m6-step9c" || runtime.config.CommandCatalogue == "m6-step10" || runtime.config.CommandCatalogue == "m6-step11") &&
 		runtime.client != nil && runtime.client.SupportsNamedBatchRead()
 }
 
@@ -222,9 +222,79 @@ func (runtime *Runtime) ReadNamedBatch(ctx context.Context, request wipdwire.Loc
 // installed, and otherwise composes the authenticated command runtime before
 // returning a daemon server ready to Serve.
 func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
+	return newServer(profileRoot)
+}
+
+// NewServerWithD115OwnerSigner is retained as a source-compatible guard for
+// callers from the earlier draft. D115 signing is never part of daemon runtime.
+func NewServerWithD115OwnerSigner(profileRoot string, signer wipdseed.D115OwnerRootSigner) (*wipd.Server, *Runtime, error) {
+	if signer != nil {
+		return nil, nil, errors.New("wipdremote: owner signer is not accepted by daemon runtime")
+	}
+	return newServer(profileRoot)
+}
+
+func newServer(profileRoot string) (*wipd.Server, *Runtime, error) {
+	d115Configured, err := hasD115ProvisioningProfile(profileRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	if d115Configured {
+		if _, err = wipdseed.LoadD115ProvisioningConfig(profileRoot); err != nil {
+			return nil, nil, err
+		}
+	}
+	configureD115 := func(server *wipd.Server) error {
+		if !d115Configured {
+			return nil
+		}
+		return ConfigureD115CreateLocal(server, profileRoot)
+	}
 	config, err := LoadConfig(profileRoot)
 	if errors.Is(err, ErrNotConfigured) {
-		return wipd.NewServer(), nil, nil
+		hasRoutes, routeErr := hasPrebindingRouteProfile(profileRoot)
+		if routeErr != nil {
+			return nil, nil, routeErr
+		}
+		if !hasRoutes {
+			server := wipd.NewServer()
+			if routeErr = configureD115(server); routeErr != nil {
+				return nil, nil, routeErr
+			}
+			return server, nil, nil
+		}
+		registry := operation.NewRegistry()
+		for _, definition := range operation.Step11Catalogue() {
+			if definition.Metadata().Operation == operation.RouteResolveV1.Metadata().Operation {
+				continue
+			}
+			if routeErr = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+				return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+					Code: operation.ProblemExecutionFailed, Message: "Step 11 command requires connected authority execution",
+				}}
+			}); routeErr != nil {
+				return nil, nil, routeErr
+			}
+		}
+		if routeErr = registry.Register(operation.RouteResolveV1, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed}}
+		}); routeErr != nil {
+			return nil, nil, routeErr
+		}
+		server := wipd.NewServerWithRegistry(registry)
+		if routeErr = configurePrebindingRoutes(server, profileRoot); routeErr != nil {
+			return nil, nil, routeErr
+		}
+		if routeErr = configureRouteMutations(server, profileRoot); routeErr != nil {
+			return nil, nil, routeErr
+		}
+		if routeErr = configureD115(server); routeErr != nil {
+			return nil, nil, routeErr
+		}
+		if routeErr = configureAttachLifecycle(server, profileRoot); routeErr != nil {
+			return nil, nil, routeErr
+		}
+		return server, nil, nil
 	}
 	if err != nil {
 		return nil, nil, err
@@ -238,7 +308,7 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 		_ = runtime.Close()
 		return nil, nil, err
 	}
-	if runtime.SupportsCommandSubmitV2() && (config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b" || config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10") {
+	if runtime.SupportsCommandSubmitV2() && (config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b" || config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10" || config.CommandCatalogue == "m6-step11") {
 		if err = registry.Register(operation.GateExemptionRepairV1, func(context.Context, operation.Request) operation.Result {
 			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
 				Code: operation.ProblemExecutionFailed, Message: "repair requires connected authority submission",
@@ -253,14 +323,42 @@ func NewServer(profileRoot string) (*wipd.Server, *Runtime, error) {
 	if err == nil {
 		err = server.ConfigureConnectedCommands(config.DomainID, runtime.journal, runtime, environment)
 	}
-	if err == nil && (config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10") {
+	if err == nil && (config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10" || config.CommandCatalogue == "m6-step11") {
 		err = server.ConfigureNamedBatchRead(runtime)
 	}
 	if err != nil {
 		_ = runtime.Close()
 		return nil, nil, err
 	}
+	if err = configurePrebindingRoutes(server, profileRoot); err != nil {
+		_ = runtime.Close()
+		return nil, nil, err
+	}
+	if err = configureRouteMutations(server, profileRoot, runtime.journal); err != nil {
+		_ = runtime.Close()
+		return nil, nil, err
+	}
+	if err = configureD115(server); err != nil {
+		_ = runtime.Close()
+		return nil, nil, err
+	}
+	if err = configureAttachLifecycle(server, profileRoot, runtime.journal); err != nil {
+		_ = runtime.Close()
+		return nil, nil, err
+	}
 	return server, runtime, nil
+}
+
+func hasD115ProvisioningProfile(profileRoot string) (bool, error) {
+	profile, err := wipdprofile.Resolve(profileRoot)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Lstat(filepath.Join(profile.Root, "d115-provisioning-profile.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // OpenRuntime opens the validated authority client and the identity-bound
@@ -282,7 +380,7 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	for _, definition := range definitions {
 		operations = append(operations, definition.Metadata().Operation)
 	}
-	if config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b" || config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10" {
+	if config.CommandCatalogue == "m6-step5" || config.CommandCatalogue == "m6-step7" || config.CommandCatalogue == "m6-step8" || config.CommandCatalogue == "m6-step9a" || config.CommandCatalogue == "m6-step9b" || config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10" || config.CommandCatalogue == "m6-step11" {
 		operations = append(operations, operation.GateExemptionRepairV1.Metadata().Operation)
 	}
 	sort.Slice(operations, func(i, j int) bool {
@@ -291,9 +389,12 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var client *wipdseed.CommandExchangeClient
-	if config.CommandCatalogue == "m6-step9c" || config.CommandCatalogue == "m6-step10" {
+	switch config.CommandCatalogue {
+	case "m6-step11":
+		client, err = wipdseed.OpenStep11CommandExchangeClient(startupCtx, profile, roots, config.ClientStateDirectory, operations)
+	case "m6-step9c", "m6-step10":
 		client, err = wipdseed.OpenCommandExchangeClientWithNamedBatchRead(startupCtx, profile, roots, config.ClientStateDirectory, operations)
-	} else {
+	default:
 		client, err = wipdseed.OpenCommandExchangeClient(startupCtx, profile, roots, config.ClientStateDirectory, operations)
 	}
 	if err != nil {
@@ -304,17 +405,13 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 		_ = client.Close()
 		return nil, wipdseed.ErrInvalidClientState
 	}
-	identity := wipdjournal.Identity{
-		RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch,
-		EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID,
-	}
-	journal, err := wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), identity)
+	journal, err := openRuntimeJournal(profileRoot, config, state)
 	if err != nil {
 		_ = client.Close()
 		return nil, err
 	}
 	var hooks *schedulerhook.Adapter
-	if config.CommandCatalogue == "m6-step10" {
+	if config.CommandCatalogue == "m6-step10" || config.CommandCatalogue == "m6-step11" {
 		hooks, err = schedulerhook.Open(profileRoot, journal)
 		if err != nil {
 			_ = journal.Close()
@@ -328,6 +425,17 @@ func OpenRuntime(profileRoot string, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	return runtime, nil
+}
+
+func openRuntimeJournal(profileRoot string, config Config, state wipdseed.ClientState) (*wipdjournal.Journal, error) {
+	if config.CommandCatalogue == "m6-step11" {
+		return openStep11Journal(profileRoot, state.RepoID, state.DomainID, state.Epoch, state.EnvironmentID, state.OwnerKeyID)
+	}
+	identity := wipdjournal.Identity{
+		RepoID: state.RepoID, DomainID: state.DomainID, AuthorityEpoch: state.Epoch,
+		EnvironmentID: state.EnvironmentID, OwnerRootSPKI: state.OwnerKeyID,
+	}
+	return wipdjournal.Open(filepath.Join(profileRoot, "environment-journal"), identity)
 }
 
 // Return submits or queries the exact journal identity, then obtains the
@@ -368,7 +476,9 @@ func (runtime *Runtime) Return(ctx context.Context, entry wipdjournal.Entry, ins
 		return empty, err
 	}
 	var receipt []byte
-	if operation.Step10Operation(entry.Command.Request.Operation) {
+	if entry.Command.Request.Operation == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+		receipt, _, err = terminalFromAttachSubmit(ctx, runtime.client, runtime.state.DomainID, entry, frames)
+	} else if operation.Step10Operation(entry.Command.Request.Operation) {
 		receipt, err = runtime.completeSchedulerHook(ctx, entry, frames)
 	} else {
 		receipt, err = terminalFromSubmit(ctx, runtime.client, runtime.state.DomainID, entry, frames)
@@ -546,7 +656,7 @@ func validateConfig(config Config) error {
 		config.RepoID == "" || config.ClientStateDirectory == "" || !filepath.IsAbs(config.ClientStateDirectory) {
 		return errors.New("wipdremote: invalid connected authority profile")
 	}
-	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" && config.CommandCatalogue != "m6-step7" && config.CommandCatalogue != "m6-step8" && config.CommandCatalogue != "m6-step9a" && config.CommandCatalogue != "m6-step9b" && config.CommandCatalogue != "m6-step9c" && config.CommandCatalogue != "m6-step10" {
+	if config.CommandCatalogue != "" && config.CommandCatalogue != "m6-step5" && config.CommandCatalogue != "m6-step7" && config.CommandCatalogue != "m6-step8" && config.CommandCatalogue != "m6-step9a" && config.CommandCatalogue != "m6-step9b" && config.CommandCatalogue != "m6-step9c" && config.CommandCatalogue != "m6-step10" && config.CommandCatalogue != "m6-step11" {
 		return errors.New("wipdremote: unsupported connected command catalogue")
 	}
 	if config.Schema == "wipd.connected-authority-profile/1" {
@@ -569,28 +679,26 @@ func validateConfig(config Config) error {
 }
 
 func registryForConfig(config Config) (*operation.Registry, error) {
-	if config.CommandCatalogue == "m6-step10" {
+	switch config.CommandCatalogue {
+	case "m6-step11":
+		return wipdauthority.NewM6Step11Registry()
+	case "m6-step10":
 		return wipdauthority.NewM6Step10Registry()
-	}
-	if config.CommandCatalogue == "m6-step9c" {
+	case "m6-step9c":
 		return wipdauthority.NewM6Step9CRegistry()
-	}
-	if config.CommandCatalogue == "m6-step9b" {
+	case "m6-step9b":
 		return wipdauthority.NewM6Step9BRegistry()
-	}
-	if config.CommandCatalogue == "m6-step9a" {
+	case "m6-step9a":
 		return wipdauthority.NewM6Step9ARegistry()
-	}
-	if config.CommandCatalogue == "m6-step8" {
+	case "m6-step8":
 		return wipdauthority.NewM6Step8Registry()
-	}
-	if config.CommandCatalogue == "m6-step7" {
+	case "m6-step7":
 		return wipdauthority.NewM6Step7Registry()
-	}
-	if config.CommandCatalogue == "m6-step5" {
+	case "m6-step5":
 		return wipdauthority.NewM6Step5Registry()
+	default:
+		return wipdauthority.NewM5BirthRegistry()
 	}
-	return wipdauthority.NewM5BirthRegistry()
 }
 
 func authorityProfile(config Config) (wipdauthority.Profile, *x509.CertPool, error) {

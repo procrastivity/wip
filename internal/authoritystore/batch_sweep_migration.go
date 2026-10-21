@@ -152,5 +152,14 @@ func UpgradeV16(root string) error {
 	if err = installNamedBatchMembership(db); err != nil {
 		return err
 	}
+	if err = installRouteIndex(db); err != nil {
+		return err
+	}
+	if err = installD115(db); err != nil {
+		return err
+	}
+	if err = installEnvironmentAttach(db); err != nil {
+		return err
+	}
 	return checkSchema(db)
 }

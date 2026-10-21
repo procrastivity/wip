@@ -832,7 +832,8 @@ func validateCommandFold(entry wipdjournal.Entry, start wipdwire.PrefixAnchor, f
 		return ErrCommandStartIdentity
 	}
 	if resultCode, err := commandReceiptCode(entry, fold.CanonicalReceipt); err != nil || resultCode != fold.ResultCode {
-		return fmt.Errorf("%w: terminal receipt does not match the connected operation", ErrCommandStartIdentity)
+		return fmt.Errorf("%w: terminal receipt does not match the connected operation: receipt=%s fold=%s error=%v",
+			ErrCommandStartIdentity, resultCode, fold.ResultCode, err)
 	}
 	return nil
 }
@@ -852,6 +853,15 @@ func operationDefinition(id operation.ID) (operation.Definition, bool) {
 func connectedOperationDefinition(id operation.ID) (operation.Definition, bool) {
 	if id == operation.BatchSweepAnonymousV1.Metadata().Operation {
 		return operation.BatchSweepAnonymousV1, true
+	}
+	if id == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+		return operation.EnvironmentAttachOnceV1, true
+	}
+	if id == operation.RepoRouteBindV1.Metadata().Operation {
+		return operation.RepoRouteBindV1, true
+	}
+	if id == operation.RepoAdoptRemoteV1.Metadata().Operation {
+		return operation.RepoAdoptRemoteV1, true
 	}
 	for _, definition := range operation.Step10Catalogue() {
 		if definition.Metadata().Operation == id {
@@ -908,6 +918,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 	}
 	batchSweepNoEvent := false
 	namedBatchJoinNoEvent := false
+	routeMutationNoEvent := false
 	if code == operation.ResultSucceeded {
 		if resultFields["problem_code"] != nil {
 			return "", ErrCommandStartIdentity
@@ -1011,6 +1022,26 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 				!hasRange || accepted["event_count"] != uint64(1) {
 				return "", ErrCommandStartIdentity
 			}
+		case operation.EnvironmentAttachOnceV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes,
+				"repo_id", "domain_id", "authority_epoch", "environment_id", "clone_id", "worktree_id")
+			input, inputOK := entry.Command.Request.Input.(operation.EnvironmentAttachOnceInput)
+			proof, proofErr := operation.DecodeAttachCheckoutProof([]byte(input.CheckoutProof))
+			if outputErr != nil || !inputOK || proofErr != nil || proof.EnvironmentID != entry.Command.EnvironmentID ||
+				output["repo_id"] != entry.Command.Request.Context.Repo ||
+				output["domain_id"] != entry.Command.AuthorityDomainID || output["authority_epoch"] != entry.Command.ExpectedAuthorityEpoch ||
+				output["environment_id"] != entry.Command.EnvironmentID || !commandStartULID.MatchString(asCommandStartString(output["clone_id"])) ||
+				!commandStartULID.MatchString(asCommandStartString(output["worktree_id"])) || !hasRange || accepted["event_count"] != uint64(1) ||
+				accepted["first_event_id"] != accepted["last_event_id"] {
+				return "", ErrCommandStartIdentity
+			}
+		case operation.RepoRouteBindV1.Metadata().Operation, operation.RepoAdoptRemoteV1.Metadata().Operation:
+			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "repo_id", "domain_id", "epoch")
+			if outputErr != nil || output["repo_id"] != entry.Command.Request.Context.Repo ||
+				output["domain_id"] != entry.Command.AuthorityDomainID || output["epoch"] != entry.Command.ExpectedAuthorityEpoch || hasRange {
+				return "", ErrCommandStartIdentity
+			}
+			routeMutationNoEvent = true
 		case operation.SchedulerResumeV1.Metadata().Operation:
 			output, outputErr := wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")
 			input, inputOK := entry.Command.Request.Input.(operation.RunResumeInput)
@@ -1091,7 +1122,7 @@ func commandReceiptCode(entry wipdjournal.Entry, raw []byte) (operation.ResultCo
 			return "", ErrCommandStartIdentity
 		}
 		if len(metadata.Writes) > 0 && !hasRange && entry.Command.Request.Operation != operation.GateExemptionRepairV1.Metadata().Operation &&
-			entry.Command.Request.Operation != operation.GateDeclareV1.Metadata().Operation && !batchSweepNoEvent && !namedBatchJoinNoEvent {
+			entry.Command.Request.Operation != operation.GateDeclareV1.Metadata().Operation && !batchSweepNoEvent && !namedBatchJoinNoEvent && !routeMutationNoEvent {
 			return "", ErrCommandStartIdentity
 		}
 		if hasRange {
@@ -1218,6 +1249,32 @@ func commandReceiptResult(entry wipdjournal.Entry, raw []byte) (operation.Result
 		}
 		typed = operation.MatterFinishOutput{
 			MatterID: asCommandStartString(output["matter_id"]), State: asCommandStartString(output["state"]), BecameSealed: sealed,
+		}
+	case operation.EnvironmentAttachOnceV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes,
+			"repo_id", "domain_id", "authority_epoch", "environment_id", "clone_id", "worktree_id")
+		epoch, epochOK := output["authority_epoch"].(uint64)
+		if err != nil || !epochOK {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		typed = operation.EnvironmentAttachOnceOutput{
+			RepoID: asCommandStartString(output["repo_id"]), DomainID: asCommandStartString(output["domain_id"]), Epoch: epoch,
+			EnvironmentID: asCommandStartString(output["environment_id"]), CloneID: asCommandStartString(output["clone_id"]),
+			WorktreeID: asCommandStartString(output["worktree_id"]),
+		}
+	case operation.RepoRouteBindV1.Metadata().Operation, operation.RepoAdoptRemoteV1.Metadata().Operation:
+		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "repo_id", "domain_id", "epoch")
+		epoch, epochOK := output["epoch"].(uint64)
+		if err != nil || !epochOK {
+			return operation.Result{}, ErrCommandStartIdentity
+		}
+		routeOutput := operation.RepoRouteBindOutput{
+			RepoID: asCommandStartString(output["repo_id"]), DomainID: asCommandStartString(output["domain_id"]), Epoch: epoch,
+		}
+		if entry.Command.Request.Operation == operation.RepoAdoptRemoteV1.Metadata().Operation {
+			typed = operation.RepoAdoptRemoteOutput(routeOutput)
+		} else {
+			typed = routeOutput
 		}
 	case operation.RunFinishV1.Metadata().Operation:
 		output, err = wipdwire.DecodeCanonicalMap(outputBytes, "run_id", "state")

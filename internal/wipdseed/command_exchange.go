@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -56,22 +57,67 @@ func (client *CommandExchangeClient) SupportsOperation(id operation.ID) bool {
 // proves its private-key possession with mTLS, and negotiates the exact birth
 // operation set required by the caller.
 func OpenCommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID) (*CommandExchangeClient, error) {
-	return openCommandExchangeClient(ctx, profile, roots, directory, operations, false)
+	return openCommandExchangeClient(ctx, profile, roots, directory, directory, "", operations, false, false)
 }
 
 // OpenCommandExchangeClientWithNamedBatchRead additionally requires the
 // authority's explicit batch.read@v1 capability during negotiation.
 func OpenCommandExchangeClientWithNamedBatchRead(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID) (*CommandExchangeClient, error) {
-	return openCommandExchangeClient(ctx, profile, roots, directory, operations, true)
+	return openCommandExchangeClient(ctx, profile, roots, directory, directory, "", operations, true, false)
 }
 
-func openCommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID, namedBatchRead bool) (*CommandExchangeClient, error) {
+// OpenStep11CommandExchangeClient requires the canonical profile-local
+// Environment credential in addition to validating the Repo-bound state. The
+// Step 11 runtime uses it before opening the Environment journal.
+func OpenStep11CommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory string, operations []operation.ID) (*CommandExchangeClient, error) {
+	return OpenStep11CommandExchangeClientWithCredential(ctx, profile, roots, directory, directory, operations)
+}
+
+// OpenStep11CommandExchangeClientWithCredential validates the Repo-bound
+// command state in directory against the canonical profile-local Environment
+// credential in credentialDirectory without copying private credential data.
+func OpenStep11CommandExchangeClientWithCredential(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool,
+	directory, credentialDirectory string, operations []operation.ID,
+) (*CommandExchangeClient, error) {
+	return openCommandExchangeClient(ctx, profile, roots, directory, credentialDirectory, "", operations, true, true)
+}
+
+// OpenStep11CommandExchangeClientForRepoWithCredential opens authority M2
+// state for one receipt-authorized Repo while validating the Environment
+// credential from its separate canonical profile directory. This supports
+// D54-selected Repo identities without pinning them into the route profile.
+func OpenStep11CommandExchangeClientForRepoWithCredential(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool,
+	directory, credentialDirectory, repoID string, operations []operation.ID,
+) (*CommandExchangeClient, error) {
+	if !clientULIDPattern.MatchString(repoID) {
+		return nil, ErrInvalidClientState
+	}
+	return openCommandExchangeClient(ctx, profile, roots, directory, credentialDirectory, repoID, operations, true, true)
+}
+
+func openCommandExchangeClient(ctx context.Context, profile wipdauthority.Profile, roots *x509.CertPool, directory, credentialDirectory, expectedRepoID string,
+	operations []operation.ID, namedBatchRead, requireCanonicalCredential bool,
+) (*CommandExchangeClient, error) {
 	if ctx == nil || roots == nil || directory == "" || len(operations) == 0 {
 		return nil, ErrInvalidClientState
 	}
-	state, err := loadInstalledClientState(directory, profile)
+	state, err := loadInstalledClientStateModeWithCredential(directory, profile, requireCanonicalCredential, credentialDirectory, expectedRepoID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validate installed M2 state: %w", err)
+	}
+	if requireCanonicalCredential {
+		credential, credentialErr := loadEnvironmentCredential(credentialDirectory)
+		if credentialErr != nil || credential.DomainID != state.DomainID || credential.Epoch != state.Epoch ||
+			credential.EnvironmentID != state.EnvironmentID || credential.OwnerKeyID != state.OwnerKeyID || len(credential.CertificateDER) != 2 {
+			clear(credential.PrivateKeyPKCS8)
+			clear(state.PrivateKeyPKCS8)
+			return nil, fmt.Errorf("validate canonical Environment credential: %w", ErrInvalidClientState)
+		}
+		clear(state.PrivateKeyPKCS8)
+		state.PrivateKeyPKCS8 = bytes.Clone(credential.PrivateKeyPKCS8)
+		state.CertificateDER = clone2D(credential.CertificateDER)
+		state.SPKIDigest = credential.SPKIDigest
+		clear(credential.PrivateKeyPKCS8)
 	}
 	privateKey, err := x509.ParsePKCS8PrivateKey(state.PrivateKeyPKCS8)
 	if err != nil {
@@ -81,7 +127,7 @@ func openCommandExchangeClient(ctx context.Context, profile wipdauthority.Profil
 	certificate, err := validateStoredCertificate(state, privateKey, time.Now())
 	if err != nil {
 		clear(state.PrivateKeyPKCS8)
-		return nil, err
+		return nil, fmt.Errorf("validate stored Environment certificate: %w", err)
 	}
 	client, err := profile.HTTPClientWithCertificate(roots, &certificate)
 	if err != nil {
@@ -92,7 +138,7 @@ func openCommandExchangeClient(ctx context.Context, profile wipdauthority.Profil
 	if err != nil {
 		client.CloseIdleConnections()
 		clear(state.PrivateKeyPKCS8)
-		return nil, err
+		return nil, fmt.Errorf("negotiate M2 command capabilities: %w", err)
 	}
 	return &CommandExchangeClient{profile: profile, client: client, limits: limits, state: state}, nil
 }
@@ -315,7 +361,20 @@ func (client *CommandExchangeClient) Close() error {
 }
 
 func loadInstalledClientState(directory string, profile wipdauthority.Profile) (ClientState, error) {
+	return loadInstalledClientStateMode(directory, profile, false)
+}
+
+func loadInstalledClientStateMode(directory string, profile wipdauthority.Profile, requireCanonicalCredential bool) (ClientState, error) {
+	return loadInstalledClientStateModeWithCredential(directory, profile, requireCanonicalCredential, directory, "")
+}
+
+func loadInstalledClientStateModeWithCredential(directory string, profile wipdauthority.Profile, requireCanonicalCredential bool,
+	credentialDirectory, expectedRepoID string,
+) (ClientState, error) {
 	var empty ClientState
+	if requireCanonicalCredential && credentialDirectory == "" {
+		return empty, ErrInvalidClientState
+	}
 	lock, err := lockInstalledState(directory)
 	if err != nil {
 		return empty, err
@@ -337,7 +396,29 @@ func loadInstalledClientState(directory string, profile wipdauthority.Profile) (
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var state ClientState
-	if err = decoder.Decode(&state); err != nil || decoder.Decode(new(any)) != io.EOF || validateInstalledState(state, profile) != nil {
+	if err = decoder.Decode(&state); err == nil {
+		if trailingErr := decoder.Decode(new(any)); trailingErr != io.EOF {
+			err = ErrInvalidClientState
+		}
+	}
+	var validationErr error
+	if err == nil {
+		if expectedRepoID == "" {
+			validationErr = validateInstalledState(state, profile)
+		} else {
+			validationErr = validateInstalledStateForRepo(state, profile, expectedRepoID)
+		}
+	}
+	if err != nil || validationErr != nil {
+		clear(state.PrivateKeyPKCS8)
+		return empty, ErrInvalidClientState
+	}
+	if requireCanonicalCredential {
+		err = validateStateCredentialRequired(credentialDirectory, state)
+	} else {
+		err = validateStateCredential(directory, state)
+	}
+	if err != nil {
 		clear(state.PrivateKeyPKCS8)
 		return empty, ErrInvalidClientState
 	}

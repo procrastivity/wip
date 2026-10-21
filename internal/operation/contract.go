@@ -128,6 +128,14 @@ const (
 	ProblemBatchMembershipMissing ProblemCode = "refusal.batch-membership-missing"
 )
 
+// Route-bind refusals distinguish the two authoritative uniqueness conflicts
+// and an already-fenced Environment identity.
+const (
+	ProblemRouteKeyBoundElsewhere ProblemCode = "refusal.repo-route-key-bound-elsewhere"
+	ProblemRouteRepoHasKey        ProblemCode = "refusal.repo-route-repo-has-key"
+	ProblemRouteIdentityFenced    ProblemCode = "refusal.repo-route-identity-fenced"
+)
+
 // Problem carries one coded semantic failure.
 type Problem struct {
 	Code    ProblemCode

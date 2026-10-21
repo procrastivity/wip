@@ -920,7 +920,8 @@ func receiptEventRange(ctx context.Context, tx *sql.Tx, installed wipdwire.Prefi
 		return nil, 0, 0, ErrInvalidTransfer
 	}
 	if fields["accepted_events"] == nil {
-		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) || batchSweepReceiptNoEvent(entry, raw) || namedBatchJoinReceiptNoEvent(entry, raw) {
+		if repairReceiptNoEvent(entry, raw) || gateDeclarationReceiptNoEvent(entry, raw) || batchSweepReceiptNoEvent(entry, raw) ||
+			namedBatchJoinReceiptNoEvent(entry, raw) || routeMutationReceiptNoEvent(entry, raw) {
 			return nil, 0, 0, nil
 		}
 		return nil, 0, 0, ErrInvalidTransfer
@@ -1220,7 +1221,8 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 				return ErrInvalidTransfer
 			}
 		}
-		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) && !namedBatchJoinReceiptNoEvent(entry, raw) {
+		if len(eventIDs) == 0 && !repairReceiptNoEvent(entry, raw) && !gateDeclarationReceiptNoEvent(entry, raw) && !batchSweepReceiptNoEvent(entry, raw) &&
+			!namedBatchJoinReceiptNoEvent(entry, raw) && !routeMutationReceiptNoEvent(entry, raw) {
 			return fmt.Errorf("%w: successful effectful fold has no verified events", ErrInvalidTransfer)
 		}
 		if len(eventIDs) == 0 {
@@ -1239,6 +1241,38 @@ func validateTerminalReceipt(entry Entry, result operation.ResultCode, raw []byt
 		}
 	}
 	return nil
+}
+
+func routeMutationReceiptNoEvent(entry Entry, raw []byte) bool {
+	var definition operation.Definition
+	switch entry.Command.Request.Operation {
+	case operation.RepoRouteBindV1.Metadata().Operation:
+		definition = operation.RepoRouteBindV1
+	case operation.RepoAdoptRemoteV1.Metadata().Operation:
+		definition = operation.RepoAdoptRemoteV1
+	default:
+		return false
+	}
+	if definition.ValidateRequest(entry.Command.Request) != nil {
+		return false
+	}
+	fields, err := wipdwire.DecodeCanonicalMap(raw,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || fields["accepted_events"] != nil {
+		return false
+	}
+	result, ok := fields["result"].(map[string]any)
+	if !ok || !wipdwire.ExactMapKeys(result, "code", "output", "problem_code") ||
+		result["code"] != string(operation.ResultSucceeded) || result["problem_code"] != nil {
+		return false
+	}
+	rawOutput, ok := result["output"].([]byte)
+	if !ok {
+		return false
+	}
+	output, err := wipdwire.DecodeCanonicalMap(rawOutput, "repo_id", "domain_id", "epoch")
+	return err == nil && output["repo_id"] == entry.Command.Request.Context.Repo &&
+		output["domain_id"] == entry.Command.AuthorityDomainID && output["epoch"] == entry.Command.ExpectedAuthorityEpoch
 }
 
 func gateDeclarationReceiptNoEvent(entry Entry, raw []byte) bool {

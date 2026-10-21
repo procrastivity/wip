@@ -155,7 +155,7 @@ func UpgradeV19(root string) error {
 	if err = installNamedBatchMembership(db); err != nil {
 		return err
 	}
-	if err = checkSchema(db); err != nil {
+	if err = checkSchemaVersion(db, 20); err != nil {
 		return err
 	}
 	if err = checkNamedBatchMembershipState(db); err != nil {

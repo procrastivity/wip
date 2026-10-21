@@ -2697,3 +2697,62 @@ func step7IndependentPrefixAnchor(records []wipdwire.EventRecord) wipdwire.Prefi
 	}
 	return anchor
 }
+
+func TestLoadInstalledClientStateRequiresExactEOFBeforeValidation(t *testing.T) {
+	fixture := newClientFixture(t)
+	directory := privateTempDir(t)
+	if err := SavePending(directory, fixture.identity); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := EnrollEnvironment(context.Background(), fixture.profile, fixture.roots, fixture.ownerRoot,
+		fixture.delegation, fixture.identity, fixture.grant, directory)
+	if err != nil {
+		t.Fatalf("install canonical Environment credential: %v", err)
+	}
+	clear(credential.PrivateKeyPKCS8)
+	state, err := SeedRepoFromEnvironmentCredential(context.Background(), fixture.profile, fixture.roots,
+		fixture.ownerRoot, fixture.delegation, testRepoID, directory, directory)
+	if err != nil {
+		t.Fatalf("seed valid Repo state from canonical credential: %v", err)
+	}
+	if _, err = loadInstalledClientStateMode(directory, fixture.profile, true); err != nil {
+		t.Fatalf("valid installed state rejected: %v (state=%v credential=%v)", err,
+			validateInstalledState(state, fixture.profile), validateStateCredentialRequired(directory, state))
+	}
+	clear(state.PrivateKeyPKCS8)
+
+	path := filepath.Join(directory, stateName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corrupted ClientState
+	if err = json.Unmarshal(raw, &corrupted); err != nil {
+		t.Fatal(err)
+	}
+	corrupted.Schema = "wipd.invalid-client-state/1"
+	invalidState, err := json.Marshal(corrupted)
+	clear(corrupted.PrivateKeyPKCS8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		suffix []byte
+	}{
+		{name: "trailing JSON object", suffix: []byte("\n{}\n")},
+		{name: "invalid trailing bytes", suffix: []byte("\n{invalid")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := append(bytes.Clone(invalidState), test.suffix...)
+			if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			loaded, loadErr := loadInstalledClientStateMode(directory, fixture.profile, true)
+			clear(loaded.PrivateKeyPKCS8)
+			if !errors.Is(loadErr, ErrInvalidClientState) {
+				t.Fatalf("load with %s = %v; want ErrInvalidClientState", test.name, loadErr)
+			}
+		})
+	}
+}

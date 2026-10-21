@@ -630,17 +630,29 @@ type Repo struct {
 
 // Repo reads one Repo by identity.
 func (v View) Repo(ctx context.Context, id string) (Repo, error) {
+	r, found, err := v.RepoByID(ctx, id)
+	if err != nil {
+		return Repo{}, err
+	}
+	if !found {
+		return Repo{}, fmt.Errorf("store: no repo %s", id)
+	}
+	return r, nil
+}
+
+// RepoByID reads a Repo by identity without conflating absence and storage errors.
+func (v View) RepoByID(ctx context.Context, id string) (Repo, bool, error) {
 	var r Repo
 	err := v.q.QueryRowContext(ctx,
 		`SELECT id, COALESCE(remote_url, ''), COALESCE(identity_remote, ''), COALESCE(label, '')
 		 FROM repos WHERE id = ?`, id).Scan(&r.ID, &r.RemoteURL, &r.IdentityRemote, &r.Label)
 	if err == sql.ErrNoRows {
-		return Repo{}, fmt.Errorf("store: no repo %s", id)
+		return Repo{}, false, nil
 	}
 	if err != nil {
-		return Repo{}, fmt.Errorf("store: read repo %s: %w", id, err)
+		return Repo{}, false, fmt.Errorf("store: read repo %s: %w", id, err)
 	}
-	return r, nil
+	return r, true, nil
 }
 
 // RepoByRemote resolves a Repo by its natural key.
@@ -711,17 +723,29 @@ func (v View) CloneByCommonDir(ctx context.Context, gitCommonDir string) (Clone,
 
 // Clone reads one Clone by identity.
 func (v View) Clone(ctx context.Context, id string) (Clone, error) {
+	c, found, err := v.CloneByID(ctx, id)
+	if err != nil {
+		return Clone{}, err
+	}
+	if !found {
+		return Clone{}, fmt.Errorf("store: no clone %s", id)
+	}
+	return c, nil
+}
+
+// CloneByID reads a Clone by identity without conflating absence and storage errors.
+func (v View) CloneByID(ctx context.Context, id string) (Clone, bool, error) {
 	var c Clone
 	err := v.q.QueryRowContext(ctx,
 		`SELECT id, repo, git_common_dir, label FROM clones WHERE id = ?`, id).
 		Scan(&c.ID, &c.Repo, &c.GitCommonDir, &c.Label)
 	if err == sql.ErrNoRows {
-		return Clone{}, fmt.Errorf("store: no clone %s", id)
+		return Clone{}, false, nil
 	}
 	if err != nil {
-		return Clone{}, fmt.Errorf("store: read clone %s: %w", id, err)
+		return Clone{}, false, fmt.Errorf("store: read clone %s: %w", id, err)
 	}
-	return c, nil
+	return c, true, nil
 }
 
 // Worktree is a Worktree row. Name is empty for the main worktree (D37's null
@@ -734,17 +758,29 @@ type Worktree struct {
 
 // Worktree reads one Worktree by identity.
 func (v View) Worktree(ctx context.Context, id string) (Worktree, error) {
+	w, found, err := v.WorktreeByID(ctx, id)
+	if err != nil {
+		return Worktree{}, err
+	}
+	if !found {
+		return Worktree{}, fmt.Errorf("store: no worktree %s", id)
+	}
+	return w, nil
+}
+
+// WorktreeByID reads a Worktree by identity without conflating absence and storage errors.
+func (v View) WorktreeByID(ctx context.Context, id string) (Worktree, bool, error) {
 	var w Worktree
 	err := v.q.QueryRowContext(ctx,
 		`SELECT id, clone, COALESCE(name, '') FROM worktrees WHERE id = ?`, id).
 		Scan(&w.ID, &w.Clone, &w.Name)
 	if err == sql.ErrNoRows {
-		return Worktree{}, fmt.Errorf("store: no worktree %s", id)
+		return Worktree{}, false, nil
 	}
 	if err != nil {
-		return Worktree{}, fmt.Errorf("store: read worktree %s: %w", id, err)
+		return Worktree{}, false, fmt.Errorf("store: read worktree %s: %w", id, err)
 	}
-	return w, nil
+	return w, true, nil
 }
 
 // WorktreeByName resolves a Worktree by its natural key: the clone it belongs

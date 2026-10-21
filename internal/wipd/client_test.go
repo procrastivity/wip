@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -287,6 +288,77 @@ func TestClientProcessRestartRetainsFixtureState(t *testing.T) {
 	}
 }
 
+func TestStep11ClientResolvesRouteThroughAuthenticatedLocalQuery(t *testing.T) {
+	registry := operation.NewRegistry()
+	definitions := append(operation.Step11Catalogue(), operation.SchedulerOrchestrateV1)
+	for _, definition := range definitions {
+		if err := registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed}}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newServer(registry, 2)
+	want := operation.RouteResolveOutput{
+		DomainID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Epoch: 7, ConnectionProfile: "primary",
+	}
+	var called atomic.Bool
+	if err := server.ConfigureRouteResolve(RouteResolverFunc(func(_ context.Context, peer *PeerProcess) (operation.RouteResolveOutput, error) {
+		called.Store(true)
+		if peer == nil || peer.PID() != os.Getpid() {
+			t.Errorf("route resolver received unauthenticated peer: %+v", peer)
+		}
+		return want, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	profileRoot, _ := startLocalIPCServer(t, server)
+	profile, err := wipdprofile.Resolve(profileRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := connectProfileCapabilities(context.Background(), profile, true, false, false, false, false, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	got, err := client.ResolveRoute(context.Background())
+	if err != nil || got.RepoID != nil || got.DomainID != want.DomainID || got.Epoch != want.Epoch ||
+		got.ConnectionProfile != want.ConnectionProfile || !called.Load() {
+		t.Fatalf("ResolveRoute() = %+v, %v, called=%t; want %+v", got, err, called.Load(), want)
+	}
+}
+
+func TestStep11ClientAcceptsReadOnlyPrebindingCatalogue(t *testing.T) {
+	registry := operation.NewRegistry()
+	if err := registry.Register(operation.RouteResolveV1, func(context.Context, operation.Request) operation.Result {
+		return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithRegistry(registry)
+	want := operation.RouteResolveOutput{DomainID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Epoch: 7, ConnectionProfile: "primary"}
+	if err := server.ConfigureRouteResolve(RouteResolverFunc(func(context.Context, *PeerProcess) (operation.RouteResolveOutput, error) {
+		return want, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	profileRoot, _ := startLocalIPCServer(t, server)
+	profile, err := wipdprofile.Resolve(profileRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := connectProfileCapabilitiesWithRouteResolve(context.Background(), profile, false, false, false, false, false, false, false, true)
+	if err != nil {
+		t.Fatalf("connect to the intentionally read-only prebinding catalogue: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	got, err := client.ResolveRoute(context.Background())
+	if err != nil || got.RepoID != nil || got.DomainID != want.DomainID || got.Epoch != want.Epoch || got.ConnectionProfile != want.ConnectionProfile {
+		t.Fatalf("prebinding ResolveRoute() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
 func TestClientProcessRestartHelper(t *testing.T) {
 	if os.Getenv("WIPD_CLIENT_RESTART_HELPER") != "1" {
 		return
@@ -313,6 +385,120 @@ func TestClientProcessRestartHelper(t *testing.T) {
 			t.Fatalf("client subprocess result = %+v, want typed success", result)
 		}
 	}
+}
+
+func TestD115SubmitPreservesDurableDispositionOverAuthenticatedIPC(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		disposition string
+		want        error
+	}{
+		{name: "unknown", disposition: "outcome-unknown", want: ErrOutcomeUnknown},
+		{name: "unsent", disposition: "definitely-unsent", want: ErrD115DefinitelyUnsent},
+		{name: "receipt-durable", disposition: "receipt-durable", want: ErrD115ReceiptDurable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := NewServer()
+			if err := server.ConfigureD115Lifecycle(testD115DispositionHandler{disposition: test.disposition}); err != nil {
+				t.Fatal(err)
+			}
+			profileRoot, _ := startLocalIPCServer(t, server)
+			client, err := Connect(context.Background(), profileRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = client.Close() }()
+			_, err = client.D115Submit(context.Background(), "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+			if !errors.Is(err, test.want) {
+				t.Fatalf("D115Submit() error=%v; want errors.Is(_, %v)", err, test.want)
+			}
+		})
+	}
+}
+
+func TestAttachLifecycleUsesAuthenticatedLocalIPC(t *testing.T) {
+	registry := operation.NewRegistry()
+	for _, definition := range operation.Step11Catalogue() {
+		if err := registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{Code: operation.ProblemExecutionFailed}}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := &testAttachLifecycleHandler{}
+	server := NewServerWithRegistry(registry)
+	if err := server.ConfigureAttachLifecycle(handler); err != nil {
+		t.Fatal(err)
+	}
+	profileRoot, _ := startLocalIPCServer(t, server)
+	client, err := ConnectAttachLifecycle(context.Background(), profileRoot)
+	if err != nil {
+		t.Fatalf("connect attach lifecycle IPC client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	grant := "test-owner-root-signed-attach-grant"
+	attempt, err := client.AttachOnce(context.Background(), grant)
+	if err != nil || attempt.AttemptID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" || attempt.State != "installed" ||
+		string(attempt.Receipt) != "canonical-receipt" || string(attempt.SignedReceipt) != "portable-signature" {
+		t.Fatalf("authenticated AttachOnce = %+v, %v", attempt, err)
+	}
+	status, err := client.AttachStatus(context.Background(), attempt.AttemptID)
+	if err != nil || status.AttemptID != attempt.AttemptID || status.State != attempt.State ||
+		string(status.Receipt) != string(attempt.Receipt) || string(status.SignedReceipt) != string(attempt.SignedReceipt) {
+		t.Fatalf("authenticated AttachStatus = %+v, %v", status, err)
+	}
+	if handler.prepareCalls.Load() != 1 || handler.statusCalls.Load() != 1 {
+		t.Fatalf("attach handler calls prepare=%d status=%d; want one each", handler.prepareCalls.Load(), handler.statusCalls.Load())
+	}
+}
+
+type testAttachLifecycleHandler struct {
+	prepareCalls atomic.Int32
+	statusCalls  atomic.Int32
+}
+
+func (handler *testAttachLifecycleHandler) AttachOnce(_ context.Context, peer *PeerProcess, grant string) (AttachLocalAttempt, error) {
+	handler.prepareCalls.Add(1)
+	if peer == nil || peer.PID() <= 0 || grant != "test-owner-root-signed-attach-grant" {
+		return AttachLocalAttempt{}, errors.New("attach IPC did not preserve authenticated request context")
+	}
+	return AttachLocalAttempt{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", State: "installed",
+		Receipt: []byte("canonical-receipt"), SignedReceipt: []byte("portable-signature"),
+	}, nil
+}
+
+func (handler *testAttachLifecycleHandler) AttachStatus(_ context.Context, peer *PeerProcess, attemptID string) (AttachLocalAttempt, error) {
+	handler.statusCalls.Add(1)
+	if peer == nil || peer.PID() <= 0 || attemptID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+		return AttachLocalAttempt{}, errors.New("attach status IPC did not preserve authenticated request context")
+	}
+	return AttachLocalAttempt{
+		AttemptID: attemptID, State: "installed",
+		Receipt: []byte("canonical-receipt"), SignedReceipt: []byte("portable-signature"),
+	}, nil
+}
+
+type testD115DispositionHandler struct{ disposition string }
+
+func (handler testD115DispositionHandler) Prepare(context.Context, *PeerProcess, string) (D115LocalAttempt, error) {
+	return D115LocalAttempt{}, errors.New("unexpected prepare")
+}
+
+func (handler testD115DispositionHandler) ImportProof(context.Context, string, []byte) (D115LocalAttempt, error) {
+	return D115LocalAttempt{}, errors.New("unexpected import")
+}
+
+func (handler testD115DispositionHandler) Submit(context.Context, *PeerProcess, string) ([]byte, error) {
+	return nil, &D115SubmitDispositionError{Disposition: handler.disposition}
+}
+
+func (handler testD115DispositionHandler) Status(context.Context, string) (D115LocalAttempt, error) {
+	return D115LocalAttempt{}, errors.New("unexpected status")
+}
+
+func (handler testD115DispositionHandler) Cancel(context.Context, string) (D115LocalAttempt, error) {
+	return D115LocalAttempt{}, errors.New("unexpected cancel")
 }
 
 func startLocalIPCServer(t *testing.T, server *Server) (string, *Daemon) {

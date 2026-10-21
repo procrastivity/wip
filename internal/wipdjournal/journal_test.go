@@ -123,6 +123,46 @@ func TestPrepareCommandSurvivesLostResponseAndRestart(t *testing.T) {
 	}
 }
 
+func TestStep11CommandsShareEnvironmentSequenceAcrossRepos(t *testing.T) {
+	identity := testIdentity
+	identity.RepoID = identity.DomainID
+	root := filepath.Join(privateTempDir(t), "step11-environment-journal")
+	journal, err := Open(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = journal.Close() }()
+	first, err := journal.PrepareCommand(CommandInput{
+		ID: testCommandPrefix + "40",
+		Request: operation.Request{
+			Operation: operation.RepoRouteBindV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: testRepoID, Clone: testCommandPrefix + "41", Worktree: testCommandPrefix + "42"},
+			Input:   operation.RepoRouteBindInput{NormalizedKey: "github.com/acme/first"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("prepare first Repo route mutation: %v", err)
+	}
+	second, err := journal.PrepareCommand(CommandInput{
+		ID: testCommandPrefix + "43",
+		Request: operation.Request{
+			Operation: operation.RepoAdoptRemoteV1.Metadata().Operation, Actor: "human",
+			Context: operation.Context{Repo: testCommandPrefix + "44", Clone: testCommandPrefix + "45", Worktree: testCommandPrefix + "46"},
+			Input:   operation.RepoAdoptRemoteInput{NormalizedKey: "github.com/acme/second"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("prepare second Repo route mutation: %v", err)
+	}
+	if first.EnvironmentSeq != 1 || second.EnvironmentSeq != 2 {
+		t.Fatalf("Step 11 Environment sequences = %d then %d; want 1 then 2 across Repo contexts", first.EnvironmentSeq, second.EnvironmentSeq)
+	}
+	entries, err := journal.Entries()
+	if err != nil || len(entries) != 2 || entries[1].Command.Request.Context.Repo == entries[0].Command.Request.Context.Repo {
+		t.Fatalf("cross-Repo Environment journal entries = %+v, %v", entries, err)
+	}
+}
+
 func TestPreparedCommandSurvivesWriterProcessCrashBeforeResponse(t *testing.T) {
 	root := filepath.Join(privateTempDir(t), "client-profile")
 	command := exec.Command(os.Args[0], "-test.run=^TestPrepareCommandCrashHelper$")

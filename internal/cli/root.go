@@ -66,7 +66,7 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 				return wiperr.New("transport.unavailable", "--experimental-wipd-profile requires a non-empty explicit profile root; no legacy store fallback was attempted")
 			}
 			if profileExplicit && cmd.Parent() != nil &&
-				(cmd.Parent().Name() != "wip" || cmd.Name() != "status") {
+				(cmd.Parent().Name() != "wip" || cmd.Name() != "status") && !isD115Command(cmd) {
 				return wiperr.New("transport.unavailable", "this WIP verb is not routed through the experimental local profile; no legacy store fallback was attempted")
 			}
 			jsonOut, err := cmd.Flags().GetBool("json")
@@ -108,6 +108,7 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	// this global also disables sorting inside that group.
 	cobra.EnableCommandSorting = false
 	root.AddCommand(statusverb.PorcelainCommand(streams))
+	root.AddCommand(d115RepositoryCommand(streams))
 	root.AddCommand(backlogverb.PorcelainCommand(streams))
 	root.AddCommand(nextverb.AliasCommand(streams))
 	root.AddCommand(initverb.Command(streams))
@@ -166,6 +167,13 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	}
 
 	return root
+}
+
+func isD115Command(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "prepare" && cmd.Name() != "import-proof" && cmd.Name() != "submit" && cmd.Name() != "status" && cmd.Name() != "cancel" {
+		return false
+	}
+	return cmd.Parent() != nil && cmd.Parent().Name() == "create-local" && cmd.Parent().Parent() != nil && cmd.Parent().Parent().Name() == "repo"
 }
 
 // movedVerbs derives the flat-invocation moved set from the plumbing

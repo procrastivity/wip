@@ -40,6 +40,35 @@ const (
 	m5TestMatter = "01KZ7XHAQT1S46NYPN1PW1DX3E"
 )
 
+func TestAttachCommandTerminalCarriesPortableSignedReceipt(t *testing.T) {
+	receipt := []byte{0xa1, 0x61, 0x78, 0x01}
+	signed := []byte{0xa1, 0x61, 0x79, 0x02}
+	status := authoritystore.CommandStatus{
+		Operation: operation.EnvironmentAttachOnceV1.Metadata().Operation.Name,
+		Receipt:   receipt, SignedReceipt: signed,
+	}
+	payload, kind, err := commandTerminalPayload(status, m5TestMatter, "sha256:request")
+	if err != nil || kind != "command.terminal" {
+		t.Fatalf("attach terminal = kind %q, err %v", kind, err)
+	}
+	var terminal wipdwire.SignedCommandTerminal
+	if err = wipdwire.DecodeCanonical(payload, &terminal,
+		"schema", "command_id", "request_hash", "receipt", "signed_receipt"); err != nil ||
+		terminal.Schema != "wipd.signed-command-terminal/1" || terminal.CommandID != m5TestMatter ||
+		terminal.RequestHash != "sha256:request" || !bytes.Equal(terminal.Receipt, receipt) || !bytes.Equal(terminal.SignedReceipt, signed) {
+		t.Fatalf("attach terminal payload = %+v, err %v", terminal, err)
+	}
+	status.SignedReceipt = nil
+	if _, _, err = commandTerminalPayload(status, m5TestMatter, "sha256:request"); err == nil {
+		t.Fatal("attach terminal without portable signature was emitted")
+	}
+	legacy := authoritystore.CommandStatus{Operation: "run.finish", Receipt: receipt}
+	legacyPayload, legacyKind, err := commandTerminalPayload(legacy, m5TestMatter, "sha256:request")
+	if err != nil || legacyKind != "command.terminal" || !bytes.Equal(legacyPayload, receipt) {
+		t.Fatalf("non-attach terminal compatibility = kind %q payload %x err %v", legacyKind, legacyPayload, err)
+	}
+}
+
 type m5CommandFixture struct {
 	store        *authoritystore.Store
 	root         string

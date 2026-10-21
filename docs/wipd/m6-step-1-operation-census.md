@@ -77,7 +77,7 @@ by default.
 | 8 | Dependency and bind/unbind/rebind reference operations. |
 | 9 | Named Batch membership operations and reads. |
 | 10 | Run/Dispatch/role and non-CLI scheduler orchestration/resume. |
-| 11 | D115–D116 route resolution/discovery, remote-less creation, one-use attach, remote adoption. |
+| 11 | D115–D116 route resolution/discovery, remote-less creation, one-use attach, remote adoption. Linux peer discovery uses UID plus kernel-bound pidfd and opened-CWD/Git revalidation; Darwin checkout discovery fails closed before authority IPC and remains outstanding pending a separately authorized trusted mechanism and runtime validation. |
 | 12 | D117–D118 certificate renewal/rotation/lost-key Environment identity and revocation. |
 | 13 | Tier enrollment and Clone/Worktree administration/relink/labels. |
 | 14 | D125 cursor delivery and D124 domain-wide Session ordering. |

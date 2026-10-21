@@ -790,6 +790,15 @@ func foldEventRecordsCore(records []wipdwire.EventRecord, domainID string) (wipd
 			return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
 		}
 		switch kind {
+		case "environment.checkout-attached/1":
+			lifecycle, valid := decodeFoldedLifecycleEvent(fields, record, domainID)
+			payload, payloadOK := fields["payload"].(map[string]any)
+			if !valid || !payloadOK || !wipdwire.ExactMapKeys(payload, "repo_id", "environment_id", "normalized_repo_key", "clone_id", "worktree_id",
+				"common_dir_digest", "git_dir_digest", "worktree_name", "grant_id", "grant_digest") ||
+				fields["repo_id"] != lifecycle.repoID || fields["subject_id"] != lifecycle.repoID ||
+				!validStep11AttachEvent(payload, lifecycle.repoID, lifecycle.environmentID) {
+				return wipdwire.PrefixAnchor{}, nil, nil, ErrInvalidClientState
+			}
 		case "matter.created":
 			var event matterCreatedEvent
 			if decodeM1Event(record.Record, &event) != nil || event.Schema != "wipd.event/1" || event.EventID != record.EventID ||
@@ -1666,6 +1675,25 @@ func validateContentManifest(content []json.RawMessage, evidence map[string]stru
 	return validateContentManifestForMatter(content, "", evidence, entries)
 }
 
+func validStep11AttachEvent(payload map[string]any, repoID, environmentID string) bool {
+	repo, repoOK := payload["repo_id"].(string)
+	environment, environmentOK := payload["environment_id"].(string)
+	key, keyOK := payload["normalized_repo_key"].(string)
+	clone, cloneOK := payload["clone_id"].(string)
+	worktree, worktreeOK := payload["worktree_id"].(string)
+	worktreeName, worktreeNameOK := payload["worktree_name"].(string)
+	grant, grantOK := payload["grant_id"].(string)
+	commonDigest, commonOK := payload["common_dir_digest"].(string)
+	gitDigest, gitOK := payload["git_dir_digest"].(string)
+	grantDigest, grantDigestOK := payload["grant_digest"].(string)
+	return repoOK && repo == repoID && environmentOK && environment == environmentID &&
+		keyOK && strings.TrimSpace(key) == key && strings.Contains(key, "/") && !strings.ContainsAny(key, "*?#") &&
+		cloneOK && clientULIDPattern.MatchString(clone) && worktreeOK && clientULIDPattern.MatchString(worktree) &&
+		worktreeNameOK && (worktreeName == "" || worktreeName != "." && worktreeName != ".." && !strings.ContainsAny(worktreeName, "/\\\x00\r\n")) &&
+		grantOK && clientULIDPattern.MatchString(grant) && commonOK && validDigest(commonDigest) &&
+		gitOK && validDigest(gitDigest) && grantDigestOK && validDigest(grantDigest)
+}
+
 func validateClaimContentManifest(content []json.RawMessage, records []wipdwire.EventRecord, evidence map[string]struct{}, entries []wipdwire.BlobManifestEntry) error {
 	matterID := ""
 	for _, record := range records {
@@ -2044,8 +2072,15 @@ func clientManifestChain(entries []wipdwire.BlobManifestEntry) (string, error) {
 }
 
 func validateInstalledState(state ClientState, profile wipdauthority.Profile) error {
+	if profile.M5LabRepoID() != state.RepoID {
+		return ErrInvalidClientState
+	}
+	return validateInstalledStateForRepo(state, profile, state.RepoID)
+}
+
+func validateInstalledStateForRepo(state ClientState, profile wipdauthority.Profile, repoID string) error {
 	if state.Schema != "wipd.m5-client-state/1" || state.DomainID != profile.DomainID() || state.Epoch != profile.Epoch() ||
-		profile.M5LabRepoID() != state.RepoID ||
+		repoID == "" || repoID != state.RepoID ||
 		state.OwnerKeyID != profile.OwnerRootSPKI() || !clientULIDPattern.MatchString(state.RepoID) ||
 		!clientULIDPattern.MatchString(state.EnvironmentID) || !validDigest(state.SPKIDigest) || !validAnchor(state.Prefix) ||
 		!validDigest(state.ManifestDigest) || state.Projections == nil {
@@ -2155,6 +2190,9 @@ func replaceInstalledStateLocked(directory string, previous []byte, state Client
 	current, err := os.ReadFile(target)
 	if err != nil || !bytes.Equal(current, previous) {
 		return ErrStateExists
+	}
+	if err = validateStateCredential(directory, state); err != nil {
+		return err
 	}
 	data, err := json.Marshal(state)
 	if err != nil || len(data) > maxClientStateBytes {

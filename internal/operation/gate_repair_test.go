@@ -127,7 +127,7 @@ func TestGateExemptionRepairClosedInputAndClaim(t *testing.T) {
 	if _, err := DecodeCanonicalCommand(bad); err == nil {
 		t.Fatal("decoded an unknown proof field")
 	}
-	if len(GateCatalogue()) != 3 || len(Catalogue()) != 31 || Catalogue()[30].Metadata().Operation != GateExemptionRepairV1.Metadata().Operation {
+	if len(GateCatalogue()) != 3 || len(Catalogue()) != 32 || Catalogue()[30].Metadata().Operation != GateExemptionRepairV1.Metadata().Operation {
 		t.Fatal("repair must be in the full catalogue, not ordinary GateCatalogue")
 	}
 	for _, already := range []bool{false, true} {

@@ -114,6 +114,9 @@ func checkStep4State(db *sql.DB) error {
 		step10Role := operation.Step10RoleOperation(id)
 		step10Run := operation.Step10RunOperation(id)
 		step10Any := step10 || step10Role || step10Run
+		step11RouteMutation := id == operation.RepoRouteBindV1.Metadata().Operation || id == operation.RepoAdoptRemoteV1.Metadata().Operation
+		step11Attach := id == operation.EnvironmentAttachOnceV1.Metadata().Operation
+		step11Any := step11RouteMutation || step11Attach
 		_, knownGate := gateDefinition(id)
 		step13Gate := version >= 12 && knownGate
 		privateGateRepair := version >= 14 && s.operation == gateExemptionRepairOperationName && s.version == 1
@@ -126,7 +129,7 @@ func checkStep4State(db *sql.DB) error {
 		reference := version >= 18 && knownReference
 		legacyBirth := (s.operation == "matter.create" || s.operation == "step.create") && !step4
 		if !ulid.MatchString(s.domain) || !ulid.MatchString(s.id) || !ulid.MatchString(s.env) || !validDigest(s.hash) || s.epoch == 0 || s.seq == 0 ||
-			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step10Any && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !namedBatchMembership && !dependency && !reference) ||
+			(s.operation != "matter.create" && s.operation != "step.create" && !lifecycleOperation(s.operation) && !contentOperation(id) && !step4 && !step10Any && !step13Gate && !privateGateRepair && !batchSweep && !namedBatch && !namedBatchMembership && !dependency && !reference && !step11Any) ||
 			(s.operation == "matter.create" || s.operation == "step.create") && s.version != 1 && !step4 ||
 			!step4 && s.version != 1 && !dependency && !reference {
 			return ErrInvalidStore
@@ -234,6 +237,26 @@ func checkStep4State(db *sql.DB) error {
 		if err = artifactDecoder.Unmarshal(s.command, &identity); err != nil || identity.Schema != "wipd.command/1" || identity.ID != s.id || identity.Authority.Domain != s.domain || identity.Authority.Epoch != s.epoch || identity.Environment.ID != s.env || identity.Environment.Sequence != s.seq || identity.Operation.Name != s.operation || identity.Operation.Version != s.version {
 			return ErrInvalidStore
 		}
+		if step11Any {
+			command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+			if decodeErr != nil || command.Request.Context.Repo == "" ||
+				step11RouteMutation && (command.Request.Context.Clone == "" || command.Request.Context.Worktree == "") {
+				return ErrInvalidStore
+			}
+			var validRequest bool
+			switch id {
+			case operation.RepoRouteBindV1.Metadata().Operation:
+				validRequest = operation.RepoRouteBindV1.ValidateRequest(command.Request) == nil
+			case operation.RepoAdoptRemoteV1.Metadata().Operation:
+				validRequest = operation.RepoAdoptRemoteV1.ValidateRequest(command.Request) == nil
+			case operation.EnvironmentAttachOnceV1.Metadata().Operation:
+				validRequest = operation.EnvironmentAttachOnceV1.ValidateRequest(command.Request) == nil
+			}
+			var member int
+			if !validRequest || db.QueryRow(`SELECT count(*) FROM repo_memberships WHERE domain_id=? AND repo_id=?`, s.domain, command.Request.Context.Repo).Scan(&member) != nil || member != 1 {
+				return fmt.Errorf("%w: Step 11 command %s request or Repo membership", ErrInvalidStore, s.id)
+			}
+		}
 		if privateGateRepair {
 			if s.state != "terminal" {
 				return ErrInvalidStore
@@ -282,7 +305,7 @@ func checkStep4State(db *sql.DB) error {
 		terminals++
 		r, e := readReceipt(receipt)
 		if e != nil || r.Schema != "wipd.terminal-receipt/1" || r.Identity != "wipd.command/1" || r.Domain != s.domain || r.Epoch != s.epoch || r.ID != s.id || r.Hash != s.hash || r.Operation.Name != s.operation || r.Operation.Version != s.version || r.Environment.ID != s.env || r.Environment.Sequence != s.seq || r.Result.Code != code {
-			return ErrInvalidStore
+			return fmt.Errorf("%w: Step 11/general receipt identity for %s", ErrInvalidStore, s.id)
 		}
 		var artifact signedArtifact
 		if err = artifactDecoder.Unmarshal(wrapper, &artifact); err != nil || artifact.Kind != "portable-receipt" || artifact.PayloadSchema != "wipd.terminal-receipt/1" || !bytes.Equal(artifact.Payload, receipt) || artifact.Epoch != epoch || artifact.Generation == nil || *artifact.Generation != gen || artifact.Sequence == nil || *artifact.Sequence != seq {
@@ -302,30 +325,59 @@ func checkStep4State(db *sql.DB) error {
 		if code == "result.succeeded" {
 			gateNoop := step13Gate && s.operation == "gate.declare" && !first.Valid && !last.Valid && r.Range == nil
 			namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && !first.Valid && !last.Valid && r.Range == nil
-			if gateNoop || namedBatchMembershipNoop {
+			step11RouteNoop := step11RouteMutation && !first.Valid && !last.Valid && r.Range == nil
+			if gateNoop || namedBatchMembershipNoop || step11RouteNoop {
 				if r.Result.Problem != nil || len(r.Result.Output) == 0 {
-					return ErrInvalidStore
+					return fmt.Errorf("%w: successful no-event terminal %s result", ErrInvalidStore, s.id)
 				}
 			} else if !first.Valid || !last.Valid || (legacyBirth && first.Int64 != last.Int64) || r.Range == nil || (legacyBirth && r.Range.Count != 1) || r.Result.Problem != nil || len(r.Result.Output) == 0 {
-				return ErrInvalidStore
+				return fmt.Errorf("%w: successful terminal %s lacks event range/output", ErrInvalidStore, s.id)
 			}
-			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop {
+			if lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop || step11Attach {
 				var n int64
 				var minID, maxID string
 				if err = db.QueryRow(`SELECT count(*),min(event_id),max(event_id) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&n, &minID, &maxID); err != nil || n < 1 || n != last.Int64-first.Int64+1 || uint64(n) != r.Range.Count {
-					return ErrInvalidStore
+					return fmt.Errorf("%w: terminal %s event count/range", ErrInvalidStore, s.id)
 				}
 				var firstID, lastID string
 				if db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&firstID) != nil || db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, last.Int64, s.id).Scan(&lastID) != nil || firstID != r.Range.First || lastID != r.Range.Last || minID != firstID || maxID != lastID {
-					return ErrInvalidStore
+					return fmt.Errorf("%w: terminal %s event endpoints", ErrInvalidStore, s.id)
 				}
 			} else if !gateNoop && !namedBatchMembershipNoop && (s.operation == "matter.create" || s.operation == "step.create") {
 				var eventID string
 				if err = db.QueryRow(`SELECT event_id FROM authority_events WHERE domain_id=? AND position=? AND command_id=?`, s.domain, first.Int64, s.id).Scan(&eventID); err != nil || eventID != r.Range.First || eventID != r.Range.Last {
 					return ErrInvalidStore
 				}
-			} else if !gateNoop && !namedBatchMembershipNoop {
+			} else if !gateNoop && !namedBatchMembershipNoop && !step11RouteNoop {
 				return ErrInvalidStore
+			}
+			if step11RouteMutation {
+				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+				var output struct {
+					RepoID   string `cbor:"repo_id"`
+					DomainID string `cbor:"domain_id"`
+					Epoch    uint64 `cbor:"epoch"`
+				}
+				if decodeErr != nil || artifactDecoder.Unmarshal(r.Result.Output, &output) != nil ||
+					output.RepoID != command.Request.Context.Repo || output.DomainID != s.domain || output.Epoch != s.epoch {
+					return fmt.Errorf("%w: Step 11 route terminal %s output", ErrInvalidStore, s.id)
+				}
+			}
+			if step11Attach {
+				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
+				var output map[string]cbor.RawMessage
+				if decodeErr != nil || artifactDecoder.Unmarshal(r.Result.Output, &output) != nil ||
+					!exactKeys(output, "repo_id", "domain_id", "authority_epoch", "environment_id", "clone_id", "worktree_id") {
+					return fmt.Errorf("%w: Step 11 attach terminal %s output shape", ErrInvalidStore, s.id)
+				}
+				var repo, domain, environment, clone, worktree string
+				var epoch uint64
+				if artifactDecoder.Unmarshal(output["repo_id"], &repo) != nil || artifactDecoder.Unmarshal(output["domain_id"], &domain) != nil ||
+					artifactDecoder.Unmarshal(output["authority_epoch"], &epoch) != nil || artifactDecoder.Unmarshal(output["environment_id"], &environment) != nil ||
+					artifactDecoder.Unmarshal(output["clone_id"], &clone) != nil || artifactDecoder.Unmarshal(output["worktree_id"], &worktree) != nil ||
+					repo != command.Request.Context.Repo || domain != s.domain || epoch != s.epoch || environment != s.env || !ulid.MatchString(clone) || !ulid.MatchString(worktree) {
+					return fmt.Errorf("%w: Step 11 attach terminal %s output identity", ErrInvalidStore, s.id)
+				}
 			}
 			if step10 {
 				command, decodeErr := operation.DecodeCanonicalCommand(s.command)
@@ -393,9 +445,12 @@ func checkStep4State(db *sql.DB) error {
 		namedBatchMembershipNoop := namedBatchMembership && id == operation.BatchJoinV1.Metadata().Operation && code == "result.succeeded" && r.Range == nil
 		if err = db.QueryRow(`SELECT count(*) FROM authority_events WHERE domain_id=? AND command_id=?`, s.domain, s.id).Scan(&eventCount); err != nil ||
 			(code == "result.succeeded" && legacyBirth && eventCount != 1) ||
-			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop) && eventCount != int(r.Range.Count)) ||
+			(code == "result.succeeded" && (lifecycleOperation(s.operation) || contentOperation(id) || step4 || step10Any || namedBatch || namedBatchMembership && !namedBatchMembershipNoop || dependency || reference || step13Gate && !gateNoop || step11Attach) && eventCount != int(r.Range.Count)) ||
 			(code == "result.succeeded" && (gateNoop || namedBatchMembershipNoop) && eventCount != 0) || (code != "result.succeeded" && eventCount != 0) {
 			return ErrInvalidStore
+		}
+		if code == "result.succeeded" && step11RouteMutation && eventCount != 0 {
+			return fmt.Errorf("%w: route mutation %s unexpectedly has authority events", ErrInvalidStore, s.id)
 		}
 	}
 	if version >= 17 {
@@ -478,8 +533,29 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 	for _, s := range submissions {
 		byID[ownerKey(s.domain, s.id)] = s
 	}
-	var evidencePositions map[string]uint64
+	attachConsumptions := make(map[string]storedAttachConsumption)
 	var err error
+	if version >= 23 {
+		consumptionRows, queryErr := db.Query(`SELECT domain_id,command_id,request_hash,repo_id,environment_id,clone_id,worktree_id,grant_id,grant_digest FROM environment_attach_grant_consumptions`)
+		if queryErr != nil {
+			return queryErr
+		}
+		for consumptionRows.Next() {
+			var value storedAttachConsumption
+			if err = consumptionRows.Scan(&value.domain, &value.command, &value.hash, &value.repo, &value.environment, &value.clone, &value.worktree, &value.grant, &value.grantDigest); err != nil {
+				break
+			}
+			attachConsumptions[ownerKey(value.domain, value.command)] = value
+		}
+		if err == nil {
+			err = consumptionRows.Err()
+		}
+		_ = consumptionRows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	var evidencePositions map[string]uint64
 	if version >= 20 {
 		evidencePositions, err = schedulerHookEvidencePositions(db)
 		if err != nil {
@@ -522,6 +598,29 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 		if !ok || s.state != "terminal" || pos != position || !ulid.MatchString(id) || (previousID != "" && id <= previousID) {
 			err = ErrInvalidStore
 			break
+		}
+		if (operation.ID{Name: s.operation, Version: uint16(s.version)}) == operation.EnvironmentAttachOnceV1.Metadata().Operation {
+			event, parseErr := parseStep12Event(raw, d, pos, id, cmd)
+			command, commandErr := operation.DecodeCanonicalCommand(s.command)
+			if parseErr != nil || commandErr != nil || event.hash != s.hash || event.kind != "environment.checkout-attached/1" ||
+				validateStoredAttachEvent(attachConsumptions, event, s, command) != nil {
+				err = ErrInvalidStore
+				break
+			}
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(raw)))
+			h := sha256.New()
+			_, _ = h.Write([]byte("wipd/event-prefix-step/v1\x00"))
+			_, _ = h.Write(prefix[:])
+			_, _ = h.Write(length[:])
+			_, _ = h.Write(raw)
+			copy(prefix[:], h.Sum(nil))
+			if digest != digestRawBytes(prefix[:]) {
+				err = ErrInvalidStore
+				break
+			}
+			previousID = id
+			continue
 		}
 		if lifecycleOperation(s.operation) {
 			var event struct {
@@ -1056,6 +1155,61 @@ func checkStep4Events(db *sql.DB, submissions []storedSubmission, version int) e
 	}
 	var invalidPending int
 	if err = db.QueryRow(`SELECT count(*) FROM submissions s JOIN environments e USING(domain_id,environment_id) WHERE s.state='submitted' AND s.environment_sequence - 1 != e.sequence_head`).Scan(&invalidPending); err != nil || invalidPending != 0 {
+		return ErrInvalidStore
+	}
+	return nil
+}
+
+type storedAttachConsumption struct {
+	domain, command, hash, repo, environment, clone, worktree, grant, grantDigest string
+}
+
+func validateStoredAttachEvent(consumptions map[string]storedAttachConsumption, event step12Event, submission storedSubmission, command operation.Command) error {
+	if event.repo != command.Request.Context.Repo || event.subject != command.Request.Context.Repo || event.environment != command.EnvironmentID ||
+		event.sequence != command.EnvironmentSequence || event.acted != command.ActedAt {
+		return ErrInvalidStore
+	}
+	input, ok := command.Request.Input.(operation.EnvironmentAttachOnceInput)
+	if !ok {
+		return ErrInvalidStore
+	}
+	proof, err := operation.DecodeAttachCheckoutProof([]byte(input.CheckoutProof))
+	if err != nil || proof.EnvironmentID != command.EnvironmentID {
+		return ErrInvalidStore
+	}
+	var payload struct {
+		RepoID            string `cbor:"repo_id"`
+		EnvironmentID     string `cbor:"environment_id"`
+		NormalizedRepoKey string `cbor:"normalized_repo_key"`
+		CloneID           string `cbor:"clone_id"`
+		WorktreeID        string `cbor:"worktree_id"`
+		CommonDirDigest   string `cbor:"common_dir_digest"`
+		GitDirDigest      string `cbor:"git_dir_digest"`
+		WorktreeName      string `cbor:"worktree_name"`
+		GrantID           string `cbor:"grant_id"`
+		GrantDigest       string `cbor:"grant_digest"`
+	}
+	if artifactDecoder.Unmarshal(event.payload["repo_id"], &payload.RepoID) != nil ||
+		artifactDecoder.Unmarshal(event.payload["environment_id"], &payload.EnvironmentID) != nil ||
+		artifactDecoder.Unmarshal(event.payload["normalized_repo_key"], &payload.NormalizedRepoKey) != nil ||
+		artifactDecoder.Unmarshal(event.payload["clone_id"], &payload.CloneID) != nil ||
+		artifactDecoder.Unmarshal(event.payload["worktree_id"], &payload.WorktreeID) != nil ||
+		artifactDecoder.Unmarshal(event.payload["common_dir_digest"], &payload.CommonDirDigest) != nil ||
+		artifactDecoder.Unmarshal(event.payload["git_dir_digest"], &payload.GitDirDigest) != nil ||
+		artifactDecoder.Unmarshal(event.payload["worktree_name"], &payload.WorktreeName) != nil ||
+		artifactDecoder.Unmarshal(event.payload["grant_id"], &payload.GrantID) != nil ||
+		artifactDecoder.Unmarshal(event.payload["grant_digest"], &payload.GrantDigest) != nil ||
+		!exactKeys(event.payload, "repo_id", "environment_id", "normalized_repo_key", "clone_id", "worktree_id", "common_dir_digest", "git_dir_digest", "worktree_name", "grant_id", "grant_digest") ||
+		payload.RepoID != command.Request.Context.Repo || payload.EnvironmentID != command.EnvironmentID ||
+		payload.NormalizedRepoKey != proof.NormalizedRepoKey || payload.CommonDirDigest != proof.CommonDirDigest ||
+		payload.GitDirDigest != proof.GitDirDigest || payload.WorktreeName != proof.WorktreeName ||
+		!ulid.MatchString(payload.CloneID) || !ulid.MatchString(payload.WorktreeID) || !ulid.MatchString(payload.GrantID) ||
+		!validDigest(payload.CommonDirDigest) || !validDigest(payload.GitDirDigest) || !validDigest(payload.GrantDigest) {
+		return fmt.Errorf("%w: Step 11 attached event %s proof", ErrInvalidStore, submission.id)
+	}
+	stored, found := consumptions[ownerKey(submission.domain, submission.id)]
+	if !found || stored.hash != submission.hash || stored.repo != payload.RepoID || stored.environment != payload.EnvironmentID ||
+		stored.clone != payload.CloneID || stored.worktree != payload.WorktreeID || stored.grant != payload.GrantID || stored.grantDigest != payload.GrantDigest {
 		return ErrInvalidStore
 	}
 	return nil

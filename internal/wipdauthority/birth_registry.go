@@ -149,6 +149,26 @@ func NewM6Step10Registry() (*operation.Registry, error) {
 	return registry, nil
 }
 
+// NewM6Step11Registry advertises the closed routing/adoption operation set
+// only on the explicit Step 11 profile. Connected execution remains owned by
+// the authenticated route coordinator; an unconfigured fixture fails closed.
+func NewM6Step11Registry() (*operation.Registry, error) {
+	registry, err := NewM6Step10Registry()
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range operation.Step11Catalogue() {
+		if err = registry.Register(definition, func(context.Context, operation.Request) operation.Result {
+			return operation.Result{Code: operation.ResultFailed, Problem: &operation.Problem{
+				Code: operation.ProblemExecutionFailed, Message: "Step 11 route operation requires its authenticated route coordinator",
+			}}
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
+}
+
 func newM6Registry(step5 bool) (*operation.Registry, error) {
 	registry, err := NewM5BirthRegistry()
 	if err != nil {

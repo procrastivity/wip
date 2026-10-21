@@ -340,6 +340,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		"matter.cancel@v1": true, "stage.cancel@v1": true, "step.cancel@v1": true,
 		"stage.finish@v1": true,
 		"gate.declare@v1": true, "gate.close@v1": true, "gate.dismiss@v1": true, "gate.exemption.repair@v1": true,
+		"repo.route-bind@v1": true,
 	}
 	definitions := make(map[string]map[string]string, len(rows))
 	registered := make(map[string]map[string]string)
@@ -353,7 +354,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 		if !validCensusOperationID(id) {
 			t.Errorf("operation row %d has invalid versioned ID %q", index+1, id)
 		}
-		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "m6-step7-profile-only", "m6-step8-profile-only", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
+		if !oneOf(row["status"], "catalogued-m5", "catalogued-m6", "m6-step7-profile-only", "m6-step8-profile-only", "m6-step11-profile-only", "proposed-not-registered-not-implemented", "authenticated-control-existing") {
 			t.Errorf("%s has unsupported status %q", id, row["status"])
 		}
 		if row["status"] == "catalogued-m5" && !m5Operations[id] || row["status"] == "catalogued-m6" && !m6Operations[id] {
@@ -419,7 +420,7 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 				t.Errorf("%s is marked catalogued but is absent from operation.Catalogue()", id)
 			}
 		}
-		if row["status"] == "m6-step7-profile-only" || row["status"] == "m6-step8-profile-only" || row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
+		if row["status"] == "m6-step7-profile-only" || row["status"] == "m6-step8-profile-only" || row["status"] == "m6-step11-profile-only" || row["status"] == "proposed-not-registered-not-implemented" || row["status"] == "authenticated-control-existing" {
 			if _, ok := actual[id]; ok {
 				t.Errorf("%s operation %s must remain outside operation.Catalogue()", row["status"], id)
 			}
@@ -451,6 +452,27 @@ func checkCensusOperations(t *testing.T, rows []map[string]string) map[string]ma
 				t.Errorf("%s contract metadata omits Repo tracker-push configuration guard", id)
 			}
 		}
+	}
+	routeResolveID := "route.resolve@v1"
+	var routeResolveMetadata operation.Metadata
+	for _, definition := range operation.Step11Catalogue() {
+		metadata := definition.Metadata()
+		if metadata.Operation.String() == routeResolveID {
+			routeResolveMetadata = metadata
+			break
+		}
+	}
+	if routeResolveMetadata.Operation.String() != routeResolveID {
+		t.Fatalf("Step11Catalogue() omits %s", routeResolveID)
+	}
+	routeResolveRow, exists := definitions[routeResolveID]
+	if !exists || routeResolveRow["status"] != "m6-step11-profile-only" {
+		t.Fatalf("%s census row = %+v, want m6-step11-profile-only", routeResolveID, routeResolveRow)
+	} else {
+		compareCensusMetadata(t, routeResolveID, routeResolveRow, routeResolveMetadata)
+	}
+	if _, exists := actual[routeResolveID]; exists {
+		t.Errorf("%s must remain absent from operation.Catalogue()", routeResolveID)
 	}
 	for id, row := range definitions {
 		if row["status"] == "m6-step8-profile-only" {
@@ -499,11 +521,11 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 		}
 		verbs[verb.Name] = verb
 	}
-	if len(verbs) != 79 {
-		t.Errorf("current manifest has %d runnable paths, want census baseline 79", len(verbs))
+	if len(verbs) != 84 {
+		t.Errorf("current manifest has %d runnable paths, want census baseline 84", len(verbs))
 	}
-	if len(rows) != 95 {
-		t.Errorf("CLI mode table has %d rows, want census baseline 95", len(rows))
+	if len(rows) != 100 {
+		t.Errorf("CLI mode table has %d rows, want census baseline 100", len(rows))
 	}
 	for _, problem := range m6PinnedCLIModeErrors(rows) {
 		t.Errorf("CLI mode expectations: %s", problem)
@@ -666,7 +688,7 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 		"authenticated-control": {"claim.acquire@v1", "claim.release@v1", "claim.stand-down@v1", "claim-journal.repair@v1", "claim-journal.close@v1"},
 		"environment-identity":  {"environment.certificate.renew@v1", "environment.certificate.rotate@v1", "environment.identity.recover@v1", "environment.identity.revoke@v1"},
 		"authority-read":        {"batch.read@v1"},
-		"authority-operation":   {"matter.locator-repair@v1", "batch.sweep-anonymous@v1"},
+		"authority-operation":   {"matter.locator-repair@v1", "batch.sweep-anonymous@v1", "repo.route-bind@v1"},
 		"daemon-diagnostics":    {"diagnostics.inspect@v1"},
 	}
 	for kind, operationIDs := range requiredOwnerOperations {

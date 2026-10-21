@@ -3,6 +3,7 @@
 package wipd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -177,6 +178,179 @@ func TestAcceptAuthenticatesSameUIDSubprocessBeforeExposingBytes(t *testing.T) {
 	}
 }
 
+func TestPeerCheckoutDiscoveryUsesLivePIDFDAndOpenedGitDirectory(t *testing.T) {
+	root := testProfileRoot(t)
+	daemon, err := Start(root)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = daemon.Close() })
+
+	checkout := filepath.Join(t.TempDir(), "repo")
+	workdir := filepath.Join(checkout, "nested")
+	if err = os.MkdirAll(workdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, checkout, "init", "-q")
+	runGitTestCommand(t, checkout, "remote", "add", "origin", "https://github.com/acme/widget.git")
+
+	client, accepted := startPeerClient(t, daemon, workdir, "")
+	connection, ok := accepted.(*peerProcessConn)
+	if !ok || connection.peer == nil {
+		t.Fatalf("accepted connection = %T, want peer-process connection", accepted)
+	}
+	peer := connection.peer
+	if peer.PID() != client.Process.Pid {
+		t.Fatalf("authenticated peer PID = %d, client PID = %d", peer.PID(), client.Process.Pid)
+	}
+	if err = peer.CheckAlive(); err != nil {
+		t.Fatalf("peer pidfd liveness check while client is connected: %v", err)
+	}
+	discovered, err := peer.DiscoverGitCheckout(context.Background(), "origin")
+	if err != nil {
+		t.Fatalf("DiscoverGitCheckout() = %+v, %v", discovered, err)
+	}
+	wantCommon := filepath.Join(checkout, ".git")
+	if discovered.CommonDir != wantCommon || discovered.GitDir != wantCommon || discovered.WorktreeName != "" ||
+		discovered.RemoteName != "origin" || discovered.NormalizedRemote != "github.com/acme/widget" {
+		t.Fatalf("discovered checkout = %+v", discovered)
+	}
+	cwd := mustOpenPeerCWD(t, peer)
+	defer func() { _ = cwd.Close() }()
+	if err = peer.RevalidateWorkingDirectory(cwd); err != nil {
+		t.Fatalf("revalidate stable peer CWD: %v", err)
+	}
+	if _, err = accepted.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("release connected client: %v", err)
+	}
+	if err = client.Wait(); err != nil {
+		t.Fatalf("same-UID client subprocess: %v", err)
+	}
+	if err = peer.CheckAlive(); !errors.Is(err, ErrPeerProcessUnavailable) {
+		t.Fatalf("peer pidfd after client exit = %v, want ErrPeerProcessUnavailable", err)
+	}
+	_ = accepted.Close()
+}
+
+func TestPeerCheckoutRejectsCWDChangeDuringDiscovery(t *testing.T) {
+	root := testProfileRoot(t)
+	daemon, err := Start(root)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = daemon.Close() })
+
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	for _, dir := range []string{first, second} {
+		if err = os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runGitTestCommand(t, dir, "init", "-q")
+		runGitTestCommand(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	}
+	client, accepted := startPeerClient(t, daemon, first, second)
+	peer := peerProcessForConnection(accepted)
+	if peer == nil {
+		t.Fatal("accepted connection did not retain authenticated peer context")
+	}
+	cwd := mustOpenPeerCWD(t, peer)
+	defer func() { _ = cwd.Close() }()
+	if _, err = accepted.Write([]byte("chdir\n")); err != nil {
+		t.Fatalf("request peer CWD change: %v", err)
+	}
+	if err = accepted.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(io.LimitReader(accepted, int64(len("changed\n"))))
+	if err != nil || string(response) != "changed\n" {
+		t.Fatalf("CWD change response = %q, %v", response, err)
+	}
+	if err = peer.RevalidateWorkingDirectory(cwd); !errors.Is(err, ErrPeerProcessUnavailable) {
+		t.Fatalf("RevalidateWorkingDirectory() after peer chdir = %v, want ErrPeerProcessUnavailable", err)
+	}
+	if err = accepted.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = accepted.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("release connected client: %v", err)
+	}
+	if err = client.Wait(); err != nil {
+		t.Fatalf("same-UID client subprocess: %v", err)
+	}
+	_ = accepted.Close()
+}
+
+func startPeerClient(t *testing.T, daemon *Daemon, cwd, target string) (*exec.Cmd, net.Conn) {
+	t.Helper()
+	const request = "GET /wipd/v1/negotiate HTTP/1.1\r\n\r\n"
+	command := exec.Command(os.Args[0], "-test.run=^TestPeerAuthClientHelper$")
+	command.Dir = cwd
+	command.Env = append(os.Environ(), "WIPD_PEER_TEST_CLIENT=1", "WIPD_PEER_WAIT=1",
+		"WIPD_PEER_SOCKET="+filepath.Join(daemon.profile, socketFileName), "WIPD_PEER_BYTES="+request,
+		"WIPD_PEER_TARGET_CWD="+target)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatalf("start same-UID peer client: %v", err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	accepted := make(chan struct {
+		connection net.Conn
+		err        error
+	}, 1)
+	go func() {
+		connection, err := daemon.Accept()
+		accepted <- struct {
+			connection net.Conn
+			err        error
+		}{connection, err}
+	}()
+	select {
+	case result := <-accepted:
+		if result.err != nil {
+			t.Fatalf("Accept() rejected same-UID peer: %v", result.err)
+		}
+		const request = "GET /wipd/v1/negotiate HTTP/1.1\r\n\r\n"
+		if err := result.connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set peer test request deadline: %v", err)
+		}
+		requestBytes := make([]byte, len(request))
+		if _, err := io.ReadFull(result.connection, requestBytes); err != nil || string(requestBytes) != request {
+			t.Fatalf("read peer test request = %q, %v", requestBytes, err)
+		}
+		if err := result.connection.SetReadDeadline(time.Time{}); err != nil {
+			t.Fatalf("clear peer test request deadline: %v", err)
+		}
+		return command, result.connection
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-UID peer did not reach authenticated Accept()")
+		return nil, nil
+	}
+}
+
+func mustOpenPeerCWD(t *testing.T, peer *PeerProcess) *os.File {
+	t.Helper()
+	file, err := peer.OpenWorkingDirectory()
+	if err != nil {
+		t.Fatalf("open authenticated peer CWD: %v", err)
+	}
+	return file
+}
+
+func runGitTestCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+}
+
 func TestPeerAuthClientHelper(t *testing.T) {
 	if os.Getenv("WIPD_PEER_TEST_CLIENT") != "1" {
 		return
@@ -188,6 +362,27 @@ func TestPeerAuthClientHelper(t *testing.T) {
 	defer func() { _ = connection.Close() }()
 	if _, err := io.WriteString(connection, os.Getenv("WIPD_PEER_BYTES")); err != nil {
 		t.Fatalf("write peer-auth test bytes: %v", err)
+	}
+	if os.Getenv("WIPD_PEER_WAIT") == "1" {
+		for {
+			line, readErr := bufio.NewReader(connection).ReadString('\n')
+			if readErr != nil {
+				t.Fatalf("read peer helper command: %v", readErr)
+			}
+			switch strings.TrimSpace(line) {
+			case "exit":
+				return
+			case "chdir":
+				if err = os.Chdir(os.Getenv("WIPD_PEER_TARGET_CWD")); err != nil {
+					t.Fatalf("change peer helper CWD: %v", err)
+				}
+				if _, err = io.WriteString(connection, "changed\n"); err != nil {
+					t.Fatalf("acknowledge peer CWD change: %v", err)
+				}
+			default:
+				t.Fatalf("unknown peer helper command %q", line)
+			}
+		}
 	}
 }
 

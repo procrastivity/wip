@@ -103,6 +103,18 @@ func encodeOperationResultPayload(id operation.ID, result operation.Result) ([]b
 			}
 			fields["output"] = encoded
 			return encodePayload(fields)
+		case operation.RepoRouteBindV1.Metadata().Operation:
+			value, ok := result.Output.(operation.RepoRouteBindOutput)
+			if !ok || !validRequestID(value.RepoID) || !validRequestID(value.DomainID) || value.Epoch == 0 {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"repo_id": value.RepoID, "domain_id": value.DomainID, "epoch": value.Epoch}
+		case operation.RepoAdoptRemoteV1.Metadata().Operation:
+			value, ok := result.Output.(operation.RepoAdoptRemoteOutput)
+			if !ok || !validRequestID(value.RepoID) || !validRequestID(value.DomainID) || value.Epoch == 0 {
+				return nil, errMalformedMessage
+			}
+			output = map[string]any{"repo_id": value.RepoID, "domain_id": value.DomainID, "epoch": value.Epoch}
 		default:
 			if operation.Step10Operation(id) {
 				hook, ok := result.Output.(operation.SchedulerHookOutput)
@@ -366,6 +378,21 @@ func decodeOperationResultPayload(id operation.ID, payload []byte) (operation.Re
 			result.Output, err = decodeRepairOutput(encodedOutput)
 			if err != nil {
 				return operation.Result{}, err
+			}
+		case operation.RepoRouteBindV1.Metadata().Operation, operation.RepoAdoptRemoteV1.Metadata().Operation:
+			if !exactFields(outputFields, "repo_id", "domain_id", "epoch") {
+				return operation.Result{}, errMalformedMessage
+			}
+			repoID, repoOK := outputFields["repo_id"].(string)
+			domainID, domainOK := outputFields["domain_id"].(string)
+			epoch, epochOK := outputFields["epoch"].(uint64)
+			if !repoOK || !validRequestID(repoID) || !domainOK || !validRequestID(domainID) || !epochOK || epoch == 0 {
+				return operation.Result{}, errMalformedMessage
+			}
+			if id == operation.RepoRouteBindV1.Metadata().Operation {
+				result.Output = operation.RepoRouteBindOutput{RepoID: repoID, DomainID: domainID, Epoch: epoch}
+			} else {
+				result.Output = operation.RepoAdoptRemoteOutput{RepoID: repoID, DomainID: domainID, Epoch: epoch}
 			}
 		default:
 			if operation.Step10Operation(id) {

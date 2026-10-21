@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/procrastivity/wip/internal/operation"
 	"github.com/procrastivity/wip/internal/wipdwire"
 )
 
@@ -30,6 +31,103 @@ type ClaimGrantEvidence struct {
 	Start                  []byte
 	End                    []byte
 	Transfer               VerifiedTransfer
+}
+
+// TerminalReceiptClaims is the authenticated identity and effect range of
+// one portable M2 terminal receipt.
+type TerminalReceiptClaims struct {
+	CommandID   string
+	RequestHash string
+	Operation   string
+	ResultCode  operation.ResultCode
+	Output      []byte
+	ProblemCode string
+	FirstEvent  string
+	LastEvent   string
+	EventCount  uint64
+}
+
+// VerifyPortableTerminalReceipt verifies the authority's portable-receipt
+// wrapper against the owner-root-certified artifact key and exact Environment
+// identity, then binds its closed logical receipt to the requested command.
+func VerifyPortableTerminalReceipt(identity Identity, trust ClaimGrantTrust, artifactCertificate, receipt, wrapper []byte) (TerminalReceiptClaims, error) {
+	var claims TerminalReceiptClaims
+	if !validIdentity(identity) || len(artifactCertificate) == 0 || len(artifactCertificate) > 1<<20 ||
+		len(receipt) == 0 || len(receipt) > wipdwire.FrameLimit || len(wrapper) == 0 || len(wrapper) > 1<<20 ||
+		len(trust.OwnerRootPublicKey) != ed25519.PublicKeySize || trust.OwnerRootSPKI != identity.OwnerRootSPKI || trust.VerifiedAt.IsZero() {
+		return claims, errInvalidClaimGrant
+	}
+	artifactKey, keyID, generation, notBefore, notAfter, err := verifyClaimArtifactCertificate(identity, trust, trust.OwnerRootSPKI, artifactCertificate)
+	if err != nil {
+		return claims, errInvalidClaimGrant
+	}
+	fields, err := decodeClosed(wrapper,
+		"schema", "kind", "domain_id", "authority_epoch", "signer_role", "signer_key_id", "key_generation", "artifact_sequence",
+		"previous_artifact_digest", "issued_at", "payload_schema", "payload_digest", "payload", "signature")
+	if err != nil || fields["schema"] != "wipd.signed-artifact/1" || fields["kind"] != "portable-receipt" ||
+		fields["domain_id"] != identity.DomainID || fields["authority_epoch"] != identity.AuthorityEpoch ||
+		fields["signer_role"] != "authority" || fields["signer_key_id"] != keyID ||
+		fields["payload_schema"] != "wipd.terminal-receipt/1" || fields["payload_digest"] != digestBytes(receipt) ||
+		!bytes.Equal(asBytes(fields["payload"]), receipt) || !validOptionalDigest(fields["previous_artifact_digest"]) {
+		return claims, errInvalidClaimGrant
+	}
+	wrapperGeneration, generationOK := fields["key_generation"].(uint64)
+	sequence, sequenceOK := fields["artifact_sequence"].(uint64)
+	issuedAt, timeOK := canonicalArtifactTime(fields["issued_at"])
+	if !generationOK || wrapperGeneration != generation || !sequenceOK || sequence == 0 || !timeOK ||
+		issuedAt.Before(notBefore) || !issuedAt.Before(notAfter) || issuedAt.After(trust.VerifiedAt) || !verifySignedArtifact(fields, artifactKey) {
+		return claims, errInvalidClaimGrant
+	}
+	terminal, err := decodeClosed(receipt,
+		"schema", "domain_id", "authority_epoch", "identity_schema", "command_id", "request_hash", "operation", "environment", "result", "accepted_events")
+	if err != nil || terminal["schema"] != "wipd.terminal-receipt/1" || terminal["domain_id"] != identity.DomainID ||
+		terminal["authority_epoch"] != identity.AuthorityEpoch || terminal["identity_schema"] != "wipd.command/1" {
+		return claims, errInvalidClaimGrant
+	}
+	commandID, commandOK := terminal["command_id"].(string)
+	requestHash, hashOK := terminal["request_hash"].(string)
+	operationName, operationOK := terminal["operation"].(map[string]any)
+	environment, environmentOK := terminal["environment"].(map[string]any)
+	result, resultOK := terminal["result"].(map[string]any)
+	if !commandOK || !transferULID.MatchString(commandID) || !hashOK || !transferHash.MatchString(requestHash) ||
+		!operationOK || !wipdwire.ExactMapKeys(operationName, "name", "version") ||
+		!environmentOK || !wipdwire.ExactMapKeys(environment, "id", "sequence") || environment["id"] != identity.EnvironmentID ||
+		!resultOK || !wipdwire.ExactMapKeys(result, "code", "output", "problem_code") {
+		return claims, errInvalidClaimGrant
+	}
+	version, versionOK := operationName["version"].(uint64)
+	name, nameOK := operationName["name"].(string)
+	code, codeOK := result["code"].(string)
+	output, outputOK := result["output"].([]byte)
+	if !versionOK || version == 0 || !nameOK || name == "" || !codeOK {
+		return claims, errInvalidClaimGrant
+	}
+	problemCode, problemOK := result["problem_code"].(string)
+	switch operation.ResultCode(code) {
+	case operation.ResultSucceeded:
+		if !outputOK || result["problem_code"] != nil {
+			return claims, errInvalidClaimGrant
+		}
+	case operation.ResultRejected, operation.ResultRefused, operation.ResultFailed:
+		if result["output"] != nil || !problemOK || problemCode == "" {
+			return claims, errInvalidClaimGrant
+		}
+	default:
+		return claims, errInvalidClaimGrant
+	}
+	claims = TerminalReceiptClaims{
+		CommandID: commandID, RequestHash: requestHash, Operation: name,
+		ResultCode: operation.ResultCode(code), Output: bytes.Clone(output), ProblemCode: problemCode,
+	}
+	if accepted, ok := terminal["accepted_events"].(map[string]any); ok {
+		if !wipdwire.ExactMapKeys(accepted, "first_event_id", "last_event_id", "event_count") {
+			return TerminalReceiptClaims{}, errInvalidClaimGrant
+		}
+		claims.FirstEvent, _ = accepted["first_event_id"].(string)
+		claims.LastEvent, _ = accepted["last_event_id"].(string)
+		claims.EventCount, _ = accepted["event_count"].(uint64)
+	}
+	return claims, nil
 }
 
 // VerifiedClaimGrant can only be created after verifying the owner-certified
