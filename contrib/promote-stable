@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# contrib/promote-stable — point the `stable` branch at a published
+# release's binaries, so `nix profile install <flake>/stable` downloads the
+# CI-built binary and compiles nothing.
+#
+# stable is a generated branch, not a release commit. Each commit on it
+# holds one flake.nix (rendered from contrib/stable-flake.nix.in), its
+# flake.lock, and a README. The flake fetches the release assets, pinned by
+# the hashes in the release's SHA256SUMS. That flake can only be written
+# after CI publishes the assets, which is why it cannot live in the tagged
+# commit, and why this script runs after the tag push (contrib/release
+# calls it with --wait).
+#
+# Each stable commit is a child of the previous one, so every push is a
+# plain fast-forward: this script never forces. It refuses a tag that is
+# not on main, and a tag that is not newer than what stable names now.
+# The stable tree has no CI config, so pushing it starts no pipeline.
+set -Eeuo pipefail
+
+DIR=$(cd "$(dirname "${0}")" && pwd)
+PROJECT_ROOT=$(cd "$DIR/.." && pwd)
+cd "$PROJECT_ROOT"
+
+NAME=wip
+STABLE=stable
+TEMPLATE=contrib/stable-flake.nix.in
+POLL_SECONDS=20
+
+usage() {
+	cat <<'EOF'
+Usage: contrib/promote-stable [--wait SECONDS] [--dry-run] vX.Y.Z
+
+Reads the release's SHA256SUMS, checks both release binaries against it,
+renders contrib/stable-flake.nix.in, builds it, and pushes it as a new
+commit on the stable branch.
+
+  --wait SECONDS  poll until the release assets are downloadable, for at
+                  most SECONDS (contrib/release uses this after a tag push)
+  --dry-run       stop after the build; print the rendered flake's path
+EOF
+}
+
+usage_error() {
+	echo "error: $*" >&2
+	usage >&2
+	exit 1
+}
+
+# --- Parse arguments ---
+
+WAIT=0
+DRY_RUN=0
+TAG=""
+while (($#)); do
+	case "$1" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	--wait)
+		[[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || usage_error "--wait needs a number of seconds"
+		WAIT=$2
+		shift 2
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
+	v[0-9]*)
+		[[ -z "$TAG" ]] || usage_error "exactly one release tag is required"
+		[[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage_error "invalid release tag: $1"
+		TAG=$1
+		shift
+		;;
+	*) usage_error "unexpected argument: $1" ;;
+	esac
+done
+[[ -n "$TAG" ]] || usage_error "exactly one release tag is required"
+VERSION=${TAG#v}
+
+for tool in git curl nix sed sort; do
+	command -v "$tool" >/dev/null || {
+		echo "error: '$tool' not found on PATH" >&2
+		exit 1
+	}
+done
+
+# --- Where the release lives ---
+
+ORIGIN_URL=$(git remote get-url --push origin)
+if [[ "$ORIGIN_URL" =~ ^ssh://([^/@]+@)?([^/:]+)(:[0-9]+)?/(.+)$ ]]; then
+	HOST=${BASH_REMATCH[2]}
+	REPO_PATH=${BASH_REMATCH[4]}
+elif [[ "$ORIGIN_URL" =~ ^https://([^/:]+)/(.+)$ ]]; then
+	HOST=${BASH_REMATCH[1]}
+	REPO_PATH=${BASH_REMATCH[2]}
+elif [[ "$ORIGIN_URL" =~ ^([^/@:]+@)?([^/:]+):(.+)$ ]]; then
+	HOST=${BASH_REMATCH[2]}
+	REPO_PATH=${BASH_REMATCH[3]}
+else
+	echo "error: unsupported origin URL: $ORIGIN_URL" >&2
+	exit 1
+fi
+HOST=${HOST,,}
+REPO_PATH=${REPO_PATH#/}
+REPO_PATH=${REPO_PATH%.git}
+
+# GitHub serves release assets under releases/download. Any other host is
+# taken to be GitLab, whose release links serve them under
+# -/releases/TAG/downloads (the release job's direct_asset_path).
+case "$HOST" in
+github.com)
+	URL_BASE="https://github.com/${REPO_PATH}/releases/download/${TAG}"
+	INSTALL_REF="github:${REPO_PATH}/${STABLE}"
+	;;
+*)
+	URL_BASE="https://${HOST}/${REPO_PATH}/-/releases/${TAG}/downloads"
+	INSTALL_REF="git+https://${HOST}/${REPO_PATH}?ref=${STABLE}"
+	;;
+esac
+
+# The release publishes exactly these binaries (the Makefile's
+# cross-compile target), keyed here by the nix system that runs each.
+ASSET_LINUX_AMD64="${NAME}-linux-amd64"
+ASSET_DARWIN_ARM64="${NAME}-darwin-arm64"
+
+# --- Validate the tag against origin ---
+
+REMOTE_TAG=$(git ls-remote --tags origin "refs/tags/${TAG}") || {
+	echo "error: could not query origin for tag ${TAG}" >&2
+	exit 1
+}
+[[ -n "$REMOTE_TAG" ]] || {
+	echo "error: tag ${TAG} is not on origin; push the release first" >&2
+	exit 1
+}
+git fetch -q --no-tags origin "+refs/heads/main:refs/remotes/origin/main" "refs/tags/${TAG}:refs/tags/${TAG}"
+[[ "${REMOTE_TAG%%[[:space:]]*}" == "$(git rev-parse "refs/tags/${TAG}")" ]] || {
+	echo "error: local tag ${TAG} differs from origin's" >&2
+	exit 1
+}
+RELEASE_COMMIT=$(git rev-parse "${TAG}^{commit}")
+git merge-base --is-ancestor "$RELEASE_COMMIT" refs/remotes/origin/main || {
+	echo "error: ${TAG} is not on origin/main; only releases from main move ${STABLE}" >&2
+	exit 1
+}
+
+# --- Validate against the current stable ---
+
+PARENT=""
+set +e
+git ls-remote --exit-code --heads origin "refs/heads/${STABLE}" >/dev/null
+LS_REMOTE_STATUS=$?
+set -e
+case "$LS_REMOTE_STATUS" in
+0)
+	git fetch -q --no-tags origin "+refs/heads/${STABLE}:refs/remotes/origin/${STABLE}"
+	PARENT=$(git rev-parse "refs/remotes/origin/${STABLE}")
+	CURRENT=$(git show "${PARENT}:flake.nix" | sed -n 's/^ *version = "\(.*\)";$/\1/p')
+	[[ -n "$CURRENT" ]] || {
+		echo "error: ${STABLE}'s flake.nix names no version; this script did not write it" >&2
+		exit 1
+	}
+	NEWEST=$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n 1)
+	if [[ "$CURRENT" == "$VERSION" || "$NEWEST" != "$VERSION" ]]; then
+		echo "error: ${STABLE} already names v${CURRENT}; ${TAG} is not newer" >&2
+		exit 1
+	fi
+	echo "Moving ${STABLE} from v${CURRENT} to ${TAG}"
+	;;
+2) echo "Creating ${STABLE} at ${TAG}" ;;
+*)
+	echo "error: could not query ${STABLE} on origin (git ls-remote exited ${LS_REMOTE_STATUS})" >&2
+	exit 1
+	;;
+esac
+
+# --- Wait for the release assets ---
+
+RETRY_HINT="when the release has finished, run: contrib/promote-stable ${TAG}"
+
+asset_ready() {
+	curl -fsSLI -o /dev/null "${URL_BASE}/$1"
+}
+
+if ((WAIT > 0)); then
+	trap 'echo; echo "interrupted: ${STABLE} was not moved; ${RETRY_HINT}" >&2; exit 130' INT
+	DEADLINE=$((SECONDS + WAIT))
+	echo "Waiting up to ${WAIT}s for the ${TAG} assets at ${URL_BASE}"
+	until asset_ready SHA256SUMS && asset_ready "$ASSET_LINUX_AMD64" && asset_ready "$ASSET_DARWIN_ARM64"; do
+		if ((SECONDS >= DEADLINE)); then
+			echo "error: the ${TAG} assets are still not downloadable; ${STABLE} was not moved" >&2
+			echo "$RETRY_HINT" >&2
+			exit 1
+		fi
+		sleep "$POLL_SECONDS"
+	done
+	trap - INT
+fi
+
+# --- Hashes: SHA256SUMS, checked against the real downloads ---
+
+WORK=$(mktemp -d)
+if ((DRY_RUN)); then
+	trap 'echo "dry run: rendered flake kept in ${WORK}/flake"' EXIT
+else
+	trap 'rm -rf "$WORK"' EXIT
+fi
+mkdir "$WORK/flake" "$WORK/assets"
+
+curl -fsSL -o "$WORK/assets/SHA256SUMS" "${URL_BASE}/SHA256SUMS" || {
+	echo "error: could not download ${URL_BASE}/SHA256SUMS" >&2
+	exit 1
+}
+
+sha256_hex() {
+	if command -v sha256sum >/dev/null; then
+		sha256sum "$1" | awk '{ print $1 }'
+	else
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	fi
+}
+
+# Each asset is downloaded and hashed here, not through nix: nix skips a
+# download when its store already holds a path with the expected hash, so
+# it would not notice an asset that no longer matches SHA256SUMS. Every
+# asset is checked, not only this host's, so a wrong darwin hash cannot
+# ship from a Linux machine.
+sri_for() {
+	local asset=$1 expected actual
+	expected=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 }' "$WORK/assets/SHA256SUMS")
+	[[ "$expected" =~ ^[0-9a-f]{64}$ ]] || {
+		echo "error: SHA256SUMS has no single sha256 for ${asset}" >&2
+		return 1
+	}
+	echo "Checking ${asset} against SHA256SUMS..." >&2
+	curl -fsSL -o "$WORK/assets/${asset}" "${URL_BASE}/${asset}" || {
+		echo "error: could not download ${URL_BASE}/${asset}" >&2
+		return 1
+	}
+	actual=$(sha256_hex "$WORK/assets/${asset}")
+	[[ "$actual" == "$expected" ]] || {
+		echo "error: ${URL_BASE}/${asset} has sha256 ${actual}, but SHA256SUMS says ${expected}" >&2
+		return 1
+	}
+	nix hash convert --hash-algo sha256 --to sri "$expected"
+}
+
+HASH_LINUX_AMD64=$(sri_for "$ASSET_LINUX_AMD64")
+HASH_DARWIN_ARM64=$(sri_for "$ASSET_DARWIN_ARM64")
+
+# --- Render, lock, and build the stable flake ---
+
+# Pin the nixpkgs the release itself was built with.
+git show "${TAG}:flake.lock" >"$WORK/source.lock"
+NIXPKGS_REV=$(nix eval --raw --impure --expr \
+	"(builtins.fromJSON (builtins.readFile ${WORK}/source.lock)).nodes.nixpkgs.locked.rev")
+[[ "$NIXPKGS_REV" =~ ^[0-9a-f]{40}$ ]] || {
+	echo "error: could not read the nixpkgs rev from ${TAG}'s flake.lock" >&2
+	exit 1
+}
+
+sed -e "s|@TAG@|${TAG}|g" \
+	-e "s|@VERSION@|${VERSION}|g" \
+	-e "s|@URL_BASE@|${URL_BASE}|g" \
+	-e "s|@NIXPKGS_REV@|${NIXPKGS_REV}|g" \
+	-e "s|@HASH_LINUX_AMD64@|${HASH_LINUX_AMD64}|g" \
+	-e "s|@HASH_DARWIN_ARM64@|${HASH_DARWIN_ARM64}|g" \
+	"$TEMPLATE" >"$WORK/flake/flake.nix"
+if grep -q '@[A-Z_0-9]*@' "$WORK/flake/flake.nix"; then
+	echo "error: ${TEMPLATE} has a placeholder this script does not fill" >&2
+	exit 1
+fi
+
+cat >"$WORK/flake/README.md" <<EOF
+# ${NAME} ${STABLE}
+
+Generated by \`contrib/promote-stable\` on \`main\`. Do not edit: the next
+release replaces every file here.
+
+This branch names the latest release, ${TAG}. Its flake installs that
+release's prebuilt binary and compiles nothing:
+
+    nix profile install '${INSTALL_REF}'
+
+Source, issues, and the flake that builds from source are on \`main\`.
+EOF
+
+(cd "$WORK/flake" && nix flake lock)
+
+HOST_SYSTEM=$(nix eval --raw --impure --expr builtins.currentSystem)
+case "$HOST_SYSTEM" in
+x86_64-linux | aarch64-darwin)
+	echo "Building the ${STABLE} flake for ${HOST_SYSTEM}..."
+	OUT=$(nix build --no-link --print-out-paths "path:${WORK}/flake")
+	"$OUT/bin/${NAME}" version | grep -qF "version ${TAG} " || {
+		echo "error: the downloaded binary does not report ${TAG}:" >&2
+		"$OUT/bin/${NAME}" version >&2
+		exit 1
+	}
+	echo "Built: $("$OUT/bin/${NAME}" version)"
+	;;
+*) echo "note: ${HOST_SYSTEM} has no release binary; skipping the build check" >&2 ;;
+esac
+
+if ((DRY_RUN)); then
+	exit 0
+fi
+
+# --- Commit (the working tree is never touched) and push ---
+
+TREE=$(
+	for FILE in README.md flake.lock flake.nix; do
+		printf '100644 blob %s\t%s\n' "$(git hash-object -w "$WORK/flake/$FILE")" "$FILE"
+	done | git mktree
+)
+PARENT_ARGS=()
+[[ -z "$PARENT" ]] || PARENT_ARGS=(-p "$PARENT")
+COMMIT=$(git commit-tree "$TREE" "${PARENT_ARGS[@]}" \
+	-m "chore(${STABLE}): ${TAG}" \
+	-m "Installs the ${TAG} release binaries from ${URL_BASE}. Release commit: ${RELEASE_COMMIT}.")
+
+git push --no-follow-tags origin "${COMMIT}:refs/heads/${STABLE}"
+git fetch -q --no-tags origin "+refs/heads/${STABLE}:refs/remotes/origin/${STABLE}"
+
+cat <<EOF
+
+${STABLE} now installs the ${TAG} release binary:
+  nix profile install '${INSTALL_REF}'
+EOF

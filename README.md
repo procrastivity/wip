@@ -91,12 +91,18 @@ release and checks the binary before replacing the destination. The script and
 checksum file are trusted GitHub/HTTPS inputs: the checksum detects transfer
 corruption, not a compromised release or installer.
 
-**Nix alternative.** Install the binary from `main` instead of using a
-release asset, then use the same optional harness step above:
+**Nix alternative.** Install the same release binary with Nix, then use
+the same optional harness step above:
 
 ```sh
-nix profile install github:procrastivity/wip/main
+nix profile install github:procrastivity/wip/stable
 ```
+
+`stable` holds a generated flake that installs the latest release's
+prebuilt binary (Linux amd64, macOS arm64), so Nix compiles nothing. Only
+`contrib/promote-stable` moves it, after a release from `main`. To build
+from source instead, use `github:procrastivity/wip/vX.Y.Z`, or
+`github:procrastivity/wip/main` for unreleased work.
 
 ## Develop
 

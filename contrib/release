@@ -9,6 +9,11 @@
 # never in a committed CHANGELOG.md: nothing in the repo can disagree
 # with the tag it was built from. The tag sits on an ordinary commit;
 # this script creates no commit of its own.
+#
+# A release from main then runs contrib/promote-stable. It waits until CI
+# has published the release binaries, then points the generated flake on
+# the `stable` branch at them, so a nix install from stable downloads the
+# release binary and compiles nothing.
 set -Eeuo pipefail
 
 DIR=$(cd "$(dirname "${0}")" && pwd)
@@ -21,7 +26,8 @@ usage() {
 	echo "Runs make check, generates the release notes with git-cliff,"
 	echo "tags the current commit with the notes as the annotated tag"
 	echo "message, and pushes the branch and the tag (CI publishes the"
-	echo "release from the tag push)."
+	echo "release from the tag push). A release from main then waits for"
+	echo "the release binaries and moves the stable branch to them."
 	exit 1
 }
 
@@ -42,7 +48,7 @@ esac
 
 # --- Preconditions ---
 
-for tool in git git-cliff go golangci-lint shellcheck; do
+for tool in git git-cliff go golangci-lint shellcheck curl nix; do
 	command -v "$tool" >/dev/null || {
 		echo "error: '$tool' not found on PATH (are you in the dev shell? 'direnv allow' / 'nix develop')" >&2
 		exit 1
@@ -143,3 +149,15 @@ Watch the run:
 Once released:
   ${WEB_URL}/releases/tag/${TAG}
 EOF
+
+# --- Point stable at the release binaries ---
+#
+# Last, because the binaries exist only once CI has published the release.
+# Only a release from main moves stable, so a release from a maintenance
+# branch cannot pull it onto a side line.
+if [[ "$BRANCH" == "main" ]]; then
+	echo
+	contrib/promote-stable --wait 1800 "$TAG"
+else
+	echo "note: released from '${BRANCH}', not main, so stable was not moved" >&2
+fi
