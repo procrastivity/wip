@@ -11,9 +11,10 @@
 # this script creates no commit of its own.
 #
 # A release from main then runs contrib/promote-stable. It waits until CI
-# has published the release binaries, then points the generated flake on
-# the `stable` branch at them, so a nix install from stable downloads the
-# release binary and compiles nothing.
+# has published the release binaries, then writes a generated flake that
+# installs them, tags it `bin-vX.Y.Z`, and moves the `stable` branch to it,
+# so a nix install of the release or of stable downloads the release
+# binary and compiles nothing.
 set -Eeuo pipefail
 
 DIR=$(cd "$(dirname "${0}")" && pwd)
@@ -27,7 +28,8 @@ usage() {
 	echo "tags the current commit with the notes as the annotated tag"
 	echo "message, and pushes the branch and the tag (CI publishes the"
 	echo "release from the tag push). A release from main then waits for"
-	echo "the release binaries and moves the stable branch to them."
+	echo "the release binaries, tags their nix flake bin-vX.Y.Z, and moves"
+	echo "the stable branch to it."
 	exit 1
 }
 

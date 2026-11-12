@@ -98,11 +98,13 @@ the same optional harness step above:
 nix profile install github:procrastivity/wip/stable
 ```
 
-`stable` holds a generated flake that installs the latest release's
-prebuilt binary (Linux amd64, macOS arm64), so Nix compiles nothing. Only
-`contrib/promote-stable` moves it, after a release from `main`. To build
-from source instead, use `github:procrastivity/wip/vX.Y.Z`, or
-`github:procrastivity/wip/main` for unreleased work.
+`stable` names the latest release. To pin one release, use its
+`bin-vX.Y.Z` tag, for example
+`nix profile install github:procrastivity/wip/bin-v0.3.1`. Both hold a
+generated flake that installs the release's prebuilt binary (Linux amd64,
+macOS arm64), so Nix compiles nothing. `contrib/promote-stable` writes
+them after each release. The `vX.Y.Z` tags build from source, and
+`github:procrastivity/wip/main` builds unreleased work.
 
 ## Develop
 
