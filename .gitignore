@@ -18,5 +18,5 @@
 
 .DS_Store
 
-# Step 10 verifier inputs from `make step10-verifier-inputs-local`
+# Keep private input caches from the retired Step 10 process gate untracked.
 /.step10-local/

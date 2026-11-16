@@ -23,6 +23,17 @@ func TestAdopt_HappyPath(t *testing.T) {
 
 	addRemote(t, dir, "origin", "git@github.com:acme/widget.git")
 
+	// Pairing/preview uses lookup only: seeing a new Git remote must not
+	// opportunistically adopt native metadata before the user makes a write.
+	lookedUp, found, err := LookupCurrentClone(ctx, s.View, dir)
+	if err != nil || !found || lookedUp.ID != before.Clone.ID {
+		t.Fatal("read-only clone lookup", err)
+	}
+	unchanged, err := s.Repo(ctx, lookedUp.Repo)
+	if err != nil || unchanged.RemoteURL != "" || unchanged.ID != before.Repo.ID {
+		t.Fatal("read-only lookup adopted remote", err)
+	}
+
 	clone, found, err := ResolveCurrentClone(ctx, s, store.ActorHuman, dir)
 	if err != nil {
 		t.Fatalf("ResolveCurrentClone: %v", err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for the eleven-column event envelope (MODEL §10, the `schema` Brief §A).
@@ -921,5 +922,29 @@ func TestPayloadIsAJsonObject(t *testing.T) {
 	ev := h.commit(Draft{Type: TypeRenderPerformed, Subject: matter})[0]
 	if got := string(ev.Payload); got != `{}` {
 		t.Errorf("a draft with no payload stamped %q, want %q", got, `{}`)
+	}
+}
+
+func TestIndependentlyOpenedWriterRefreshesIdentityFloor(t *testing.T) {
+	h := newHarness(t)
+	matter := h.matter("shared-writers", "Shared writers")
+	newClock, oldClock := time.Now().Add(time.Hour), time.Now().Add(time.Minute)
+	newer, err := OpenWithClock(h.Path(), func() time.Time { return newClock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = newer.Close() }()
+	older, err := OpenWithClock(h.Path(), func() time.Time { return oldClock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = older.Close() }()
+	first := h.wrap(newer).commit(renderDraft(matter))[0]
+	second := h.wrap(older).commit(renderDraft(matter))[0]
+	if second.ID <= first.ID || second.OccurredAt.Before(first.OccurredAt) {
+		t.Fatalf("stale handle did not advance beyond committed floor: %s then %s", first.ID, second.ID)
+	}
+	if err := older.Rebuild(h.ctx); err != nil {
+		t.Fatal(err)
 	}
 }

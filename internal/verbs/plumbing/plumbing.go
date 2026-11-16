@@ -37,6 +37,7 @@ import (
 	stageverb "github.com/procrastivity/wip/internal/verbs/stage"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
 	stepverb "github.com/procrastivity/wip/internal/verbs/step"
+	syncverb "github.com/procrastivity/wip/internal/verbs/sync"
 	trackerverb "github.com/procrastivity/wip/internal/verbs/tracker"
 )
 
@@ -91,6 +92,7 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	cmd.AddCommand(lifecycleverb.StartCommand(streams))
 	cmd.AddCommand(statusverb.Command(streams))
 	cmd.AddCommand(stepverb.Command(streams))
+	cmd.AddCommand(syncverb.Command(streams))
 	cmd.AddCommand(trackerverb.Command(streams, providers))
 	cmd.AddCommand(bindverb.UnbindCommand(streams))
 	cmd.AddCommand(contentverb.WorkplanCommand(streams))

@@ -1,0 +1,930 @@
+package store
+
+// This opt-in lab deliberately lives beside the real append/project functions.
+// It is not a production synchronization API or an authorization boundary.
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+)
+
+// ExperimentAction keeps the original envelope separate from a local effect.
+// Baseline is the preceding subject event, NOT the command's causation ID.
+// Parent is a paired-fixture structural observation, not a path/Clone mapping.
+type ExperimentAction struct {
+	Event          Event
+	Baseline       string
+	NativeBaseline string `json:",omitempty"`
+	Parent         string
+	Ancestors      []ExperimentBaseline
+}
+
+// ExperimentBaseline names source-observed ancestor evidence, not a timestamp.
+type ExperimentBaseline struct {
+	Subject, Event string
+	NativeEvent    string `json:",omitempty"`
+}
+
+// ExperimentSource is one complete committed source command and its origin.
+type ExperimentSource struct {
+	Host    string
+	Actions []ExperimentAction
+}
+
+// ExperimentDecision links retained source activity to local representation.
+type ExperimentDecision struct {
+	Source      ExperimentSource
+	Disposition string // integrated, conflict, or pending
+	Reason      string
+	Effects     []string // aligned with Actions; empty for unresolved groups
+	key, target string   // local correspondence scope; never part of source JSON
+}
+
+// Only private correspondence keys are namespaced, never source/native IDs.
+// Existing lab keys remain readable; a retained destination cannot be changed.
+func experimentKey(repo, id string) string {
+	if repo == "" {
+		return id
+	}
+	return repo + ":" + id
+}
+
+func experimentOriginalID(key string) string {
+	return key[strings.LastIndex(key, ":")+1:]
+}
+
+func experimentSourceKey(ctx context.Context, q querier, repo, id string) (string, error) {
+	var old string
+	err := q.QueryRowContext(ctx, `SELECT id FROM experiment_sources WHERE id=? AND target_repo=?`, id, repo).Scan(&old)
+	if err == nil {
+		return old, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return experimentKey(repo, id), nil
+}
+
+// Legacy unscoped public helpers remain usable when identity is unambiguous.
+// Bound callers always select the target explicitly rather than using this.
+func experimentUniqueKey(ctx context.Context, q querier, id string) (string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id FROM experiment_sources WHERE json_extract(source,'$.Actions[0].Event.ID')=?`, id)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	key := ""
+	for rows.Next() {
+		if key != "" {
+			return "", fmt.Errorf("experiment: ambiguous group; select its target Repo")
+		}
+		if err := rows.Scan(&key); err != nil {
+			return "", err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if key == "" {
+		return "", sql.ErrNoRows
+	}
+	return key, nil
+}
+
+// ExperimentEvaluation is a changed decision or changed supporting evidence.
+type ExperimentEvaluation struct {
+	Kind                string // import or recheck; neither is work activity
+	PreviousDisposition string
+	Decision            ExperimentDecision
+	Evidence            []string
+	EvaluatedAt         time.Time
+}
+
+// ExperimentAcknowledgement is local handling, never integration or resolution.
+type ExperimentAcknowledgement struct {
+	Statement      string
+	AcknowledgedAt time.Time
+}
+
+// EnableSharedStoreExperiment creates only lab tables, on explicit invocation.
+// Normal Open and normal migrations do not create or consult these tables.
+func (s *Store) EnableSharedStoreExperiment(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS experiment_sources (
+	 id TEXT PRIMARY KEY, source TEXT NOT NULL, decision TEXT NOT NULL, target_repo TEXT NOT NULL DEFAULT '');
+	 CREATE TABLE IF NOT EXISTS experiment_actions (
+	 id TEXT PRIMARY KEY, source_group TEXT NOT NULL REFERENCES experiment_sources(id),
+	 effect TEXT REFERENCES events(id), baseline TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS experiment_effects (id TEXT PRIMARY KEY REFERENCES events(id));
+	 CREATE TABLE IF NOT EXISTS experiment_evaluations (
+	 source_group TEXT NOT NULL REFERENCES experiment_sources(id), ordinal INTEGER NOT NULL,
+	 evaluation TEXT NOT NULL, PRIMARY KEY(source_group, ordinal));
+	 CREATE TABLE IF NOT EXISTS experiment_acknowledgements (
+	 source_group TEXT PRIMARY KEY REFERENCES experiment_sources(id), acknowledgement TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS experiment_native_origins (id TEXT PRIMARY KEY REFERENCES events(id), host TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS experiment_collisions (
+	 id TEXT NOT NULL, source TEXT NOT NULL, target_repo TEXT NOT NULL, decision TEXT NOT NULL,
+	 PRIMARY KEY(source, target_repo));
+	 CREATE TRIGGER IF NOT EXISTS experiment_source_immutable BEFORE UPDATE OF id, source ON experiment_sources
+	 BEGIN SELECT RAISE(ABORT, 'experiment source is immutable'); END;
+	 CREATE TRIGGER IF NOT EXISTS experiment_source_no_delete BEFORE DELETE ON experiment_sources
+	 BEGIN SELECT RAISE(ABORT, 'experiment source is immutable'); END;`)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ExperimentExport derives baseline evidence from the immutable local log.
+// Export is explicit: the host label is fixture input, not authenticated identity.
+// Integration effects cannot become new original user activities.
+func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) (ExperimentSource, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExperimentSource{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	v := View{q: tx, schemaVersion: s.version}
+	group, err := v.EventsOfChain(ctx, correlation)
+	if err != nil {
+		return ExperimentSource{}, err
+	}
+	if host == "" || len(group) == 0 {
+		return ExperimentSource{}, fmt.Errorf("experiment: host and committed group required")
+	}
+	out := ExperimentSource{Host: host}
+	for _, ev := range group {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, ev.ID).Scan(&count); err != nil {
+			return out, err
+		}
+		if count != 0 || ev.Actor == SystemActor("shared-store-experiment") {
+			return out, fmt.Errorf("experiment: integration effects are not source actions")
+		}
+		history, err := v.EventsOfSubject(ctx, ev.Subject)
+		if err != nil {
+			return out, err
+		}
+		a := ExperimentAction{Event: ev}
+		for _, prior := range history {
+			if prior.ID < ev.ID {
+				a.Baseline = prior.ID
+				if prior.Type == TypeMatterCreated || prior.Type == TypeStageCreated || prior.Type == TypeStepCreated || prior.Type == TypeStepInserted {
+					var birth NodeBirth
+					if err := decode(prior, &birth); err != nil {
+						return out, err
+					}
+					a.Parent = birth.Parent
+				}
+			}
+		}
+		for parent := a.Parent; parent != ""; {
+			history, err := v.EventsOfSubject(ctx, parent)
+			if err != nil {
+				return out, err
+			}
+			b := ExperimentBaseline{Subject: parent}
+			next := ""
+			for _, prior := range history {
+				if prior.ID >= group[0].ID {
+					break
+				}
+				b.Event = prior.ID
+				if prior.Type == TypeStageCreated {
+					var birth NodeBirth
+					if err := decode(prior, &birth); err != nil {
+						return out, err
+					}
+					next = birth.Parent
+				}
+			}
+			a.Ancestors = append(a.Ancestors, b)
+			parent = next
+		}
+		// A generated local effect is not a portable baseline. Refer back to
+		// its retained original so independently initialized stores can resolve it.
+		canonical := func(id string) (string, error) {
+			var original string
+			err := tx.QueryRowContext(ctx, `SELECT a.id FROM experiment_actions a JOIN experiment_effects e ON a.effect=e.id WHERE a.effect=? ORDER BY a.id LIMIT 1`, id).Scan(&original)
+			if errors.Is(err, sql.ErrNoRows) {
+				return id, nil
+			}
+			return experimentOriginalID(original), err
+		}
+		observed := a.Baseline
+		a.Baseline, err = canonical(a.Baseline)
+		if err != nil {
+			return out, err
+		}
+		if a.Baseline != observed {
+			a.NativeBaseline = observed
+		}
+		for i := range a.Ancestors {
+			observed := a.Ancestors[i].Event
+			a.Ancestors[i].Event, err = canonical(a.Ancestors[i].Event)
+			if err != nil {
+				return out, err
+			}
+			if a.Ancestors[i].Event != observed {
+				a.Ancestors[i].NativeEvent = observed
+			}
+		}
+		out.Actions = append(out.Actions, a)
+	}
+	// Remember locally supplied provenance before any echo can claim it. This
+	// is fixture attribution, not authority conferred by an incoming envelope.
+	for _, ev := range group {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_native_origins VALUES (?,?)`, ev.ID, host); err != nil {
+			return out, err
+		}
+		var origin string
+		if err := tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, ev.ID).Scan(&origin); err != nil {
+			return out, err
+		}
+		if origin != host {
+			return out, fmt.Errorf("experiment: native export origin is immutable")
+		}
+	}
+	return out, tx.Commit()
+}
+
+// ExperimentImport retains even unsupported content and conflicted groups.
+// Only starts on explicitly paired objects can have effects in this lab.
+// Decisions and effects share one writer reservation and one commit.
+func (s *Store) ExperimentImport(ctx context.Context, source ExperimentSource) (ExperimentDecision, error) {
+	return s.experimentImport(ctx, source, "")
+}
+
+// ExperimentImportBound retains foreign Repo identity and projects only into an
+// explicitly chosen native Repo. It also enables the bounded Matter/Brief slice.
+func (s *Store) ExperimentImportBound(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
+	if _, err := s.Repo(ctx, repo); err != nil {
+		return ExperimentDecision{}, err
+	}
+	return s.experimentImport(ctx, source, repo)
+}
+
+func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
+	if source.Host == "" || len(source.Actions) == 0 {
+		return ExperimentDecision{}, fmt.Errorf("experiment: empty source")
+	}
+	group := source.Actions[0].Event.ID
+	seen := map[string]bool{}
+	for i, a := range source.Actions {
+		e := a.Event
+		if !IsIdentityShaped(e.ID) || seen[e.ID] || e.Correlation != group || (i == 0 && e.Causation != group) || (i > 0 && !seen[e.Causation]) {
+			return ExperimentDecision{}, fmt.Errorf("experiment: incomplete or malformed source group")
+		}
+		seen[e.ID] = true
+	}
+	raw, err := json.Marshal(source)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// IDs are global, not scoped to a subject or an equivalent transition.
+	// Compare untouched original evidence before Repo/baseline mapping and before
+	// reserving source/action IDs that a later genuine self-echo must still use.
+	v := View{q: tx, schemaVersion: s.version}
+	for _, a := range source.Actions {
+		native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
+		if err != nil {
+			return ExperimentDecision{}, err
+		}
+		if len(native) == 0 {
+			continue
+		}
+		var origin string
+		err = tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, a.Event.ID).Scan(&origin)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return ExperimentDecision{}, err
+		}
+		if reflect.DeepEqual(native[0], a.Event) && origin == source.Host {
+			continue
+		}
+		result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return ExperimentDecision{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), repo, string(encoded)); err != nil {
+			return ExperimentDecision{}, err
+		}
+		return result, tx.Commit()
+	}
+	key, err := experimentSourceKey(ctx, tx, repo, group)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	var old, decision, target string
+	err = tx.QueryRowContext(ctx, `SELECT source, decision, target_repo FROM experiment_sources WHERE id=?`, key).Scan(&old, &decision, &target)
+	if err == nil {
+		if old != string(raw) || target != repo {
+			return ExperimentDecision{}, fmt.Errorf("experiment: immutable source identity reused with different data")
+		}
+		var result ExperimentDecision
+		err = json.Unmarshal([]byte(decision), &result)
+		return result, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ExperimentDecision{}, err
+	}
+	// Legacy raw action keys and scoped keys reserve the same immutable identity
+	// within a target. Check every action before projecting any group effect.
+	for _, a := range source.Actions {
+		var reserved bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE s.target_repo=? AND (a.id=? OR a.id=?))`, repo, experimentKey(repo, a.Event.ID), a.Event.ID).Scan(&reserved); err != nil {
+			return ExperimentDecision{}, err
+		}
+		if reserved {
+			return ExperimentDecision{}, fmt.Errorf("experiment: immutable action identity reused by another source group")
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_sources VALUES (?, ?, '', ?)`, key, string(raw), repo); err != nil {
+		return ExperimentDecision{}, err
+	}
+	result, err := s.experimentEvaluate(ctx, tx, key, source, nil)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	return result, tx.Commit()
+}
+
+// ExperimentRecheck explicitly reconsiders immutable retained input. Delivery
+// retry never calls this. Integrated groups keep their original mappings.
+func (s *Store) ExperimentRecheck(ctx context.Context, group string) (ExperimentDecision, error) {
+	key, err := experimentUniqueKey(ctx, s.db, group)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	return s.experimentRecheck(ctx, key)
+}
+
+// ExperimentRecheckBound reconsiders only this target Repo's retained source.
+func (s *Store) ExperimentRecheckBound(ctx context.Context, repo, group string) (ExperimentDecision, error) {
+	key, err := experimentSourceKey(ctx, s.db, repo, group)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	return s.experimentRecheck(ctx, key)
+}
+
+func (s *Store) experimentRecheck(ctx context.Context, group string) (ExperimentDecision, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var raw, current string
+	if err := tx.QueryRowContext(ctx, `SELECT source, decision FROM experiment_sources WHERE id=?`, group).Scan(&raw, &current); err != nil {
+		return ExperimentDecision{}, err
+	}
+	var source ExperimentSource
+	var previous ExperimentDecision
+	if err := json.Unmarshal([]byte(raw), &source); err != nil {
+		return previous, err
+	}
+	if err := json.Unmarshal([]byte(current), &previous); err != nil {
+		return previous, err
+	}
+	if previous.Disposition == "integrated" {
+		return previous, nil
+	}
+	result, err := s.experimentEvaluate(ctx, tx, group, source, &previous)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	return result, tx.Commit()
+}
+
+func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string, source ExperimentSource, previous *ExperimentDecision) (ExperimentDecision, error) {
+	if err := s.loadFloorFrom(ctx, tx); err != nil {
+		return ExperimentDecision{}, err
+	}
+	v := View{q: tx, schemaVersion: s.version}
+	result := ExperimentDecision{Source: source, Disposition: "integrated"}
+	var target string
+	if err := tx.QueryRowContext(ctx, `SELECT target_repo FROM experiment_sources WHERE id=?`, group).Scan(&target); err != nil {
+		return ExperimentDecision{}, err
+	}
+	evidence, err := experimentEvidence(ctx, v, source, target)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	effects := make([]string, len(source.Actions))
+	needed := make([]bool, len(source.Actions))
+	subjects := map[string]bool{}
+	for _, a := range source.Actions {
+		subjects[a.Event.Subject] = true
+	}
+	// Classify the complete group before appending any business effect.
+	for i, a := range source.Actions {
+		if target != "" {
+			a.Event.Repo = target
+			if a.Baseline != "" {
+				a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
+				if err != nil {
+					return ExperimentDecision{}, err
+				}
+			}
+		}
+		var disposition, reason, effect string
+		var need bool
+		if target != "" && (a.Event.Type == TypeMatterCreated || a.Event.Type == TypeContentCreated) {
+			disposition, reason, effect, need, err = experimentClassifyUseful(ctx, v, a)
+		} else {
+			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target)
+		}
+		if err != nil {
+			return ExperimentDecision{}, err
+		}
+		if disposition != "integrated" {
+			result.Disposition, result.Reason = disposition, reason
+			break
+		}
+		effects[i], needed[i] = effect, need
+	}
+	var local []Event
+	for i, a := range source.Actions {
+		if result.Disposition == "integrated" && needed[i] {
+			repo := a.Event.Repo
+			if target != "" {
+				repo = target
+			}
+			ev, err := s.stamp(Request{Actor: SystemActor("shared-store-experiment"), Env: Env{Repo: repo}}, Draft{Type: a.Event.Type, Subject: a.Event.Subject, Payload: a.Event.Payload})
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			ev.Causation, ev.Correlation = ev.ID, ev.ID
+			if len(local) > 0 {
+				ev.Causation, ev.Correlation = local[len(local)-1].ID, local[0].ID
+			}
+			if err := appendEvent(ctx, tx, ev); err != nil {
+				return ExperimentDecision{}, err
+			}
+			if err := applyEventVersion(ctx, tx, ev, s.version); err != nil {
+				return ExperimentDecision{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_effects VALUES (?)`, ev.ID); err != nil {
+				return ExperimentDecision{}, err
+			}
+			local = append(local, ev)
+			effects[i] = ev.ID
+		}
+		effect := ""
+		if result.Disposition == "integrated" {
+			effect = effects[i]
+		}
+		if previous == nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, experimentKey(target, a.Event.ID), group, nullable(effect), a.Baseline); err != nil {
+				return ExperimentDecision{}, err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), experimentKey(target, a.Event.ID), a.Event.ID, group); err != nil {
+				return ExperimentDecision{}, err
+			}
+		}
+	}
+	if result.Disposition == "integrated" {
+		result.Effects = effects
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	evaluation := ExperimentEvaluation{Kind: "import", Decision: result, Evidence: evidence, EvaluatedAt: s.ids.now().UTC()}
+	if previous != nil {
+		evaluation.Kind, evaluation.PreviousDisposition = "recheck", previous.Disposition
+	}
+	var last string
+	err = tx.QueryRowContext(ctx, `SELECT evaluation FROM experiment_evaluations WHERE source_group=? ORDER BY ordinal DESC LIMIT 1`, group).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ExperimentDecision{}, err
+	}
+	var old ExperimentEvaluation
+	if last != "" {
+		if err := json.Unmarshal([]byte(last), &old); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
+	if last == "" || !reflect.DeepEqual(old.Decision, result) || !reflect.DeepEqual(old.Evidence, evidence) {
+		raw, err := json.Marshal(evaluation)
+		if err != nil {
+			return ExperimentDecision{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_evaluations SELECT ?, COALESCE(MAX(ordinal),0)+1, ? FROM experiment_evaluations WHERE source_group=?`, group, string(raw), group); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE experiment_sources SET decision=? WHERE id=?`, string(encoded), group); err != nil {
+		return ExperimentDecision{}, err
+	}
+	return result, nil
+}
+
+func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string) (string, string, string, bool, error) {
+	e := a.Event
+	conflict := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	pending := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	if e.Type != TypeMatterStarted && e.Type != TypeStageStarted && e.Type != TypeStepStarted {
+		return conflict("unsupported family; original payload retained, no content overwritten")
+	}
+	var p Transition
+	if err := decodeStrict(e, &p); err != nil {
+		return conflict("invalid transition payload")
+	}
+	if p.From != Planned || p.To != InProgress || p.Reason != "" {
+		return conflict("not a planned start")
+	}
+	n, err := v.Node(ctx, e.Subject)
+	if err != nil {
+		return pending("missing live paired object")
+	}
+	expected := map[Scale]string{ScaleMatter: TypeMatterStarted, ScaleStage: TypeStageStarted, ScaleStep: TypeStepStarted}
+	if n.Repo != e.Repo || n.Parent != a.Parent || expected[n.Kind] != e.Type {
+		return conflict("paired structure differs")
+	}
+	if a.Baseline == "" {
+		return pending("missing baseline evidence")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	baseline := -1
+	for i, prior := range history {
+		if prior.ID == a.Baseline {
+			baseline = i
+		}
+	}
+	if baseline < 0 {
+		return pending("unknown baseline dependency")
+	}
+	for parent := n.Parent; parent != ""; {
+		ancestor, err := v.Node(ctx, parent)
+		if err != nil {
+			return pending("missing ancestor")
+		}
+		if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
+			return conflict("incompatible ancestor lifecycle")
+		}
+		if !subjects[parent] {
+			if ancestor.Lifecycle == Planned {
+				return pending("incomplete ancestor cascade")
+			}
+			history, err := v.EventsOfSubject(ctx, parent)
+			if err != nil {
+				return "", "", "", false, err
+			}
+			last := history[len(history)-1]
+			if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
+				return conflict("ancestor history diverged from its start")
+			}
+			observed := ""
+			for _, b := range a.Ancestors {
+				if b.Subject == parent {
+					observed = b.Event
+				}
+			}
+			if observed == "" {
+				return pending("missing ancestor baseline evidence")
+			}
+			mapped, err := experimentMappedEvidence(ctx, v, observed, target)
+			if err != nil {
+				return "", "", "", false, err
+			}
+			if mapped != last.ID {
+				var count int
+				if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id=?`, mapped).Scan(&count); err != nil {
+					return "", "", "", false, err
+				}
+				if count == 0 {
+					return pending("unknown ancestor correspondence")
+				}
+				return conflict("ancestor history differs from source observation")
+			}
+		}
+		parent = ancestor.Parent
+	}
+	last := history[len(history)-1]
+	if n.Lifecycle == InProgress && len(history) >= 2 && history[len(history)-2].ID == a.Baseline && last.Type == e.Type {
+		var represented Transition
+		if err := decodeStrict(last, &represented); err != nil {
+			return "", "", "", false, err
+		}
+		if represented.TrackerPushLevel != p.TrackerPushLevel {
+			return conflict("tracker policy snapshots differ")
+		}
+		return "integrated", "", last.ID, false, nil
+	}
+	if n.Lifecycle != Planned || last.ID != a.Baseline {
+		return conflict("lifecycle or subject history diverged; never reopen or infer from current InProgress")
+	}
+	return "integrated", "", "", true, nil
+}
+
+func experimentMappedEvidence(ctx context.Context, v View, id, target string) (string, error) {
+	var mapped sql.NullString
+	err := v.q.QueryRowContext(ctx, `SELECT a.effect FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE (a.id=? OR a.id=?) AND s.target_repo=?`, experimentKey(target, id), id, target).Scan(&mapped)
+	if errors.Is(err, sql.ErrNoRows) {
+		return id, nil
+	}
+	return mapped.String, err
+}
+
+func experimentEvidence(ctx context.Context, v View, source ExperimentSource, target string) ([]string, error) {
+	subjects := map[string]bool{}
+	var evidence []string
+	for _, a := range source.Actions {
+		subjects[a.Event.Subject] = true
+		if a.Parent != "" {
+			subjects[a.Parent] = true
+		}
+		for _, b := range a.Ancestors {
+			subjects[b.Subject] = true
+			mapped, err := experimentMappedEvidence(ctx, v, b.Event, target)
+			if err != nil {
+				return nil, err
+			}
+			evidence = append(evidence, "mapping:"+b.Event+":"+mapped)
+		}
+	}
+	for subject := range subjects {
+		history, err := v.EventsOfSubject(ctx, subject)
+		if err != nil {
+			return nil, err
+		}
+		last := "missing"
+		for _, event := range history {
+			if target == "" || event.Repo == target {
+				last = event.ID
+			}
+		}
+		evidence = append(evidence, "subject:"+subject+":"+last)
+	}
+	sort.Strings(evidence)
+	return evidence, nil
+}
+
+// ExperimentDecisionHistory returns only meaningful evaluations, not retries.
+func (s *Store) ExperimentDecisionHistory(ctx context.Context, group string) ([]ExperimentEvaluation, error) {
+	key, err := experimentUniqueKey(ctx, s.db, group)
+	if err != nil {
+		return nil, err
+	}
+	return experimentDecisionHistory(ctx, s.db, key)
+}
+
+func experimentDecisionHistory(ctx context.Context, q querier, group string) ([]ExperimentEvaluation, error) {
+	rows, err := q.QueryContext(ctx, `SELECT evaluation FROM experiment_evaluations WHERE source_group=? ORDER BY ordinal`, group)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ExperimentEvaluation
+	for rows.Next() {
+		var raw string
+		var e ExperimentEvaluation
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ExperimentAcknowledge records local handling without changing the outcome,
+// dependency mappings, native events, or retained source. Repeating it is inert.
+func (s *Store) ExperimentAcknowledge(ctx context.Context, group string) (ExperimentAcknowledgement, error) {
+	key, err := experimentUniqueKey(ctx, s.db, group)
+	if err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	return s.experimentAcknowledge(ctx, key)
+}
+
+// ExperimentAcknowledgeBound records handling only for this target Repo.
+func (s *Store) ExperimentAcknowledgeBound(ctx context.Context, repo, group string) (ExperimentAcknowledgement, error) {
+	key, err := experimentSourceKey(ctx, s.db, repo, group)
+	if err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	return s.experimentAcknowledge(ctx, key)
+}
+
+func (s *Store) experimentAcknowledge(ctx context.Context, group string) (ExperimentAcknowledgement, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var raw string
+	if err := tx.QueryRowContext(ctx, `SELECT decision FROM experiment_sources WHERE id=?`, group).Scan(&raw); err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	var d ExperimentDecision
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	if d.Disposition != "conflict" {
+		return ExperimentAcknowledgement{}, fmt.Errorf("experiment: acknowledgement requires a conflict; it cannot integrate it")
+	}
+	err = tx.QueryRowContext(ctx, `SELECT acknowledgement FROM experiment_acknowledgements WHERE source_group=?`, group).Scan(&raw)
+	if err == nil {
+		var ack ExperimentAcknowledgement
+		err = json.Unmarshal([]byte(raw), &ack)
+		return ack, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ExperimentAcknowledgement{}, err
+	}
+	ack := ExperimentAcknowledgement{Statement: "retained; not applied here", AcknowledgedAt: s.ids.now().UTC()}
+	encoded, err := json.Marshal(ack)
+	if err != nil {
+		return ack, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_acknowledgements VALUES (?,?)`, group, string(encoded)); err != nil {
+		return ack, err
+	}
+	return ack, tx.Commit()
+}
+
+// ExperimentActivities reports source time/host, decisions and mapped local
+// effects. Existing Session still narrates native integration time: unchanged.
+func (s *Store) ExperimentActivities(ctx context.Context) ([]ExperimentDecision, error) {
+	return experimentActivities(ctx, s.db, true, "")
+}
+
+func experimentActivities(ctx context.Context, q querier, includeCollisions bool, targetRepo string) ([]ExperimentDecision, error) {
+	query := `SELECT id,decision,target_repo FROM experiment_sources`
+	if includeCollisions {
+		query += ` UNION ALL SELECT id,decision,target_repo FROM experiment_collisions`
+	}
+	query = `SELECT id,decision,target_repo FROM (` + query + `) WHERE (?='' OR target_repo=?) ORDER BY id,decision`
+	rows, err := q.QueryContext(ctx, query, targetRepo, targetRepo)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ExperimentDecision
+	for rows.Next() {
+		var raw string
+		var d ExperimentDecision
+		var key, target string
+		if err := rows.Scan(&key, &raw, &target); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &d); err != nil {
+			return nil, err
+		}
+		d.key, d.target = key, target
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ExperimentEffect identifies native representation and its local log time.
+// RecordedAt is not the source's work time (even for equivalent local effects).
+type ExperimentEffect struct {
+	ID         string
+	RecordedAt time.Time
+}
+
+// ExperimentActivity is original work with synchronization diagnostics separate.
+type ExperimentActivity struct {
+	Event                                Event
+	Origin                               string
+	Disposition                          string
+	Effects                              []ExperimentEffect
+	ReceivedAt, LastRecordedEvaluationAt *time.Time
+	Acknowledgement                      *ExperimentAcknowledgement
+}
+
+// ExperimentActivitySnapshot combines native originals and retained sources in
+// one committed snapshot. localOrigin is fixture attribution; empty is unknown.
+// Source identity deduplicates echoes, not equivalent independent activities.
+func (s *Store) ExperimentActivitySnapshot(ctx context.Context, localOrigin string) ([]ExperimentActivity, error) {
+	return s.experimentActivitySnapshot(ctx, localOrigin, "")
+}
+
+// ExchangeActivitySnapshot scopes by the retained target mapping, not by the
+// foreign event's original Repo ID (which must remain immutable).
+func (s *Store) ExchangeActivitySnapshot(ctx context.Context, localOrigin, repo string) ([]ExperimentActivity, error) {
+	return s.experimentActivitySnapshot(ctx, localOrigin, repo)
+}
+
+func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, repo string) ([]ExperimentActivity, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	v := View{q: tx, schemaVersion: s.version}
+	events, err := v.Events(ctx)
+	if err != nil {
+		return nil, err
+	}
+	native := map[string]Event{}
+	activities := map[string]ExperimentActivity{}
+	for _, e := range events {
+		native[e.ID] = e
+		if repo != "" && e.Repo != repo {
+			continue
+		}
+		var effect int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, e.ID).Scan(&effect); err != nil {
+			return nil, err
+		}
+		if effect != 0 || e.Actor == SystemActor("shared-store-experiment") {
+			continue
+		}
+		activities[e.ID] = ExperimentActivity{Event: e, Origin: localOrigin, Disposition: "local"}
+	}
+	// Collision claims are diagnostic evidence, never canonical work. Exclude
+	// their whole groups, including actions whose IDs are absent from the native
+	// log. Ordinary canonical conflicts remain part of this activity snapshot.
+	decisions, err := experimentActivities(ctx, tx, false, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range decisions {
+		group := d.key
+		if repo != "" {
+			if d.target != repo && (d.target != "" || d.Source.Actions[0].Event.Repo != repo) {
+				continue
+			}
+		}
+		history, err := experimentDecisionHistory(ctx, tx, group)
+		if err != nil {
+			return nil, err
+		}
+		var received, evaluated *time.Time
+		if len(history) > 0 {
+			if history[0].Kind == "import" {
+				received = &history[0].EvaluatedAt
+			}
+			evaluated = &history[len(history)-1].EvaluatedAt
+		}
+		var raw string
+		var ack *ExperimentAcknowledgement
+		err = tx.QueryRowContext(ctx, `SELECT acknowledgement FROM experiment_acknowledgements WHERE source_group=?`, group).Scan(&raw)
+		if err == nil {
+			if err := json.Unmarshal([]byte(raw), &ack); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		for i, a := range d.Source.Actions {
+			key := experimentKey(d.target, a.Event.ID)
+			activity := ExperimentActivity{Event: a.Event, Origin: d.Source.Host, Disposition: d.Disposition, ReceivedAt: received, LastRecordedEvaluationAt: evaluated, Acknowledgement: ack}
+			if e, ok := native[a.Event.ID]; ok && e.Actor != SystemActor("shared-store-experiment") {
+				// A conflicting claim is inspectable in ExperimentActivities, not a
+				// replacement for authentic work. Even exact echoes cannot supply
+				// native attribution that was unknown to this local reader.
+				if d.Disposition != "integrated" || !reflect.DeepEqual(e, a.Event) {
+					continue
+				}
+				activity.Event, activity.Origin = e, localOrigin
+				key = e.ID
+			}
+			if len(d.Effects) > i && d.Effects[i] != "" {
+				e := native[d.Effects[i]]
+				activity.Effects = []ExperimentEffect{{ID: e.ID, RecordedAt: e.OccurredAt}}
+			}
+			activities[key] = activity
+		}
+	}
+	out := make([]ExperimentActivity, 0, len(activities))
+	for _, a := range activities {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Event.OccurredAt.Equal(out[j].Event.OccurredAt) {
+			return out[i].Event.OccurredAt.Before(out[j].Event.OccurredAt)
+		}
+		if out[i].Origin != out[j].Origin {
+			return out[i].Origin < out[j].Origin
+		}
+		return out[i].Event.ID < out[j].Event.ID
+	})
+	return out, tx.Commit()
+}

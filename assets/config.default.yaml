@@ -16,3 +16,9 @@ idle_gap: 6h
 # covers all engaged work in a Run; 1 is plain sequential. The engine takes
 # its cap per invocation; this key only shapes the read.
 run_cap: 1
+
+# Optional initial pairing/discovery only. The user sync block replaces this
+# whole block. Tokens belong to the OS-private credential registry, never here.
+sync:
+  connections: {}
+  routes: []

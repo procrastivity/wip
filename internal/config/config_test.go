@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,16 +19,24 @@ func TestLoad_NoOverride_ReturnsShippedDefault(t *testing.T) {
 	// chassis owns the mechanism, not any config key; read-surface earned
 	// the first one — the default idle gap for `wip session` (MODEL
 	// §2.4) — and scheduler added the second — the default Run cap `wip
-	// next`'s frontier display uses (G4/D31) — both documented next to
-	// their keys in config.default.yaml.
+	// next`'s frontier display uses (G4/D31). Explicit sync adds only empty
+	// optional connection/routing definitions, never an implicit destination.
 	if got := cfg["idle_gap"]; got != "6h" {
 		t.Fatalf(`cfg["idle_gap"] = %v, want "6h"`, got)
 	}
 	if got := cfg["run_cap"]; got != 1 {
 		t.Fatalf(`cfg["run_cap"] = %v, want 1`, got)
 	}
-	if len(cfg) != 2 {
-		t.Fatalf("cfg = %+v, want exactly the two keys the shipped default declares", cfg)
+	var sync struct {
+		Connections map[string]any
+		Routes      []any
+	}
+	raw, err := json.Marshal(cfg["sync"])
+	if err != nil || json.Unmarshal(raw, &sync) != nil || sync.Connections == nil || sync.Routes == nil || len(sync.Connections) != 0 || len(sync.Routes) != 0 {
+		t.Fatal("sync defaults must not select or route to any server")
+	}
+	if len(cfg) != 3 {
+		t.Fatalf("cfg = %+v, want exactly the three keys the shipped default declares", cfg)
 	}
 }
 

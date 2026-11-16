@@ -230,16 +230,16 @@ var projectionTables = append(append([]string{}, v1ProjectionTables...),
 // which a single-user single-host store with one connection (D34, D43) does not
 // need; if that ever stops being true, this is the function that changes.
 func (s *Store) Rebuild(ctx context.Context) error {
-	events, err := s.Events(ctx)
-	if err != nil {
-		return err
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin rebuild: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	events, err := (View{q: tx, schemaVersion: s.version}).Events(ctx)
+	if err != nil {
+		return err
+	}
 
 	// Parent and tier references make a wholesale clear order-dependent; defer
 	// the checks to commit instead of topologically sorting the deletes.

@@ -1,0 +1,98 @@
+name: Joint Go Laravel
+
+on:
+  push:
+    branches: [main, wipd, work/client-server-sync]
+  pull_request:
+    branches: [main, wipd]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: laravel_foundation_test
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: disposable-ci-only
+        # The existing harness uses a local socket and disposable databases.
+        # No TCP port is published; the container's local socket uses trust auth.
+        volumes:
+          - /var/run/postgresql:/var/run/postgresql
+        options: >-
+          --health-cmd "pg_isready -U runner -d laravel_foundation_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      WIP_CLOUD_PATH: ${{ github.workspace }}/cloud
+      # This paired feature must never silently test an old main counterpart.
+      # Other branches retain the main compatibility gate; missing refs fail checkout.
+      COUNTERPART_REF: ${{ (github.head_ref || github.ref_name) == 'work/client-server-sync' && 'work/client-server-sync' || 'main' }}
+      APP_ENV: testing
+      APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DB_URL: ''
+      DB_CONNECTION: pgsql
+      DB_HOST: /var/run/postgresql
+      DB_DATABASE: laravel_foundation_test
+      DB_USERNAME: runner
+      DB_PASSWORD: ''
+      MAIL_MAILER: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - name: Require read-only counterpart checkout access
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.WIP_SYNC_READ_TOKEN != '' }}
+        run: |
+          if [[ "$HAS_SYNC_TOKEN" != "true" ]]; then
+            echo "::error::Configure WIP_SYNC_READ_TOKEN with read-only Contents access to procrastivity/wip-cloud."
+            exit 1
+          fi
+      - name: Checkout candidate Go revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: go
+          persist-credentials: false
+      - name: Checkout compatible Laravel revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: procrastivity/wip-cloud
+          ref: ${{ env.COUNTERPART_REF }}
+          token: ${{ secrets.WIP_SYNC_READ_TOKEN }}
+          path: cloud
+          persist-credentials: false
+      - name: Record exact source revisions
+        run: |
+          test -n "$COUNTERPART_REF"
+          printf 'Required counterpart ref: %s (missing ref fails; no fallback)\n' "$COUNTERPART_REF" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'Go: %s\nLaravel: %s\n' "$(git -C go rev-parse HEAD)" "$(git -C cloud rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: shivammathur/setup-php@d52fc211a0436f8839a587b3b5b8efddab4744ea # v2
+        with:
+          php-version: '8.5'
+          extensions: pdo_pgsql, mbstring, dom
+          coverage: none
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+      - name: Install PostgreSQL client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+      - name: Install and check Laravel
+        working-directory: cloud
+        run: |
+          composer install --prefer-dist --no-interaction
+          composer validate --strict
+          vendor/bin/pint --test
+          composer test
+      - name: Run built CLI and required real Laravel acceptance
+        working-directory: go
+        run: nix develop --command make test-sync-local test-sync-integration

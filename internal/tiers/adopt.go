@@ -73,19 +73,30 @@ func AdoptIfPossible(ctx context.Context, s *store.Store, actor store.Actor, clo
 // caller's job to decide whether that is a hard failure or, for `status`
 // alone, the host-wide fallback the Brief's "Read scope" section carves out.
 func ResolveCurrentClone(ctx context.Context, s *store.Store, actor store.Actor, dir string) (store.Clone, bool, error) {
+	clone, found, err := LookupCurrentClone(ctx, s.View, dir)
+	if err != nil || !found {
+		return clone, found, err
+	}
+	if _, err := AdoptIfPossible(ctx, s, actor, clone, dir); err != nil {
+		return store.Clone{}, false, err
+	}
+	return clone, true, nil
+}
+
+// LookupCurrentClone resolves a known clone without opportunistic remote
+// adoption. Explicit sync previews and pairing must not change native identity
+// metadata just by inspecting the current checkout.
+func LookupCurrentClone(ctx context.Context, v store.View, dir string) (store.Clone, bool, error) {
 	commonDir, err := gitCommonDir(ctx, dir)
 	if err != nil {
 		return store.Clone{}, false, nil
 	}
-	clone, found, err := s.CloneByCommonDir(ctx, commonDir)
+	clone, found, err := v.CloneByCommonDir(ctx, commonDir)
 	if err != nil {
 		return store.Clone{}, false, err
 	}
 	if !found {
 		return store.Clone{}, false, nil
-	}
-	if _, err := AdoptIfPossible(ctx, s, actor, clone, dir); err != nil {
-		return store.Clone{}, false, err
 	}
 	return clone, true, nil
 }

@@ -207,7 +207,8 @@ func openAt(path string, reg []migration, target int, clock func() time.Time) (*
 	}
 
 	dsn := "file:" + path +
-		"?_pragma=journal_mode(WAL)" +
+		"?_txlock=immediate" +
+		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=foreign_keys(1)" +
 		"&_pragma=busy_timeout(5000)"
 
@@ -215,9 +216,8 @@ func openAt(path string, reg []migration, target int, clock func() time.Time) (*
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	// One connection means one writer and no lock contention to reason about.
-	// wip is single-user, single-host by refusal (D34) and one Matter is worked
-	// from one clone at a time (D43); nothing here wants concurrency.
+	// One connection per handle; BEGIN IMMEDIATE also reserves the writer
+	// across independently opened handles before transactional decisions read.
 	db.SetMaxOpenConns(1)
 
 	ctx := context.Background()
@@ -271,11 +271,15 @@ func (s *Store) SchemaVersion() int { return s.version }
 // without appending at least one event (ErrNoEvent). So every identity ever
 // persisted is below some event id.
 func (s *Store) loadFloor(ctx context.Context) error {
+	return s.loadFloorFrom(ctx, s.db)
+}
+
+func (s *Store) loadFloorFrom(ctx context.Context, q querier) error {
 	var highest sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&highest); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&highest); err != nil {
 		return fmt.Errorf("store: read the identity high-water mark: %w", err)
 	}
-	if highest.Valid {
+	if highest.Valid && highest.String > s.floor {
 		s.floor = highest.String
 	}
 	return nil
@@ -344,16 +348,22 @@ func (s *Store) verifyTaxonomy(ctx context.Context) error {
 // that cannot — the tier bootstrap, where the Repo's identity has to exist
 // before the command that creates it can name its own tier context.
 func (s *Store) NewID() string {
-	for {
-		id := s.ids.next()
-		if id > s.floor {
-			s.floor = id
-			return id
+	id := s.ids.next()
+	if id <= s.floor {
+		// Another writer (or a backwards clock) may be ahead. Advance the
+		// logical ID rather than waiting for the wall clock to catch up.
+		b := []byte(s.floor)
+		for i := len(b) - 1; i >= 0; i-- {
+			v := crockfordValue(b[i])
+			b[i] = crockford[(v+1)%32]
+			if v < 31 {
+				break
+			}
 		}
-		// The floor's timestamp cannot be ahead of now by more than clock skew,
-		// so one tick of the millisecond clock is enough to clear it.
-		time.Sleep(time.Millisecond)
+		id = string(b)
 	}
+	s.floor = id
+	return id
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +414,10 @@ func (s *Store) Commit(ctx context.Context, req Request, decide func(context.Con
 		return nil, fmt.Errorf("store: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := s.loadFloorFrom(ctx, tx); err != nil {
+		return nil, err
+	}
 
 	// A role actor is a claim about a spawned role, not a label (MODEL §6):
 	// it speaks only while an instance of that role is open — scoped to the

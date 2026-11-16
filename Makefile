@@ -13,9 +13,9 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # shell files at all, so this list is the only shell gate — `make lint`,
 # and so CI's lint job, checks it in full.
 ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy contrib/online-authority-proof/run contrib/online-authority-proof/runtime-test contrib/online-authority-proof/test-policy
-SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh scripts/prepare-step10-verifier-inputs.sh $(ORB_SHELLCHECK_FILES)
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh $(ORB_SHELLCHECK_FILES)
 
-.PHONY: fmt lint test check prepare-step10-verifier-inputs step10-verifier-inputs-local orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
+.PHONY: fmt lint test test-sync-local test-sync-integration check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
 
 fmt:
 	gofumpt -w .
@@ -27,41 +27,18 @@ lint:
 test:
 	go test ./...
 
-# The process acceptance consumes only a fresh, hash-checked directory. The
-# callers acquire the exact external commits first; this target never fetches
-# or consults credentials.
-prepare-step10-verifier-inputs:
-	@test -n "$(MODEL_SOURCE_DIR)" || { echo "error: MODEL_SOURCE_DIR is required" >&2; exit 1; }
-	@test -n "$(WORKPLAN_SOURCE_DIR)" || { echo "error: WORKPLAN_SOURCE_DIR is required" >&2; exit 1; }
-	@test -n "$(STEP10_INPUT_DIR)" || { echo "error: STEP10_INPUT_DIR is required" >&2; exit 1; }
-	@scripts/prepare-step10-verifier-inputs.sh "$(MODEL_SOURCE_DIR)" "$(WORKPLAN_SOURCE_DIR)" "$(STEP10_INPUT_DIR)"
+# PHP-independent built-client checks. Python 3 supplies a real POSIX PTY.
+test-sync-local:
+	go test ./internal/cli -run '^TestSync' -count=1 -v -timeout=2m
 
-# Local twin of CI's Step 10 input acquisition. It clones the two pinned
-# commits out of a local wip-reboot checkout (no network, no credentials)
-# and prepares them with the same validating script CI uses. The pins are
-# read from that script, so this target does not repeat them.
-WIP_REBOOT_DIR ?= ../wip-reboot
-STEP10_LOCAL_DIR := $(CURDIR)/.step10-local
+# Unlike optional developer runs, designated acceptance cannot skip Laravel.
+# Fixture creation/migration also fails hard if PHP/vendor/PostgreSQL is absent.
+test-sync-integration:
+	WIP_EXCHANGE_REQUIRED=1 go test -tags sharedstoreexperiment ./internal/store ./internal/readsurface -count=1 -v -timeout=8m
 
-step10-verifier-inputs-local:
-	@git -C "$(WIP_REBOOT_DIR)" rev-parse --git-dir >/dev/null 2>&1 || { echo "error: WIP_REBOOT_DIR=$(WIP_REBOOT_DIR) is not a wip-reboot checkout" >&2; exit 1; }
-	@rm -rf "$(STEP10_LOCAL_DIR)"
-	@mkdir -p "$(STEP10_LOCAL_DIR)"
-	@for source in model workplan; do \
-		commit=$$(sed -n "s/^readonly $${source}_commit='\([0-9a-f]*\)'$$/\1/p" scripts/prepare-step10-verifier-inputs.sh); \
-		git clone -q --no-checkout "$(WIP_REBOOT_DIR)" "$(STEP10_LOCAL_DIR)/$$source" && \
-		git -C "$(STEP10_LOCAL_DIR)/$$source" checkout -q --detach "$$commit" || \
-		{ echo "error: $(WIP_REBOOT_DIR) lacks pinned $$source commit $$commit; fetch it, then retry" >&2; exit 1; }; \
-	done
-	@scripts/prepare-step10-verifier-inputs.sh "$(STEP10_LOCAL_DIR)/model" "$(STEP10_LOCAL_DIR)/workplan" "$(STEP10_LOCAL_DIR)/inputs"
-	@echo
-	@echo "Run the full suite with:"
-	@echo "  GOFLAGS='-timeout=45m -count=1' WIPD_STEP10_VERIFIER_INPUTS=$(STEP10_LOCAL_DIR)/inputs make check"
-
-# `test` includes the Step 10 process acceptance, which needs pinned inputs
-# (step10-verifier-inputs-local), GOFLAGS='-timeout=45m -count=1', and a
-# host that permits the bubblewrap sandbox. It fails at once and names the
-# missing one; docs/step10-verifier-test-inputs.md has the details.
+# The abandoned pinned-plan process acceptance is retired. Ordinary checks
+# need no private Model/Workplan inputs or per-test exclusion. Real Laravel
+# acceptance remains a separate, required test-sync-integration target.
 check: lint test
 
 orb-lint:

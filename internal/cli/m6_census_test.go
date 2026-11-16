@@ -493,11 +493,34 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 		t.Fatalf("build Cobra manifest in process: %v", err)
 	}
 	verbs := make(map[string]manifest.Verb, len(result.Verbs))
+	// The separately authorized Laravel exchange is not an M6 IPC operation
+	// or a change to the historical ownership matrix. Pin every explicit path
+	// separately; a prefix exemption would silently hide future commands.
+	exchangePaths := map[string]bool{
+		"plumbing sync login": false, "plumbing sync logout": false,
+		"plumbing sync repos": false, "plumbing sync pair": false,
+		"plumbing sync status": false, "plumbing sync run": false,
+		"plumbing sync activity": false, "plumbing sync recheck": false,
+		"plumbing sync ack": false, "plumbing sync unpair": false,
+		"plumbing sync connections": false, "plumbing sync route": false,
+	}
 	for _, verb := range result.Verbs {
+		if seen, ok := exchangePaths[verb.Name]; ok {
+			if seen {
+				t.Errorf("manifest contains duplicate exchange path %q", verb.Name)
+			}
+			exchangePaths[verb.Name] = true
+			continue
+		}
 		if _, exists := verbs[verb.Name]; exists {
 			t.Errorf("manifest contains duplicate path %q", verb.Name)
 		}
 		verbs[verb.Name] = verb
+	}
+	for path, seen := range exchangePaths {
+		if !seen {
+			t.Errorf("manifest is missing explicit exchange path %q", path)
+		}
 	}
 	if len(verbs) != 79 {
 		t.Errorf("current manifest has %d runnable paths, want census baseline 79", len(verbs))
