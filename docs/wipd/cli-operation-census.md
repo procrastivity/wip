@@ -253,7 +253,7 @@ name the normal drafts, not every projection side effect already noted above.
 |---|---|
 | cursor | `internal/readsurface/next.go:325` `SetCursor` → `cursor.moved`; `:372` `ClearCursor` → `cursor.moved` |
 | render/dispatch | `internal/render/dispatch.go:62` open → `dispatch.opened`; `:94` close/supersede/reap → `dispatch.closed`; `internal/render/refresh.go:158` → `render.performed` |
-| tiers | `internal/tiers/adopt.go:57` → `repo.key-adopted`; `internal/tiers/init.go:84` existing Clone → `worktree.attached`; `:177` new tier attachment → `repo.attached`/`clone.attached`/`worktree.attached`; `internal/tiers/move.go:136` → `clone.relinked`; `internal/tiers/relabel.go:54` → `clone.labeled` |
+| tiers | `internal/tiers/adopt.go:57` → `repo.key-adopted`; `internal/tiers/init.go:82` existing Clone, missing Worktree → `worktree.attached` (known Worktree is reused without a commit); `:175` new tier attachment → `repo.attached`/`clone.attached`/`worktree.attached`; `internal/tiers/move.go:136` → `clone.relinked`; `internal/tiers/relabel.go:54` → `clone.labeled` |
 | evented config | `internal/store/config.go:172` `SetConfig` → `config.set`; `:300` `DeclareGate` → `gate.declared`; `:335` `RepairGateExemption` → `gate.exemption-repaired` |
 | birth | `internal/writesurface/birth.go:41` Matter; `:79` Stage; `:115` Step |
 | amendment | `internal/writesurface/amendment.go:98` insert/rebalance; `:183` reorder; `:213` replace; `:238` remove |

@@ -12,6 +12,7 @@ import (
 // excludes pre-pair history; unsupported local work remains fully usable.
 type ExchangeStatus struct {
 	Binding                              ExchangeBinding
+	Generation                           string
 	Paired, Active                       bool
 	Boundary                             string
 	EarlierGroups                        int
@@ -56,6 +57,18 @@ func (s *Store) PairExchangeConnection(ctx context.Context, repo, endpoint, conn
 	return s.ExchangeStatus(ctx, repo)
 }
 
+// PairExchangeConnectionAt rejects a pairing whose pre-HTTP view was reset.
+func (s *Store) PairExchangeConnectionAt(ctx context.Context, repo, endpoint, connection, account, expectedGeneration, expectedConnectionGeneration string) (ExchangeStatus, error) {
+	preview, err := s.ExchangeStatus(ctx, repo)
+	if err != nil {
+		return preview, err
+	}
+	if _, err := s.bindExchange(ctx, repo, endpoint, &preview.Boundary, connection, account, expectedGeneration, expectedConnectionGeneration); err != nil {
+		return preview, err
+	}
+	return s.ExchangeStatus(ctx, repo)
+}
+
 // UnpairExchange disables future passes without deleting evidence or checkpoints.
 func (s *Store) UnpairExchange(ctx context.Context, repo string) error {
 	status, err := s.ExchangeStatus(ctx, repo)
@@ -71,6 +84,11 @@ func (s *Store) UnpairExchange(ctx context.Context, repo string) error {
 func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus, error) {
 	out := ExchangeStatus{Binding: ExchangeBinding{LocalRepo: repo}}
 	if _, err := s.Repo(ctx, repo); err != nil {
+		return out, err
+	}
+	var err error
+	out.Generation, err = exchangeGeneration(ctx, s.db, repo)
+	if err != nil {
 		return out, err
 	}
 	exists, err := s.exchangeCLIExists(ctx)
@@ -92,6 +110,15 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 		}
 	}
 	if out.Paired {
+		out.Binding.AssociationID = out.Generation
+		if exists, err := exchangeTableExists(ctx, s.db, "exchange_associations"); err != nil {
+			return out, err
+		} else if exists {
+			err := s.db.QueryRowContext(ctx, `SELECT installation FROM exchange_associations WHERE repo=?`, repo).Scan(&out.Binding.InstallationID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return out, err
+			}
+		}
 		var exists int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='exchange_accounts'`).Scan(&exists); err != nil {
 			return out, err
@@ -191,7 +218,11 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(applied),0) FROM exchange_inbox WHERE repo=?`, repo).Scan(&out.Downloaded, &out.Evaluated); err != nil {
 			return out, err
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT decision,0 FROM experiment_sources WHERE target_repo=? UNION ALL SELECT decision,1 FROM experiment_collisions WHERE target_repo=?`, repo, repo)
+		scope, err := exchangeScope(ctx, s.db, repo)
+		if err != nil {
+			return out, err
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT decision,0 FROM experiment_sources WHERE target_repo=? AND (?=? OR substr(id,1,length(?)+1)=?||':') UNION ALL SELECT decision,1 FROM experiment_collisions WHERE target_repo=?`, repo, scope, repo, scope, scope, scope)
 		if err != nil {
 			return out, err
 		}
@@ -280,7 +311,18 @@ func (s *Store) RunExchange(ctx context.Context, c ExchangeClient, repo string) 
 		if err := c.request(ctx, "POST", status.Binding.Endpoint+"/changes", map[string]any{"changes": []ExchangeChange{change}}, nil); err != nil {
 			return status, err
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_upload_ack VALUES(?,?)`, repo, id); err != nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return status, err
+		}
+		if err = checkExchangeBinding(ctx, tx, status.Binding); err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_upload_ack VALUES(?,?)`, repo, id)
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		_ = tx.Rollback()
+		if err != nil {
 			return status, err
 		}
 	}

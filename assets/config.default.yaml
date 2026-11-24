@@ -17,8 +17,11 @@ idle_gap: 6h
 # its cap per invocation; this key only shapes the read.
 run_cap: 1
 
-# Optional initial pairing/discovery only. The user sync block replaces this
+# Optional initial pairing/discovery. The user sync block replaces this
 # whole block. Tokens belong to the OS-private credential registry, never here.
 sync:
   connections: {}
   routes: []
+  onboarding:
+    on_init: false
+    default_join: ask

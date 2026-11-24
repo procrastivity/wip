@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,8 +19,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Command never runs automatically. Ordinary writes have no dependency on this
-// namespace, credentials, a server or an active association.
+// Command exposes explicit exchange operations. Opt-in init onboarding uses
+// the same operations; ordinary writes have no network dependency.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	var server, repo, connection string
 	root := &cobra.Command{Use: "sync", Short: "experimental explicit pairing and one-pass sync (bounded work families)"}
@@ -117,28 +118,9 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		c, err := onlineConnection(cmd, selected)
+		out, err := discoverRepos(cmd.Context(), selected)
 		if err != nil {
 			return err
-		}
-		api := newAPI(c.Server, c.Token)
-		orgs, err := api.list(cmd, "/api/organizations")
-		if err != nil {
-			return err
-		}
-		var out []map[string]any
-		for _, org := range orgs {
-			var identity struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(org, &identity); err != nil {
-				return err
-			}
-			repos, err := api.list(cmd, "/api/organizations/"+identity.ID+"/repos")
-			if err != nil {
-				return err
-			}
-			out = append(out, map[string]any{"organization": org, "repos": repos})
 		}
 		return write(cmd, out)
 	}})
@@ -231,25 +213,8 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 				return wiperr.New("refusal.binding", "destination is immutable; unpair preserves its association, not a retarget operation")
 			}
 			if !dryPair {
-				if status.Paired {
-					selected, err = selectBound(connection, server, status)
-					if err != nil {
-						return err
-					}
-				}
-				c, err := onlineConnection(cmd, selected)
+				status, destination, err = applyPair(cmd.Context(), s, r.ID, selected, org, remote, nil)
 				if err != nil {
-					return err
-				}
-				api := newAPI(c.Server, c.Token)
-				if err := api.request(cmd.Context(), "GET", path, nil, &destination); err != nil {
-					return err
-				}
-				status, err = s.PairExchangeConnection(cmd.Context(), r.ID, endpoint, selected.Connection, c.Account)
-				if err != nil {
-					return err
-				}
-				if err := api.request(cmd.Context(), "POST", path+"/origins", map[string]string{"installation_id": status.Binding.InstallationID}, nil); err != nil {
 					return err
 				}
 			}
@@ -296,22 +261,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 					if dry {
 						return write(cmd, map[string]any{"dry_run": true, "local": status, "download": "not fetched; remote work and decisions may change concurrently", "application": "no effects or checkpoint changes"})
 					}
-					if !status.Active {
-						return fmt.Errorf("sync: Repo is not actively paired")
-					}
-					selected, e := selectBound(connection, server, status)
-					if e != nil {
-						return e
-					}
-					c, e := onlineConnection(cmd, selected)
-					if e != nil {
-						return e
-					}
-					if _, e := s.PairExchangeConnection(cmd.Context(), r.ID, status.Binding.Endpoint, selected.Connection, c.Account); e != nil {
-						return e
-					}
-					api := newAPI(c.Server, c.Token)
-					status, err = s.RunExchange(cmd.Context(), store.ExchangeClient{HTTP: api.http, Token: c.Token}, r.ID)
+					status, err = runBound(cmd.Context(), s, r.ID)
 				case "activity":
 					if !status.Paired {
 						return write(cmd, status)
@@ -366,17 +316,18 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		}
 		add(cmd)
 	}
+	addResetCommands(root, streams, write, &connection, &server)
 	return root
 }
 
-func (c apiClient) list(cmd *cobra.Command, path string) ([]json.RawMessage, error) {
+func (c apiClient) list(ctx context.Context, path string) ([]json.RawMessage, error) {
 	var result []json.RawMessage
 	for page := 1; ; page++ {
 		var data struct {
 			Data []json.RawMessage `json:"data"`
 			Next *string           `json:"next_page_url"`
 		}
-		if err := c.request(cmd.Context(), "GET", fmt.Sprintf("%s?page=%d", path, page), nil, &data); err != nil {
+		if err := c.request(ctx, "GET", fmt.Sprintf("%s?page=%d", path, page), nil, &data); err != nil {
 			return nil, err
 		}
 		result = append(result, data.Data...)

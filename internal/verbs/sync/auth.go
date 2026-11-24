@@ -177,6 +177,9 @@ func (c apiClient) request(ctx context.Context, method, path string, input, outp
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &httpStatusError{status: resp.StatusCode, path: path}
 	}
+	if method == "DELETE" && strings.Contains(path, "/repos/") && resp.StatusCode != 204 {
+		return fmt.Errorf("sync: remote deletion response was not 204; outcome unconfirmed")
+	}
 	if output != nil {
 		return json.NewDecoder(resp.Body).Decode(output)
 	}
@@ -184,6 +187,9 @@ func (c apiClient) request(ctx context.Context, method, path string, input, outp
 }
 
 func login(ctx context.Context, name, server, email, passwordFile string, prompt io.Writer) error {
+	if err := checkResetPending(name); err != nil {
+		return err
+	}
 	if _, err := credentialPath(); err != nil {
 		return err
 	}

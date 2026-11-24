@@ -50,7 +50,9 @@ changed; `schema`'s own seal condition is untouched.
 2. **`validation.already-initialized`.** A guard the Brief never named:
    re-running `init` against a (Clone, Worktree) pair it already knows would
    otherwise surface the store's own `UNIQUE constraint failed` as a raw Go
-   error. Added so a duplicate `init` fails cleanly instead.
+   error. Originally added so a duplicate `init` failed cleanly instead.
+   Superseded by client-server onboarding: repeat init now returns the existing
+   identities without writes, allowing optional connection/sync setup afterward.
 
 3. **Zero remotes vs. remotes-but-no-match.** The Brief's "no origin, no
    override → refuse" sentence read ambiguously as to whether a clone with

@@ -287,8 +287,8 @@ wip plumbing sync logout
 Use `--repo <native-id-or-label>` instead of the current clone when needed. Pairing
 requires explicit stable destination IDs and revalidates access with Laravel.
 Discovery follows all organization/Repo pages, never remote/title matching.
-Create destination Repos through the existing foundation API; this slice does
-not add CLI Repo creation or a new creation retry mechanism.
+Explicit `pair` uses an existing destination from the foundation API. The optional
+init onboarding extension below also offers creation with retained retry identity.
 
 Login uses Laravel's session/CSRF, verified-account login, password confirmation
 and Sanctum token issuance. A terminal prompt hides the password; automation may
@@ -543,8 +543,9 @@ Routes read the Repo's already selected/adopted `RemoteURL`, never scrape or
 adopt a newly added remote. Remote-less/unadopted Repos need explicit selection,
 even with `**`. An explicit initial `--connection` bypasses route selection.
 With multiple choices and no route or explicit choice, setup refuses instead
-of selecting the last login. Initial pairing still needs explicit organization
-and server Repo IDs. No route pairs, uploads, guesses a Repo or changes Git.
+of selecting the last login. Explicit `pair` still needs organization and server
+Repo IDs. A routing rule alone never pairs, uploads or changes Git; the separate
+opt-in init onboarding policy below can discover and join a matching server Repo.
 The existing credential-free `pair --dry-run --server` remains supported.
 
 Existing bindings always win over subsequent route/config/remote edits. They
@@ -554,7 +555,8 @@ missing credentials do not prevent offline status/activity/recheck/dry-runs.
 `route` shows a differing or invalid suggestion only as information. Run uses
 the bound credentials and verifies the account before transfer, never another
 connection as fallback. A work outage or logout does not disable personal sync
-or ordinary local work. No automatic loop or all-connections operation exists.
+or ordinary local work. No automatic sync loop exists. Searching saved connections
+is an explicit interactive onboarding action, not background fan-out.
 
 Legacy `{Server,Token}` files are read virtually as `default`, without writes or
 HTTP during ordinary commands, listing or previews. Explicit credential mutation
@@ -573,3 +575,196 @@ Laravel/PostgreSQL servers, shared native store, same-origin accounts, deliberat
 repeated foreign IDs, independent logout/revocation/outage and retry/restart)
 and `TestLaravelLegacyConnectionMigration` (legacy file/binding/correspondence
 compatibility). These are disposable fixtures, not production activation.
+
+### Optional project onboarding through init
+
+`wip init` can be run again in an initialized worktree. It reuses the local
+Repo/Clone/Worktree identities without adding duplicate events. Without opt-in
+onboarding it remains entirely local. Other local commands never trigger sync.
+
+After signing in with the existing `plumbing sync login --connection office`
+command, enable onboarding in your tool config. This is a complete example sync
+block; replace the origin, Git remote pattern and organization ID with yours:
+
+```yaml
+sync:
+  connections:
+    office:
+      server: https://your-office-server.example
+  onboarding:
+    on_init: true
+    default_join: ask
+  routes:
+    - repo: github.com/YourTeam/**
+      connection: office
+      join:
+        mode: auto
+        organization_id: "your-stable-organization-id"
+```
+
+For a new unpaired project, `auto` uses a complete read-only lookup to find
+exactly one accessible server Repo with the same normalized selected Git remote
+within the configured organization. It revalidates access, pairs and immediately
+runs **one real sync pass**, including supported upload/download. It never
+creates a server Repo automatically, adopts arbitrary pre-pair history or starts
+a recurring worker. Zero or multiple matches require an explicit choice; JSON
+or unattended init reports incomplete onboarding rather than prompting.
+
+Use `join: {mode: ask}` (or omit `join`) for prompted joining. In a terminal,
+init offers matching projects, browsing existing projects, creating a shared
+project in an organization you choose, explicit search across saved connections,
+or keeping the project local. A remote-less project can browse manually, but
+does not pretend every server Repo matches. A connection is not an organization;
+the personal organization is never silently selected. Name/slug and destination
+are shown before creation; existing-project selection is confirmed before pairing.
+Prompted joining/creation offers first sync separately. Non-terminal or JSON ask
+mode does not read input or perform discovery. Missing credentials report a login
+instruction; onboarding does not replace logins or create accounts.
+
+Creation keeps its UUID and exact request in a private `create-*.json` record
+beside the credential registry before sending HTTP. If the reply is lost, rerun
+init in a terminal to resume that same request. The server's existing idempotent
+creation contract prevents duplicate Repos on retry. Tokens are not stored in
+these records. Unknown outcomes retain the request; validation/creation-conflict
+errors allow correcting the request in a subsequent attempt. Pending creation
+is reconciled before route selection or cross-connection search, even if routing
+rules have changed since the original attempt.
+
+An already paired project retains its destination even after rule changes.
+Interactive init offers **Sync now** for an active pairing; repeated unattended
+init only reports it and does not run another pass. An inactive association is
+not automatically reactivated. Use the existing explicit pairing operation to
+resume its same destination if desired.
+
+Offline/incomplete discovery leaves local setup usable and exits successfully
+with an onboarding diagnostic. If creation, pairing or a requested pass fails,
+init returns nonzero **after preserving and reporting successful local setup**.
+Pairing can already be retained when server origin registration fails; retry
+`wip plumbing sync run` to register the same installation and exchange work.
+There is no rollback of local work or reset of cursors. Discovery/pair requests
+are bounded to 30 seconds, and the first exchange attempt to two minutes; these
+are cancellation windows, not project/item quotas. An interrupted pass retains
+normal retry evidence.
+
+`wip init --json` emits one local result, optional `alreadyInitialized`, and an
+optional `onboarding` outcome containing state/message and retained binding or
+sync inventory when relevant. Prompts and progress never mix with JSON stdout.
+
+### Offline connection forgetting and explicit remote Repo deletion
+
+These are deliberately separate operations. Neither `logout` (token revocation)
+nor `unpair` (pause the retained association) is a reset or a remote deletion.
+
+Before resetting valuable work, take a consistent SQLite backup using SQLite's
+backup API/tool, or stop all writers and checkpoint before copying. An arbitrary
+copy that omits a live WAL is not a reliable backup. Keep any credential/config
+backups private; reset diagnostics do not include saved tokens. Back up valuable
+cloud-only work separately: deletion does not download it first, and another
+machine may never have received it. Delete selected cloud Repos **before**
+forgetting when desired; if the server is unavailable, skip deletion and forget
+offline immediately. Do not use `migrate:fresh`, delete the local store, or erase
+ledger rows as a reset procedure. Restored backups and other machines retain
+their own old associations and need separate attention.
+
+```sh
+# Offline, even when the server is unavailable or the saved login is missing:
+wip plumbing sync connection forget office --dry-run --json
+wip plumbing sync connection forget office
+# Automation must explicitly confirm; JSON never reads terminal input:
+wip plumbing sync connection forget office --yes --json
+
+# Online, owner-authorized, exact stable IDs only:
+wip plumbing sync repo delete --connection office --org '<org-id>' --server-repo '<repo-id>' --dry-run --json
+wip plumbing sync repo delete --connection office --org '<org-id>' --server-repo '<repo-id>'
+```
+
+`connection forget NAME` makes **no HTTP requests**, including token revocation.
+It retires every association for that connection in the **selected SQLite DB**,
+including inactive associations (legacy unnamed associations belong to `default`).
+Native work, IDs, Repo/Clone/worktree identity, Git configuration and original
+provenance are preserved. Transport state is retired rather than silently reused
+by a later pairing. A newly explicit pairing starts a fresh association and
+future-work boundary; forgetting is not existing-history adoption or server cleanup.
+The server's old data and issued token remain unchanged: use online deletion or
+revocation separately when wanted and possible, **before** forgetting the login.
+
+The preview explicitly names the selected database and **user-global** config
+path. `WIP_DB_PATH` selects only one database; unrelated custom stores are not
+discovered or rewritten. Removing global credentials/settings can leave those
+other stores unable to sync until separately retired or reconfigured. Other
+connections, their credentials/routes/pending requests, onboarding policy and
+unrelated tool settings are retained.
+The token-free preview also inventories the selected saved origin/account,
+connection definition, routes and typed pending creation requests (including
+their exact creation keys). Unknown, malformed or unreadable creation records
+are classified by path and left untouched, without blocking safe store retirement.
+Routing cleanup problems are reported without making an offline preview fail.
+
+Before mutation, a 0600 token-free `forget-NAME.json` journal is durably saved
+beside the private credential registry. It retains a reset UUID, exact selected
+paths and hashes—not tokens—of the prior credential and cleanup inputs. A missing
+saved entry is distinct from a saved entry with an empty token. Store retirement
+and onboarding holds happen before credential/config/request cleanup. Missing
+credentials and malformed unrelated route values do not prevent retirement. If
+a whole routing container is malformed, retirement still succeeds but cleanup
+returns nonzero, retains its journal and leaves the connection fenced.
+
+Before removing a selected active creation request, cleanup durably publishes
+its typed nonsecret diagnostic to a 0600
+`retired-create-<resetID>-<repoHash>.json` file beside the registry. These records
+survive journal removal; unknown JSON fields are not copied. Retry reuses matching
+evidence but refuses to overwrite different evidence, retaining the active request
+and journal for recovery. This is diagnostic evidence, not a remote create/delete
+receipt or an instruction to send the old request again.
+
+Fix the reported filesystem/config problem, then rerun the **same** forget command
+with the original selected DB/config scope. Pending journals block new selected
+login, discovery, creation and online pairing/pass operations, not ordinary local
+work, offline status or local recovery. Concurrent replacement credentials,
+configurations and pending requests are not silently overwritten. If changed
+config still contains selected definitions/routes, remove only those selected
+settings manually before resuming; unrelated repaired settings remain intact.
+Do not delete the journal to bypass recovery. Replaying its reset UUID returns
+the original retirement snapshot and cannot retire a newly paired replacement.
+Only completed cleanup releases the store's connection barrier and removes the
+journal. No lock is held during HTTP or terminal prompts.
+
+Retired and pending-create projects receive a durable **Keep local** onboarding
+hold. Unattended/JSON init stays local even when another connection has an `auto`
+catch-all route. With onboarding enabled, terminal init offers **Keep local /
+Reconnect**; choosing Reconnect explicitly releases the hold before onboarding.
+A successful explicit `pair` also releases the hold; a failed pairing does not.
+Pairing captures Repo and connection generations before HTTP and checks them in
+the store writer transaction, so an in-flight old operation cannot revive a reset.
+Creation carries those generations through its POST and subsequent pairing too;
+restoring the same login or active request cannot authorize its retired response.
+
+`repo delete` never selects a destination from a slug, route or current binding.
+It requires `--connection`, `--org` and `--server-repo`, verifies the exact saved
+server/account before preview and revalidates them after confirmation. Its online
+owner-authorized `GET /api/organizations/{org}/repos/{repo}/deletion` preview shows
+the Repo and retained change/origin counts. Applying uses `DELETE` on that exact
+Repo endpoint; only HTTP 204 confirms deletion. It does not remove local work,
+bindings, routes or credentials. Collaborators lose that remote Repo and its
+server-side exchange data; this is not a local reset or generalized erasure claim.
+Preview and confirmation warn that cloud-only work can be lost. A completed
+deletion does not erase backups, logs, snapshots or copies on another device.
+
+Without `--yes`, applying either command requires a real terminal and typing
+`yes`; decline/EOF performs no destructive action. `--dry-run` never prompts.
+Deletion dry-run is **online**; forgetting dry-run is **offline**. JSON results
+contain no passwords or tokens. HTTP 404 is always **absent or inaccessible**,
+never evidence that this account successfully deleted anything. A lost DELETE
+response or ambiguous server failure returns nonzero `remote_outcome_unknown`
+and the exact endpoint to retry. Never discover a replacement Repo by slug;
+an exact retry that now gets 404 remains unconfirmed, not a success claim.
+
+The PHP-independent `TestSyncConnectionForget`, `TestSyncRepoDelete`,
+`TestSyncExplicitPairHold` and `TestSyncForgetPendingJournalBlocksLogin` checks
+run under `make test-sync-local`.
+They exercise built CLI/PTY confirmation and decline, offline/JSON behavior,
+missing/legacy credentials, unrelated preservation, partial cleanup/retry,
+replacement refusal, selected-store scope, catch-all holds, owner/auth failures,
+pairing/registration failure retries, a completed reset during initial pairing,
+and lost responses. These dummy-HTTP checks complement, not replace, actual
+Laravel/PostgreSQL authorization, cascade and multi-client integration tests.

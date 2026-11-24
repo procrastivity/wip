@@ -61,8 +61,15 @@ func experimentOriginalID(key string) string {
 }
 
 func experimentSourceKey(ctx context.Context, q querier, repo, id string) (string, error) {
+	scope, err := exchangeScope(ctx, q, repo)
+	if err != nil {
+		return "", err
+	}
+	if scope != repo {
+		return experimentKey(scope, id), nil
+	}
 	var old string
-	err := q.QueryRowContext(ctx, `SELECT id FROM experiment_sources WHERE id=? AND target_repo=?`, id, repo).Scan(&old)
+	err = q.QueryRowContext(ctx, `SELECT id FROM experiment_sources WHERE id=? AND target_repo=?`, id, repo).Scan(&old)
 	if err == nil {
 		return old, nil
 	}
@@ -275,7 +282,7 @@ func (s *Store) ExperimentImportBound(ctx context.Context, source ExperimentSour
 	return s.experimentImport(ctx, source, repo)
 }
 
-func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
+func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, repo string, binding ...ExchangeBinding) (ExperimentDecision, error) {
 	if source.Host == "" || len(source.Actions) == 0 {
 		return ExperimentDecision{}, fmt.Errorf("experiment: empty source")
 	}
@@ -297,6 +304,15 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 		return ExperimentDecision{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if len(binding) != 0 {
+		if err := checkExchangeBinding(ctx, tx, binding[0]); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
+	scope, err := exchangeScope(ctx, tx, repo)
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
 	// IDs are global, not scoped to a subject or an equivalent transition.
 	// Compare untouched original evidence before Repo/baseline mapping and before
 	// reserving source/action IDs that a later genuine self-echo must still use.
@@ -322,7 +338,7 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 		if err != nil {
 			return ExperimentDecision{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), repo, string(encoded)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), scope, string(encoded)); err != nil {
 			return ExperimentDecision{}, err
 		}
 		return result, tx.Commit()
@@ -348,7 +364,7 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 	// within a target. Check every action before projecting any group effect.
 	for _, a := range source.Actions {
 		var reserved bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE s.target_repo=? AND (a.id=? OR a.id=?))`, repo, experimentKey(repo, a.Event.ID), a.Event.ID).Scan(&reserved); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE s.target_repo=? AND (a.id=? OR (?=? AND a.id=?)))`, repo, experimentKey(scope, a.Event.ID), scope, repo, a.Event.ID).Scan(&reserved); err != nil {
 			return ExperimentDecision{}, err
 		}
 		if reserved {
@@ -384,12 +400,17 @@ func (s *Store) ExperimentRecheckBound(ctx context.Context, repo, group string) 
 	return s.experimentRecheck(ctx, key)
 }
 
-func (s *Store) experimentRecheck(ctx context.Context, group string) (ExperimentDecision, error) {
+func (s *Store) experimentRecheck(ctx context.Context, group string, binding ...ExchangeBinding) (ExperimentDecision, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ExperimentDecision{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if len(binding) != 0 {
+		if err := checkExchangeBinding(ctx, tx, binding[0]); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
 	var raw, current string
 	if err := tx.QueryRowContext(ctx, `SELECT source, decision FROM experiment_sources WHERE id=?`, group).Scan(&raw, &current); err != nil {
 		return ExperimentDecision{}, err
@@ -401,6 +422,17 @@ func (s *Store) experimentRecheck(ctx context.Context, group string) (Experiment
 	}
 	if err := json.Unmarshal([]byte(current), &previous); err != nil {
 		return previous, err
+	}
+	var target string
+	if err := tx.QueryRowContext(ctx, `SELECT target_repo FROM experiment_sources WHERE id=?`, group).Scan(&target); err != nil {
+		return previous, err
+	}
+	expected, err := experimentSourceKey(ctx, tx, target, source.Actions[0].Event.ID)
+	if err != nil {
+		return previous, err
+	}
+	if expected != group {
+		return previous, fmt.Errorf("experiment: source belongs to a retired association")
 	}
 	if previous.Disposition == "integrated" {
 		return previous, nil
@@ -420,6 +452,10 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 	result := ExperimentDecision{Source: source, Disposition: "integrated"}
 	var target string
 	if err := tx.QueryRowContext(ctx, `SELECT target_repo FROM experiment_sources WHERE id=?`, group).Scan(&target); err != nil {
+		return ExperimentDecision{}, err
+	}
+	scope, err := exchangeScope(ctx, tx, target)
+	if err != nil {
 		return ExperimentDecision{}, err
 	}
 	evidence, err := experimentEvidence(ctx, v, source, target)
@@ -491,11 +527,11 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			effect = effects[i]
 		}
 		if previous == nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, experimentKey(target, a.Event.ID), group, nullable(effect), a.Baseline); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, experimentKey(scope, a.Event.ID), group, nullable(effect), a.Baseline); err != nil {
 				return ExperimentDecision{}, err
 			}
 		} else {
-			if _, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), experimentKey(target, a.Event.ID), a.Event.ID, group); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), experimentKey(scope, a.Event.ID), a.Event.ID, group); err != nil {
 				return ExperimentDecision{}, err
 			}
 		}
@@ -639,8 +675,12 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 }
 
 func experimentMappedEvidence(ctx context.Context, v View, id, target string) (string, error) {
+	scope, err := exchangeScope(ctx, v.q, target)
+	if err != nil {
+		return "", err
+	}
 	var mapped sql.NullString
-	err := v.q.QueryRowContext(ctx, `SELECT a.effect FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE (a.id=? OR a.id=?) AND s.target_repo=?`, experimentKey(target, id), id, target).Scan(&mapped)
+	err = v.q.QueryRowContext(ctx, `SELECT a.effect FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE (a.id=? OR (?=? AND a.id=?)) AND s.target_repo=?`, experimentKey(scope, id), scope, target, id, target).Scan(&mapped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return id, nil
 	}
@@ -744,6 +784,17 @@ func (s *Store) experimentAcknowledge(ctx context.Context, group string) (Experi
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		return ExperimentAcknowledgement{}, err
 	}
+	var target string
+	if err := tx.QueryRowContext(ctx, `SELECT target_repo FROM experiment_sources WHERE id=?`, group).Scan(&target); err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	expected, err := experimentSourceKey(ctx, tx, target, d.Source.Actions[0].Event.ID)
+	if err != nil {
+		return ExperimentAcknowledgement{}, err
+	}
+	if expected != group {
+		return ExperimentAcknowledgement{}, fmt.Errorf("experiment: source belongs to a retired association")
+	}
 	if d.Disposition != "conflict" {
 		return ExperimentAcknowledgement{}, fmt.Errorf("experiment: acknowledgement requires a conflict; it cannot integrate it")
 	}
@@ -775,11 +826,23 @@ func (s *Store) ExperimentActivities(ctx context.Context) ([]ExperimentDecision,
 
 func experimentActivities(ctx context.Context, q querier, includeCollisions bool, targetRepo string) ([]ExperimentDecision, error) {
 	query := `SELECT id,decision,target_repo FROM experiment_sources`
-	if includeCollisions {
+	var args []any
+	if targetRepo != "" {
+		scope, err := exchangeScope(ctx, q, targetRepo)
+		if err != nil {
+			return nil, err
+		}
+		query += ` WHERE target_repo=? AND (?=? OR substr(id,1,length(?)+1)=?||':')`
+		args = append(args, targetRepo, scope, targetRepo, scope, scope)
+		if includeCollisions {
+			query += ` UNION ALL SELECT id,decision,? AS target_repo FROM experiment_collisions WHERE target_repo=?`
+			args = append(args, targetRepo, scope)
+		}
+	} else if includeCollisions {
 		query += ` UNION ALL SELECT id,decision,target_repo FROM experiment_collisions`
 	}
-	query = `SELECT id,decision,target_repo FROM (` + query + `) WHERE (?='' OR target_repo=?) ORDER BY id,decision`
-	rows, err := q.QueryContext(ctx, query, targetRepo, targetRepo)
+	query += ` ORDER BY id,decision`
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -861,7 +924,7 @@ func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, rep
 	// Collision claims are diagnostic evidence, never canonical work. Exclude
 	// their whole groups, including actions whose IDs are absent from the native
 	// log. Ordinary canonical conflicts remain part of this activity snapshot.
-	decisions, err := experimentActivities(ctx, tx, false, "")
+	decisions, err := experimentActivities(ctx, tx, false, repo)
 	if err != nil {
 		return nil, err
 	}

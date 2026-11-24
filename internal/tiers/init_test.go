@@ -1,8 +1,10 @@
 package tiers
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -238,17 +240,48 @@ func TestInit_WorktreeInsideAlreadyKnownClone(t *testing.T) {
 	}
 }
 
-// TestInit_AlreadyInitializedRefuses covers re-running init against a
-// location wip already knows — a location, not just a directory: the second
-// call here targets the exact same (clone, worktree) pair as the first.
-func TestInit_AlreadyInitializedRefuses(t *testing.T) {
-	s := newStore(t)
-	dir := newRepo(t, "widget")
-	addRemote(t, dir, "origin", "git@github.com:acme/widget.git")
-
-	if _, err := Init(ctx, s, store.ActorHuman, dir, ""); err != nil {
-		t.Fatalf("first Init: %v", err)
+// Repeated init reuses the exact location, including linked worktrees,
+// without adding events or changing any stored rows.
+func TestInit_AlreadyInitializedReuses(t *testing.T) {
+	for _, linked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("linked=%v", linked), func(t *testing.T) {
+			s := newStore(t)
+			dir := newRepo(t, "widget")
+			addRemote(t, dir, "origin", "git@github.com:acme/widget.git")
+			if linked {
+				if _, err := Init(ctx, s, store.ActorHuman, dir, ""); err != nil {
+					t.Fatalf("Init(main): %v", err)
+				}
+				dir = addWorktree(t, dir, dir+"-wt", "feature")
+			}
+			first, err := Init(ctx, s, store.ActorHuman, dir, "")
+			if err != nil {
+				t.Fatalf("first Init: %v", err)
+			}
+			if first.AlreadyInitialized {
+				t.Fatal("first Init reported AlreadyInitialized")
+			}
+			before, err := s.Events(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := Init(ctx, s, store.ActorHuman, dir, "")
+			if err != nil {
+				t.Fatalf("repeat Init: %v", err)
+			}
+			if !second.AlreadyInitialized || second.RepoCreated || second.CloneCreated {
+				t.Errorf("repeat Init creation/reuse flags: %+v", second)
+			}
+			if !reflect.DeepEqual(first.Repo, second.Repo) || !reflect.DeepEqual(first.Clone, second.Clone) || !reflect.DeepEqual(first.Worktree, second.Worktree) {
+				t.Errorf("repeat Init changed rows: first=%+v second=%+v", first, second)
+			}
+			after, err := s.Events(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("repeat Init changed the event log")
+			}
+		})
 	}
-	_, err := Init(ctx, s, store.ActorHuman, dir, "")
-	wantWiperr(t, err, "validation.already-initialized")
 }

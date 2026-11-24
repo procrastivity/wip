@@ -15,15 +15,17 @@ type InitResult struct {
 	Clone    store.Clone
 	Worktree store.Worktree
 
-	RepoCreated  bool
-	CloneCreated bool
+	RepoCreated        bool
+	CloneCreated       bool
+	AlreadyInitialized bool
 }
 
 // Init implements `wip init` against the tiers Brief's "Move detection",
 // "Multi-remote rule" and "Null-remote identity and remote adoption"
 // sections.
 //
-// It always births exactly one Worktree row for the location it runs from:
+// It reuses an already-known location without writing events. Otherwise it
+// births exactly one Worktree row for the location it runs from:
 // the main worktree (empty name) when git-dir and git-common-dir agree, or a
 // linked worktree's own git-assigned name when they do not. Whether it also
 // births a Clone row, and a Repo row above that, depends on whether this
@@ -59,24 +61,20 @@ func notAGitRepo(dir string, err error) error {
 		fmt.Sprintf("%s is not inside a git repository wip can read: %v", dir, err))
 }
 
-// initExistingClone is worked example 2's path: the Clone already exists,
-// but this worktree of it does not yet — so `wip init` here births only the
-// Worktree row.
+// initExistingClone reuses an existing worktree or, in worked example 2's
+// path, births only the missing Worktree row.
 func initExistingClone(ctx context.Context, s *store.Store, actor store.Actor, clone store.Clone, worktreeName string) (InitResult, error) {
-	if _, found, err := s.WorktreeByName(ctx, clone.ID, worktreeName); err != nil {
+	wt, found, err := s.WorktreeByName(ctx, clone.ID, worktreeName)
+	if err != nil {
 		return InitResult{}, err
-	} else if found {
-		where := "the main worktree"
-		if worktreeName != "" {
-			where = fmt.Sprintf("worktree %q", worktreeName)
-		}
-		return InitResult{}, wiperr.New("validation.already-initialized",
-			fmt.Sprintf("%s of clone %q is already known to wip", where, clone.Label))
 	}
 
 	repo, err := s.Repo(ctx, clone.Repo)
 	if err != nil {
 		return InitResult{}, err
+	}
+	if found {
+		return InitResult{Repo: repo, Clone: clone, Worktree: wt, AlreadyInitialized: true}, nil
 	}
 
 	req := store.Request{Actor: actor, Env: store.Env{Repo: repo.ID}}
@@ -92,7 +90,7 @@ func initExistingClone(ctx context.Context, s *store.Store, actor store.Actor, c
 		return InitResult{}, err
 	}
 
-	wt, err := s.Worktree(ctx, wtID)
+	wt, err = s.Worktree(ctx, wtID)
 	if err != nil {
 		return InitResult{}, err
 	}

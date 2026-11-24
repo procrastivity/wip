@@ -3,9 +3,11 @@
 package store_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -15,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +29,343 @@ import (
 type syncCLI struct {
 	host   labPair
 	config string
+}
+
+func TestLaravelInitOnboardingCLI(t *testing.T) {
+	f := startLaravelFixture(t)
+	fixtureHTTP(t, "PATCH", f.endpoint(), f.Owner, map[string]string{"remote_url": "https://GitHub.com/Team/Project.git"}, 200)
+	upstream, err := url.Parse(f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int64
+	var failChanges atomic.Bool
+	var dropCreate atomic.Bool
+	var createMu sync.Mutex
+	var createBodies []string
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/repos") {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "read creation", 500)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			createMu.Lock()
+			createBodies = append(createBodies, string(raw))
+			createMu.Unlock()
+			if dropCreate.Swap(false) {
+				recorder := httptest.NewRecorder()
+				proxy.ServeHTTP(recorder, r)
+				if recorder.Code == 201 {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				w.WriteHeader(recorder.Code)
+				_, _ = w.Write(recorder.Body.Bytes())
+				return
+			}
+		}
+		if failChanges.Load() && strings.HasSuffix(r.URL.Path, "/changes") {
+			http.Error(w, "disposable first-pass outage", http.StatusServiceUnavailable)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("fixture-password-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Each client starts with a fresh Git checkout, native database and config
+	// home. Login is saved before init, not injected as an exchange token.
+	newClient := func(t *testing.T, email string) syncCLI {
+		t.Helper()
+		c := syncCLI{labPair{dir: t.TempDir(), db: filepath.Join(t.TempDir(), "native.db")}, t.TempDir()}
+		for _, args := range [][]string{{"init", "--quiet", c.host.dir}, {"-C", c.host.dir, "remote", "add", "origin", "git@github.com:Team/Project.git"}} {
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+		}
+		if email != "" {
+			c.sync(t, true, "login", "--connection", "office", "--server", server.URL, "--email", email, "--password-file", password)
+		}
+		return c
+	}
+	configure := func(t *testing.T, c syncCLI, mode string) {
+		t.Helper()
+		path := filepath.Join(c.config, "wip", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		config := fmt.Sprintf("sync:\n  onboarding: {on_init: true, default_join: ask}\n  connections:\n    office: {server: %q}\n  routes:\n    - {repo: 'github.com/Team/Project', connection: office, join: {mode: %s, organization_id: %q}}\n", server.URL, mode, f.Org)
+		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type initResult struct {
+		Repo, Clone, Worktree string
+		Onboarding            *struct {
+			State, Message string
+			Binding        *store.ExchangeBinding
+			Sync           *store.ExchangeStatus
+		}
+	}
+	initialize := func(t *testing.T, c syncCLI, ok bool, state string) initResult {
+		t.Helper()
+		var result initResult
+		out := c.command(t, ok, "--json", "init")
+		// Failed commands also report diagnostics on stderr; the JSON object
+		// remains the first complete stdout line.
+		if err := json.Unmarshal([]byte(strings.SplitN(out, "\n", 2)[0]), &result); err != nil {
+			t.Fatalf("init JSON: %v: %s", err, out)
+		}
+		if result.Repo == "" || result.Clone == "" || result.Worktree == "" {
+			t.Fatal("missing native init identities", out)
+		}
+		if state == "" {
+			if result.Onboarding != nil {
+				t.Fatal("unconfigured init opted into onboarding", out)
+			}
+		} else if result.Onboarding == nil || result.Onboarding.State != state || result.Onboarding.Message == "" {
+			t.Fatal("unexpected onboarding outcome", out)
+		}
+		return result
+	}
+	ca := newClient(t, "owner@example.test")
+	// Ordinary init remains local until explicitly configured, even with a
+	// saved login. Its earlier work must not be silently adopted by pairing.
+	local := initialize(t, ca, true, "")
+	private := ca.matter(t, "Before onboarding remains private")
+	configure(t, ca, "auto")
+	a := initialize(t, ca, true, "synced")
+	if a.Repo != local.Repo || a.Onboarding.Binding == nil || a.Onboarding.Sync == nil {
+		t.Fatal("auto join replaced native identity or omitted successful sync")
+	}
+	n := ca.matter(t, "Post-pair supported original")
+	const briefText = "# Onboarding\n\nExact λ original bytes.\n"
+	brief := filepath.Join(t.TempDir(), "brief")
+	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ca.command(t, true, "plumbing", "brief", n.Locator, "--file", brief)
+	ca.command(t, true, "plumbing", "start", n.Locator)
+	ca.sync(t, true, "run")
+	cb := newClient(t, "member@example.test")
+	configure(t, cb, "auto")
+	b := initialize(t, cb, true, "synced")
+	if b.Onboarding.Binding == nil || b.Onboarding.Sync == nil {
+		t.Fatal("new auto join omitted binding/sync")
+	}
+	pa, pb := ca.status(t), cb.status(t)
+	if a.Repo == b.Repo || a.Clone == b.Clone || a.Worktree == b.Worktree || pa.Binding.InstallationID == pb.Binding.InstallationID || pa.Binding.Account == pb.Binding.Account {
+		t.Fatal("independent machine/native/account identities conflated")
+	}
+	for _, status := range []store.ExchangeStatus{pa, pb} {
+		if status.Binding.Endpoint != server.URL+strings.TrimPrefix(f.endpoint(), f.base) || status.Binding.Connection != "office" || status.Binding.Account == "" || status.Cursor != 3 || status.Conflicts != 0 {
+			t.Fatal("wrong shared destination or first-pass result", status)
+		}
+	}
+	sa, sb := labOpen(t, ca.host.db), labOpen(t, cb.host.db)
+	if _, err := sb.Node(labCtx, private.ID); err == nil {
+		t.Fatal("pre-pair history adopted")
+	}
+	if got, err := sb.Node(labCtx, n.ID); err != nil || got.Repo != b.Repo || got.Lifecycle != store.InProgress || got.Title != n.Title {
+		t.Fatal("Matter/start did not arrive under receiver's native Repo", got, err)
+	}
+	if got, err := sb.Content(labCtx, n.ID, store.KindBrief); err != nil || string(got) != briefText {
+		t.Fatal("Brief bytes changed", err)
+	}
+	var feed struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &feed); err != nil || len(feed.Changes) != 3 {
+		t.Fatal("expected exactly three supported originals", err)
+	}
+	for i, kind := range []string{store.TypeMatterCreated, store.TypeContentCreated, store.TypeMatterStarted} {
+		original, err := sa.ExperimentExport(labCtx, pa.Binding.InstallationID, sourceGroup(t, sa, n.ID, kind))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(original)
+		if err != nil || feed.Changes[i].Source != string(raw) || feed.Changes[i].SourceRepoID != a.Repo || feed.Changes[i].InstallationID != pa.Binding.InstallationID {
+			t.Fatal("server changed exact source original", kind, err)
+		}
+		found := false
+		for _, decision := range pb.Decisions {
+			if reflect.DeepEqual(decision.Source, original) && decision.Disposition == "integrated" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("receiver did not retain exact supported original", kind)
+		}
+	}
+	// Pending work makes an accidental repeated-init exchange observable both
+	// on the HTTP boundary and in the durable cursor/upload state.
+	later := cb.matter(t, "Ordinary later upload from independent machine")
+	before, count := cb.status(t), requests.Load()
+	retained := initialize(t, cb, true, "retained")
+	if retained.Repo != b.Repo || retained.Clone != b.Clone || retained.Worktree != b.Worktree || !reflect.DeepEqual(before, cb.status(t)) || requests.Load() != count {
+		t.Fatal("repeated init changed identities or reran exchange")
+	}
+	cb.sync(t, true, "run")
+	ca.sync(t, true, "run")
+	if got, err := sa.Node(labCtx, later.ID); err != nil || got.Repo != a.Repo {
+		t.Fatal("later upload did not reach same shared Repo", err)
+	}
+	t.Run("ask JSON stays local", func(t *testing.T) {
+		c := newClient(t, "member@example.test")
+		configure(t, c, "ask")
+		count := requests.Load()
+		initialize(t, c, true, "local")
+		if c.status(t).Paired || requests.Load() != count {
+			t.Fatal("JSON ask prompted/discovered/paired without consent")
+		}
+	})
+	t.Run("saved named login required", func(t *testing.T) {
+		c := newClient(t, "")
+		configure(t, c, "auto")
+		initialize(t, c, true, "incomplete")
+		if c.status(t).Paired {
+			t.Fatal("auto joined without saved login")
+		}
+	})
+	t.Run("first sync outage retains pairing and explicit retry", func(t *testing.T) {
+		c := newClient(t, "member@example.test")
+		configure(t, c, "auto")
+		failChanges.Store(true)
+		defer failChanges.Store(false)
+		failed := initialize(t, c, false, "failed")
+		before := c.status(t)
+		if failed.Onboarding.Binding == nil || !before.Paired || before.Cursor != 0 {
+			t.Fatal("failed first pass lost pairing or advanced cursor", before)
+		}
+		failChanges.Store(false)
+		count := requests.Load()
+		initialize(t, c, true, "retained")
+		if requests.Load() != count || !reflect.DeepEqual(before, c.status(t)) {
+			t.Fatal("init retried a retained first-pass failure implicitly")
+		}
+		c.sync(t, true, "run")
+		if got := c.status(t); got.Cursor != 4 || got.Binding != before.Binding || got.Conflicts != 0 {
+			t.Fatal("explicit retry did not recover retained binding", got)
+		}
+	})
+	t.Run("prompted create survives lost response and second machine joins", func(t *testing.T) {
+		creator := newClient(t, "owner@example.test")
+		configureNew := func(c syncCLI, mode string) {
+			t.Helper()
+			if out, err := exec.Command("git", "-C", c.host.dir, "remote", "set-url", "origin", "git@github.com:Team/NewProject.git").CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+			configure(t, c, mode)
+			path := filepath.Join(c.config, "wip", "config.yaml")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, bytes.ReplaceAll(raw, []byte("Team/Project"), []byte("Team/NewProject")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		configureNew(creator, "ask")
+		var orgs struct{ Data []struct{ ID string } }
+		if err := json.Unmarshal(fixtureHTTP(t, "GET", f.base+"/api/organizations", f.Owner, nil, 200), &orgs); err != nil {
+			t.Fatal(err)
+		}
+		orgChoice := 0
+		for i, org := range orgs.Data {
+			if org.ID == f.Org {
+				orgChoice = i + 1
+			}
+		}
+		if orgChoice == 0 {
+			t.Fatal("shared organization missing")
+		}
+		pty := func(c syncCLI, steps [][2]string, wantExit int) string {
+			t.Helper()
+			driver, err := filepath.Abs("../cli/testdata/sync-onboarding.py")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("python3", driver, cliBinary(t), "init")
+			cmd.Dir = c.host.dir
+			cmd.Env = append(os.Environ(), "HOME="+c.config, "XDG_CONFIG_HOME="+c.config, "WIP_DB_PATH="+c.host.db, "WIP_AS_ROLE=", "WIP_EXPERIMENTAL_WIPD_PROFILE=")
+			raw, err := json.Marshal(steps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd.Stdin = bytes.NewReader(raw)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatal(err, string(out))
+			}
+			var result struct {
+				Output    string
+				ExitCode  int `json:"exit_code"`
+				Remaining int `json:"remaining_steps"`
+			}
+			if err := json.Unmarshal(out, &result); err != nil || result.ExitCode != wantExit || result.Remaining != 0 {
+				t.Fatal(err, string(out))
+			}
+			return result.Output
+		}
+		dropCreate.Store(true)
+		pty(creator, [][2]string{{"Choice [0]: ", "3"}, {"Choice [0]: ", fmt.Sprint(orgChoice)}, {"Project name [Project]: ", "Created through init λ"}, {"Project slug (lowercase letters, digits, hyphens) []: ", "created-through-init"}, {"Choice [0]: ", "1"}}, 1)
+		if creator.status(t).Paired {
+			t.Fatal("lost create reply unexpectedly paired")
+		}
+		pty(creator, [][2]string{{"Choice [0]: ", "1"}, {"Choice [0]: ", "0"}}, 0)
+		created := creator.status(t)
+		if !created.Active {
+			t.Fatal("new project was not created/paired", created)
+		}
+		createMu.Lock()
+		bodies := append([]string(nil), createBodies...)
+		createMu.Unlock()
+		if len(bodies) != 2 || bodies[0] != bodies[1] {
+			t.Fatal("lost reply changed creation operation", bodies)
+		}
+		var repos struct {
+			Data []struct {
+				ID     string
+				Remote string `json:"remote_url"`
+			}
+		}
+		if err := json.Unmarshal(fixtureHTTP(t, "GET", f.base+"/api/organizations/"+f.Org+"/repos", f.Owner, nil, 200), &repos); err != nil {
+			t.Fatal(err)
+		}
+		matches := 0
+		for _, r := range repos.Data {
+			if r.Remote == "github.com/Team/NewProject" {
+				matches++
+				if created.Binding.Endpoint != server.URL+"/api/organizations/"+f.Org+"/repos/"+r.ID {
+					t.Fatal("creation paired a different server Repo", created)
+				}
+			}
+		}
+		if matches != 1 {
+			t.Fatal("creation retry duplicated shared project", matches)
+		}
+		n := creator.matter(t, "Created project original")
+		creator.sync(t, true, "run")
+		joining := newClient(t, "member@example.test")
+		configureNew(joining, "auto")
+		joined := initialize(t, joining, true, "synced")
+		if joining.status(t).Binding.Endpoint != created.Binding.Endpoint {
+			t.Fatal("second machine joined another project")
+		}
+		if got, err := labOpen(t, joining.host.db).Node(labCtx, n.ID); err != nil || got.Repo != joined.Repo || got.Title != n.Title {
+			t.Fatal("created project work did not arrive", got, err)
+		}
+	})
+	t.Log("real Laravel/PostgreSQL: opt-in init, named login, normalized remote auto join, exact Matter/Brief/start originals, independent machines, retained init without HTTP, later upload, JSON ask, first-pass outage/retry, prompted creation with lost reply and second-machine joining")
 }
 
 func TestLaravelNamedConnections(t *testing.T) {
@@ -443,12 +783,18 @@ func (c syncCLI) command(t *testing.T, ok bool, args ...string) string {
 	cmd := exec.Command(cliBinary(t), args...)
 	cmd.Dir = c.host.dir
 	cmd.Env = append(os.Environ(), "WIP_DB_PATH="+c.host.db, "XDG_CONFIG_HOME="+c.config, "WIP_AS_ROLE=", "WIP_EXPERIMENTAL_WIPD_PROFILE=")
-	out, err := cmd.CombinedOutput()
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	out, err := cmd.Output()
 	if (err == nil) != ok {
-		t.Fatalf("CLI %v: %v: %s", args, err, out)
+		t.Fatalf("CLI %v: %v: %s\n%s", args, err, out, diagnostics.String())
 	}
-	if strings.Contains(string(out), "fixture-password-123") || strings.Contains(string(out), `"Token"`) {
+	combined := string(out) + diagnostics.String()
+	if strings.Contains(combined, "fixture-password-123") || strings.Contains(combined, `"Token"`) {
 		t.Fatal("credential leak in command output")
+	}
+	if !ok {
+		return combined
 	}
 	return string(out)
 }

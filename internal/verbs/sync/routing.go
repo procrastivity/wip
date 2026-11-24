@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,7 +15,14 @@ import (
 )
 
 type (
-	routeRule     struct{ Repo, Connection string }
+	joinPolicy struct {
+		Mode           string `json:"mode"`
+		OrganizationID string `json:"organization_id"`
+	}
+	routeRule struct {
+		Repo, Connection string
+		Join             joinPolicy
+	}
 	routingConfig struct {
 		Connections map[string]struct{ Server string }
 		Routes      []routeRule
@@ -247,13 +255,16 @@ func bindingSelection(name, server string, status store.ExchangeStatus) (selecti
 	return selection{Connection: connection, Server: origin, Account: b.Account}, nil
 }
 
-func onlineConnection(cmd *cobra.Command, selected selection) (credentials, error) {
+func onlineConnection(ctx context.Context, selected selection) (credentials, error) {
+	if err := checkResetPending(selected.Connection); err != nil {
+		return credentials{}, err
+	}
 	c, err := loadConnection(selected.Connection, selected.Server)
 	if err != nil {
 		return c, err
 	}
 	before := c
-	if err := c.identify(cmd.Context()); err != nil {
+	if err := c.identify(ctx); err != nil {
 		return c, err
 	}
 	if selected.Account != "" && selected.Account != c.Account {

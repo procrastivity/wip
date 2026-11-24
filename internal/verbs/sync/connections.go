@@ -55,6 +55,30 @@ func replaceConnection(name string, before, next credentials) error {
 	if !connectionName.MatchString(name) {
 		return fmt.Errorf("sync: invalid connection name")
 	}
+	return withRegistryLock(func(path string) error {
+		if err := checkResetPending(name); err != nil {
+			return err
+		}
+		r, err := loadRegistry()
+		if err != nil {
+			return err
+		}
+		if r.Connections[name] != before {
+			return fmt.Errorf("sync: connection changed concurrently; retry with current credentials")
+		}
+		if before.Server != "" && (before.Server != next.Server || (before.Account != "" && before.Account != next.Account)) {
+			return fmt.Errorf("sync: connection origin/account is immutable")
+		}
+		r.Connections[name] = next
+		raw, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		return atomicPrivate(path, raw)
+	})
+}
+
+func withRegistryLock(fn func(string) error) error {
 	path, err := credentialDir()
 	if err != nil {
 		return err
@@ -76,26 +100,16 @@ func replaceConnection(name string, before, next credentials) error {
 		return err
 	}
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
-	r, err := loadRegistry()
-	if err != nil {
-		return err
-	}
-	if r.Connections[name] != before {
-		return fmt.Errorf("sync: connection changed concurrently; retry with current credentials")
-	}
-	if before.Server != "" && (before.Server != next.Server || (before.Account != "" && before.Account != next.Account)) {
-		return fmt.Errorf("sync: connection origin/account is immutable")
-	}
-	r.Connections[name] = next
+	return fn(path)
+}
+
+func atomicPrivate(path string, raw []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".credentials-")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(f.Name()) }()
-	raw, err := json.Marshal(r)
-	if err == nil {
-		_, err = f.Write(raw)
-	}
+	_, err = f.Write(raw)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -106,7 +120,19 @@ func replaceConnection(name string, before, next credentials) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
 
 func (c *credentials) identify(ctx context.Context) error {

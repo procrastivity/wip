@@ -233,11 +233,14 @@ func TestWorkedExample3_MovedCloneSameCommonDir(t *testing.T) {
 		t.Errorf("clone identity changed across a same-common-dir move: %s -> %s", beforePayload.Clone, doctorPayload.Clone)
 	}
 
-	// A second init here refuses as already-initialized, not as a new clone
-	// — confirming no new row was ever tempting.
+	// Repeat init reuses the known identities, including after this no-op move.
 	reInit := runIn(t, moved, dbEnv, "init", "--json")
-	if reInit.exitCode != 1 {
-		t.Fatalf("re-init after the no-op move: exit=%d, want 1 (already-initialized)", reInit.exitCode)
+	var reused struct {
+		Clone              string
+		AlreadyInitialized bool
+	}
+	if err := json.Unmarshal([]byte(reInit.stdout), &reused); err != nil || reInit.exitCode != 0 || !reused.AlreadyInitialized || reused.Clone != beforePayload.Clone {
+		t.Fatalf("re-init after the no-op move: exit=%d, output=%s, error=%v", reInit.exitCode, reInit.stdout, err)
 	}
 }
 

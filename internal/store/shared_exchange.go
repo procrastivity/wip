@@ -19,6 +19,7 @@ import (
 type ExchangeBinding struct {
 	LocalRepo, Endpoint, InstallationID string
 	Connection, Account                 string
+	AssociationID                       string
 }
 
 // ExchangeChange v1 retains exact source JSON as a string. Authenticated uploader
@@ -57,6 +58,32 @@ func (s *Store) bindExchange(ctx context.Context, repo, endpoint string, boundar
 		return ExchangeBinding{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := ensureExchangeReset(ctx, tx); err != nil {
+		return ExchangeBinding{}, err
+	}
+	if len(identity) >= 2 {
+		if err := exchangeConnectionResetting(ctx, tx, identity[0]); err != nil {
+			return ExchangeBinding{}, err
+		}
+	}
+	if len(identity) >= 3 {
+		generation, err := exchangeGeneration(ctx, tx, repo)
+		if err != nil {
+			return ExchangeBinding{}, err
+		}
+		if generation != identity[2] {
+			return ExchangeBinding{}, fmt.Errorf("exchange: association changed during pairing; retry explicitly")
+		}
+	}
+	if len(identity) >= 4 {
+		generation, err := exchangeConnectionGeneration(ctx, tx, identity[0])
+		if err != nil {
+			return ExchangeBinding{}, err
+		}
+		if generation != identity[3] {
+			return ExchangeBinding{}, fmt.Errorf("exchange: connection forgotten during pairing; retry explicitly")
+		}
+	}
 	_, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS exchange_installation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS exchange_bindings (repo TEXT PRIMARY KEY REFERENCES repos(id), endpoint TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0);
 	CREATE TABLE IF NOT EXISTS exchange_exports (repo TEXT NOT NULL REFERENCES exchange_bindings(repo), group_id TEXT NOT NULL, envelope TEXT NOT NULL, PRIMARY KEY(repo,group_id));
@@ -84,6 +111,10 @@ func (s *Store) bindExchange(ctx context.Context, repo, endpoint string, boundar
 	if b.Endpoint != endpoint {
 		return b, fmt.Errorf("exchange: binding is immutable")
 	}
+	b.AssociationID, b.InstallationID, err = installExchangeAssociation(ctx, tx, repo, b.InstallationID)
+	if err != nil {
+		return b, err
+	}
 	// Additive opt-in metadata: legacy rows, source keys and all transfer state
 	// remain in place. Reading an older store does not initialize this table.
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS exchange_accounts (
@@ -91,7 +122,7 @@ func (s *Store) bindExchange(ctx context.Context, repo, endpoint string, boundar
 	 connection TEXT NOT NULL, account TEXT NOT NULL)`); err != nil {
 		return b, err
 	}
-	if len(identity) == 2 {
+	if len(identity) >= 2 {
 		if identity[0] == "" || identity[1] == "" {
 			return b, fmt.Errorf("exchange: connection and verified account required")
 		}
@@ -177,12 +208,8 @@ func (c ExchangeClient) request(ctx context.Context, method, endpoint string, in
 // to a durable inbox+cursor, then applies/rechecks locally. No HTTP call holds a
 // local writer transaction. A crash between receipt and application is safe.
 func (s *Store) ExchangePass(ctx context.Context, c ExchangeClient, b ExchangeBinding, groups []string) error {
-	var installation string
-	if err := s.db.QueryRowContext(ctx, `SELECT i.id FROM exchange_bindings b CROSS JOIN exchange_installation i WHERE b.repo=? AND b.endpoint=?`, b.LocalRepo, b.Endpoint).Scan(&installation); err != nil {
+	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
 		return err
-	}
-	if installation != b.InstallationID {
-		return fmt.Errorf("exchange: installation differs from durable binding")
 	}
 	if err := c.request(ctx, "POST", b.Endpoint+"/origins", map[string]string{"installation_id": b.InstallationID}, nil); err != nil {
 		return err
@@ -197,6 +224,9 @@ func (s *Store) ExchangePass(ctx context.Context, c ExchangeClient, b ExchangeBi
 		}
 	}
 	for {
+		if err := checkExchangeBinding(ctx, s.db, b); err != nil {
+			return err
+		}
 		var after int64
 		if err := s.db.QueryRowContext(ctx, `SELECT cursor FROM exchange_bindings WHERE repo=? AND endpoint=?`, b.LocalRepo, b.Endpoint).Scan(&after); err != nil {
 			return err
@@ -222,6 +252,9 @@ func (s *Store) ExchangePass(ctx context.Context, c ExchangeClient, b ExchangeBi
 }
 
 func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group string) (ExchangeChange, error) {
+	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
+		return ExchangeChange{}, err
+	}
 	var raw string
 	err := s.db.QueryRowContext(ctx, `SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, b.LocalRepo, group).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -245,13 +278,29 @@ func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group str
 		if err != nil {
 			return ExchangeChange{}, err
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_exports VALUES(?,?,?)`, b.LocalRepo, group, string(encoded)); err != nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return ExchangeChange{}, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := checkExchangeBinding(ctx, tx, b); err != nil {
+			return ExchangeChange{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_exports VALUES(?,?,?)`, b.LocalRepo, group, string(encoded)); err != nil {
+			return ExchangeChange{}, err
+		}
+		if err := tx.Commit(); err != nil {
 			return ExchangeChange{}, err
 		}
 		// A concurrent pass may have captured earlier correspondence evidence.
-		err = s.db.QueryRowContext(ctx, `SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, b.LocalRepo, group).Scan(&raw)
+		if err := s.db.QueryRowContext(ctx, `SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, b.LocalRepo, group).Scan(&raw); err != nil {
+			return ExchangeChange{}, err
+		}
 	}
 	if err != nil {
+		return ExchangeChange{}, err
+	}
+	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
 		return ExchangeChange{}, err
 	}
 	var change ExchangeChange
@@ -265,6 +314,9 @@ func (s *Store) receiveExchangePage(ctx context.Context, b ExchangeBinding, afte
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkExchangeBinding(ctx, tx, b); err != nil {
+		return err
+	}
 	for _, change := range changes {
 		if change.Version != 1 || change.Sequence != after+1 {
 			return fmt.Errorf("exchange: unsupported version or noncontiguous page")
@@ -310,6 +362,9 @@ func (s *Store) receiveExchangePage(ctx context.Context, b ExchangeBinding, afte
 // ApplyExchangeInbox needs no server. Restarted processes finish receipt even
 // while offline. Pending groups are reconsidered once after this incoming batch.
 func (s *Store) ApplyExchangeInbox(ctx context.Context, b ExchangeBinding) error {
+	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
+		return err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence,envelope FROM exchange_inbox WHERE repo=? AND applied=0 ORDER BY sequence`, b.LocalRepo)
 	if err != nil {
 		return err
@@ -343,10 +398,21 @@ func (s *Store) ApplyExchangeInbox(ctx context.Context, b ExchangeBinding) error
 		if err := json.Unmarshal([]byte(row.change.Source), &source); err != nil {
 			return err
 		}
-		if _, err := s.ExperimentImportBound(ctx, source, b.LocalRepo); err != nil {
+		if _, err := s.experimentImport(ctx, source, b.LocalRepo, b); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE exchange_inbox SET applied=1 WHERE repo=? AND sequence=?`, b.LocalRepo, row.seq); err != nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if err = checkExchangeBinding(ctx, tx, b); err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE exchange_inbox SET applied=1 WHERE repo=? AND sequence=?`, b.LocalRepo, row.seq)
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		_ = tx.Rollback()
+		if err != nil {
 			return err
 		}
 	}
@@ -358,7 +424,7 @@ func (s *Store) ApplyExchangeInbox(ctx context.Context, b ExchangeBinding) error
 	}
 	for _, d := range decisions {
 		if d.Disposition == "pending" {
-			if _, err := s.ExperimentRecheckBound(ctx, b.LocalRepo, d.Source.Actions[0].Event.ID); err != nil {
+			if _, err := s.experimentRecheck(ctx, d.key, b); err != nil {
 				return err
 			}
 		}

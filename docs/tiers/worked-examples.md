@@ -96,9 +96,9 @@ $ wip doctor --json   # known=true — no relink offer, because nothing moved
 {"known":true,"clone":"01KYRN0T1B4Z2A2XE162FYJSE6"}
 ```
 
-A second `wip init` at the renamed location refuses as
-`validation.already-initialized`, not as a new clone — confirming a new row
-was never even tempting.
+A second `wip init` at the renamed location now succeeds with
+`alreadyInitialized: true` and the same identities, without adding new local
+rows. Optional onboarding can then connect or explicitly sync the known project.
 
 ## Example 4 — a repo gaining a remote after local-only init
 

@@ -503,6 +503,7 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 		"plumbing sync activity": false, "plumbing sync recheck": false,
 		"plumbing sync ack": false, "plumbing sync unpair": false,
 		"plumbing sync connections": false, "plumbing sync route": false,
+		"plumbing sync connection forget": false, "plumbing sync repo delete": false,
 	}
 	for _, verb := range result.Verbs {
 		if seen, ok := exchangePaths[verb.Name]; ok {
