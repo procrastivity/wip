@@ -439,12 +439,12 @@ sync, signal/EOF cancellation or production readiness.
 
 Both repositories carry `.github/workflows/sync-integration.yml`. A push or PR
 tests that repository's exact triggering revision against the other repository's
-matching `work/client-server-sync` branch when that is the triggering branch
-(or PR head). Other branches test the counterpart's `main`. The selected ref is
+matching `preview` or `work/client-server-sync` branch when that is the triggering
+branch (or PR head). Other branches test the counterpart's `main`. The selected ref is
 always nonempty; a missing matching branch or inaccessible repository fails
 checkout, with **no fallback to main**. Both resolved commit IDs and the required
 ref are recorded in the job summary. Go runs on `main`, `wipd` and the sync
-feature branch pushes, plus PRs to `main`/`wipd`; Laravel uses push/PR triggers.
+feature branch and `preview` pushes, plus PRs to `main`/`wipd`/`preview`; Laravel uses push/PR triggers.
 Each job installs PHP 8.5 and locked Composer dependencies, checks the Laravel suite, then
 runs `make test-sync-local test-sync-integration` in the Go Nix environment.
 Missing Laravel prerequisites fail rather than skip. Existing CI and release
@@ -474,6 +474,11 @@ explicitly; do not suppress the failure or use old `main` as compatibility
 evidence. A rerun/dispatch needs its own authorization. Local paired-candidate
 acceptance is not an already executed GitHub Actions run. Each run logs its
 resolved counterpart revision; this is not an atomic two-repository release.
+
+Local `preview` preparation does not authorize publication or deployment. A push
+to `wip-cloud/preview` may trigger Beau's branch-matched Laravel Cloud automation,
+independently of CI results. Obtain explicit authorization before either push;
+review Cloud resources and migration scope before publishing the server branch.
 
 ### Independent named connections and optional remote routes
 

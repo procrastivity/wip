@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [main, wipd, work/client-server-sync]
+    branches: [main, wipd, work/client-server-sync, preview]
   pull_request:
-    branches: [main, wipd]
+    branches: [main, wipd, preview]
 
 permissions:
   contents: read

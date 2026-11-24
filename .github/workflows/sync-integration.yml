@@ -2,9 +2,9 @@ name: Joint Go Laravel
 
 on:
   push:
-    branches: [main, wipd, work/client-server-sync]
+    branches: [main, wipd, work/client-server-sync, preview]
   pull_request:
-    branches: [main, wipd]
+    branches: [main, wipd, preview]
 
 permissions:
   contents: read
@@ -37,7 +37,7 @@ jobs:
       WIP_CLOUD_PATH: ${{ github.workspace }}/cloud
       # This paired feature must never silently test an old main counterpart.
       # Other branches retain the main compatibility gate; missing refs fail checkout.
-      COUNTERPART_REF: ${{ (github.head_ref || github.ref_name) == 'work/client-server-sync' && 'work/client-server-sync' || 'main' }}
+      COUNTERPART_REF: ${{ (github.head_ref || github.ref_name) == 'preview' && 'preview' || (github.head_ref || github.ref_name) == 'work/client-server-sync' && 'work/client-server-sync' || 'main' }}
       APP_ENV: testing
       APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DB_URL: ''
