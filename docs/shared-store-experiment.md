@@ -267,11 +267,12 @@ daemon or any production synchronization activation.
 The ordinary built binary now exposes these deliberately experimental commands
 under `wip plumbing sync`. None runs at startup or changes ordinary local command
 ownership. They are separate from the historical M6 IPC operation census; its
-existing paths/contracts remain pinned, with these ten paths inventoried separately.
+existing paths/contracts remain pinned, with these paths inventoried separately.
 
 ```sh
 wip plumbing sync login --server https://your-laravel-origin --email you@example.com
 wip plumbing sync repos --json
+wip plumbing sync bindings --json
 wip plumbing sync pair --org <organization-id> --server-repo <server-repo-id> --dry-run
 wip plumbing sync pair --org <organization-id> --server-repo <server-repo-id>
 wip plumbing sync status
@@ -289,6 +290,85 @@ requires explicit stable destination IDs and revalidates access with Laravel.
 Discovery follows all organization/Repo pages, never remote/title matching.
 Explicit `pair` uses an existing destination from the foundation API. The optional
 init onboarding extension below also offers creation with retained retry identity.
+
+### Local binding inventory and scripted passes
+
+`wip plumbing sync bindings --json` is an offline inventory of **current retained
+local pairings in the selected store**, not online server discovery (`sync repos`)
+or connection discovery (`sync connections`). It returns the same inventory inside
+and outside known clones. Paused bindings are included; never-paired Repos and
+retired association archives are omitted. It neither resumes nor exchanges work.
+
+The JSON contract is an object with a `bindings` array, sorted by `local_repo`
+(ascending local Repo ID). Each entry always contains these five fields:
+
+```json
+{"bindings":[{"local_repo":"LOCAL_REPO_ID","active":true,"connection":"work","account":"42","endpoint":"https://work.example.invalid/api/organizations/1/repos/2"}]}
+```
+
+`local_repo`, `connection`, `account`, and `endpoint` are strings; `active` is a
+boolean. Paused entries have `active: false`. Legacy pairings without retained
+connection/account metadata use empty strings, not inferred config or credential
+values. No bindings returns `{"bindings":[]}`, never `null`. Consumers should
+tolerate additional fields. There are no credentials, tokens, work payloads,
+installation IDs, or transfer/convergence claims in this response. Destination
+metadata itself may still be sensitive.
+
+Normal `WIP_DB_PATH`/data-home store selection applies; separate custom stores
+require separate invocations. Opening a missing/older store can create/migrate
+the ordinary local database, but this command never enables sync tables, creates
+an installation, reads credentials, evaluates routes, or contacts a server.
+`--repo`, `--connection`, and `--server` are rejected here: the inventory is always
+the whole selected store, and each entry describes its retained destination.
+Without `--json`, the same object is pretty-printed.
+
+The included `scripts/sync-mapped.sh` uses this inventory directly. It needs Bash,
+`jq`, and a preview WIP binary with the bindings command (`WIP_BIN` may select an
+executable path). It defaults to `--list`; `--dry-run` performs offline passes and
+`--run` explicitly exchanges work. Unlike the older host-wide status workaround,
+it needs no temporary directory, checkout switching, or per-Repo status calls.
+Its TSV output includes active and paused retained bindings only; unpaired and
+retired entries are no longer rows, and `skipped` counts paused bindings.
+Each pass retains its own destination; failures are reported by Repo ID and do
+not prevent later passes. Exit codes: 0 for success (including empty inventory),
+1 for any failed pass, 2 for usage or inventory errors.
+
+```bash
+bash scripts/sync-mapped.sh --list
+bash scripts/sync-mapped.sh --dry-run
+# Only when you choose to exchange data:
+bash scripts/sync-mapped.sh --run
+```
+
+This Bash loop requires `jq`, explicitly runs one pass for each **active** binding,
+continues after individual failures, and exits nonzero if any pass failed. It
+does not change directory, so relative store/config overrides keep their meaning.
+Run inventory first to review destinations before choosing to exchange data:
+
+```bash
+set -euo pipefail
+bindings=$(wip plumbing sync bindings --json)
+ids=$(jq -r '.bindings[] | select(.active) | .local_repo' <<< "$bindings")
+failed=0
+while IFS= read -r id; do
+  [[ -n $id ]] || continue
+  # No global destination override: each Repo retains its own connection/account.
+  if wip plumbing sync run --repo "$id" --json >/dev/null; then
+    printf 'OK: %s\n' "$id" >&2
+  else
+    printf 'FAILED: %s (not retried)\n' "$id" >&2
+    failed=1
+  fi
+done <<< "$ids"
+exit "$failed"
+```
+
+Add `--dry-run` to `sync run` for offline local inspection rather than exchange;
+that does not validate remote health or credentials. An empty inventory succeeds
+without running any passes. A failure obtaining/parsing inventory stops the script
+before any passes; per-Repo errors remain on stderr. For failures, inspect
+`wip plumbing sync status --repo ID --json` before explicitly retrying. A successful
+pass still has the experimental work-family/history limits described here.
 
 Login uses Laravel's session/CSRF, verified-account login, password confirmation
 and Sanctum token issuance. A terminal prompt hides the password; automation may

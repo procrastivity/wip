@@ -31,6 +31,54 @@ func (s *Store) exchangeCLIExists(ctx context.Context) (bool, error) {
 	return n != 0, err
 }
 
+// ExchangeBindingInfo is retained destination metadata, not transfer state or
+// credential validity. Legacy pairings have empty connection and account fields.
+type ExchangeBindingInfo struct {
+	LocalRepo  string `json:"local_repo"`
+	Active     bool   `json:"active"`
+	Connection string `json:"connection"`
+	Account    string `json:"account"`
+	Endpoint   string `json:"endpoint"`
+}
+
+// ExchangeBindings lists current CLI pairings, including paused ones, in local
+// Repo ID order. It never creates opt-in tables or reads work or credentials.
+func (s *Store) ExchangeBindings(ctx context.Context) ([]ExchangeBindingInfo, error) {
+	out := make([]ExchangeBindingInfo, 0)
+	exists, err := s.exchangeCLIExists(ctx)
+	if err != nil || !exists {
+		return out, err
+	}
+	accounts, err := exchangeTableExists(ctx, s.db, "exchange_accounts")
+	if err != nil {
+		return nil, err
+	}
+	query := `SELECT c.repo,c.active,b.endpoint,c.version,1,'','' FROM exchange_cli c JOIN exchange_bindings b ON b.repo=c.repo`
+	if accounts {
+		query = `SELECT c.repo,c.active,b.endpoint,c.version,COALESCE(a.version,1),COALESCE(a.connection,''),COALESCE(a.account,'') FROM exchange_cli c JOIN exchange_bindings b ON b.repo=c.repo LEFT JOIN exchange_accounts a ON a.repo=c.repo`
+	}
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY c.repo`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var b ExchangeBindingInfo
+		var version, accountVersion int
+		if err := rows.Scan(&b.LocalRepo, &b.Active, &b.Endpoint, &version, &accountVersion, &b.Connection, &b.Account); err != nil {
+			return nil, err
+		}
+		if version != 1 {
+			return nil, fmt.Errorf("exchange: unsupported local pairing version %d", version)
+		}
+		if accountVersion != 1 {
+			return nil, fmt.Errorf("exchange: unsupported connection metadata version %d", accountVersion)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // PairExchange pins a future-only history boundary once. Repeat pairing resumes
 // the same destination and cursor; no installation or state is created by preview.
 func (s *Store) PairExchange(ctx context.Context, repo, endpoint string) (ExchangeStatus, error) {

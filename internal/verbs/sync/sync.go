@@ -81,6 +81,25 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 		}
 		return write(cmd, list)
 	}})
+	add(&cobra.Command{Use: "bindings", Short: "offline retained bindings in the selected store, including paused Repos", Long: "List all current retained local bindings, independent of checkout. Does not load credentials or contact a server. Select active Repos from .bindings[] in JSON output; --repo, --connection and --server do not apply.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		for _, flag := range []string{"repo", "connection", "server"} {
+			if cmd.Flags().Changed(flag) {
+				return wiperr.New("refusal.selection", "bindings inventories the selected store; --"+flag+" does not apply")
+			}
+		}
+		s, err := tiers.OpenStore()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+		bindings, err := s.ExchangeBindings(cmd.Context())
+		if err != nil {
+			return err
+		}
+		return write(cmd, struct {
+			Bindings []store.ExchangeBindingInfo `json:"bindings"`
+		}{Bindings: bindings})
+	}})
 	add(&cobra.Command{Use: "logout", Short: "revoke the saved token; preserve local work and bindings", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		name := connection
 		if name == "" {

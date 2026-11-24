@@ -13,7 +13,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # shell files at all, so this list is the only shell gate — `make lint`,
 # and so CI's lint job, checks it in full.
 ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy contrib/online-authority-proof/run contrib/online-authority-proof/runtime-test contrib/online-authority-proof/test-policy
-SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh $(ORB_SHELLCHECK_FILES)
+SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh scripts/sync-mapped.sh $(ORB_SHELLCHECK_FILES)
 
 .PHONY: fmt lint test test-registration test-sync-local test-sync-integration check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
 
@@ -33,6 +33,7 @@ test-registration:
 # PHP-independent built-client checks. Python 3 supplies a real POSIX PTY.
 test-sync-local:
 	go test ./internal/cli -run '^TestSync' -count=1 -v -timeout=2m
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_sync_mapped.py' -v
 
 # Unlike optional developer runs, designated acceptance cannot skip Laravel.
 # Fixture creation/migration also fails hard if PHP/vendor/PostgreSQL is absent.
