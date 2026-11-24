@@ -15,7 +15,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 ORB_SHELLCHECK_FILES := .agents/setup .agents/resume contrib/orb-smoke/entrypoint contrib/orb-smoke/run contrib/orb-smoke/test-policy contrib/online-authority-proof/run contrib/online-authority-proof/runtime-test contrib/online-authority-proof/test-policy
 SHELLCHECK_FILES := .envrc contrib/check-commit-msg contrib/check-gofumpt contrib/release scripts/install.sh $(ORB_SHELLCHECK_FILES)
 
-.PHONY: fmt lint test test-sync-local test-sync-integration check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
+.PHONY: fmt lint test test-registration test-sync-local test-sync-integration check orb-lint orb-policy-test orb-smoke authority-lab-policy-test authority-lab-config authority-lab-runtime-test hooks build cross-compile changelog release-notes
 
 fmt:
 	gofumpt -w .
@@ -26,6 +26,9 @@ lint:
 
 test:
 	go test ./...
+
+test-registration:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
 # PHP-independent built-client checks. Python 3 supplies a real POSIX PTY.
 test-sync-local:

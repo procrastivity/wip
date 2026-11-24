@@ -106,6 +106,36 @@ macOS arm64), so Nix compiles nothing. `contrib/promote-stable` writes
 them after each release. The `vX.Y.Z` tags build from source, and
 `github:procrastivity/wip/main` builds unreleased work.
 
+## Register a Cloud account
+
+From a checkout containing the helper, use Python 3 and curl in your WSL/Ubuntu
+terminal. This script is separate from the installed `wip` binary:
+
+```sh
+python3 scripts/register-account.py https://your-wip-server.example.com
+```
+
+The endpoint is the only argument. The helper prompts for account details and
+a hidden password, then waits for a verification link from your inbox or, for
+log-only mail, the application's logs. Paste the link at its hidden prompt;
+enter `resend` to request another or `login` to recover an expired session.
+If the account already exists or an earlier attempt was interrupted, choose
+`existing` at startup instead of registering again. HTTP is available with an
+explicit warning for disposable local testing; use trusted HTTPS for real accounts.
+
+After verification, optional CLI login prompts for the password again and saves
+a normal named connection. Separate names such as `preview` and `work` can stay
+logged in concurrently; existing connection names are never overwritten by this
+helper. It does not pair projects or synchronize work.
+
+Cookies and responses use a private temporary directory (0700, files 0600).
+Passwords and signed links are not command arguments. The helper attempts session
+logout and removes temporary files on completion, errors, Ctrl+C and SIGTERM;
+forced termination/power loss cannot guarantee cleanup. Durable CLI credentials
+are separate and remain managed by `wip`. No mail or server settings are changed.
+
+Run the helper's terminal/HTTP regression checks with `make test-registration`.
+
 ## Develop
 
 ```
