@@ -60,6 +60,21 @@ func experimentOriginalID(key string) string {
 	return key[strings.LastIndex(key, ":")+1:]
 }
 
+// experimentOriginVerified reports whether the claimed host is recorded export
+// provenance for this native event. The first origin stays immutable;
+// experiment_native_origin_hosts appends every installation that exported the
+// same event, so a retired association's fresh installation still verifies.
+// Stores predating that table fall back to the single first origin.
+func experimentOriginVerified(ctx context.Context, q querier, id, host string, hostsTable bool) (bool, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_native_origins WHERE id=? AND host=?`, id, host).Scan(&n)
+	if err != nil || n != 0 || !hostsTable {
+		return n != 0, err
+	}
+	err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_native_origin_hosts WHERE id=? AND host=?`, id, host).Scan(&n)
+	return n != 0, err
+}
+
 func experimentSourceKey(ctx context.Context, q querier, repo, id string) (string, error) {
 	scope, err := exchangeScope(ctx, q, repo)
 	if err != nil {
@@ -140,6 +155,8 @@ func (s *Store) EnableSharedStoreExperiment(ctx context.Context) error {
 	 CREATE TABLE IF NOT EXISTS experiment_acknowledgements (
 	 source_group TEXT PRIMARY KEY REFERENCES experiment_sources(id), acknowledgement TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS experiment_native_origins (id TEXT PRIMARY KEY REFERENCES events(id), host TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS experiment_native_origin_hosts (
+	 id TEXT NOT NULL REFERENCES events(id), host TEXT NOT NULL, PRIMARY KEY(id, host));
 	 CREATE TABLE IF NOT EXISTS experiment_collisions (
 	 id TEXT NOT NULL, source TEXT NOT NULL, target_repo TEXT NOT NULL, decision TEXT NOT NULL,
 	 PRIMARY KEY(source, target_repo));
@@ -249,18 +266,16 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		}
 		out.Actions = append(out.Actions, a)
 	}
-	// Remember locally supplied provenance before any echo can claim it. This
-	// is fixture attribution, not authority conferred by an incoming envelope.
+	// Remember locally supplied provenance before any echo can claim it. The
+	// first origin stays immutable; a retired association may re-export the
+	// same native event under its fresh installation, recorded append-only.
+	// This is fixture attribution, not authority conferred by an incoming envelope.
 	for _, ev := range group {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_native_origins VALUES (?,?)`, ev.ID, host); err != nil {
 			return out, err
 		}
-		var origin string
-		if err := tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, ev.ID).Scan(&origin); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_native_origin_hosts VALUES (?,?)`, ev.ID, host); err != nil {
 			return out, err
-		}
-		if origin != host {
-			return out, fmt.Errorf("experiment: native export origin is immutable")
 		}
 	}
 	return out, tx.Commit()
@@ -317,6 +332,10 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 	// Compare untouched original evidence before Repo/baseline mapping and before
 	// reserving source/action IDs that a later genuine self-echo must still use.
 	v := View{q: tx, schemaVersion: s.version}
+	originHosts, err := exchangeTableExists(ctx, tx, "experiment_native_origin_hosts")
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
 	for _, a := range source.Actions {
 		native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
 		if err != nil {
@@ -325,12 +344,11 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 		if len(native) == 0 {
 			continue
 		}
-		var origin string
-		err = tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, a.Event.ID).Scan(&origin)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		verified, err := experimentOriginVerified(ctx, tx, a.Event.ID, source.Host, originHosts)
+		if err != nil {
 			return ExperimentDecision{}, err
 		}
-		if reflect.DeepEqual(native[0], a.Event) && origin == source.Host {
+		if reflect.DeepEqual(native[0], a.Event) && verified {
 			continue
 		}
 		result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}

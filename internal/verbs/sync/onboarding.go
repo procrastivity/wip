@@ -358,7 +358,7 @@ func onboardingSelect(ctx context.Context, repo store.Repo, candidates []onboard
 		return &OnboardingResult{State: "local", Message: "Kept local; no pairing performed."}, nil
 	}
 	c := candidates[n-1]
-	n, err = ui.choose("Pair with "+labels[n]+"? Earlier history is not adopted.", []string{"Keep local", "Confirm pairing"})
+	n, err = ui.choose("Pair with "+labels[n]+"? Supported project work syncs regardless of age; unsupported work stays local.", []string{"Keep local", "Confirm pairing"})
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +382,7 @@ func onboardingPair(ctx context.Context, repo store.Repo, c onboardingCandidate,
 	status, _, err := applyPair(pairCtx, s, repo.ID, c.Selection, c.Organization.ID, c.Repo.ID, expected)
 	closeErr := s.Close()
 	cancel()
-	result := &OnboardingResult{State: "paired", Message: "Paired. Initial scope is future supported originals only; earlier history is not adopted."}
+	result := &OnboardingResult{State: "paired", Message: "Paired. Supported originals sync regardless of age; unsupported work stays local and inspectable."}
 	if status.Paired {
 		result.Binding = &status.Binding
 	}

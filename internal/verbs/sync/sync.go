@@ -203,7 +203,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	}})
 	var org, remote string
 	var dryPair bool
-	pair := &cobra.Command{Use: "pair", Short: "explicit future-work association; no existing-history merge or Git changes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	pair := &cobra.Command{Use: "pair", Short: "explicit project association; portable originals sync regardless of age; no Git changes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return withRepo(cmd, func(s *store.Store, r store.Repo) error {
 			if org == "" || remote == "" || strings.ContainsAny(org+remote, "/?#%") {
 				return wiperr.New("refusal.destination", "choose --org and --server-repo stable IDs from sync repos")
@@ -237,7 +237,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 					return err
 				}
 			}
-			return write(cmd, map[string]any{"dry_run": dryPair, "selection": selected, "local": status, "destination": destination, "organization_id": org, "server_repo_id": remote, "destination_revalidated": !dryPair, "endpoint": endpoint, "initial_scope": "future originals only; earlier history not adopted; required pre-boundary dependencies may wait", "installation": "allocated only on apply; reused on retry", "git_and_checkout": "unchanged; paths not transmitted"})
+			return write(cmd, map[string]any{"dry_run": dryPair, "selection": selected, "local": status, "destination": destination, "organization_id": org, "server_repo_id": remote, "destination_revalidated": !dryPair, "endpoint": endpoint, "initial_scope": "all supported unsynced originals regardless of age; unsupported families, missing prerequisites and incompatible formats remain inspectable local states", "installation": "allocated only on apply; reused on retry", "git_and_checkout": "unchanged; paths not transmitted"})
 		})
 	}}
 	pair.Flags().StringVar(&org, "org", "", "explicit organization stable ID")

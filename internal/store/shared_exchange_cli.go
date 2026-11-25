@@ -8,8 +8,11 @@ import (
 	"fmt"
 )
 
-// ExchangeStatus is an offline inventory, not a claim of convergence. Boundary
-// excludes pre-pair history; unsupported local work remains fully usable.
+// ExchangeStatus is an offline inventory, not a claim of convergence. For a
+// paired Repo the recorded boundary is retained pairing evidence only: every
+// supported unsynced original group is eligible regardless of age.
+// EarlierGroups counts command groups at or before that boundary as inventory;
+// unsupported local work remains fully usable.
 type ExchangeStatus struct {
 	Binding                              ExchangeBinding
 	Generation                           string
@@ -79,8 +82,9 @@ func (s *Store) ExchangeBindings(ctx context.Context) ([]ExchangeBindingInfo, er
 	return out, rows.Err()
 }
 
-// PairExchange pins a future-only history boundary once. Repeat pairing resumes
-// the same destination and cursor; no installation or state is created by preview.
+// PairExchange records the pairing boundary once; it is retained evidence,
+// not an export exclusion. Repeat pairing resumes the same destination and
+// cursor; no installation or state is created by preview.
 func (s *Store) PairExchange(ctx context.Context, repo, endpoint string) (ExchangeStatus, error) {
 	preview, err := s.ExchangeStatus(ctx, repo)
 	if err != nil {
@@ -205,50 +209,86 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 	if !out.Paired && len(groups) > 0 {
 		out.Boundary = groups[len(groups)-1]
 	}
-	for _, group := range groups {
-		if group <= out.Boundary {
-			out.EarlierGroups++
-			continue
-		}
-		events, err := s.EventsOfChain(ctx, group)
-		if err != nil {
-			return out, err
-		}
-		var effect int
-		if out.Paired {
+	// A paired Repo evaluates every command group regardless of the recorded
+	// boundary, which remains pairing evidence rather than an export exclusion.
+	// An unpaired preview keeps the latest-group boundary, so every group is
+	// inventory and nothing counts as outgoing work.
+	type groupScan struct {
+		events    []Event
+		effect    bool
+		supported bool
+	}
+	scans := make([]groupScan, len(groups))
+	portable := map[string]bool{}
+	if out.Paired {
+		for i, group := range groups {
+			events, err := s.EventsOfChain(ctx, group)
+			if err != nil {
+				return out, err
+			}
+			scans[i].events = events
+			var effect int
 			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events e JOIN experiment_effects x ON x.id=e.id WHERE e.correlation=?`, group).Scan(&effect); err != nil {
 				return out, err
 			}
-		}
-		if effect != 0 {
-			continue
-		}
-		for _, ev := range events {
-			var prior string
-			if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),'') FROM events WHERE subject=? AND id<?`, ev.Subject, ev.ID).Scan(&prior); err != nil {
-				return out, err
+			scans[i].effect = effect != 0
+			if scans[i].effect {
+				continue
 			}
-			if prior != "" && prior <= out.Boundary {
-				out.Dependencies = append(out.Dependencies, group+": depends on pre-boundary subject evidence "+prior+" (not adopted)")
-			}
-		}
-		supported := true
-		for _, ev := range events {
-			if ev.Repo != repo || ev.Actor == SystemActor("shared-store-experiment") {
-				supported = false
-			}
-			switch ev.Type {
-			case TypeMatterCreated, TypeMatterStarted, TypeStageStarted, TypeStepStarted:
-			case TypeContentCreated:
-				var p ContentWritten
-				if json.Unmarshal(ev.Payload, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" {
+			supported := true
+			for _, ev := range events {
+				if ev.Repo != repo || ev.Actor == SystemActor("shared-store-experiment") {
 					supported = false
 				}
-			default:
-				supported = false
+				switch ev.Type {
+				case TypeMatterCreated, TypeMatterStarted, TypeStageStarted, TypeStepStarted:
+				case TypeContentCreated:
+					var p ContentWritten
+					if json.Unmarshal(ev.Payload, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" {
+						supported = false
+					}
+				default:
+					supported = false
+				}
+			}
+			scans[i].supported = supported
+			if supported {
+				portable[group] = true
 			}
 		}
-		if !supported {
+	}
+	for i, group := range groups {
+		if group <= out.Boundary {
+			out.EarlierGroups++
+			if !out.Paired {
+				continue
+			}
+		}
+		scan := scans[i]
+		if scan.effect {
+			continue
+		}
+		for _, ev := range scan.events {
+			var prior, priorGroup string
+			err := s.db.QueryRowContext(ctx, `SELECT id,correlation FROM events WHERE subject=? AND id<? ORDER BY id DESC LIMIT 1`, ev.Subject, ev.ID).Scan(&prior, &priorGroup)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return out, err
+			}
+			if prior == "" || priorGroup == group || portable[priorGroup] {
+				continue
+			}
+			var effect int
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, prior).Scan(&effect); err != nil {
+				return out, err
+			}
+			// An integration effect is never a portable original, but its
+			// retained source evidence resolves the dependency instead.
+			if effect != 0 {
+				continue
+			}
+			out.Dependencies = append(out.Dependencies, group+": depends on subject evidence "+prior+" in group "+priorGroup+" (not portable)")
+		}
+		if !scan.supported {
 			out.Unsupported = append(out.Unsupported, group)
 			continue
 		}

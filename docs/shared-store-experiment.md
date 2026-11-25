@@ -259,8 +259,8 @@ offline recovery, post-effect/pre-inbox-mark failure, 100+3 committed pages,
 tenant/credential/origin revocation and ordinary CLI/server-unavailable controls.
 Existing tagged/race and ordinary CLI suites remain controls. This extends only
 fresh-fixture Matter birth and inline create-once Brief integration; it does not
-enable generalized families, blob transfer, existing-history adoption, a default
-daemon or any production synchronization activation.
+enable generalized families, blob transfer, generalized existing-history
+adoption, a default daemon or any production synchronization activation.
 
 ## Explicit pairing and one-pass CLI extension
 
@@ -386,17 +386,20 @@ for both session authentication and bearer exchange. Logout revokes the saved
 token and removes its file; an already-revoked token (HTTP 401) can also be
 forgotten. A network failure does not pretend revocation succeeded.
 
-**History scope is future-only.** Pairing inventories existing command groups and
-pins their maximum correlation ID as the initial boundary. Older work is not
-silently adopted, uploaded or merged, and pre-boundary dependency findings are
-reported. Applying pairing commits installation, immutable destination, active
+**History scope is project-wide for supported originals.** Pairing inventories
+existing command groups and pins their maximum correlation ID as the recorded
+boundary, which is retained pairing evidence rather than an export exclusion.
+Every supported unsynced original group is eligible regardless of age;
+unsupported families stay local and inspectable, and dependency findings report
+the prior event's own command group and whether that group is portable in the
+same scan. Applying pairing commits installation, immutable destination, active
 flag, boundary and local version together before origin-registration HTTP. A
 lost registration response can be retried with that same identity/boundary.
 Normal native Repo IDs, local clone/path associations and Git configuration are
 unchanged. Lookup deliberately avoids ordinary opportunistic remote adoption.
 
-`RunExchange` selects complete original commands in that Repo after the boundary,
-not caller-supplied IDs. It captures every eligible exact envelope before HTTP,
+`RunExchange` selects complete original commands in that Repo, not
+caller-supplied IDs. It captures every eligible exact envelope before HTTP,
 uploads in local command order and acknowledges each group durably after the
 server accepts it. A lost response resends the same cached key/bytes. Concurrent
 new local work remains eligible for the next pass. Supported Matter births,
@@ -434,7 +437,7 @@ cursor state. Pairing the same association resumes it; it cannot silently switch
 destinations or reuse a cursor elsewhere. Logout is separate and does not unpair
 or erase local data. Local pairing persistence is version 1. Missing CLI tables
 are initialized only on apply; an older low-level lab binding can opt in with its
-existing endpoint/installation/cursor and a newly explicit future boundary. An
+existing endpoint/installation/cursor and a freshly recorded boundary. An
 unknown CLI version refuses without rewriting it. No generalized real-history
 upgrade/adoption guarantee is claimed.
 
@@ -691,8 +694,9 @@ For a new unpaired project, `auto` uses a complete read-only lookup to find
 exactly one accessible server Repo with the same normalized selected Git remote
 within the configured organization. It revalidates access, pairs and immediately
 runs **one real sync pass**, including supported upload/download. It never
-creates a server Repo automatically, adopts arbitrary pre-pair history or starts
-a recurring worker. Zero or multiple matches require an explicit choice; JSON
+creates a server Repo automatically or starts a recurring worker; supported
+portable originals sync regardless of age while unsupported work stays local.
+Zero or multiple matches require an explicit choice; JSON
 or unattended init reports incomplete onboarding rather than prompting.
 
 Use `join: {mode: ask}` (or omit `join`) for prompted joining. In a terminal,
@@ -769,7 +773,7 @@ including inactive associations (legacy unnamed associations belong to `default`
 Native work, IDs, Repo/Clone/worktree identity, Git configuration and original
 provenance are preserved. Transport state is retired rather than silently reused
 by a later pairing. A newly explicit pairing starts a fresh association and
-future-work boundary; forgetting is not existing-history adoption or server cleanup.
+pairing boundary; forgetting is not existing-history adoption or server cleanup.
 The server's old data and issued token remain unchanged: use online deletion or
 revocation separately when wanted and possible, **before** forgetting the login.
 
