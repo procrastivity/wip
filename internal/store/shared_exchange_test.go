@@ -5,7 +5,9 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -228,18 +230,31 @@ func sourceDecision(t *testing.T, s *store.Store, group, want string) store.Expe
 // labExchangeFeed is a minimal stateful exchange endpoint: it stores uploaded
 // changes under contiguous server sequences and serves committed pages, so
 // portable-derivative coverage exercises the real version-1 wire contract
-// without a Laravel fixture.
+// without a Laravel fixture. It also keeps a digest-keyed blob store with the
+// same verify-then-acknowledge contract as Cloud, and records request order so
+// tests can prove blobs land before the changes that name them.
 type labExchangeFeed struct {
-	mu      sync.Mutex
-	changes []store.ExchangeChange
+	mu       sync.Mutex
+	changes  []store.ExchangeChange
+	blobs    map[string][]byte
+	requests []string
+	// blobPutStatus/blobGetStatus, when non-zero, are the status every blob
+	// PUT/GET returns — the transient-failure controls.
+	blobPutStatus, blobGetStatus int
 }
 
 func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
 	t.Helper()
-	feed := &labExchangeFeed{}
+	feed := &labExchangeFeed{blobs: map[string][]byte{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		feed.mu.Lock()
 		defer feed.mu.Unlock()
+		feed.requests = append(feed.requests, r.Method+" "+r.URL.Path)
+		blob := strings.Contains(r.URL.Path, "/blobs/")
+		if blob {
+			feed.serveBlob(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/origins"):
@@ -279,6 +294,154 @@ func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
 	}))
 	t.Cleanup(server.Close)
 	return feed, server.URL + "/api/organizations/org/repos/repo"
+}
+
+// blobDigest extracts the {digest} path segment of a /blobs/ request.
+func (f *labExchangeFeed) blobDigest(r *http.Request) string {
+	return r.URL.Path[strings.LastIndex(r.URL.Path, "/blobs/")+len("/blobs/"):]
+}
+
+// serveBlob implements the Cloud blob contract: PUT verifies the declared
+// length and content digest before storing (201 first store, 200 exact
+// retry), GET serves verified bytes under X-Blob-SHA256, and HEAD probes
+// availability. Absent and unauthorized are the same indistinguishable 404.
+func (f *labExchangeFeed) serveBlob(w http.ResponseWriter, r *http.Request) {
+	digest := f.blobDigest(r)
+	switch r.Method {
+	case "PUT":
+		if f.blobPutStatus != 0 {
+			w.WriteHeader(f.blobPutStatus)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		if r.URL.Query().Get("length") != strconv.Itoa(len(data)) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != digest {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		_, exists := f.blobs[digest]
+		f.blobs[digest] = data
+		w.Header().Set("Content-Type", "application/json")
+		if !exists {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"digest": digest, "byte_length": len(data), "created": !exists})
+	case "GET", "HEAD":
+		if f.blobGetStatus != 0 {
+			w.WriteHeader(f.blobGetStatus)
+			return
+		}
+		data, ok := f.blobs[digest]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Blob-SHA256", digest)
+		w.WriteHeader(http.StatusOK)
+		if r.Method == "GET" {
+			_, _ = w.Write(data)
+		}
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// serveBlobStatus arms the transient-failure controls; status 0 restores
+// normal blob serving.
+func (f *labExchangeFeed) serveBlobStatus(put, get int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobPutStatus, f.blobGetStatus = put, get
+}
+
+// requestIndex returns the position of the first request matching method and
+// path suffix, or -1 — the ordering oracle for upload-before-commit.
+func (f *labExchangeFeed) requestIndex(method, suffix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range f.requests {
+		if strings.HasPrefix(r, method+" ") && strings.HasSuffix(r, suffix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasRequest reports whether any recorded request matches method and
+// contains frag — for assertions suffix matching cannot express, like "any
+// blob GET at all".
+func (f *labExchangeFeed) hasRequest(method, frag string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.requests {
+		if strings.HasPrefix(r, method+" ") && strings.Contains(r, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// blob serves the stored bytes for digest, for corrupt-then-serve fixtures.
+func (f *labExchangeFeed) blob(digest string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.blobs[digest]
+	return data, ok
+}
+
+// setBlob injects or replaces stored bytes directly — the server-side
+// corruption control a verifying PUT can never produce.
+func (f *labExchangeFeed) setBlob(digest string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobs[digest] = data
+}
+
+// removeBlob drops stored bytes, simulating a blob the server never received.
+func (f *labExchangeFeed) removeBlob(digest string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.blobs, digest)
+}
+
+// changeCount reports how many changes the feed has committed.
+func (f *labExchangeFeed) changeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.changes)
+}
+
+// changeOrder lists committed group IDs in feed sequence order.
+func (f *labExchangeFeed) changeOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.changes))
+	for i, c := range f.changes {
+		out[i] = c.GroupID
+	}
+	return out
+}
+
+// postChangesIndices returns the request-log positions of every POST /changes,
+// in arrival order — paired with changeOrder it proves each blob PUT landed
+// before the changes POST that made its group receivable.
+func (f *labExchangeFeed) postChangesIndices() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []int
+	for i, r := range f.requests {
+		if strings.HasPrefix(r, "POST ") && strings.HasSuffix(r, "/changes") {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // The response is lost only AFTER the real Laravel request commits. The same

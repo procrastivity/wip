@@ -386,6 +386,12 @@ func (s *Store) RunExchange(ctx context.Context, c ExchangeClient, repo string) 
 		if err != nil {
 			return status, err
 		}
+		// Spilled bytes must reach the server before the change that names
+		// them: a blob failure aborts before this group's POST, so nothing
+		// ack-able uploads without its content.
+		if err := s.exchangeUploadChangeBlobs(ctx, c, status.Binding, change); err != nil {
+			return status, err
+		}
 		if err := c.request(ctx, "POST", status.Binding.Endpoint+"/changes", map[string]any{"changes": []ExchangeChange{change}}, nil); err != nil {
 			return status, err
 		}
