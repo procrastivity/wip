@@ -837,3 +837,280 @@ func TestSharedStoreEffectDelegationRecordsFactWithoutOutbox(t *testing.T) {
 		t.Fatalf("native delegation outbox = %+v (err %v), want one create", outbox, err)
 	}
 }
+
+// labGroup commits drafts as one chain on s and exports the resulting source
+// group. Each draft causally follows its predecessor so the export is a real
+// ordered group rather than unrelated origins sharing a correlation.
+func labGroup(t *testing.T, s *store.Store, host, repo string, decide func(*store.Tx) ([]store.Draft, error)) store.ExperimentSource {
+	t.Helper()
+	events, err := s.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: store.Env{Repo: repo}}, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		drafts, err := decide(tx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range drafts {
+			if i > 0 {
+				drafts[i].Cause = i - 1
+			}
+		}
+		return drafts, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := s.ExperimentExport(labCtx, host, events[0].Correlation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+func labImportBound(t *testing.T, s *store.Store, source store.ExperimentSource, repo, disposition string) store.ExperimentDecision {
+	t.Helper()
+	d, err := s.ExperimentImportBound(labCtx, source, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Disposition != disposition {
+		t.Fatalf("got %+v, want %s", d, disposition)
+	}
+	return d
+}
+
+// A Stage and Step may be non-origin members of one group: their NodeBirth
+// payloads name parents by shared identity, and classification sees the Matter
+// and Stage effects earlier members just folded into candidate state.
+func TestSharedStorePortableBirthGroup(t *testing.T) {
+	p := newLabPair(t)
+	var mid, sid, tid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Portable", Locator: "portable", SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do-01", Parent: sid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if len(d.Effects) != 3 {
+		t.Fatalf("effects=%v", d.Effects)
+	}
+	m, err := p.fluke.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Locator != "portable" || m.Parent != "" || m.Matter != mid || m.Lifecycle != store.Planned {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := p.fluke.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid || sn.Matter != mid || sn.Lifecycle != store.Planned {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	tn, err := p.fluke.Node(labCtx, tid)
+	if err != nil || tn.Kind != store.ScaleStep || tn.Parent != sid || tn.Matter != mid || tn.Lifecycle != store.Planned {
+		t.Fatalf("step = %+v %v", tn, err)
+	}
+	events := labEvents(t, p.fluke)
+	if len(events) != before+3 {
+		t.Fatalf("native count %d -> %d", before, len(events))
+	}
+	for i, effect := range d.Effects {
+		ev := events[before+i]
+		if ev.ID != effect || ev.Type != source.Actions[i].Event.Type || ev.Correlation != d.Effects[0] || (i > 0 && ev.Causation != d.Effects[i-1]) {
+			t.Fatalf("effect %d = %+v, want aligned chained fold of %s", i, ev, source.Actions[i].Event.Type)
+		}
+	}
+	labRebuild(t, p.fluke)
+	// An exact retry returns the retained decision without new effects.
+	again := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if !reflect.DeepEqual(d, again) || len(labEvents(t, p.fluke)) != before+3 {
+		t.Fatal("exact retry was not inert", again)
+	}
+	// The verified self-echo on the origin store maps back to native ids.
+	hybridBefore := len(labEvents(t, p.hybrid))
+	echo := labImportBound(t, p.hybrid, source, p.repo, "integrated")
+	if len(echo.Effects) != 3 || len(labEvents(t, p.hybrid)) != hybridBefore {
+		t.Fatal("verified echo was not inert", echo)
+	}
+	for i, effect := range echo.Effects {
+		if effect != source.Actions[i].Event.ID {
+			t.Fatalf("echo effect %d = %s, want native %s", i, effect, source.Actions[i].Event.ID)
+		}
+	}
+}
+
+// Dependent members see same-group candidate state end to end: the Brief's
+// baseline is the Matter birth and the start's baseline is the Brief, both
+// resolved through the ledger rows written earlier in the same pass.
+func TestSharedStorePortableDependentGroup(t *testing.T) {
+	p := newLabPair(t)
+	var mid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid = tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("portable brief"))
+		if err != nil {
+			return nil, err
+		}
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Chained", Locator: "chained", SortKey: 0}},
+			brief,
+			{Type: store.TypeMatterStarted, Subject: mid, Payload: store.Transition{From: store.Planned, To: store.InProgress}},
+		}, nil
+	})
+	d := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if len(d.Effects) != 3 {
+		t.Fatalf("effects=%v", d.Effects)
+	}
+	labState(t, p.fluke, mid, store.InProgress)
+	content, err := p.fluke.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(content) != "portable brief" {
+		t.Fatalf("brief = %q %v", content, err)
+	}
+	history, err := p.fluke.EventsOfSubject(labCtx, mid)
+	if err != nil || len(history) != 3 {
+		t.Fatalf("subject history=%v %v", history, err)
+	}
+	for i, effect := range d.Effects {
+		if history[i].ID != effect || history[i].Type != source.Actions[i].Event.Type {
+			t.Fatalf("history[%d]=%+v, want folded effect %s", i, history[i], effect)
+		}
+	}
+	labRebuild(t, p.fluke)
+}
+
+// A birth whose parent has not arrived waits with the whole group; once the
+// parent group integrates, explicit recheck folds the children against the
+// now-live parent and the same-group stage.
+func TestSharedStorePortablePendingParent(t *testing.T) {
+	p := newLabPair(t)
+	var mid string
+	ancestor := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid = tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Root", Locator: "root", SortKey: 0}},
+		}, nil
+	})
+	var sid, tid string
+	child := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		sid, tid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do-01", Parent: sid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	pending := labImportBound(t, p.fluke, child, p.repo, "pending")
+	if len(pending.Effects) != 0 || len(labEvents(t, p.fluke)) != before || !strings.Contains(pending.Reason, "awaiting parent") {
+		t.Fatalf("pending group wrote effects or lost its reason: %+v", pending)
+	}
+	if _, err := p.fluke.Node(labCtx, sid); err == nil {
+		t.Fatal("pending parent produced a node")
+	}
+	// Redelivery never reconsiders; only explicit recheck does.
+	labImportBound(t, p.fluke, child, p.repo, "pending")
+	if len(labEvents(t, p.fluke)) != before {
+		t.Fatal("redelivery applied pending work")
+	}
+	labImportBound(t, p.fluke, ancestor, p.repo, "integrated")
+	integrated := followRecheck(t, p.fluke, child, "integrated")
+	if len(integrated.Effects) != 2 {
+		t.Fatalf("recheck effects=%v", integrated.Effects)
+	}
+	sn, err := p.fluke.Node(labCtx, sid)
+	if err != nil || sn.Parent != mid || sn.Matter != mid {
+		t.Fatalf("stage after recheck = %+v %v", sn, err)
+	}
+	tn, err := p.fluke.Node(labCtx, tid)
+	if err != nil || tn.Parent != sid || tn.Matter != mid {
+		t.Fatalf("step after recheck = %+v %v", tn, err)
+	}
+	followHistory(t, p.fluke, child.Actions[0].Event.ID, 2)
+	labRebuild(t, p.fluke)
+}
+
+// One conflicting member condemns the whole group: earlier members' effects
+// and ledger rows roll back to the savepoint, every action stays retained with
+// no effect, and the decision is an inspectable conflict — never a merge. The
+// target already occupies the second Stage's address with its own node, so the
+// source group is valid on its origin yet incompatible here.
+func TestSharedStorePortableConflictAtomic(t *testing.T) {
+	p := newLabPair(t)
+	if _, err := writesurface.CreateStage(labCtx, p.fluke, store.ActorHuman, p.repo, "shared", "Taken"); err != nil {
+		t.Fatal(err)
+	}
+	var s1, s2 string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		s1, s2 = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeStageCreated, Subject: s1, Payload: store.NodeBirth{Title: "Free", Locator: "free", Parent: p.matter, SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: s2, Payload: store.NodeBirth{Title: "Taken", Locator: "taken", Parent: p.matter, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatalf("conflicting member left partial effects: %+v", d)
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := p.fluke.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back birth %s still projected", id)
+		}
+	}
+	db, err := sql.Open("sqlite", p.fluke.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var actions, effected int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(a.effect IS NOT NULL),0) FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE json_extract(s.source,'$.Actions[0].Event.ID')=?`, source.Actions[0].Event.ID).Scan(&actions, &effected); err != nil {
+		t.Fatal(err)
+	}
+	if actions != 2 || effected != 0 {
+		t.Fatalf("ledger retained %d actions, %d effected; want 2/0", actions, effected)
+	}
+	followRecheck(t, p.fluke, source, "conflict")
+	followHistory(t, p.fluke, source.Actions[0].Event.ID, 1)
+}
+
+// A Matter's locator is unique per Repo, not per Matter — the (matter,
+// locator) index cannot see across Matters, so the source may legally carry
+// two same-slug Matters. The bounded import still refuses the second as an
+// occupied repo address and keeps the whole group non-integrated.
+func TestSharedStorePortableMatterLocatorScope(t *testing.T) {
+	p := newLabPair(t)
+	var m1, m2 string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		m1, m2 = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: m1, Payload: store.NodeBirth{Title: "One", Locator: "dup", SortKey: 0}},
+			{Type: store.TypeMatterCreated, Subject: m2, Payload: store.NodeBirth{Title: "Two", Locator: "dup", SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatalf("same-slug Matters merged or partially applied: %+v", d)
+	}
+	for _, id := range []string{m1, m2} {
+		if _, err := p.fluke.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back matter %s still projected", id)
+		}
+	}
+}
+
+// Births live only in the bounded slice: the unscoped lab import keeps the
+// historical conflict rather than guessing a target.
+func TestSharedStorePortableBirthRequiresBoundTarget(t *testing.T) {
+	p := newLabPair(t)
+	var mid, sid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid, sid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Scoped", Locator: "scoped", SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImport(t, p.fluke, source, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatal("unbound import applied bounded births", d)
+	}
+}

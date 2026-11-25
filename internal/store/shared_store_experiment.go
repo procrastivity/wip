@@ -289,7 +289,8 @@ func (s *Store) ExperimentImport(ctx context.Context, source ExperimentSource) (
 }
 
 // ExperimentImportBound retains foreign Repo identity and projects only into an
-// explicitly chosen native Repo. It also enables the bounded Matter/Brief slice.
+// explicitly chosen native Repo. It also enables the bounded portable slice:
+// node births, planned starts and the inline create-once Brief.
 func (s *Store) ExperimentImportBound(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
 	if _, err := s.Repo(ctx, repo); err != nil {
 		return ExperimentDecision{}, err
@@ -481,26 +482,37 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 		return ExperimentDecision{}, err
 	}
 	effects := make([]string, len(source.Actions))
-	needed := make([]bool, len(source.Actions))
 	subjects := map[string]bool{}
 	for _, a := range source.Actions {
 		subjects[a.Event.Subject] = true
 	}
-	// Classify the complete group before appending any business effect.
+	// One pass over the group: member i is classified against candidate state —
+	// committed rows plus the folded effects of members 0..i-1 — then its effect
+	// is appended and its ledger row written before member i+1 is read, so a
+	// same-group baseline or parent resolves through the same experiment_actions
+	// JOIN prior groups use. The savepoint keeps the unit atomic: the first
+	// non-integrated member rolls every effect and ledger write back, and the
+	// ledger is rewritten exactly as two-phase classification left it — every
+	// action retained, none with an effect.
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT experiment_candidate`); err != nil {
+		return ExperimentDecision{}, err
+	}
+	var local []Event
 	for i, a := range source.Actions {
+		baseline, eventID := a.Baseline, a.Event.ID
 		if target != "" {
 			a.Event.Repo = target
-			if a.Baseline != "" {
-				a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
-				if err != nil {
-					return ExperimentDecision{}, err
-				}
+		}
+		if a.Baseline != "" {
+			a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
+			if err != nil {
+				return ExperimentDecision{}, err
 			}
 		}
 		var disposition, reason, effect string
 		var need bool
-		if target != "" && (a.Event.Type == TypeMatterCreated || a.Event.Type == TypeContentCreated) {
-			disposition, reason, effect, need, err = experimentClassifyUseful(ctx, v, a)
+		if target != "" && experimentPortableMember(a.Event.Type) {
+			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a)
 		} else {
 			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target)
 		}
@@ -509,13 +521,17 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 		}
 		if disposition != "integrated" {
 			result.Disposition, result.Reason = disposition, reason
+			if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT experiment_candidate`); err != nil {
+				return ExperimentDecision{}, err
+			}
+			for _, member := range source.Actions {
+				if err := experimentRecordAction(ctx, tx, group, scope, member.Event.ID, member.Baseline, "", previous == nil); err != nil {
+					return ExperimentDecision{}, err
+				}
+			}
 			break
 		}
-		effects[i], needed[i] = effect, need
-	}
-	var local []Event
-	for i, a := range source.Actions {
-		if result.Disposition == "integrated" && needed[i] {
+		if need {
 			repo := a.Event.Repo
 			if target != "" {
 				repo = target
@@ -539,20 +555,15 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			}
 			local = append(local, ev)
 			effects[i] = ev.ID
-		}
-		effect := ""
-		if result.Disposition == "integrated" {
-			effect = effects[i]
-		}
-		if previous == nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, experimentKey(scope, a.Event.ID), group, nullable(effect), a.Baseline); err != nil {
-				return ExperimentDecision{}, err
-			}
 		} else {
-			if _, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), experimentKey(scope, a.Event.ID), a.Event.ID, group); err != nil {
-				return ExperimentDecision{}, err
-			}
+			effects[i] = effect
 		}
+		if err := experimentRecordAction(ctx, tx, group, scope, eventID, baseline, effects[i], previous == nil); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT experiment_candidate`); err != nil {
+		return ExperimentDecision{}, err
 	}
 	if result.Disposition == "integrated" {
 		result.Effects = effects
@@ -589,6 +600,21 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 		return ExperimentDecision{}, err
 	}
 	return result, nil
+}
+
+// experimentRecordAction writes one member's ledger row inside the group's
+// single pass: first evaluation inserts, recheck updates the retained effect in
+// place. The baseline column always keeps the untouched source-space value,
+// never the locally mapped one, so later exports and rechecks read the same
+// immutable correspondence.
+func experimentRecordAction(ctx context.Context, tx *sql.Tx, group, scope, eventID, baseline, effect string, insert bool) error {
+	key := experimentKey(scope, eventID)
+	if insert {
+		_, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, key, group, nullable(effect), baseline)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), key, eventID, group)
+	return err
 }
 
 func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string) (string, string, string, bool, error) {

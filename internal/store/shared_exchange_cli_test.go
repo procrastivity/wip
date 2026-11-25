@@ -1471,18 +1471,14 @@ func TestSharedStoreExchangeProjectScope(t *testing.T) {
 	if err != nil || !status.Paired || !status.Active {
 		t.Fatal("pairing failed", status, err)
 	}
-	// Every command group predates the recorded boundary, yet the two supported
-	// originals are outgoing while births stay inspectable local states.
-	if !reflect.DeepEqual(status.PendingUpload, []string{matterGroup, startGroup}) {
+	// Every command group predates the recorded boundary, yet the supported
+	// originals — the three births and the start cascade — are outgoing.
+	if !reflect.DeepEqual(status.PendingUpload, []string{matterGroup, stageGroup, stepGroup, startGroup}) {
 		t.Fatal("age excluded supported originals", status.PendingUpload)
 	}
-	for _, group := range []string{stageGroup, stepGroup} {
-		found := false
-		for _, unsupported := range status.Unsupported {
-			found = found || unsupported == group
-		}
-		if !found {
-			t.Fatal("unsupported birth escaped local inventory", group, status.Unsupported)
+	for _, group := range status.Unsupported {
+		if group == stageGroup || group == stepGroup {
+			t.Fatal("portable birth stayed local inventory", group, status.Unsupported)
 		}
 	}
 	db, err := sql.Open("sqlite", "file:"+p.db+"?mode=ro")
@@ -1498,15 +1494,13 @@ func TestSharedStoreExchangeProjectScope(t *testing.T) {
 		t.Fatal("boundary count is not plain inventory", status.EarlierGroups, total)
 	}
 	wantDependency := startGroup + ": depends on subject evidence " + stageCreated + " in group " + stageGroup + " (not portable)"
-	foundDependency := false
 	for _, dependency := range status.Dependencies {
 		if strings.Contains(dependency, "(not adopted)") {
 			t.Fatal("stale pre-boundary claim", dependency)
 		}
-		foundDependency = foundDependency || dependency == wantDependency
-	}
-	if !foundDependency {
-		t.Fatal("unsupported prior group not reported", status.Dependencies, wantDependency)
+		if dependency == wantDependency {
+			t.Fatal("portable prior group still reported as a blocker", dependency)
+		}
 	}
 	if err := s.UnpairExchange(labCtx, p.repo); err != nil {
 		t.Fatal(err)

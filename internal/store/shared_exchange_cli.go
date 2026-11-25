@@ -241,7 +241,7 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 					supported = false
 				}
 				switch ev.Type {
-				case TypeMatterCreated, TypeMatterStarted, TypeStageStarted, TypeStepStarted:
+				case TypeMatterCreated, TypeMatterStarted, TypeStageCreated, TypeStageStarted, TypeStepCreated, TypeStepStarted:
 				case TypeContentCreated:
 					var p ContentWritten
 					if json.Unmarshal(ev.Payload, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" {
