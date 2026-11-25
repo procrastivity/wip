@@ -771,8 +771,15 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	// The step amendment family mutates an already-paired object like the
 	// lifecycle matrix does, so it shares this bound-and-unbound path; only
 	// step.inserted joins the birth classifier, bound-only like *.created.
+	// The backlog outcome family is Repo-durable paired state in the same
+	// position — entered births the entry row, the three exits mutate it — so
+	// it classifies here on both paths too.
 	if e.Type == TypeStepReordered || e.Type == TypeStepReplaced || e.Type == TypeStepRemoved {
 		return experimentClassifyAmendment(ctx, v, a)
+	}
+	if e.Type == TypeBacklogEntered || e.Type == TypeBacklogPlanned ||
+		e.Type == TypeBacklogDeclined || e.Type == TypeBacklogDelegated {
+		return experimentClassifyBacklog(ctx, v, a)
 	}
 	spec, admitted := experimentLifecycleEdges[e.Type]
 	if !admitted {

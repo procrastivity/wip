@@ -66,14 +66,14 @@ var experimentLifecycleEdges = map[string]experimentLifecycleEdge{
 // ExchangeStatus eligibility and portable derivatives: the event must be a
 // repo-scoped original of an admitted family — the node births including the
 // positioned step.inserted, the step amendment family, the inline
-// create-once Brief and the lifecycle matrix above, exactly what
-// experimentClassifyPortable and experimentClassify can project on a bound
-// target. The predicate is per event, not per subject: reordered names the
-// parent, replaced the old step and removed the step, and each classifier
-// resolves its own subject shape. Batch/execution-scoped events carry no
-// Repo, generated integration effects are never originals, and every
-// unadmitted family stays local. The whitelist lives only here and in the
-// import classifiers, never in a second list that could drift.
+// create-once Brief, the lifecycle matrix above and the backlog outcome
+// family, exactly what experimentClassifyPortable and experimentClassify can
+// project on a bound target. The predicate is per event, not per subject:
+// reordered names the parent, replaced the old step and removed the step,
+// and each classifier resolves its own subject shape. Batch/execution-scoped
+// events carry no Repo, generated integration effects are never originals,
+// and every unadmitted family stays local. The whitelist lives only here and
+// in the import classifiers, never in a second list that could drift.
 func experimentExchangePortable(ev Event, repo string) bool {
 	if ev.Repo != repo || ev.Actor == integrationEffectActor {
 		return false
@@ -83,7 +83,8 @@ func experimentExchangePortable(ev Event, repo string) bool {
 	}
 	switch ev.Type {
 	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted,
-		TypeStepReordered, TypeStepReplaced, TypeStepRemoved:
+		TypeStepReordered, TypeStepReplaced, TypeStepRemoved,
+		TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated:
 		return true
 	case TypeContentCreated:
 		var p ContentWritten
@@ -497,6 +498,203 @@ func experimentClassifyAmendment(ctx context.Context, v View, a ExperimentAction
 			if rows != 0 {
 				return refuse("replacement address already occupied; identities not merged")
 			}
+		}
+	}
+	return "integrated", "", "", true, nil
+}
+
+// experimentClassifyBacklog admits the backlog outcome family —
+// backlog.entered plus the three terminal exits planned, declined and
+// delegated — the intake facts writesurface's backlog verbs emit. Entries are
+// Repo-durable paired objects like nodes, so the family classifies on both the
+// bound and the unbound path: the subject is the entry's own identity and
+// every fold precondition is pre-validated here because a fold failure would
+// roll the whole unit back and wedge the inbox. Delegated is admitted but
+// inert: the fold already records the fact without queueing an outbox row for
+// integration effects (delegateBacklogEntry's integrationEffectActor guard),
+// so the source's outbox identity is kept as audit evidence and never becomes
+// delivery authority here. All four states are terminal exits from entered:
+// an equal-payload tail of the same type is the echo, and any other observed
+// successor conflicts rather than reordering facts.
+func experimentClassifyBacklog(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+
+	// Decode and shape-check first: a malformed outcome is retained evidence
+	// whatever the local state happens to be. The fold's own decodeStrict on
+	// delegated sets the bar; the other folds decode leniently, but admission
+	// stays strict — extra fields are not something the verbs emit.
+	var (
+		entered   BacklogEntered
+		planned   BacklogPlanned
+		declined  BacklogDeclined
+		delegated BacklogDelegated
+		same      func(Event) bool
+	)
+	switch e.Type {
+	case TypeBacklogEntered:
+		if decodeStrict(e, &entered) != nil ||
+			(entered.Provenance != ProvenanceIntake && entered.Provenance != ProvenanceFound && entered.Provenance != ProvenanceDeferred) ||
+			entered.Title == "" || (entered.OriginNode != "" && !IsIdentityShaped(entered.OriginNode)) {
+			return refuse("invalid backlog entry")
+		}
+	case TypeBacklogPlanned:
+		if decodeStrict(e, &planned) != nil || !IsIdentityShaped(planned.Matter) {
+			return refuse("invalid backlog plan")
+		}
+		same = func(prior Event) bool {
+			var q BacklogPlanned
+			return decode(prior, &q) == nil && q.Matter == planned.Matter
+		}
+	case TypeBacklogDeclined:
+		// The fold refuses an empty reason — declined must be distinguishable
+		// from not-yet-acted-upon — so admission refuses it first.
+		if decodeStrict(e, &declined) != nil || declined.Reason == "" {
+			return refuse("invalid backlog decline")
+		}
+		same = func(prior Event) bool {
+			var q BacklogDeclined
+			return decode(prior, &q) == nil && q.Reason == declined.Reason
+		}
+	case TypeBacklogDelegated:
+		// Same bar the fold enforces: an outbox identity plus the key that
+		// keeps a retry from minting a second external item.
+		if decodeStrict(e, &delegated) != nil || !IsIdentityShaped(delegated.Outbox) || delegated.IdempotencyKey == "" {
+			return refuse("invalid backlog delegation")
+		}
+		same = func(prior Event) bool {
+			var q BacklogDelegated
+			return decode(prior, &q) == nil && q.Outbox == delegated.Outbox &&
+				q.IdempotencyKey == delegated.IdempotencyKey
+		}
+	default:
+		return refuse("unsupported family; original payload retained, no content overwritten")
+	}
+	// The subject is the entry's own ULID everywhere in the family.
+	if !IsIdentityShaped(e.Subject) {
+		return refuse("invalid backlog subject")
+	}
+
+	// One backlog_entries read serves both branches: entered needs the row's
+	// absence (a plain PK insert) or its birth event (the echo test); the
+	// exits need repo, state and the entered precondition the fold's guarded
+	// UPDATE enforces with exactlyRows.
+	var entryRepo, entryState, entryBirth string
+	entryErr := v.q.QueryRowContext(ctx,
+		`SELECT repo,state,birth_event FROM backlog_entries WHERE id=?`, e.Subject).
+		Scan(&entryRepo, &entryState, &entryBirth)
+
+	if e.Type == TypeBacklogEntered {
+		// entered is the subject's first and only birth: a claimed baseline
+		// names evidence that can never exist for a fresh entry identity.
+		if a.Baseline != "" {
+			return refuse("invalid backlog entry")
+		}
+		// The fold's INSERT carries repo as a foreign key; a Repo not yet
+		// represented locally waits rather than wedging on the constraint.
+		var repos int
+		if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repos WHERE id=?`, e.Repo).Scan(&repos); err != nil {
+			return "", "", "", false, err
+		}
+		if repos == 0 {
+			return wait("missing paired repo")
+		}
+		// origin_node's fold check is existence-only; admission wants the live
+		// node the verb resolved, in this Repo — a tombstone or a foreign node
+		// is a permanent incompatibility, a missing one may still arrive.
+		if entered.OriginNode != "" {
+			n, err := v.Node(ctx, entered.OriginNode)
+			if err != nil {
+				var rows int
+				if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, entered.OriginNode).Scan(&rows); qerr != nil {
+					return "", "", "", false, qerr
+				}
+				if rows != 0 {
+					return refuse("backlog origin node was removed; a tombstoned node is not a discovery origin")
+				}
+				return wait("backlog origin awaiting node")
+			}
+			if n.Repo != e.Repo {
+				return refuse("backlog origin belongs to another Repo")
+			}
+		}
+		if entryErr == nil {
+			// The only legitimate existing row is this event's own earlier
+			// fold — the verified self-echo, whose local identity IS the
+			// source identity. Any other birth is a divergent claim on a
+			// spent entry identity, never a merge.
+			if entryBirth == e.ID {
+				return "integrated", "", e.ID, false, nil
+			}
+			return refuse("backlog entry identity already exists")
+		}
+		if !errors.Is(entryErr, sql.ErrNoRows) {
+			return "", "", "", false, entryErr
+		}
+		return "integrated", "", "", true, nil
+	}
+
+	// The three exits share entered -> terminal: the mapped baseline must be
+	// the subject-history tail the source observed, an equal-payload tail of
+	// this same type is the echo, and anything else is divergence the fold's
+	// state='entered' guard could never absorb.
+	if a.Baseline == "" {
+		return wait("missing baseline evidence")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	baseline, _, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if baseline < 0 {
+		return wait("unknown baseline dependency")
+	}
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		before := ""
+		if len(history) >= 2 {
+			before = history[len(history)-2].ID
+		}
+		if before == a.Baseline && last.Type == e.Type && same(last) {
+			return "integrated", "", last.ID, false, nil
+		}
+		if last.ID != a.Baseline {
+			return refuse("backlog subject history diverged; outcomes never reorder observed facts")
+		}
+	}
+	if errors.Is(entryErr, sql.ErrNoRows) {
+		return wait("missing backlog entry")
+	}
+	if entryErr != nil {
+		return "", "", "", false, entryErr
+	}
+	if entryRepo != e.Repo {
+		return refuse("backlog entry belongs to another Repo")
+	}
+	if entryState != "entered" {
+		return refuse("backlog entry already exited; planned, declined and delegated are terminal")
+	}
+	if e.Type == TypeBacklogPlanned {
+		// matter's fold check is existence-only; admission wants the live
+		// Matter the verb resolved, in this Repo — the fold cannot tell a
+		// Stage or a tombstone from the Matter the entry became.
+		n, err := v.Node(ctx, planned.Matter)
+		if err != nil {
+			var rows int
+			if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, planned.Matter).Scan(&rows); qerr != nil {
+				return "", "", "", false, qerr
+			}
+			if rows != 0 {
+				return refuse("planned matter was removed; a tombstoned node is not a plan target")
+			}
+			return wait("backlog plan awaiting matter")
+		}
+		if n.Kind != ScaleMatter || n.Repo != e.Repo {
+			return refuse("backlog plan target is not a live matter of this Repo")
 		}
 	}
 	return "integrated", "", "", true, nil

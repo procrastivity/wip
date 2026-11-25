@@ -816,9 +816,9 @@ func TestSharedStoreEffectDelegationRecordsFactWithoutOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// backlog.* is outside the import classifier's admitted families, so the
-	// guard is exercised directly: the same actor stamp ExperimentImport
-	// writes, on the one write path every event takes.
+	// The family is admitted now, but the guard is still exercised directly:
+	// the same actor stamp ExperimentImport writes, on the one write path
+	// every event takes.
 	sourceOutbox := p.fluke.NewID()
 	if _, err := p.fluke.Commit(labCtx, store.Request{
 		Actor: store.SystemActor("shared-store-experiment"),
