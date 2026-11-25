@@ -6,9 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
 	"github.com/procrastivity/wip/internal/writesurface"
@@ -825,4 +828,754 @@ func TestSharedStoreRelationsPendingAndConflicts(t *testing.T) {
 	if !strings.Contains(d.Reason, "occupied") {
 		t.Fatalf("occupied-reference reason = %q", d.Reason)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3 proofs: the composed relations family, its field-level comparison,
+// and the three remaining scenarios — real-Laravel transport, a
+// tracker-configured receiver, and missing targets with unrelated work
+// proceeding.
+// ---------------------------------------------------------------------------
+
+// labRelationsWork is the composed relations family the Stage-3 proofs
+// share, built only from writesurface verbs and the store's own gate
+// repair: a Matter with a Stage and three Steps carrying live edges in both
+// hierarchy directions, one added-then-removed edge, the full gate arc
+// (declare, close, exemption repair, dismiss on a Done node) and the
+// reference add/rebind/unbind/re-add arc, plus a delegated backlog entry
+// whose deferred provenance originates at the Stage — the linked backlog
+// outcome riding the same family as the reference work.
+type labRelationsWork struct {
+	matter, stage, step1, step2, step3 store.Node
+	entry                              store.BacklogEntry
+	sibling, descendant, ancestor      store.Edge
+	removed                            store.Edge
+}
+
+// labComposeRelations drives every portable relation family on s in an
+// order that never closes a loop: the sibling edge, the descendant-waits
+// edge, the add/remove pair, then the ancestor-waits edge — kept live, the
+// removed edge would have made step3 -> step1 -> step2 -> matter -> step3.
+func labComposeRelations(t *testing.T, s *store.Store, repo, title, locator string) labRelationsWork {
+	t.Helper()
+	var w labRelationsWork
+	var err error
+	if w.matter, err = writesurface.CreateMatter(labCtx, s, store.ActorHuman, repo, title, locator); err != nil {
+		t.Fatal(err)
+	}
+	if w.stage, err = writesurface.CreateStage(labCtx, s, store.ActorHuman, repo, locator, "Phase"); err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range []string{"One", "Two", "Three"} {
+		n, err := writesurface.CreateStep(labCtx, s, store.ActorHuman, repo,
+			locator+"/"+w.stage.Locator, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch i {
+		case 0:
+			w.step1 = n
+		case 1:
+			w.step2 = n
+		case 2:
+			w.step3 = n
+		}
+	}
+	// Live edges: a sibling wait, a descendant waiting on its Matter, and —
+	// added last — the Matter waiting on its own Step: the reverse of the
+	// containment direction, legal because any node may block any node.
+	if w.sibling, err = writesurface.DependAdd(labCtx, s, store.ActorHuman, repo, w.step1.ID, w.step2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w.descendant, err = writesurface.DependAdd(labCtx, s, store.ActorHuman, repo, w.step2.ID, w.matter.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w.removed, err = writesurface.DependAdd(labCtx, s, store.ActorHuman, repo, w.step3.ID, w.step1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = writesurface.DependRemove(labCtx, s, store.ActorHuman, repo, w.step3.ID, w.step1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w.ancestor, err = writesurface.DependAdd(labCtx, s, store.ActorHuman, repo, w.matter.ID, w.step3.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The gate arc. step2 runs to Done so the writesurface exemption repair
+	// — which requires a Done node at the bound scale — has a real subject;
+	// step3 runs to Done so the dismissal has one.
+	if err = writesurface.DeclareGate(labCtx, s, repo, "wire-gate", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.CloseGate(labCtx, s, store.ActorHuman, repo, "wire-gate", w.step1.ID); err != nil {
+		t.Fatal(err)
+	}
+	step2Path := locator + "/" + w.stage.Locator + "/" + w.step2.Locator
+	if _, err = writesurface.Start(labCtx, s, store.ActorHuman, repo, step2Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Finish(labCtx, s, store.ActorHuman, repo, step2Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.RepairGateExemption(labCtx, s, repo, "wire-gate", step2Path); err != nil {
+		t.Fatal(err)
+	}
+	step3Path := locator + "/" + w.stage.Locator + "/" + w.step3.Locator
+	if _, err = writesurface.Start(labCtx, s, store.ActorHuman, repo, step3Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Finish(labCtx, s, store.ActorHuman, repo, step3Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.DismissGate(labCtx, s, store.ActorHuman, repo, "wire-gate", step3Path, "superseded by review"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reference arc ends where the delegated backlog entry's detail
+	// points: the rebind moved the tracker item, and the deferred entry —
+	// originated at the Stage — records the follow-up as delegated evidence.
+	if _, err = writesurface.Bind(labCtx, s, store.ActorHuman, repo, locator, "fixture:GH-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Rebind(labCtx, s, store.ActorHuman, repo, locator, "fixture:GH-1", "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Unbind(labCtx, s, store.ActorHuman, repo, locator, "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Bind(labCtx, s, store.ActorHuman, repo, locator, "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	var entry store.BacklogEntry
+	if entry, err = writesurface.BacklogAdd(labCtx, s, store.ActorHuman, repo,
+		store.ProvenanceDeferred, "Rebind follow-up", "tracker item moved with the rebind",
+		locator+"/"+w.stage.Locator); err != nil {
+		t.Fatal(err)
+	}
+	if w.entry, err = writesurface.BacklogDelegate(labCtx, s, store.ActorHuman, repo, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// labAssertRelations compares got's observable relation state against the
+// composed family field for field: live edges by source identity (plus
+// exactly the named receiver-local extras), the removed edge's absence, the
+// gate arc's declaration/satisfaction/exemption/dismissal, the reference
+// membership and the delegated backlog row — and then the per-subject event
+// trails, proving the receiver's retained effects mirror the source's
+// portable history event for event. wantRepo is masked exactly as
+// labAssertFamily masks Repo: each store keeps its own native identity.
+func labAssertRelations(t *testing.T, want, got *store.Store, gotRepo string, w labRelationsWork, local ...store.Edge) {
+	t.Helper()
+
+	// Edges: the three live synced edges verbatim plus exactly the named
+	// local extras; the removed pair is out of force on both stores.
+	type edgeKey struct{ blocked, blocker string }
+	wantEdges := map[edgeKey]string{}
+	for _, e := range []store.Edge{w.sibling, w.descendant, w.ancestor} {
+		wantEdges[edgeKey{e.Blocked, e.Blocker}] = e.ID
+	}
+	for _, e := range local {
+		wantEdges[edgeKey{e.Blocked, e.Blocker}] = e.ID
+	}
+	gotEdges, err := got.LiveEdges(labCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotEdges) != len(wantEdges) {
+		t.Fatalf("receiver live edges = %+v, want %d", gotEdges, len(wantEdges))
+	}
+	for _, e := range gotEdges {
+		id, ok := wantEdges[edgeKey{e.Blocked, e.Blocker}]
+		if !ok || id != e.ID {
+			t.Fatalf("receiver live edge %+v is not a synced or named-local edge", e)
+		}
+	}
+	sourceEdges, err := want.LiveEdges(labCtx)
+	if err != nil || len(sourceEdges) != 3 {
+		t.Fatalf("source live edges = %+v %v, want the three composed edges", sourceEdges, err)
+	}
+	for _, s := range []*store.Store{want, got} {
+		if _, found := relationEdge(t, s, w.step3.ID, w.step1.ID); found {
+			t.Fatalf("removed edge still in force on %s", s.Path())
+		}
+	}
+
+	// Gate arc: the declaration landed at the paired Repo's scale, the
+	// close and the dismissal satisfy gate_state with their own evidence,
+	// and the repair landed exempt.
+	decls, err := got.GateDeclarations(labCtx, gotRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var declared bool
+	for _, d := range decls {
+		if d.Repo == gotRepo && d.Gate == "wire-gate" && d.Scale == store.ScaleStep {
+			declared = true
+		}
+	}
+	if !declared {
+		t.Fatalf("receiver declarations = %+v, want wire-gate@step in %s", decls, gotRepo)
+	}
+	for _, check := range []struct {
+		node   string
+		state  store.GateRequirementState
+		reason string
+	}{
+		{w.step1.ID, store.GateRequirementClosed, ""},
+		{w.step3.ID, store.GateRequirementDismissed, "superseded by review"},
+	} {
+		closed, err := got.ClosedGates(labCtx, check.node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, g := range closed {
+			if g.Gate != "wire-gate" {
+				continue
+			}
+			found = true
+			if g.State != check.state || g.Scale != store.ScaleStep || g.DismissalReason != check.reason {
+				t.Fatalf("gate state on %s = %+v, want %s", check.node, g, check.state)
+			}
+		}
+		if !found {
+			t.Fatalf("no wire-gate state on %s: %+v", check.node, closed)
+		}
+		satisfied, err := got.GateSatisfied(labCtx, gotRepo, check.node, "wire-gate")
+		if err != nil || !satisfied {
+			t.Fatalf("GateSatisfied(%s, wire-gate) = %v %v", check.node, satisfied, err)
+		}
+	}
+	exempt, err := got.GateExempt(labCtx, gotRepo, w.step2.ID, "wire-gate")
+	if err != nil || !exempt {
+		t.Fatalf("GateExempt(step2, wire-gate) = %v %v", exempt, err)
+	}
+
+	// References: the add/rebind/unbind/re-add arc lands as the final
+	// membership, and the delegated backlog entry keeps the source's outbox
+	// identity as audit evidence with Repo masked.
+	if refs := matterRefs(t, got, w.matter.ID); !slices.Equal(refs, []string{"fixture:BB-7"}) {
+		t.Fatalf("receiver refs = %v", refs)
+	}
+	gotEntry := labBacklog(t, got, gotRepo, w.entry.ID)
+	wantEntry := w.entry
+	wantEntry.Repo, gotEntry.Repo = "", ""
+	if !reflect.DeepEqual(wantEntry, gotEntry) {
+		t.Fatalf("receiver backlog entry = %+v, want %+v", gotEntry, wantEntry)
+	}
+
+	// Source history: each synced subject's ordered portable event types on
+	// the sender must equal the receiver's retained integration effects —
+	// the repo-keyed gate.declared is the one subject remap and is asserted
+	// through GateDeclarations instead.
+	subjects := []string{w.matter.ID, w.stage.ID, w.step1.ID, w.step2.ID, w.step3.ID, w.entry.ID}
+	source := labPortableTrail(t, want, store.ActorHuman, subjects...)
+	effects := labPortableTrail(t, got, store.SystemActor("shared-store-experiment"), subjects...)
+	for _, id := range subjects {
+		if !reflect.DeepEqual(source[id], effects[id]) {
+			t.Fatalf("trail on %s: source %v, receiver effects %v", id, source[id], effects[id])
+		}
+	}
+}
+
+// labPortableTrail returns each named subject's ordered event types recorded
+// by one actor — the source's originals or the receiver's retained
+// integration effects — so a test can prove effect history mirrors source
+// history event for event.
+func labPortableTrail(t *testing.T, s *store.Store, actor store.Actor, subjects ...string) map[string][]string {
+	t.Helper()
+	want := make(map[string]bool, len(subjects))
+	for _, id := range subjects {
+		want[id] = true
+	}
+	out := map[string][]string{}
+	for _, ev := range labEvents(t, s) {
+		if ev.Actor != actor || !want[ev.Subject] {
+			continue
+		}
+		out[ev.Subject] = append(out[ev.Subject], ev.Type)
+	}
+	return out
+}
+
+// Step-3 flagship over real Laravel/PostgreSQL transport: the whole
+// relations family — dependencies and their removal, the gate
+// declaration/exemption/close/dismiss arc, reference rebinds and a linked
+// delegated backlog outcome — crosses into a receiver that already holds
+// unrelated local work, and the receiver's relationship, gate, reference,
+// backlog and event-trail state matches the source after retry, reopen and
+// rebuild.
+func TestLaravelExchangeRelationsWire(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+
+	// The receiver's own pre-existing work: a Matter with its own edge, its
+	// own declared-and-closed gate and its own tracker reference — local
+	// facts that must stay untouched and distinguishable from synced ones.
+	local, err := writesurface.CreateMatter(labCtx, sb, store.ActorHuman, b.repo, "Local", "local-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localStage, err := writesurface.CreateStage(labCtx, sb, store.ActorHuman, b.repo, "local-rel", "Phase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localStep, err := writesurface.CreateStep(labCtx, sb, store.ActorHuman, b.repo,
+		"local-rel/"+localStage.Locator, "Solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localEdge, err := writesurface.DependAdd(labCtx, sb, store.ActorHuman, b.repo, localStep.ID, localStage.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writesurface.DeclareGate(labCtx, sb, b.repo, "local-gate", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.CloseGate(labCtx, sb, store.ActorHuman, b.repo, "local-gate", localStep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Bind(labCtx, sb, store.ActorHuman, b.repo, "local-rel", "fixture:LOCAL-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sender's full relations family, then real pairing and transport.
+	work := labComposeRelations(t, sa, a.repo, "Relwire", "relwire")
+	statusA, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Member}
+	done, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done.PendingUpload) != 0 {
+		t.Fatalf("sender left %d groups un-uploaded: %v", len(done.PendingUpload), done.PendingUpload)
+	}
+	beforeSync := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, statusB.Binding)
+
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Waiting != 0 || st.Conflicts != 0 {
+		t.Fatalf("receiver status = %+v", st)
+	}
+	if st.Evaluated != st.Downloaded || int64(st.Integrated+st.Conflicts) != st.Evaluated {
+		t.Fatalf("receiver did not evaluate every download exactly once: %+v", st)
+	}
+	// Every appended event is an accounted integration effect.
+	decisions, err := sb.ExperimentActivities(labCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) == 0 {
+		t.Fatal("receiver recorded no decisions")
+	}
+	effects := 0
+	for _, d := range decisions {
+		if d.Disposition != "integrated" {
+			t.Fatalf("decision = %s (%s), want integrated", d.Disposition, d.Reason)
+		}
+		effects += len(d.Effects)
+	}
+	if appended := len(labEvents(t, sb)) - beforeSync; appended != effects {
+		t.Fatalf("receiver appended %d events for %d integrated effects", appended, effects)
+	}
+	labAssertRelations(t, sa, sb, b.repo, work, localEdge)
+
+	// The receiver's own work is untouched: same lifecycle, same gate
+	// satisfaction, same reference, same local edge.
+	if ln := mustNode(t, sb, localStep.ID); ln.Lifecycle != store.Planned {
+		t.Fatalf("local step lifecycle = %s", ln.Lifecycle)
+	}
+	if satisfied, err := sb.GateSatisfied(labCtx, b.repo, localStep.ID, "local-gate"); err != nil || !satisfied {
+		t.Fatalf("local gate satisfaction = %v %v", satisfied, err)
+	}
+	if refs := matterRefs(t, sb, local.ID); !slices.Equal(refs, []string{"fixture:LOCAL-1"}) {
+		t.Fatalf("local refs = %v", refs)
+	}
+	if value, found, err := sb.Config(labCtx, b.repo, "tracker.backend"); err != nil || found || value != "" {
+		t.Fatalf("sender-less receiver gained tracker config: %q %v %v", value, found, err)
+	}
+
+	// Retry and reopen stay inert; the sender's echo and an explicit
+	// re-upload of the declaration group append nothing; rebuild preserves
+	// every relationship and the whole effect trail.
+	declaredGroup := sourceGroup(t, sa, a.repo, store.TypeGateDeclared)
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, statusB.Binding)
+	exchangePass(t, sa, ca, statusA.Binding, declaredGroup)
+	exchangePass(t, sb, cb, statusB.Binding)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("retry, echo or redelivery appended effects")
+	}
+	if err := sb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sb = labOpen(t, b.db)
+	if err := sb.ApplyExchangeInbox(labCtx, statusB.Binding); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("offline inbox apply duplicated effects")
+	}
+	labRebuild(t, sb)
+	labAssertRelations(t, sa, sb, b.repo, work, localEdge)
+	if satisfied, err := sb.GateSatisfied(labCtx, b.repo, localStep.ID, "local-gate"); err != nil || !satisfied {
+		t.Fatalf("post-rebuild local gate satisfaction = %v %v", satisfied, err)
+	}
+	t.Logf("relations wire over Laravel: %d downloads, %d integrated effects, rebuild-clean",
+		st.Downloaded, effects)
+}
+
+// With full tracker configuration on the receiver — backend, target,
+// project and narrated push, all Repo-tier config.set that never crosses —
+// the received relation/gate/reference facts mint no outbox rows, no open
+// execution projections and no provider HTTP, before and after rebuild,
+// while the receiver's own native gate and reference operations keep
+// queueing exactly what local policy dictates.
+func TestSharedStoreRelationsSyncMintsNoDelivery(t *testing.T) {
+	_, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	feedURL, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both stores are delivery-bearing before any relation work: the
+	// sender's payloads carry the narrated push level, so the only thing
+	// keeping the receiver clean is the integration-effect boundary itself.
+	for repo, s := range map[string]*store.Store{a.repo: sa, b.repo: sb} {
+		if err := s.SetConfig(labCtx, repo, store.TrackerBackendKey, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetConfig(labCtx, repo, store.TrackerTargetKey, "fixture-target"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetConfig(labCtx, repo, store.TrackerProjectKey, "fixture-project"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetTrackerPushLevel(labCtx, repo, string(store.TrackerPushNarrated)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sb.SetTrackerBacklogPush(labCtx, b.repo, string(store.TrackerBacklogPushAuto)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The receiver's own pre-existing work, authored under the live
+	// configuration: a local edge, a declared-and-closed gate, a bound
+	// reference, a started Matter and an auto-delegated backlog entry — the
+	// native baseline every later count is measured against.
+	local, err := writesurface.CreateMatter(labCtx, sb, store.ActorHuman, b.repo, "Local", "local-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localStage, err := writesurface.CreateStage(labCtx, sb, store.ActorHuman, b.repo, "local-rel", "Phase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localStep, err := writesurface.CreateStep(labCtx, sb, store.ActorHuman, b.repo,
+		"local-rel/"+localStage.Locator, "Solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localEdge, err := writesurface.DependAdd(labCtx, sb, store.ActorHuman, b.repo, localStep.ID, localStage.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writesurface.DeclareGate(labCtx, sb, b.repo, "local-gate", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.CloseGate(labCtx, sb, store.ActorHuman, b.repo, "local-gate", localStep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Bind(labCtx, sb, store.ActorHuman, b.repo, "local-rel", "fixture:LOCAL-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Start(labCtx, sb, store.ActorHuman, b.repo, "local-rel/"+localStep.Locator); err != nil {
+		t.Fatal(err)
+	}
+	nativeEntry, err := writesurface.BacklogAdd(labCtx, sb, store.ActorHuman, b.repo,
+		store.ProvenanceIntake, "Native item", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nativeEntry.State != "delegated" {
+		t.Fatalf("auto-push entry = %+v, want delegated", nativeEntry)
+	}
+	outboxBefore := labOutboxRows(t, sb.Path(), b.repo)
+	if outboxBefore == 0 {
+		t.Fatal("native control queued nothing; the configuration was not delivery-bearing")
+	}
+
+	// The sender's relations family rides narrated payloads to the
+	// configured receiver.
+	work := labComposeRelations(t, sa, a.repo, "Relwire", "relwire")
+	if _, err = sa.PairExchange(labCtx, a.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &labRecordTransport{hosts: map[string]int{}}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Transport: rec, Timeout: 10 * time.Second}}
+	done, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done.PendingUpload) != 0 {
+		t.Fatalf("sender left %d groups un-uploaded", len(done.PendingUpload))
+	}
+	exchangePass(t, sb, cb, statusB.Binding)
+
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Waiting != 0 || st.Conflicts != 0 || st.Integrated != int(st.Evaluated) || st.Evaluated != st.Downloaded {
+		t.Fatalf("receiver status = %+v", st)
+	}
+	labAssertRelations(t, sa, sb, b.repo, work, localEdge)
+
+	// Zero delivery minted by the import: the outbox count is exactly the
+	// native baseline, no execution projection opened, and every HTTP
+	// request the receiver made went to the exchange feed — never a
+	// provider.
+	if got := labOutboxRows(t, sb.Path(), b.repo); got != outboxBefore {
+		t.Fatalf("imported relations minted %d outbox rows (baseline %d)", got-outboxBefore, outboxBefore)
+	}
+	for _, entry := range mustOutbox(t, sb, b.repo) {
+		if entry.Subject == work.matter.ID || entry.Subject == work.entry.ID ||
+			entry.Ref == "fixture:GH-1" || entry.Ref == "fixture:BB-7" {
+			t.Fatalf("imported relation queued a delivery candidate: %+v", entry)
+		}
+	}
+	if open := labOpenExecution(t, sb.Path()); open != 0 {
+		t.Fatalf("imported relations opened %d execution rows", open)
+	}
+	if len(rec.hosts) == 0 {
+		t.Fatal("receiver made no exchange requests")
+	}
+	for host, n := range rec.hosts {
+		if host != feedURL.Host {
+			t.Fatalf("receiver called unexpected host %s (%d requests)", host, n)
+		}
+	}
+
+	// Rebuild preserves both halves: the relations landed and the delivery
+	// surface is still exactly the native baseline.
+	labRebuild(t, sb)
+	labAssertRelations(t, sa, sb, b.repo, work, localEdge)
+	if got := labOutboxRows(t, sb.Path(), b.repo); got != outboxBefore {
+		t.Fatalf("rebuild changed outbox rows to %d (baseline %d)", got, outboxBefore)
+	}
+	if open := labOpenExecution(t, sb.Path()); open != 0 {
+		t.Fatalf("rebuild opened %d execution rows", open)
+	}
+
+	// Native control: the same verbs authored locally still behave exactly
+	// as configured — the rebind queues its state candidate for the new
+	// reference only, the gate close records gate_state, and nothing names
+	// an imported subject or reference.
+	if _, err = writesurface.Rebind(labCtx, sb, store.ActorHuman, b.repo, "local-rel", "fixture:LOCAL-1", "fixture:LOCAL-9"); err != nil {
+		t.Fatal(err)
+	}
+	if err = writesurface.DeclareGate(labCtx, sb, b.repo, "local-gate-2", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.CloseGate(labCtx, sb, store.ActorHuman, b.repo, "local-gate-2", localStep.ID); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := sb.Outbox(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outbox) <= outboxBefore {
+		t.Fatalf("native rebind queued nothing: %+v", outbox)
+	}
+	var sawNative bool
+	for _, entry := range outbox {
+		if entry.Subject == work.matter.ID || entry.Subject == work.entry.ID ||
+			entry.Ref == "fixture:GH-1" || entry.Ref == "fixture:BB-7" {
+			t.Fatalf("native op queued a candidate for imported work: %+v", entry)
+		}
+		if entry.Kind == "state" && entry.Ref == "fixture:LOCAL-9" && entry.Subject == local.ID {
+			sawNative = true
+		}
+	}
+	if !sawNative {
+		t.Fatalf("native rebind queued no state candidate for fixture:LOCAL-9: %+v", outbox)
+	}
+	if satisfied, err := sb.GateSatisfied(labCtx, b.repo, localStep.ID, "local-gate-2"); err != nil || !satisfied {
+		t.Fatalf("native gate close = %v %v", satisfied, err)
+	}
+	if refs := matterRefs(t, sb, local.ID); !slices.Equal(refs, []string{"fixture:LOCAL-2", "fixture:LOCAL-9"}) && !slices.Equal(refs, []string{"fixture:LOCAL-9"}) {
+		t.Fatalf("local refs after rebind = %v", refs)
+	}
+}
+
+// mustOutbox reads a Repo's outbox entries, failing the test on error.
+func mustOutbox(t *testing.T, s *store.Store, repo string) []store.OutboxEntry {
+	t.Helper()
+	entries, err := s.Outbox(labCtx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+// A dependency whose blocker lives outside what sync carries — the target
+// exists on the sender but its birth is never uploaded — stays a named
+// pending wait across passes while unrelated valid units, including
+// reverse-direction edges, integrate in the same pass and afterwards
+// without any acknowledgement. Accepted work is retained and the missing
+// target never materializes.
+func TestSharedStoreDependencyMissingTargetProceeds(t *testing.T) {
+	f := newRelationFixture(t)
+
+	// The external target: a real Matter on the sender whose birth group is
+	// deliberately never uploaded, so the dependent edge waits on evidence
+	// that cannot arrive through this exchange. It hangs off the Stage — a
+	// subject with no other synced facts — so nothing else's baseline can
+	// chain onto the wait.
+	late, err := writesurface.CreateMatter(labCtx, f.sa, store.ActorHuman, f.a.repo, "Late Ext", "late-ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.DependAdd(labCtx, f.sa, store.ActorHuman, f.a.repo, f.stage.ID, late.ID); err != nil {
+		t.Fatal(err)
+	}
+	missingGroup := sourceGroup(t, f.sa, f.stage.ID, store.TypeDependencyAdded)
+
+	// Reverse-direction edges plus a sibling wait and a valid reference —
+	// every one legal where written, each on its own subject so no baseline
+	// chains onto the pending wait, forming the chain
+	// step1 -> step2 -> matter -> stage on the receiver.
+	siblingEdge, err := writesurface.DependAdd(labCtx, f.sa, store.ActorHuman, f.a.repo, f.step1.ID, f.step2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingGroup := sourceGroup(t, f.sa, f.step1.ID, store.TypeDependencyAdded)
+	descendantEdge, err := writesurface.DependAdd(labCtx, f.sa, store.ActorHuman, f.a.repo, f.step2.ID, f.matter.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descendantGroup := sourceGroup(t, f.sa, f.step2.ID, store.TypeDependencyAdded)
+	ancestorEdge, err := writesurface.DependAdd(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.ID, f.stage.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ancestorGroup := sourceGroup(t, f.sa, f.matter.ID, store.TypeDependencyAdded)
+	if _, err = writesurface.Bind(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.Locator, "fixture:OK-1"); err != nil {
+		t.Fatal(err)
+	}
+	bindGroup := sourceGroup(t, f.sa, f.matter.ID, store.TypeReferenceAdded)
+
+	// One pass carries the missing-target edge first, then every valid
+	// unit: pending evidence must not hold back unrelated work.
+	exchangePass(t, f.sa, f.ca, f.ba, missingGroup, siblingGroup, descendantGroup, ancestorGroup, bindGroup)
+	exchangePass(t, f.sb, f.cb, f.bb)
+
+	d := sourceDecision(t, f.sb, missingGroup, "pending")
+	if !strings.Contains(d.Reason, "awaiting") || !strings.Contains(d.Reason, "blocker") {
+		t.Fatalf("missing-target reason = %q, want the unresolved endpoint named", d.Reason)
+	}
+	for _, group := range []string{siblingGroup, descendantGroup, ancestorGroup, bindGroup} {
+		sourceDecision(t, f.sb, group, "integrated")
+	}
+	for _, e := range []store.Edge{siblingEdge, descendantEdge, ancestorEdge} {
+		got, found := relationEdge(t, f.sb, e.Blocked, e.Blocker)
+		if !found || got.ID != e.ID {
+			t.Fatalf("receiver edge %s<-%s = %+v found=%v, want %s", e.Blocked, e.Blocker, got, found, e.ID)
+		}
+	}
+	if _, found := relationEdge(t, f.sb, f.stage.ID, late.ID); found {
+		t.Fatal("pending edge materialized before its target")
+	}
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:OK-1"}) {
+		t.Fatalf("receiver refs = %v", refs)
+	}
+	if _, err := f.sb.Node(labCtx, late.ID); err == nil {
+		t.Fatal("unsent target materialized on the receiver")
+	}
+	st, err := f.sb.ExchangeStatus(labCtx, f.b.repo)
+	if err != nil || st.Waiting != 1 || st.Conflicts != 0 {
+		t.Fatalf("status = %+v %v, want one named wait and no conflicts", st, err)
+	}
+
+	// A second pass re-evaluates the wait — it is retained evidence, never
+	// acknowledged — and appends nothing.
+	before := len(labEvents(t, f.sb))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, missingGroup, "pending")
+	history, err := f.sb.ExperimentDecisionHistory(labCtx, missingGroup)
+	if err != nil || len(history) < 2 {
+		t.Fatalf("missing-target history = %+v %v, want repeated pending evaluations", history, err)
+	}
+	for _, h := range history {
+		if h.Decision.Disposition != "pending" {
+			t.Fatalf("missing-target evaluation = %s, want pending throughout", h.Decision.Disposition)
+		}
+	}
+	if len(labEvents(t, f.sb)) != before {
+		t.Fatal("pending re-evaluation appended effects")
+	}
+
+	// Accepted work continues while the target stays missing: the sender
+	// removes the sibling edge and the removal integrates; the remaining
+	// edges, the reference and the pending wait are all retained.
+	if err = writesurface.DependRemove(labCtx, f.sa, store.ActorHuman, f.a.repo, f.step1.ID, f.step2.ID); err != nil {
+		t.Fatal(err)
+	}
+	removedGroup := sourceGroup(t, f.sa, f.step1.ID, store.TypeDependencyRemoved)
+	exchangePass(t, f.sa, f.ca, f.ba, removedGroup)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, removedGroup, "integrated")
+	sourceDecision(t, f.sb, missingGroup, "pending")
+	if _, found := relationEdge(t, f.sb, f.step1.ID, f.step2.ID); found {
+		t.Fatal("removed edge outlived its synced removal")
+	}
+	for _, e := range []store.Edge{ancestorEdge, descendantEdge} {
+		got, found := relationEdge(t, f.sb, e.Blocked, e.Blocker)
+		if !found || got.ID != e.ID {
+			t.Fatalf("accepted edge lost: %+v found=%v", got, found)
+		}
+	}
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:OK-1"}) {
+		t.Fatalf("receiver refs after removal = %v", refs)
+	}
+	if edges, _ := f.sb.LiveEdges(labCtx); len(edges) != 2 {
+		t.Fatalf("LiveEdges = %+v, want the two retained edges", edges)
+	}
+	if _, err := f.sb.Node(labCtx, late.ID); err == nil {
+		t.Fatal("unsent target materialized after later passes")
+	}
+
+	// Rebuild preserves the retained edges, the reference and the still-
+	// pending named wait.
+	labRebuild(t, f.sb)
+	for _, e := range []store.Edge{ancestorEdge, descendantEdge} {
+		got, found := relationEdge(t, f.sb, e.Blocked, e.Blocker)
+		if !found || got.ID != e.ID {
+			t.Fatalf("post-rebuild edge lost: %+v found=%v", got, found)
+		}
+	}
+	sourceDecision(t, f.sb, missingGroup, "pending")
 }
