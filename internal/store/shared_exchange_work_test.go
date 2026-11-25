@@ -3,6 +3,7 @@
 package store_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -455,9 +456,9 @@ func TestSharedStoreLifecycleExchangeWire(t *testing.T) {
 
 // A portable action's baseline is the receiver's portable-plane tail — the
 // last prior subject event sync can actually carry — never the literal
-// history tail. reference.added never leaves its store, so a start whose
-// literal prior is a tracker bind must still name the portable birth;
-// otherwise a peer that never saw the bind pends "unknown baseline
+// history tail. reference.bound never leaves its store, so a start whose
+// literal prior is a legacy tracker bind must still name the portable
+// birth; otherwise a peer that never saw the bind pends "unknown baseline
 // dependency" forever. fluke is a native copy made before the bind, so it
 // is exactly the fresh peer this must not wedge — and its own later
 // non-portable divergence must not conflict with the next portable fact.
@@ -471,12 +472,20 @@ func TestSharedStorePortableBaselineSkipsLocalFamilies(t *testing.T) {
 	// copied before this Matter existed.
 	created := labBacklogSource(t, p.hybrid, "Hybrid", matter.ID, store.TypeMatterCreated)
 	labImportBound(t, p.fluke, created, p.repo, "integrated")
-	if _, err = writesurface.Bind(labCtx, p.hybrid, store.ActorHuman, p.repo, matter.Locator, "fixture:B-1"); err != nil {
-		t.Fatal(err)
-	}
+	// reference.bound is the still-non-portable predecessor: it sits in
+	// subject history with a Repo but no portable type, so the baseline scan
+	// must step over it exactly as it did for reference.added before the
+	// reference family became portable.
+	labCommitMixed(t, p.hybrid, p.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeReferenceBound,
+			Subject: matter.ID,
+			Payload: store.ReferenceBound{Ref: "fixture:B-1"},
+		}}, nil
+	})
 	start := labStart(t, p, p.hybrid, "Hybrid", matter.Locator)
 	// The exported start must baseline on the portable birth, not on the
-	// reference.added that literally precedes it in subject history.
+	// reference.bound that literally precedes it in subject history.
 	var started store.ExperimentAction
 	for _, a := range start.Actions {
 		if a.Event.Type == store.TypeMatterStarted {
@@ -497,11 +506,15 @@ func TestSharedStorePortableBaselineSkipsLocalFamilies(t *testing.T) {
 	}
 	labImportBound(t, p.fluke, start, p.repo, "integrated")
 	labState(t, p.fluke, matter.ID, store.InProgress)
-	// fluke's own tracker bind is local-only divergence on the same subject:
+	// fluke's own legacy bind is local-only divergence on the same subject:
 	// the next portable fact must still integrate on the portable plane.
-	if _, err = writesurface.Bind(labCtx, p.fluke, store.ActorHuman, p.repo, matter.Locator, "fixture:LOCAL"); err != nil {
-		t.Fatal(err)
-	}
+	labCommitMixed(t, p.fluke, p.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeReferenceBound,
+			Subject: matter.ID,
+			Payload: store.ReferenceBound{Ref: "fixture:LOCAL"},
+		}}, nil
+	})
 	pause := labExportAfter(t, p.hybrid, "Hybrid", matter.ID, store.TypeMatterPaused,
 		labVerbPause(p.hybrid, p.repo, matter.Locator))
 	labImportBound(t, p.fluke, pause, p.repo, "integrated")

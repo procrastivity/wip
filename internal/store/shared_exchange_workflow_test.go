@@ -731,9 +731,9 @@ func TestSharedStoreExchangeFamilySyncMintsNoDelivery(t *testing.T) {
 
 	// Source control: a bound Matter plus an operator proposal queue native
 	// candidates — proof the source really exercised delivery authority. The
-	// bind lands after the Matter's last portable event: reference.added is
-	// non-portable, and a portable event whose subject-history predecessor is
-	// non-portable can never resolve its baseline on a fresh receiver.
+	// bind lands after the Matter's last portable event; reference.added is
+	// portable now, so its import must itself mint no delivery rows — the
+	// inert-data half of this test's claim.
 	if _, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Control", "control"); err != nil {
 		t.Fatal(err)
 	}
@@ -944,9 +944,15 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	mp := func(n store.Node) string { return matter.Locator + "/" + n.Locator }
-	if _, err = writesurface.Bind(labCtx, sa, store.ActorHuman, a.repo, matter.Locator, "fixture:W-1"); err != nil {
-		t.Fatal(err)
-	}
+	// reference.bound is the still-non-portable predecessor on this subject:
+	// the v5 reference family syncs now, the legacy singleton bind does not.
+	labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeReferenceBound,
+			Subject: matter.ID,
+			Payload: store.ReferenceBound{Ref: "fixture:W-1"},
+		}}, nil
+	})
 	if _, err = writesurface.DependAdd(labCtx, sa, store.ActorHuman, a.repo, mp(stage), matter.Locator); err != nil {
 		t.Fatal(err)
 	}
@@ -977,7 +983,7 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	}
 
 	// The exported start names the portable birth as baseline, never the
-	// reference.added that literally precedes it.
+	// reference.bound that literally precedes it.
 	var createdID string
 	for _, ev := range labEvents(t, sa) {
 		if ev.Subject == matter.ID && ev.Type == store.TypeMatterCreated {
@@ -1023,11 +1029,12 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 			t.Fatalf("receiver edge %s<-matter = %+v %v %v", blocked, edge, found, err)
 		}
 	}
-	// No non-portable family ever crossed the wire.
+	// No non-portable family ever crossed the wire: the receiver has not
+	// committed a legacy bind of its own yet, so any reference.bound here
+	// could only be the sender's.
 	for _, ev := range labEvents(t, sb) {
 		switch ev.Type {
-		case store.TypeReferenceAdded, store.TypeReferenceRemoved, store.TypeReferenceRebound,
-			store.TypeRenderPerformed:
+		case store.TypeRenderPerformed, store.TypeReferenceBound:
 			t.Fatalf("non-portable event %s reached the receiver", ev.Type)
 		}
 	}
@@ -1123,11 +1130,15 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 		t.Fatalf("receiver matter findings = %+v %v", segs, err)
 	}
 
-	// Phase 3 — the receiver's own tracker bind is local-only divergence on
+	// Phase 3 — the receiver's own legacy bind is local-only divergence on
 	// the same subject; the sender's pause and resume must still integrate.
-	if _, err = writesurface.Bind(labCtx, sb, store.ActorHuman, b.repo, matter.Locator, "fixture:LOCAL"); err != nil {
-		t.Fatal(err)
-	}
+	labCommitMixed(t, sb, b.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeReferenceBound,
+			Subject: matter.ID,
+			Payload: store.ReferenceBound{Ref: "fixture:LOCAL"},
+		}}, nil
+	})
 	if _, err = writesurface.Pause(labCtx, sa, store.ActorHuman, a.repo, matter.Locator); err != nil {
 		t.Fatal(err)
 	}
@@ -1143,15 +1154,15 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	sourceDecision(t, sb, matterPause, "integrated")
 	sourceDecision(t, sb, matterResume, "integrated")
 	labState(t, sb, matter.ID, store.InProgress)
-	// The receiver's local bind never became sender history.
+	// The receiver's local legacy bind never became sender history.
 	var binds int
 	for _, ev := range labEvents(t, sa) {
-		if ev.Subject == matter.ID && ev.Type == store.TypeReferenceAdded {
+		if ev.Subject == matter.ID && ev.Type == store.TypeReferenceBound {
 			binds++
 		}
 	}
 	if binds != 1 {
-		t.Fatalf("sender matter carries %d reference.added events, want only its own", binds)
+		t.Fatalf("sender matter carries %d reference.bound events, want only its own", binds)
 	}
 
 	// Phase 4 — divergent portable work still conflicts both ways: the

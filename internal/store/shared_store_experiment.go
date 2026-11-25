@@ -654,8 +654,18 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 	var local []Event
 	for i, a := range source.Actions {
 		baseline, eventID := a.Baseline, a.Event.ID
+		sourceRepo := a.Event.Repo
 		if target != "" {
 			a.Event.Repo = target
+			// gate.declared keys at its Repo (D42, D54): the source subject
+			// is the source Repo's own identity, so on a bound target it
+			// maps to the paired Repo exactly as ev.Repo does. The fold
+			// refuses any subject that is not the Repo, so the remap must
+			// land before classification and stamping see one pair; a
+			// subject naming anything else stays put and conflicts.
+			if a.Event.Type == TypeGateDeclared && a.Event.Subject == sourceRepo {
+				a.Event.Subject = target
+			}
 		}
 		if a.Baseline != "" {
 			a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
@@ -801,6 +811,14 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	}
 	if e.Type == TypeDependencyAdded || e.Type == TypeDependencyRemoved {
 		return experimentClassifyDependency(ctx, v, a)
+	}
+	if e.Type == TypeGateDeclared || e.Type == TypeGateClosed ||
+		e.Type == TypeGateDismissed || e.Type == TypeGateExemptionRepaired {
+		return experimentClassifyGate(ctx, v, a)
+	}
+	if e.Type == TypeReferenceAdded || e.Type == TypeReferenceRemoved ||
+		e.Type == TypeReferenceRebound {
+		return experimentClassifyReference(ctx, v, a)
 	}
 	spec, admitted := experimentLifecycleEdges[e.Type]
 	if !admitted {
@@ -954,7 +972,14 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 	subjects := map[string]bool{}
 	var evidence []string
 	for _, a := range source.Actions {
-		subjects[a.Event.Subject] = true
+		// gate.declared's subject is its Repo: on a bound target the effect
+		// lands under the paired Repo, so evidence must watch that subject
+		// rather than the source-space one.
+		subject := a.Event.Subject
+		if target != "" && a.Event.Type == TypeGateDeclared && subject == a.Event.Repo {
+			subject = target
+		}
+		subjects[subject] = true
 		if a.Parent != "" {
 			subjects[a.Parent] = true
 		}

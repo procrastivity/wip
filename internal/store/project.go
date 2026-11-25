@@ -520,8 +520,13 @@ func closeGate(ctx context.Context, tx *sql.Tx, ev Event) error {
 // it is the role that owns the declared gate. Arbitrary role and system actors
 // are not accepted by the event projection, even if they are otherwise valid
 // envelope actors.
+//
+// integrationEffectActor is admitted alongside the human: it is stamped only
+// by the portable-sync import path onto retained source facts, so a synced
+// dismissal is evidence the source store's own floor already admitted — never
+// a local actor claim. Every other non-human actor must still own the gate.
 func dismissalActorAllowed(actor Actor, gate string) bool {
-	if actor == ActorHuman {
+	if actor == ActorHuman || actor == integrationEffectActor {
 		return true
 	}
 	owner, owned := GateOwner(gate)

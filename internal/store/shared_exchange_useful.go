@@ -78,6 +78,8 @@ var experimentPortableTypeNames = []string{
 	TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated,
 	TypeContentCreated, TypeContentAppended,
 	TypeDependencyAdded, TypeDependencyRemoved,
+	TypeGateDeclared, TypeGateExemptionRepaired, TypeGateClosed, TypeGateDismissed,
+	TypeReferenceAdded, TypeReferenceRemoved, TypeReferenceRebound,
 }
 
 // experimentPortableTypes is every admitted portable event type — the
@@ -1280,4 +1282,594 @@ func experimentCycleResolvable(ctx context.Context, q querier, edges, nodes map[
 		}
 	}
 	return false, rows.Err()
+}
+
+// experimentEcho is the verified self-echo every mutation classifier
+// shares: the action's own identity already sits in subject history, so
+// identical evidence integrates as a no-op naming the retained event and
+// differing bytes are a conflict, never a merge.
+func experimentEcho(history []Event, e Event) (string, string, string, bool) {
+	for _, prior := range history {
+		if prior.ID != e.ID {
+			continue
+		}
+		if reflect.DeepEqual(prior, e) {
+			return "integrated", "", prior.ID, true
+		}
+		return "conflict", "source identity differs from native history", "", true
+	}
+	return "", "", "", false
+}
+
+// experimentGateBaseline resolves a node-subject gate fact's baseline the
+// way every mutation classifier does: absent or unresolvable predecessor
+// evidence waits rather than conflicts, because it may still be in flight.
+// It returns the wait reason, or "" when the baseline is usable.
+func experimentGateBaseline(ctx context.Context, v View, e Event, history []Event, baseline string) (string, error) {
+	if baseline == "" {
+		return "missing baseline evidence", nil
+	}
+	index, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, baseline)
+	if err != nil {
+		return "", err
+	}
+	if index < 0 && !anchored {
+		return "unknown baseline dependency", nil
+	}
+	return "", nil
+}
+
+// experimentGateDeclaration reads the declared scale of one gate in one
+// Repo; found is false when the declaration has not landed yet — pending
+// evidence for the gate family, since gate.declared is itself portable.
+func experimentGateDeclaration(ctx context.Context, v View, repo, gate string) (Scale, bool, error) {
+	var scale Scale
+	err := v.q.QueryRowContext(ctx,
+		`SELECT scale FROM gate_declarations WHERE repo=? AND gate=?`, repo, gate).Scan(&scale)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: read gate declaration %s for %s: %w", gate, repo, err)
+	}
+	return scale, true, nil
+}
+
+// experimentGateState reports whether (node, gate) already carries a
+// satisfaction row — gate.closed and gate.dismissed both land there, and
+// the primary key makes a second satisfaction a permanent incompatibility.
+func experimentGateState(ctx context.Context, v View, node, gate string) (bool, error) {
+	var satisfied bool
+	if err := v.q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM gate_state WHERE node=? AND gate=?)`, node, gate).Scan(&satisfied); err != nil {
+		return false, fmt.Errorf("store: read gate satisfaction %s on %s: %w", gate, node, err)
+	}
+	return satisfied, nil
+}
+
+// experimentGateExempt reports whether (repo, node, gate) already carries a
+// prospective exemption row — from a declaration snapshot or a repair.
+func experimentGateExempt(ctx context.Context, v View, repo, node, gate string) (bool, error) {
+	var exempt bool
+	if err := v.q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM gate_exemptions WHERE repo=? AND node=? AND gate=?)`,
+		repo, node, gate).Scan(&exempt); err != nil {
+		return false, fmt.Errorf("store: read gate exemption %s on %s: %w", gate, node, err)
+	}
+	return exempt, nil
+}
+
+// experimentClassifyGate admits the gate family — gate.declared,
+// gate.exemption-repaired, gate.closed and gate.dismissed — the declaration,
+// repair, close and dismissal facts the config verbs and gate writesurface
+// emit. Like the dependency family they mutate paired state, so they
+// classify on both the bound and the unbound path. Every fold precondition
+// is pre-validated here because a fold failure would roll the whole unit
+// back and wedge the inbox: declareGateProjection's declare-once row,
+// subject-equals-Repo rule and exempt-node shape; the repair fold's
+// declared gate and exempt node; closeGate's kind floor and gate_state
+// primary key; dismissGate's live Done subject, declaration scale,
+// satisfaction and exemption floors. Pending is reserved for evidence that
+// can still land — an undeclared gate, an unarrived node, an unmet Done
+// lifecycle, an exempt node still in flight — while divergent scales,
+// spent identities and occupied rows stay inspectable conflicts.
+func experimentClassifyGate(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	if a.Event.Type == TypeGateDeclared {
+		return experimentClassifyGateDeclared(ctx, v, a)
+	}
+	return experimentClassifyGateNode(ctx, v, a)
+}
+
+// experimentClassifyGateDeclared admits gate.declared: the Repo-subject
+// declaration of one gate at one scale plus its prospective exemption
+// snapshot. On a bound target experimentEvaluate has already mapped both
+// ev.Repo and — because the subject IS the source Repo's identity — the
+// subject, so the fold's subject==Repo rule sees one consistent pair.
+// Declarations of distinct gates commute, so the baseline only has to
+// resolve when present; the declare-once row is the fold's own floor and
+// decides same-gate outcomes: a different scale or a different exemption
+// snapshot is divergence, an identical one is already represented.
+func experimentClassifyGateDeclared(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+
+	var p GateDeclared
+	if decodeStrict(e, &p) != nil || p.Gate == "" {
+		return refuse("invalid gate declaration")
+	}
+	switch p.Scale {
+	case ScaleMatter, ScaleStage, ScaleStep:
+	default:
+		return refuse("invalid gate declaration")
+	}
+	// Config keys at Repo (D42, D54): the subject is the Repo the envelope
+	// carries, never a second opinion. Anything else is malformed evidence.
+	if e.Subject != e.Repo {
+		return refuse("gate declaration subject is not its Repo")
+	}
+	// gate_declarations.repo references repos(id): on the unbound path the
+	// foreign Repo may not exist locally yet, and its arrival is pending
+	// evidence rather than a conflict.
+	var repos int
+	if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repos WHERE id=?`, e.Repo).Scan(&repos); err != nil {
+		return "", "", "", false, err
+	}
+	if repos == 0 {
+		return wait("gate declaration awaiting repo")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if disp, reason, effect, ok := experimentEcho(history, e); ok {
+		return disp, reason, effect, false, nil
+	}
+
+	declared, found, err := experimentGateDeclaration(ctx, v, e.Repo, p.Gate)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if found {
+		if declared != p.Scale {
+			return refuse("gate already declared at a different scale; declarations never move")
+		}
+		// Same gate, same scale: the fact may already be represented by an
+		// earlier declaration — local or imported — so only an identical
+		// snapshot echoes; a divergent Exempt boundary conflicts because
+		// prospective applicability is never merged.
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Type != TypeGateDeclared {
+				continue
+			}
+			var prior GateDeclared
+			if decodeStrict(history[i], &prior) != nil || prior.Gate != p.Gate {
+				continue
+			}
+			if prior.Scale == p.Scale && experimentSameStrings(prior.Exempt, p.Exempt) {
+				return "integrated", "", history[i].ID, false, nil
+			}
+			return refuse("gate declaration snapshots differ; boundaries never merge")
+		}
+		return refuse("gate already declared")
+	}
+
+	// Every exempt node must be a live node of this Repo at the declared
+	// scale — requireExemptNode's floor, with absence waiting because the
+	// node's own group may still be in flight and a spent or foreign row a
+	// permanent incompatibility. The fold also refuses a repeated exempt
+	// identity inside one payload through its primary key.
+	seen := make(map[string]bool, len(p.Exempt))
+	for _, node := range p.Exempt {
+		if seen[node] || !IsIdentityShaped(node) {
+			return refuse("invalid gate declaration")
+		}
+		seen[node] = true
+		n, err := v.Node(ctx, node)
+		if err != nil {
+			var rows int
+			if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, node).Scan(&rows); qerr != nil {
+				return "", "", "", false, qerr
+			}
+			if rows != 0 {
+				return refuse("gate exemption names a removed node")
+			}
+			return wait("gate declaration awaiting exempt node")
+		}
+		if n.Repo != e.Repo {
+			return refuse("gate exemption node belongs to another Repo")
+		}
+		if n.Kind != p.Scale {
+			return refuse("gate exemption node is not at the declared scale")
+		}
+	}
+	if reason, err := experimentGateBaseline(ctx, v, e, history, a.Baseline); err != nil {
+		return "", "", "", false, err
+	} else if a.Baseline != "" && reason != "" {
+		return wait(reason)
+	}
+	return "integrated", "", "", true, nil
+}
+
+// experimentSameStrings reports whether two string slices name the same set,
+// order-insensitive — the Exempt snapshot comparison for a repeated
+// declaration.
+func experimentSameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
+}
+
+// experimentClassifyGateNode admits the three node-subject gate facts —
+// gate.exemption-repaired, gate.closed and gate.dismissed. The subject is a
+// node whose Repo must be the mapped one even where the fold itself does
+// not ask (closeGate reads kind alone), because a gate fact keys at Repo
+// scope. Each type then pre-validates exactly the fold's own floors:
+// repair needs a declared gate and a live node at its bound scale; close
+// needs the declared scale, a matching kind and a free (node, gate) slot —
+// and deliberately tolerates a tombstoned subject, the same D44 history
+// closeGate keeps; dismiss needs all of that plus a live Done subject, a
+// non-empty reason and neither a satisfaction row nor an exemption. A
+// synced dismissal lands stamped integrationEffectActor, which
+// dismissalActorAllowed admits as retained source evidence — the source
+// store's own actor floor already ran when the fact was written.
+func experimentClassifyGateNode(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+	if !IsIdentityShaped(e.Subject) {
+		return refuse("invalid gate subject")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if disp, reason, effect, ok := experimentEcho(history, e); ok {
+		return disp, reason, effect, false, nil
+	}
+	var kind Scale
+	var lifecycle Lifecycle
+	var repo string
+	var tombstone sql.NullString
+	err = v.q.QueryRowContext(ctx,
+		`SELECT kind,lifecycle,repo,tombstone_event FROM nodes WHERE id=?`, e.Subject).
+		Scan(&kind, &lifecycle, &repo, &tombstone)
+	if err == sql.ErrNoRows {
+		return wait("gate awaiting node")
+	}
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if repo != e.Repo {
+		return refuse("gate subject belongs to another Repo")
+	}
+
+	switch e.Type {
+	case TypeGateClosed:
+		var p GateClosed
+		if decodeStrict(e, &p) != nil || p.Gate == "" {
+			return refuse("invalid gate close")
+		}
+		switch p.Scale {
+		case ScaleMatter, ScaleStage, ScaleStep:
+		default:
+			return refuse("invalid gate close")
+		}
+		// The payload's scale is the subject's own kind (D12); a
+		// mis-scaled close would take the (node, gate) slot the real one
+		// needs. Liveness is deliberately not asked, matching the fold.
+		if p.Scale != kind {
+			return refuse("gate close scale does not match its subject")
+		}
+		declared, found, err := experimentGateDeclaration(ctx, v, e.Repo, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if !found {
+			return wait("gate close awaiting declaration")
+		}
+		if declared != p.Scale {
+			return refuse("gate close disagrees with the declared scale")
+		}
+		// A satisfaction row — close or dismissal — already holds the
+		// (node, gate) slot; source stores never emit a second one.
+		satisfied, err := experimentGateState(ctx, v, e.Subject, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if satisfied {
+			return refuse("gate already satisfied")
+		}
+	case TypeGateDismissed:
+		var p GateDismissed
+		if decodeStrict(e, &p) != nil || p.Gate == "" {
+			return refuse("invalid gate dismissal")
+		}
+		switch p.Scale {
+		case ScaleMatter, ScaleStage, ScaleStep:
+		default:
+			return refuse("invalid gate dismissal")
+		}
+		if strings.TrimSpace(p.Reason) == "" {
+			return refuse("invalid gate dismissal")
+		}
+		if tombstone.Valid {
+			return refuse("gate dismissal names a removed node")
+		}
+		// Done is the fold's floor and canceled is terminal: a node still
+		// working may finish later — pending — while a canceled one can
+		// never take a dismissal.
+		if lifecycle == Canceled {
+			return refuse("gate dismissal requires a Done node; canceled is terminal")
+		}
+		if lifecycle != Done {
+			return wait("gate dismissal awaiting Done lifecycle")
+		}
+		if p.Scale != kind {
+			return refuse("gate dismissal scale does not match its subject")
+		}
+		declared, found, err := experimentGateDeclaration(ctx, v, e.Repo, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if !found {
+			return wait("gate dismissal awaiting declaration")
+		}
+		if declared != p.Scale {
+			return refuse("gate dismissal disagrees with the declared scale")
+		}
+		satisfied, err := experimentGateState(ctx, v, e.Subject, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if satisfied {
+			return refuse("gate already satisfied")
+		}
+		exempt, err := experimentGateExempt(ctx, v, e.Repo, e.Subject, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if exempt {
+			return refuse("gate already satisfied by an exemption")
+		}
+	case TypeGateExemptionRepaired:
+		var p GateExemptionRepaired
+		if decodeStrict(e, &p) != nil || p.Gate == "" {
+			return refuse("invalid gate exemption repair")
+		}
+		if tombstone.Valid {
+			return refuse("gate exemption names a removed node")
+		}
+		declared, found, err := experimentGateDeclaration(ctx, v, e.Repo, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if !found {
+			return wait("gate exemption awaiting declaration")
+		}
+		if kind != declared {
+			return refuse("gate exemption node is not at the declared scale")
+		}
+		exempt, err := experimentGateExempt(ctx, v, e.Repo, e.Subject, p.Gate)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if exempt {
+			// The fold's insert is idempotent — a repeat repair is a
+			// legitimate no-op — so an existing row means the fact is
+			// already represented: name the repair or the declaration
+			// snapshot that carries it. The row can also predate every
+			// event (a pre-v8 direct write); the fold's ON CONFLICT DO
+			// NOTHING keeps a fresh effect truthful in that case.
+			for i := len(history) - 1; i >= 0; i-- {
+				if history[i].Type != TypeGateExemptionRepaired {
+					continue
+				}
+				var prior GateExemptionRepaired
+				if decodeStrict(history[i], &prior) == nil && prior.Gate == p.Gate {
+					return "integrated", "", history[i].ID, false, nil
+				}
+			}
+			repoHistory, err := v.EventsOfSubject(ctx, e.Repo)
+			if err != nil {
+				return "", "", "", false, err
+			}
+			for i := len(repoHistory) - 1; i >= 0; i-- {
+				if repoHistory[i].Type != TypeGateDeclared {
+					continue
+				}
+				var prior GateDeclared
+				if decodeStrict(repoHistory[i], &prior) == nil && prior.Gate == p.Gate {
+					return "integrated", "", repoHistory[i].ID, false, nil
+				}
+			}
+			return "integrated", "", "", true, nil
+		}
+	default:
+		return refuse("unsupported gate family")
+	}
+	if reason, err := experimentGateBaseline(ctx, v, e, history, a.Baseline); err != nil {
+		return "", "", "", false, err
+	} else if reason != "" {
+		return wait(reason)
+	}
+	return "integrated", "", "", true, nil
+}
+
+// experimentReferenceClaimed reports whether ref already binds a Matter
+// other than subject through an event local evidence wrote. A row an
+// integration effect established is shared-plane state the source may
+// legitimately extend — tracker references aggregate across Matters —
+// while a locally-bound row is divergent evidence sync must not merge
+// into a wider binding the source never claimed.
+func experimentReferenceClaimed(ctx context.Context, v View, subject, ref string) (bool, error) {
+	rows, err := v.q.QueryContext(ctx,
+		`SELECT e.actor FROM tracker_references r
+		 JOIN events e ON e.id = r.last_event
+		 WHERE r.ref = ? AND r.matter <> ? AND r.removed_event IS NULL`, ref, subject)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var actor string
+		if err := rows.Scan(&actor); err != nil {
+			return false, err
+		}
+		if Actor(actor) != integrationEffectActor {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// experimentClassifyReference admits the tracker-reference family —
+// reference.added, reference.removed and reference.rebound — the bind,
+// unbind and rebind facts writesurface's tracker verbs emit. The subject
+// is always a live Matter in the mapped Repo (requireMatterSubject's floor
+// plus the Repo check the fold itself does not make). Membership rows are
+// pre-validated against the fold's own floors: add inserts or revives a
+// tombstoned (matter, ref) and never disturbs an active one — the active
+// row is the self-echo — while a ref locally bound to a different Matter
+// is divergent occupancy; remove and rebind need their source membership
+// active, and absence or a tombstone waits because the binding's own group
+// may still be in flight. The legacy singleton reference.bound stays
+// non-portable: it has no live writer and its replace semantics are not
+// the v5 membership model.
+func experimentClassifyReference(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+	if !IsIdentityShaped(e.Subject) {
+		return refuse("invalid reference subject")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if disp, reason, effect, ok := experimentEcho(history, e); ok {
+		return disp, reason, effect, false, nil
+	}
+	var kind Scale
+	var repo string
+	var tombstone sql.NullString
+	err = v.q.QueryRowContext(ctx,
+		`SELECT kind,repo,tombstone_event FROM nodes WHERE id=?`, e.Subject).
+		Scan(&kind, &repo, &tombstone)
+	if err == sql.ErrNoRows {
+		return wait("reference awaiting matter")
+	}
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if tombstone.Valid {
+		return refuse("reference subject was removed")
+	}
+	if kind != ScaleMatter {
+		return refuse("reference subject is not a Matter")
+	}
+	if repo != e.Repo {
+		return refuse("reference subject belongs to another Repo")
+	}
+
+	switch e.Type {
+	case TypeReferenceAdded:
+		var p ReferenceAdded
+		if decodeStrict(e, &p) != nil || p.Ref == "" {
+			return refuse("invalid reference add")
+		}
+		var removed sql.NullString
+		var last string
+		err := v.q.QueryRowContext(ctx,
+			`SELECT removed_event,last_event FROM tracker_references WHERE matter=? AND ref=?`,
+			e.Subject, p.Ref).Scan(&removed, &last)
+		switch {
+		case err == nil && !removed.Valid:
+			// The membership is already active: the fact is represented —
+			// name the event that established it, whether an import or a
+			// local bind, exactly as the dependency edge's live-pair echo.
+			return "integrated", "", last, false, nil
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return "", "", "", false, err
+		}
+		// Fresh insert or tombstone revive both end with the ref active on
+		// this Matter; a ref a *local* event already binds elsewhere is
+		// occupancy the source never claimed.
+		claimed, err := experimentReferenceClaimed(ctx, v, e.Subject, p.Ref)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if claimed {
+			return refuse("reference identity occupied by a local binding; identities not merged")
+		}
+	case TypeReferenceRemoved:
+		var p ReferenceRemoved
+		if decodeStrict(e, &p) != nil || p.Ref == "" {
+			return refuse("invalid reference removal")
+		}
+		var removed sql.NullString
+		err := v.q.QueryRowContext(ctx,
+			`SELECT removed_event FROM tracker_references WHERE matter=? AND ref=?`,
+			e.Subject, p.Ref).Scan(&removed)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// The add may still be in flight; only a retained row can be
+			// tombstoned, so absence waits rather than conflicts.
+			return wait("reference awaiting binding")
+		case err != nil:
+			return "", "", "", false, err
+		case removed.Valid:
+			// Tombstoned means a later binding period — the add or rebind
+			// that re-activates (matter, ref) — has not landed yet.
+			return wait("reference awaiting rebinding")
+		}
+	case TypeReferenceRebound:
+		var p ReferenceRebound
+		if decodeStrict(e, &p) != nil || p.From == "" || p.To == "" || p.From == p.To {
+			return refuse("invalid reference rebind")
+		}
+		var removed sql.NullString
+		err := v.q.QueryRowContext(ctx,
+			`SELECT removed_event FROM tracker_references WHERE matter=? AND ref=?`,
+			e.Subject, p.From).Scan(&removed)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return wait("reference awaiting source binding")
+		case err != nil:
+			return "", "", "", false, err
+		case removed.Valid:
+			return wait("reference awaiting source rebinding")
+		}
+		// The destination takes the (matter, To) slot: an active row there
+		// is the fold's exactRows failure — permanent — while a tombstone
+		// revives cleanly.
+		err = v.q.QueryRowContext(ctx,
+			`SELECT removed_event FROM tracker_references WHERE matter=? AND ref=?`,
+			e.Subject, p.To).Scan(&removed)
+		switch {
+		case err == nil && !removed.Valid:
+			return refuse("reference identity occupied; identities not merged")
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return "", "", "", false, err
+		}
+		claimed, err := experimentReferenceClaimed(ctx, v, e.Subject, p.To)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if claimed {
+			return refuse("reference identity occupied by a local binding; identities not merged")
+		}
+	default:
+		return refuse("unsupported reference family")
+	}
+	if reason, err := experimentGateBaseline(ctx, v, e, history, a.Baseline); err != nil {
+		return "", "", "", false, err
+	} else if reason != "" {
+		return wait(reason)
+	}
+	return "integrated", "", "", true, nil
 }

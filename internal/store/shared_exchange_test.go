@@ -673,16 +673,17 @@ func TestLaravelExchangeRoundTrip(t *testing.T) {
 			t.Fatal("independent Matter did not arrive", err)
 		}
 		// Actual unsupported local work remains retained, never replayed as
-		// sync. Dependency edges are portable now, so the retained-evidence
-		// fixture is a tracker reference — a family no classifier admits.
-		if _, err := writesurface.Bind(labCtx, sa, store.ActorHuman, a.repo, "seeded", "fixture:UNSYNCED"); err != nil {
+		// sync. Gate and reference facts are portable now, so the
+		// retained-evidence fixture is a config.set — a family no classifier
+		// admits.
+		if err := sa.SetConfig(labCtx, a.repo, "fixture.unsupported", "1"); err != nil {
 			t.Fatal(err)
 		}
 		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
 		if err != nil {
 			t.Fatal(err)
 		}
-		unsupported := sourceGroup(t, sa, seeded.ID, store.TypeReferenceAdded)
+		unsupported := sourceGroup(t, sa, a.repo, store.TypeConfigSet)
 		exchangePass(t, sa, ca, ba, unsupported)
 		exchangePass(t, sb, cb, bb)
 		sourceDecision(t, sb, unsupported, "conflict")
@@ -1101,12 +1102,12 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 	}
 	// An ordinary unsupported source remains canonical conflict activity. The
 	// correction must exclude collision groups, not all conflicted decisions.
-	// Dependency edges are portable now, so the unsupported fixture is a
-	// tracker reference — a family no classifier admits.
-	if _, err := writesurface.Bind(labCtx, p.fluke, store.ActorHuman, p.repo, "shared", "fixture:UNSYNCED"); err != nil {
+	// Gate and reference facts are portable now, so the unsupported fixture
+	// is a config.set — a family no classifier admits.
+	if err := p.fluke.SetConfig(labCtx, p.repo, "fixture.unsupported", "1"); err != nil {
 		t.Fatal(err)
 	}
-	unsupportedGroup := sourceGroup(t, p.fluke, p.matter, store.TypeReferenceAdded)
+	unsupportedGroup := sourceGroup(t, p.fluke, p.repo, store.TypeConfigSet)
 	exchangePass(t, p.fluke, cb, bb, unsupportedGroup)
 	exchangePass(t, p.hybrid, ca, ba)
 	unsupported := sourceDecision(t, p.hybrid, unsupportedGroup, "conflict")

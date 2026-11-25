@@ -501,3 +501,328 @@ func TestSharedStoreDependencyMixedGroup(t *testing.T) {
 		t.Fatalf("omitted config produced an effect: %q %v %v", value, found, err)
 	}
 }
+
+// gateSyncGroup exports the committed group that produced subject's newest
+// event of kind on s — sourceGroup's shape for the gate/reference verbs,
+// which return no correlation of their own.
+func gateSyncGroup(t *testing.T, s *store.Store, host, subject, kind string) store.ExperimentSource {
+	t.Helper()
+	return labBacklogSource(t, s, host, subject, kind)
+}
+
+// The gate family crosses the wire as retained facts: a Repo-keyed
+// declaration lands under the paired Repo (subject remapped, never a
+// second opinion), a close satisfies the receiver's gate_state, an
+// exemption repair lands exempt, and a dismissal — stamped
+// integrationEffectActor on import — satisfies dismissalActorAllowed as
+// evidence rather than a local actor claim. Outbox stays empty throughout:
+// imported gate facts queue no delivery candidates.
+func TestSharedStoreGateFamilyRoundTrip(t *testing.T) {
+	f := newRelationFixture(t)
+
+	if err := writesurface.DeclareGate(labCtx, f.sa, f.a.repo, "sync-gate", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	declared := gateSyncGroup(t, f.sa, "A", f.a.repo, store.TypeGateDeclared)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.a.repo, store.TypeGateDeclared))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, declared.Actions[0].Event.ID, "integrated")
+	declarations, err := f.sb.GateDeclarations(labCtx, f.b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range declarations {
+		if d.Gate == "sync-gate" && d.Scale == store.ScaleStep {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("receiver declarations = %+v, want sync-gate@step", declarations)
+	}
+	// The stamped effect keys at the paired Repo, proving the subject remap.
+	for _, ev := range labEvents(t, f.sb) {
+		if ev.Type == store.TypeGateDeclared {
+			if ev.Subject != f.b.repo || ev.Repo != f.b.repo {
+				t.Fatalf("imported declaration subject/repo = %s/%s", ev.Subject, ev.Repo)
+			}
+		}
+	}
+
+	// A close before its declaration would wait; the declaration already
+	// landed, so this integrates and satisfies the receiver's gate_state.
+	if _, err := writesurface.CloseGate(labCtx, f.sa, store.ActorHuman, f.a.repo, "sync-gate", f.step1.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed := gateSyncGroup(t, f.sa, "A", f.step1.ID, store.TypeGateClosed)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.step1.ID, store.TypeGateClosed))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, closed.Actions[0].Event.ID, "integrated")
+	satisfied, err := f.sb.GateSatisfied(labCtx, f.b.repo, f.step1.ID, "sync-gate")
+	if err != nil || !satisfied {
+		t.Fatalf("receiver gate satisfaction = %v %v", satisfied, err)
+	}
+
+	// The exemption repair is the store verb's own event: it needs no
+	// Done lifecycle at the fold, only a live node at the declared scale.
+	if err := f.sa.RepairGateExemption(labCtx, f.a.repo, "sync-gate", f.step2.ID); err != nil {
+		t.Fatal(err)
+	}
+	repaired := gateSyncGroup(t, f.sa, "A", f.step2.ID, store.TypeGateExemptionRepaired)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.step2.ID, store.TypeGateExemptionRepaired))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, repaired.Actions[0].Event.ID, "integrated")
+	exempt, err := f.sb.GateExempt(labCtx, f.b.repo, f.step2.ID, "sync-gate")
+	if err != nil || !exempt {
+		t.Fatalf("receiver exemption = %v %v", exempt, err)
+	}
+
+	// Dismissal needs a Done subject with the gate still open: step-02 is
+	// exempt and step-01 is closed, so a third step runs the whole arc.
+	step3, err := writesurface.CreateStep(labCtx, f.sa, store.ActorHuman, f.a.repo, "rel/"+f.stage.Locator, "Three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	birth3 := gateSyncGroup(t, f.sa, "A", step3.ID, store.TypeStepCreated)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, step3.ID, store.TypeStepCreated))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, birth3.Actions[0].Event.ID, "integrated")
+	step3Path := "rel/" + f.stage.Locator + "/" + step3.Locator
+	if _, err := writesurface.Start(labCtx, f.sa, store.ActorHuman, f.a.repo, step3Path); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, step3.ID, store.TypeStepStarted))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	if _, err := writesurface.Finish(labCtx, f.sa, store.ActorHuman, f.a.repo, step3Path); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, step3.ID, store.TypeStepFinished))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	labState(t, f.sb, step3.ID, store.Done)
+	if _, err := writesurface.DismissGate(labCtx, f.sa, store.ActorHuman, f.a.repo, "sync-gate", step3.ID, "gate superseded"); err != nil {
+		t.Fatal(err)
+	}
+	dismissed := gateSyncGroup(t, f.sa, "A", step3.ID, store.TypeGateDismissed)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, step3.ID, store.TypeGateDismissed))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	d := sourceDecision(t, f.sb, dismissed.Actions[0].Event.ID, "integrated")
+	if len(d.Effects) != 1 {
+		t.Fatalf("dismissal effects = %v", d.Effects)
+	}
+	// The imported dismissal is stamped integrationEffectActor — the actor
+	// admission that lets the fold accept retained source evidence.
+	var sawDismiss bool
+	for _, ev := range labEvents(t, f.sb) {
+		if ev.Type == store.TypeGateDismissed && ev.ID == d.Effects[0] {
+			sawDismiss = true
+			if ev.Actor != store.SystemActor("shared-store-experiment") {
+				t.Fatalf("imported dismissal actor = %s", ev.Actor)
+			}
+		}
+	}
+	if !sawDismiss {
+		t.Fatal("no imported gate.dismissed effect on the receiver")
+	}
+	satisfied, err = f.sb.GateSatisfied(labCtx, f.b.repo, step3.ID, "sync-gate")
+	if err != nil || !satisfied {
+		t.Fatalf("receiver dismissal satisfaction = %v %v", satisfied, err)
+	}
+	if outbox, err := f.sb.Outbox(labCtx, f.b.repo); err != nil || len(outbox) != 0 {
+		t.Fatalf("imported gate facts queued candidates: %+v %v", outbox, err)
+	}
+	if err := f.sb.Rebuild(labCtx); err != nil {
+		t.Fatal(err)
+	}
+	if satisfied, err = f.sb.GateSatisfied(labCtx, f.b.repo, step3.ID, "sync-gate"); err != nil || !satisfied {
+		t.Fatalf("post-rebuild dismissal satisfaction = %v %v", satisfied, err)
+	}
+}
+
+// referenceSyncGroup exports the committed group that produced subject's
+// newest event of kind — sourceGroup's shape for the bind verbs.
+func referenceSyncGroup(t *testing.T, s *store.Store, host, subject, kind string) store.ExperimentSource {
+	t.Helper()
+	return labBacklogSource(t, s, host, subject, kind)
+}
+
+// matterRefs reads one Matter's active tracker references on s.
+func matterRefs(t *testing.T, s *store.Store, matter string) []string {
+	t.Helper()
+	refs, err := s.TrackerReferences(labCtx, matter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return refs
+}
+
+// The reference family crosses as inert membership facts: add, remove and
+// rebind land in tracker_references under the shared Matter identity, the
+// fold's revive-on-readd path works, retries and rebuilds are stable, and —
+// the delivery-authority half of the claim — every imported reference event
+// queues zero outbox rows even with tracker push configured on the receiver.
+func TestSharedStoreReferenceFamilyRoundTrip(t *testing.T) {
+	f := newRelationFixture(t)
+	// Give the receiver delivery-bearing config so a leaked candidate would
+	// be visible: imported refs must stay inert data, never queued work.
+	if _, err := f.sb.SetTrackerPushLevel(labCtx, f.b.repo, string(store.TrackerPushBoundary)); err != nil {
+		t.Fatal(err)
+	}
+	outboxBefore := labOutboxRows(t, f.b.db, f.b.repo)
+
+	if _, err := writesurface.Bind(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.Locator, "fixture:GH-1"); err != nil {
+		t.Fatal(err)
+	}
+	added := referenceSyncGroup(t, f.sa, "A", f.matter.ID, store.TypeReferenceAdded)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.matter.ID, store.TypeReferenceAdded))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, added.Actions[0].Event.ID, "integrated")
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:GH-1"}) {
+		t.Fatalf("receiver refs = %v", refs)
+	}
+	if got := labOutboxRows(t, f.b.db, f.b.repo); got != outboxBefore {
+		t.Fatalf("imported reference.added queued %d outbox rows", got-outboxBefore)
+	}
+
+	// Rebind replaces the membership atomically: From tombstones, To is
+	// born under the same event.
+	if _, err := writesurface.Rebind(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.Locator, "fixture:GH-1", "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	rebound := referenceSyncGroup(t, f.sa, "A", f.matter.ID, store.TypeReferenceRebound)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.matter.ID, store.TypeReferenceRebound))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, rebound.Actions[0].Event.ID, "integrated")
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:BB-7"}) {
+		t.Fatalf("receiver refs after rebind = %v", refs)
+	}
+
+	// Unbind tombstones the membership; a later re-add revives the same
+	// row rather than duplicating it.
+	if _, err := writesurface.Unbind(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.Locator, "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	removed := referenceSyncGroup(t, f.sa, "A", f.matter.ID, store.TypeReferenceRemoved)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.matter.ID, store.TypeReferenceRemoved))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, removed.Actions[0].Event.ID, "integrated")
+	if refs := matterRefs(t, f.sb, f.matter.ID); len(refs) != 0 {
+		t.Fatalf("receiver refs after unbind = %v", refs)
+	}
+	if _, err := writesurface.Bind(labCtx, f.sa, store.ActorHuman, f.a.repo, f.matter.Locator, "fixture:BB-7"); err != nil {
+		t.Fatal(err)
+	}
+	reader := referenceSyncGroup(t, f.sa, "A", f.matter.ID, store.TypeReferenceAdded)
+	exchangePass(t, f.sa, f.ca, f.ba, sourceGroup(t, f.sa, f.matter.ID, store.TypeReferenceAdded))
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, reader.Actions[0].Event.ID, "integrated")
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:BB-7"}) {
+		t.Fatalf("receiver refs after re-add = %v", refs)
+	}
+	if got := labOutboxRows(t, f.b.db, f.b.repo); got != outboxBefore {
+		t.Fatalf("imported reference events queued %d outbox rows", got-outboxBefore)
+	}
+	if err := f.sb.Rebuild(labCtx); err != nil {
+		t.Fatal(err)
+	}
+	if refs := matterRefs(t, f.sb, f.matter.ID); !slices.Equal(refs, []string{"fixture:BB-7"}) {
+		t.Fatalf("post-rebuild receiver refs = %v", refs)
+	}
+}
+
+// Reference and gate facts wait on evidence that can still land — a bind
+// ahead of its Matter's birth, a close ahead of its declaration, a
+// dismissal ahead of Done — then integrate on the pass that lands it.
+// Conflicts stay inspectable: a second satisfaction of the same (node,
+// gate) and a locally-bound ref on another Matter are never merged.
+func TestSharedStoreRelationsPendingAndConflicts(t *testing.T) {
+	f := newRelationFixture(t)
+
+	// A bind whose Matter has not arrived waits by name, then integrates
+	// once the birth group lands.
+	late, err := writesurface.CreateMatter(labCtx, f.sa, store.ActorHuman, f.a.repo, "Late", "late-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Bind(labCtx, f.sa, store.ActorHuman, f.a.repo, late.Locator, "fixture:GH-9"); err != nil {
+		t.Fatal(err)
+	}
+	bindGroup := sourceGroup(t, f.sa, late.ID, store.TypeReferenceAdded)
+	birthGroup := sourceGroup(t, f.sa, late.ID, store.TypeMatterCreated)
+	exchangePass(t, f.sa, f.ca, f.ba, bindGroup)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	d := sourceDecision(t, f.sb, bindGroup, "pending")
+	if !strings.Contains(d.Reason, "awaiting") {
+		t.Fatalf("bind-before-birth reason = %q", d.Reason)
+	}
+	exchangePass(t, f.sa, f.ca, f.ba, birthGroup)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, bindGroup, "integrated")
+	if refs := matterRefs(t, f.sb, late.ID); !slices.Equal(refs, []string{"fixture:GH-9"}) {
+		t.Fatalf("late matter refs = %v", refs)
+	}
+
+	// A close whose declaration has not been sent yet waits by name; once
+	// the declaration group lands the close integrates on the next pass.
+	if err := writesurface.DeclareGate(labCtx, f.sa, f.a.repo, "late-gate", store.ScaleStep); err != nil {
+		t.Fatal(err)
+	}
+	lateDecl := sourceGroup(t, f.sa, f.a.repo, store.TypeGateDeclared)
+	if _, err := writesurface.CloseGate(labCtx, f.sa, store.ActorHuman, f.a.repo, "late-gate", f.step1.ID); err != nil {
+		t.Fatal(err)
+	}
+	lateClose := sourceGroup(t, f.sa, f.step1.ID, store.TypeGateClosed)
+	exchangePass(t, f.sa, f.ca, f.ba, lateClose)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	d = sourceDecision(t, f.sb, lateClose, "pending")
+	if !strings.Contains(d.Reason, "awaiting") {
+		t.Fatalf("close-before-declare reason = %q", d.Reason)
+	}
+	exchangePass(t, f.sa, f.ca, f.ba, lateDecl)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, lateDecl, "integrated")
+	exchangePass(t, f.sb, f.cb, f.bb)
+	sourceDecision(t, f.sb, lateClose, "integrated")
+	satisfied, err := f.sb.GateSatisfied(labCtx, f.b.repo, f.step1.ID, "late-gate")
+	if err != nil || !satisfied {
+		t.Fatalf("late gate satisfaction = %v %v", satisfied, err)
+	}
+
+	// A second satisfaction of the same (node, gate) is a retained
+	// conflict, never a merge: the receiver closes late-gate on step-02
+	// locally while the sender closes it there too — each side's claim is
+	// valid where written and together they diverge on one (node, gate)
+	// slot.
+	if _, err := writesurface.CloseGate(labCtx, f.sb, store.ActorHuman, f.b.repo, "late-gate", f.step2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.CloseGate(labCtx, f.sa, store.ActorHuman, f.a.repo, "late-gate", f.step2.ID); err != nil {
+		t.Fatal(err)
+	}
+	raceClose := sourceGroup(t, f.sa, f.step2.ID, store.TypeGateClosed)
+	exchangePass(t, f.sa, f.ca, f.ba, raceClose)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	d = sourceDecision(t, f.sb, raceClose, "conflict")
+	if !strings.Contains(d.Reason, "already satisfied") {
+		t.Fatalf("double-satisfaction reason = %q", d.Reason)
+	}
+
+	// A ref the receiver bound locally to a different Matter is divergent
+	// occupancy: the sender's bind of the same ref to the synced Matter
+	// conflicts rather than silently widening the aggregate. The local bind
+	// is committed first so it is still local-only when the synced claim
+	// evaluates; it uploads on the same pass and conflicts symmetrically,
+	// which is the honest outcome for genuinely divergent bindings.
+	if _, err := writesurface.Bind(labCtx, f.sb, store.ActorHuman, f.b.repo, f.matter.Locator, "fixture:OCC"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Bind(labCtx, f.sa, store.ActorHuman, f.a.repo, late.Locator, "fixture:OCC"); err != nil {
+		t.Fatal(err)
+	}
+	occGroup := sourceGroup(t, f.sa, late.ID, store.TypeReferenceAdded)
+	exchangePass(t, f.sa, f.ca, f.ba, occGroup)
+	exchangePass(t, f.sb, f.cb, f.bb)
+	d = sourceDecision(t, f.sb, occGroup, "conflict")
+	if !strings.Contains(d.Reason, "occupied") {
+		t.Fatalf("occupied-reference reason = %q", d.Reason)
+	}
+}
