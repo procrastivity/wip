@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"reflect"
 )
 
@@ -16,6 +17,57 @@ func experimentPortableMember(typ string) bool {
 		return true
 	}
 	return false
+}
+
+// experimentExchangePortable is the single per-member predicate behind
+// ExchangeStatus eligibility and portable derivatives: the event must be a
+// repo-scoped original of an admitted family — exactly the bounded slice
+// experimentClassifyPortable and experimentClassify can project on a bound
+// target. Batch/execution-scoped events carry no Repo, generated integration
+// effects are never originals, and every unadmitted family stays local. The
+// whitelist lives only here and in the import classifiers, never in a second
+// list that could drift.
+func experimentExchangePortable(ev Event, repo string) bool {
+	if ev.Repo != repo || ev.Actor == integrationEffectActor {
+		return false
+	}
+	switch ev.Type {
+	case TypeMatterCreated, TypeMatterStarted, TypeStageCreated, TypeStageStarted,
+		TypeStepCreated, TypeStepStarted:
+		return true
+	case TypeContentCreated:
+		var p ContentWritten
+		return json.Unmarshal(ev.Payload, &p) == nil && p.Kind == KindBrief && p.Bytes != nil && p.BlobRef == ""
+	}
+	return false
+}
+
+// experimentUnitMask reports which members of one committed chain form its
+// portable unit. A member qualifies only when the member itself is portable
+// AND every in-group causal ancestor qualifies: the version-1 envelope's
+// causation chain must stay inside the unit, so portable facts are never a
+// truncation that leaves a dangling cause. The origin member must qualify for
+// any unit to exist, which also means a non-portable origin condemns the
+// whole group to local-only inventory.
+func experimentUnitMask(events []Event, repo string) []bool {
+	mask := make([]bool, len(events))
+	index := make(map[string]int, len(events))
+	for i, ev := range events {
+		index[ev.ID] = i
+	}
+	for i, ev := range events {
+		if !experimentExchangePortable(ev, repo) {
+			continue
+		}
+		if i > 0 {
+			cause, ok := index[ev.Causation]
+			if !ok || cause >= i || !mask[cause] {
+				continue
+			}
+		}
+		mask[i] = true
+	}
+	return mask
 }
 
 // Portable members validate against candidate state: experimentEvaluate folds

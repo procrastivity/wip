@@ -263,6 +263,14 @@ func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group str
 		if err != nil {
 			return ExchangeChange{}, err
 		}
+		// A mixed command group uploads only its portable unit, separately
+		// identified as a derivative of the raw group. A group with no
+		// portable member keeps its raw source: explicit uploads retain
+		// unsupported work as receiver-side evidence exactly as before, and
+		// automatic eligibility is ExchangeStatus's decision, not this one's.
+		if unit, portable := experimentPortableUnit(source, b.LocalRepo); portable {
+			source = unit
+		}
 		for _, a := range source.Actions {
 			if a.Event.Repo != b.LocalRepo {
 				return ExchangeChange{}, fmt.Errorf("exchange: source outside binding")
@@ -326,6 +334,9 @@ func (s *Store) receiveExchangePage(ctx context.Context, b ExchangeBinding, afte
 			return err
 		}
 		if source.Host != change.InstallationID || len(source.Actions) == 0 || source.Actions[0].Event.ID != change.GroupID {
+			return fmt.Errorf("exchange: invalid envelope")
+		}
+		if source.Derivative != nil && source.Derivative.Parent != change.GroupID {
 			return fmt.Errorf("exchange: invalid envelope")
 		}
 		for _, a := range source.Actions {

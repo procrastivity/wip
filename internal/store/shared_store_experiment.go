@@ -36,6 +36,21 @@ type ExperimentBaseline struct {
 type ExperimentSource struct {
 	Host    string
 	Actions []ExperimentAction
+	// Derivative is nil for a complete raw group. When set, this source is the
+	// separately identified portable unit of the raw group Parent names, never
+	// a truncation of it: Actions are exactly the portable members and every
+	// other member is retained under Omitted as evidence only.
+	Derivative *ExperimentDerivative `json:",omitempty"`
+}
+
+// ExperimentDerivative marks an exported source as the portable unit of one
+// raw command group. Parent is that group's identity — the shared origin
+// event — and Omitted retains every non-portable member's untouched
+// ExperimentAction: inspectable evidence, never classified and never an
+// effect. The unit's atomicity covers Actions alone.
+type ExperimentDerivative struct {
+	Parent  string
+	Omitted []ExperimentAction `json:",omitempty"`
 }
 
 // ExperimentDecision links retained source activity to local representation.
@@ -281,6 +296,47 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 	return out, tx.Commit()
 }
 
+// experimentPortableUnit projects one complete exported group into the
+// portable unit a paired exchange may carry. A fully portable group returns
+// unchanged; a mixed group returns its separately identified derivative —
+// portable members as Actions, the rest retained under Derivative.Omitted.
+// ok=false means no portable unit exists: the caller keeps the raw source,
+// which explicit uploads retain as receiver-side evidence while
+// ExchangeStatus keeps the group out of automatic PendingUpload. The
+// projection is deterministic, so exchange_exports retries emit identical
+// bytes and receivers dedup on the same source identity.
+func experimentPortableUnit(source ExperimentSource, repo string) (ExperimentSource, bool) {
+	if len(source.Actions) == 0 {
+		return source, false
+	}
+	events := make([]Event, len(source.Actions))
+	for i, a := range source.Actions {
+		events[i] = a.Event
+	}
+	mask := experimentUnitMask(events, repo)
+	unit := 0
+	for _, member := range mask {
+		if member {
+			unit++
+		}
+	}
+	if unit == 0 {
+		return source, false
+	}
+	if unit == len(mask) {
+		return source, true
+	}
+	out := ExperimentSource{Host: source.Host, Derivative: &ExperimentDerivative{Parent: source.Actions[0].Event.Correlation}}
+	for i, a := range source.Actions {
+		if mask[i] {
+			out.Actions = append(out.Actions, a)
+		} else {
+			out.Derivative.Omitted = append(out.Derivative.Omitted, a)
+		}
+	}
+	return out, true
+}
+
 // ExperimentImport retains even unsupported content and conflicted groups.
 // Only starts on explicitly paired objects can have effects in this lab.
 // Decisions and effects share one writer reservation and one commit.
@@ -311,6 +367,32 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 		}
 		seen[e.ID] = true
 	}
+	// A derivative is the sender's explicit statement that only portable
+	// members carry syncable facts: its Actions stay a closed chain and every
+	// omitted member is retained evidence whose links still name members of
+	// the same raw group. Omitted members are never classified and never get
+	// effects; the unit's atomicity covers Actions alone.
+	if d := source.Derivative; d != nil {
+		if d.Parent != group {
+			return ExperimentDecision{}, fmt.Errorf("experiment: derivative does not name its source group")
+		}
+		claimed := make(map[string]bool, len(seen)+len(d.Omitted))
+		for id := range seen {
+			claimed[id] = true
+		}
+		for _, a := range d.Omitted {
+			e := a.Event
+			if !IsIdentityShaped(e.ID) || claimed[e.ID] || e.Correlation != group {
+				return ExperimentDecision{}, fmt.Errorf("experiment: malformed derivative evidence")
+			}
+			claimed[e.ID] = true
+		}
+		for _, a := range d.Omitted {
+			if e := a.Event; e.Causation == e.ID || !claimed[e.Causation] {
+				return ExperimentDecision{}, fmt.Errorf("experiment: malformed derivative evidence")
+			}
+		}
+	}
 	raw, err := json.Marshal(source)
 	if err != nil {
 		return ExperimentDecision{}, err
@@ -337,7 +419,11 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 	if err != nil {
 		return ExperimentDecision{}, err
 	}
-	for _, a := range source.Actions {
+	claims := append([]ExperimentAction{}, source.Actions...)
+	if source.Derivative != nil {
+		claims = append(claims, source.Derivative.Omitted...)
+	}
+	for _, a := range claims {
 		native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
 		if err != nil {
 			return ExperimentDecision{}, err

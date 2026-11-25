@@ -4,17 +4,21 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,6 +223,62 @@ func sourceDecision(t *testing.T, s *store.Store, group, want string) store.Expe
 	}
 	t.Fatal("missing decision", group)
 	return store.ExperimentDecision{}
+}
+
+// labExchangeFeed is a minimal stateful exchange endpoint: it stores uploaded
+// changes under contiguous server sequences and serves committed pages, so
+// portable-derivative coverage exercises the real version-1 wire contract
+// without a Laravel fixture.
+type labExchangeFeed struct {
+	mu      sync.Mutex
+	changes []store.ExchangeChange
+}
+
+func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
+	t.Helper()
+	feed := &labExchangeFeed{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		feed.mu.Lock()
+		defer feed.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/origins"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/changes"):
+			var body struct {
+				Changes []store.ExchangeChange `json:"changes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Changes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			for _, change := range body.Changes {
+				change.Sequence = int64(len(feed.changes)) + 1
+				feed.changes = append(feed.changes, change)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/changes"):
+			after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+			var page struct {
+				Changes []store.ExchangeChange `json:"changes"`
+				Cursor  int64                  `json:"cursor"`
+			}
+			for _, change := range feed.changes {
+				if change.Sequence > after {
+					page.Changes = append(page.Changes, change)
+					page.Cursor = change.Sequence
+				}
+			}
+			if len(page.Changes) == 0 {
+				page.Cursor = after
+			}
+			_ = json.NewEncoder(w).Encode(page)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return feed, server.URL + "/api/organizations/org/repos/repo"
 }
 
 // The response is lost only AFTER the real Laravel request commits. The same
@@ -951,4 +1011,101 @@ func TestLaravelExchangeCommittedPages(t *testing.T) {
 		t.Fatal("page replay duplicated effects")
 	}
 	t.Log("103 actual Go-created Matters crossed 100+3 committed feed pages, exact source bytes retained, mapped once into the other native Repo")
+}
+
+// A mixed command group crosses the real exchange as its portable unit: the
+// committed feed carries the separately identified derivative, the omitted
+// members stay evidence, and the receiver integrates exactly the unit.
+func TestLaravelExchangePortableDerivative(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}, Token: f.Member}
+	var mid, sid, tid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("deriv brief"))
+		if err != nil {
+			return nil, err
+		}
+		brief.Cause = 0
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Deriv", Locator: "deriv", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: "v"}, Cause: 0},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}, Cause: 0},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
+			brief,
+		}, nil
+	})
+	mixed := events[0].Correlation
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	// The committed feed carries the separately identified portable unit; the
+	// raw mixed group itself is never the envelope.
+	var page struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes?after=0", f.Member, nil, 200), &page); err != nil {
+		t.Fatal(err)
+	}
+	var unit store.ExperimentSource
+	found := false
+	for _, change := range page.Changes {
+		if change.GroupID == mixed {
+			found = true
+			if err := json.Unmarshal([]byte(change.Source), &unit); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !found || unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+		t.Fatalf("Laravel did not retain the portable-unit envelope: %+v", unit)
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, cb, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before+3 {
+		t.Fatal("receiver did not integrate exactly the portable unit")
+	}
+	m, err := sb.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Repo != b.repo || m.Locator != "deriv" {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := sb.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	brief, err := sb.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(brief) != "deriv brief" {
+		t.Fatalf("brief = %q %v", brief, err)
+	}
+	if _, err := sb.Node(labCtx, tid); err == nil {
+		t.Fatal("portable-typed member with a non-portable in-group cause integrated")
+	}
+	d := sourceDecision(t, sb, mixed, "integrated")
+	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
+		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
+	}
+	var sawConfig, sawStep bool
+	for _, a := range d.Source.Derivative.Omitted {
+		sawConfig = sawConfig || a.Event.Type == store.TypeConfigSet
+		sawStep = sawStep || a.Event.Type == store.TypeStepCreated
+	}
+	if !sawConfig || !sawStep {
+		t.Fatal("omitted evidence incomplete")
+	}
+	labRebuild(t, sb)
+	t.Log("mixed command crossed real Laravel as its identified portable unit; omitted members retained as evidence only")
 }

@@ -7,10 +7,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1113,4 +1115,281 @@ func TestSharedStorePortableBirthRequiresBoundTarget(t *testing.T) {
 	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
 		t.Fatal("unbound import applied bounded births", d)
 	}
+}
+
+// labCommitMixed commits drafts verbatim — Cause values are the fixture's own —
+// so a test controls exactly which in-group member each event was caused by.
+func labCommitMixed(t *testing.T, s *store.Store, repo string, decide func(context.Context, *store.Tx) ([]store.Draft, error)) []store.Event {
+	t.Helper()
+	events, err := s.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: store.Env{Repo: repo}}, decide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+// A mixed command group uploads only its portable unit: portable members stay
+// Actions of an explicitly identified derivative of the raw group, every other
+// member — including a portable-typed member whose in-group cause is not
+// portable — is retained under Omitted as untouched evidence, and the receiver
+// integrates exactly the unit atomically through the real version-1 wire.
+func TestSharedStorePortableDerivativeExchange(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	ba, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	var mid, sid, tid, nid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("deriv brief"))
+		if err != nil {
+			return nil, err
+		}
+		brief.Cause = 0
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Deriv", Locator: "deriv", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: "v"}, Cause: 0},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}, Cause: 0},
+			// Portable type, but its in-group cause is the non-portable member:
+			// it is retained as evidence, never silently dropped or admitted.
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
+			brief,
+		}, nil
+	})
+	mixed := events[0].Correlation
+	events = labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		nid = tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "local.key", Value: "v"}},
+			{Type: store.TypeMatterCreated, Subject: nid, Payload: store.NodeBirth{Title: "Local", Locator: "local-only", SortKey: 0}, Cause: 0},
+		}, nil
+	})
+	local := events[0].Correlation
+	status, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(status.PendingUpload, mixed) || !reflect.DeepEqual(status.PendingUpload, []string{mixed}) {
+		t.Fatalf("mixed group is not the only upload candidate: %+v", status.PendingUpload)
+	}
+	if !slices.Contains(status.Unsupported, local) {
+		t.Fatalf("non-portable group not retained as local inventory: %+v", status.Unsupported)
+	}
+	saEvents := len(labEvents(t, sa))
+	if _, err := sa.RunExchange(labCtx, client, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 1 {
+		t.Fatalf("feed received %d changes, want exactly the mixed derivative", len(feed.changes))
+	}
+	wire := feed.changes[0]
+	if wire.Version != 1 || wire.GroupID != mixed || wire.SourceRepoID != a.repo {
+		t.Fatalf("envelope identity = %+v", wire)
+	}
+	var unit store.ExperimentSource
+	if err := json.Unmarshal([]byte(wire.Source), &unit); err != nil {
+		t.Fatal(err)
+	}
+	if unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+		t.Fatalf("wire source is not the identified portable unit: %+v", unit)
+	}
+	var actionTypes, omittedTypes []string
+	for _, a := range unit.Actions {
+		actionTypes = append(actionTypes, a.Event.Type)
+	}
+	for _, a := range unit.Derivative.Omitted {
+		omittedTypes = append(omittedTypes, a.Event.Type)
+	}
+	if !reflect.DeepEqual(actionTypes, []string{store.TypeMatterCreated, store.TypeStageCreated, store.TypeContentCreated}) ||
+		!reflect.DeepEqual(omittedTypes, []string{store.TypeConfigSet, store.TypeStepCreated}) {
+		t.Fatalf("unit actions=%v omitted=%v", actionTypes, omittedTypes)
+	}
+	// A group with no portable member keeps its raw source on explicit upload:
+	// the receiver retains it as evidence and never applies it, exactly as an
+	// unsupported family always has. Automatic eligibility is unchanged.
+	if err := sa.ExchangePass(labCtx, client, ba.Binding, []string{local}); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 2 {
+		t.Fatalf("feed received %d changes, want the derivative plus the raw local group", len(feed.changes))
+	}
+	done, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil || !slices.Contains(done.Retained, mixed) || slices.Contains(done.PendingUpload, mixed) {
+		t.Fatal("uploaded derivative was not acknowledged as retained", done, err)
+	}
+
+	sbEvents := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 2 {
+		t.Fatalf("receiver pass disturbed the feed: %d changes", len(feed.changes))
+	}
+	if got := len(labEvents(t, sb)); got != sbEvents+3 {
+		t.Fatalf("receiver events %d -> %d, want exactly the three portable effects", sbEvents, got)
+	}
+	m, err := sb.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Repo != b.repo || m.Locator != "deriv" {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := sb.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid || sn.Matter != mid {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	brief, err := sb.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(brief) != "deriv brief" {
+		t.Fatalf("brief = %q %v", brief, err)
+	}
+	if _, err := sb.Node(labCtx, tid); err == nil {
+		t.Fatal("portable-typed member with a non-portable in-group cause integrated")
+	}
+	if _, err := sb.Node(labCtx, nid); err == nil {
+		t.Fatal("local-only group member arrived")
+	}
+	if d := sourceDecision(t, sb, local, "conflict"); len(d.Effects) != 0 {
+		t.Fatalf("raw non-portable group produced effects: %+v", d)
+	}
+	if value, found, err := sb.Config(labCtx, b.repo, "deriv.key"); err != nil || found || value != "" {
+		t.Fatalf("omitted config.set produced an effect: %q %v %v", value, found, err)
+	}
+	d := sourceDecision(t, sb, mixed, "integrated")
+	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
+		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
+	}
+	var sawConfig, sawStep bool
+	for _, a := range d.Source.Derivative.Omitted {
+		switch a.Event.Type {
+		case store.TypeConfigSet:
+			sawConfig = true
+			var p store.ConfigSet
+			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Key != "deriv.key" || p.Value != "v" {
+				t.Fatalf("omitted config evidence altered: %s", a.Event.Payload)
+			}
+		case store.TypeStepCreated:
+			sawStep = true
+			var p store.NodeBirth
+			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Parent != sid {
+				t.Fatalf("omitted step evidence altered: %s", a.Event.Payload)
+			}
+		}
+	}
+	if !sawConfig || !sawStep {
+		t.Fatal("omitted evidence incomplete")
+	}
+	// Malformed derivatives are refused before any retention: the parent must
+	// name the raw group and every omitted link must stay inside it.
+	badParent := unit
+	badParent.Derivative = &store.ExperimentDerivative{Parent: "not-the-group", Omitted: unit.Derivative.Omitted}
+	if _, err := sb.ExperimentImportBound(labCtx, badParent, b.repo); err == nil || !strings.Contains(err.Error(), "derivative") {
+		t.Fatal("derivative naming a foreign parent imported", err)
+	}
+	badCause := unit
+	omitted := append([]store.ExperimentAction{}, unit.Derivative.Omitted...)
+	omitted[0].Event.Causation = "dangling"
+	badCause.Derivative = &store.ExperimentDerivative{Parent: mixed, Omitted: omitted}
+	if _, err := sb.ExperimentImportBound(labCtx, badCause, b.repo); err == nil || !strings.Contains(err.Error(), "malformed derivative") {
+		t.Fatal("omitted member with a dangling cause imported", err)
+	}
+	// The verified self-echo on the origin store maps back to native ids and
+	// appends nothing; the raw source evidence stays exactly as exported.
+	echo := sourceDecision(t, sa, mixed, "integrated")
+	if len(echo.Effects) != 3 {
+		t.Fatalf("self-echo effects = %v", echo.Effects)
+	}
+	for i, effect := range echo.Effects {
+		if effect != unit.Actions[i].Event.ID {
+			t.Fatalf("echo effect %d = %s, want native %s", i, effect, unit.Actions[i].Event.ID)
+		}
+	}
+	if len(labEvents(t, sa)) != saEvents {
+		t.Fatal("export or echo appended native events")
+	}
+	// An exact wire retry is inert: the cursor already passed the committed
+	// page and re-import returns the retained decision.
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("wire retry duplicated effects")
+	}
+	if again := sourceDecision(t, sb, mixed, "integrated"); !reflect.DeepEqual(d, again) {
+		t.Fatal("retry changed the retained decision", again)
+	}
+	labRebuild(t, sb)
+}
+
+// The portable unit is atomic on its own: when a later portable member
+// conflicts, the earlier portable effect rolls back with it. Omitted evidence
+// changes nothing about unit atomicity, and the retained conflict stays put
+// across an explicit recheck.
+func TestSharedStorePortableDerivativeConflictAtomic(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	if _, err := sa.PairExchange(labCtx, a.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	var xid, yid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		xid, yid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: xid, Payload: store.NodeBirth{Title: "Dup A", Locator: "dup", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "dup.key", Value: "v"}, Cause: 0},
+			// Same repo-scoped Matter locator as its own group sibling: legal in
+			// the raw command, but the second portable member conflicts once the
+			// first member's effect occupies the address.
+			{Type: store.TypeMatterCreated, Subject: yid, Payload: store.NodeBirth{Title: "Dup B", Locator: "dup", SortKey: 1}, Cause: 0},
+		}, nil
+	})
+	conflict := events[0].Correlation
+	if _, err := sa.RunExchange(labCtx, client, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 1 {
+		t.Fatalf("feed received %d changes, want the conflict derivative", len(feed.changes))
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("conflicted unit appended integration effects")
+	}
+	d := sourceDecision(t, sb, conflict, "conflict")
+	if len(d.Effects) != 0 {
+		t.Fatalf("conflicted unit retained effects: %+v", d.Effects)
+	}
+	for _, id := range []string{xid, yid} {
+		if _, err := sb.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back portable member %s still projected", id)
+		}
+	}
+	// The retained conflict is stable: reconsidering the same immutable source
+	// reaches the same atomic refusal rather than integrating partially.
+	again, err := sb.ExperimentRecheckBound(labCtx, b.repo, conflict)
+	if err != nil || again.Disposition != "conflict" || len(again.Effects) != 0 {
+		t.Fatalf("recheck drifted: %+v %v", again, err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("recheck appended effects")
+	}
+	labRebuild(t, sb)
 }

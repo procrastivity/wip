@@ -186,8 +186,10 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			}
 		}
 	}
-	// Scan entire command groups, not individual eligible actions. Mixed or
-	// unsupported groups must never be silently truncated into new originals.
+	// Scan entire command groups. Eligibility is per member, not per group: a
+	// mixed command still uploads its portable unit as an explicitly identified
+	// derivative, while a group with no portable member stays local inventory.
+	// Nothing is ever silently truncated into new originals.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT correlation FROM events WHERE repo=? ORDER BY correlation`, repo)
 	if err != nil {
 		return out, err
@@ -214,19 +216,17 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 	// An unpaired preview keeps the latest-group boundary, so every group is
 	// inventory and nothing counts as outgoing work.
 	type groupScan struct {
-		events    []Event
-		effect    bool
-		supported bool
+		unit   []Event // portable-unit members; empty when the group cannot sync
+		effect bool
 	}
 	scans := make([]groupScan, len(groups))
-	portable := map[string]bool{}
+	unitEvents := map[string]bool{}
 	if out.Paired {
 		for i, group := range groups {
 			events, err := s.EventsOfChain(ctx, group)
 			if err != nil {
 				return out, err
 			}
-			scans[i].events = events
 			var effect int
 			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events e JOIN experiment_effects x ON x.id=e.id WHERE e.correlation=?`, group).Scan(&effect); err != nil {
 				return out, err
@@ -235,25 +235,11 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			if scans[i].effect {
 				continue
 			}
-			supported := true
-			for _, ev := range events {
-				if ev.Repo != repo || ev.Actor == integrationEffectActor {
-					supported = false
+			for j, portable := range experimentUnitMask(events, repo) {
+				if portable {
+					scans[i].unit = append(scans[i].unit, events[j])
+					unitEvents[events[j].ID] = true
 				}
-				switch ev.Type {
-				case TypeMatterCreated, TypeMatterStarted, TypeStageCreated, TypeStageStarted, TypeStepCreated, TypeStepStarted:
-				case TypeContentCreated:
-					var p ContentWritten
-					if json.Unmarshal(ev.Payload, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" {
-						supported = false
-					}
-				default:
-					supported = false
-				}
-			}
-			scans[i].supported = supported
-			if supported {
-				portable[group] = true
 			}
 		}
 	}
@@ -268,13 +254,13 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 		if scan.effect {
 			continue
 		}
-		for _, ev := range scan.events {
+		for _, ev := range scan.unit {
 			var prior, priorGroup string
 			err := s.db.QueryRowContext(ctx, `SELECT id,correlation FROM events WHERE subject=? AND id<? ORDER BY id DESC LIMIT 1`, ev.Subject, ev.ID).Scan(&prior, &priorGroup)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return out, err
 			}
-			if prior == "" || priorGroup == group || portable[priorGroup] {
+			if prior == "" || priorGroup == group || unitEvents[prior] {
 				continue
 			}
 			var effect int
@@ -288,7 +274,7 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			}
 			out.Dependencies = append(out.Dependencies, group+": depends on subject evidence "+prior+" in group "+priorGroup+" (not portable)")
 		}
-		if !scan.supported {
+		if len(scan.unit) == 0 {
 			out.Unsupported = append(out.Unsupported, group)
 			continue
 		}

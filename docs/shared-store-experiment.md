@@ -389,25 +389,67 @@ forgotten. A network failure does not pretend revocation succeeded.
 **History scope is project-wide for supported originals.** Pairing inventories
 existing command groups and pins their maximum correlation ID as the recorded
 boundary, which is retained pairing evidence rather than an export exclusion.
-Every supported unsynced original group is eligible regardless of age;
-unsupported families stay local and inspectable, and dependency findings report
-the prior event's own command group and whether that group is portable in the
-same scan. Applying pairing commits installation, immutable destination, active
-flag, boundary and local version together before origin-registration HTTP. A
-lost registration response can be retried with that same identity/boundary.
-Normal native Repo IDs, local clone/path associations and Git configuration are
-unchanged. Lookup deliberately avoids ordinary opportunistic remote adoption.
+Every unsynced original group with a portable unit is eligible regardless of
+age; groups without one stay local and inspectable, and dependency findings
+report the prior event's own command group and whether that event itself is
+portable in the same scan. Applying pairing commits installation, immutable
+destination, active flag, boundary and local version together before
+origin-registration HTTP. A lost registration response can be retried with
+that same identity/boundary. Normal native Repo IDs, local clone/path
+associations and Git configuration are unchanged. Lookup deliberately avoids
+ordinary opportunistic remote adoption.
 
 `RunExchange` selects complete original commands in that Repo, not
 caller-supplied IDs. It captures every eligible exact envelope before HTTP,
 uploads in local command order and acknowledges each group durably after the
 server accepts it. A lost response resends the same cached key/bytes. Concurrent
 new local work remains eligible for the next pass. Supported Matter births,
-inline create-once Briefs and starts use the existing bounded importer; generated
-effects and unrelated Repo/clone lookup work are never re-exported. Unsupported
-families stay usable locally and appear in the unsupported inventory. Required
+inline create-once Briefs and starts use the existing bounded importer; a mixed
+group crosses only as its portable unit, described below. Generated effects and
+unrelated Repo/clone lookup work are never re-exported. Unsupported families
+stay usable locally and appear in the unsupported inventory. Required
 supported births/Brief baselines are included in command order when inside the
 scope; old or unsupported dependencies are not silently synthesized.
+
+### Portable units for mixed command groups
+
+Eligibility is per member, not per group. `experimentExchangePortable` is the
+single predicate: a member qualifies only as a repo-scoped original of an
+admitted family — the same bounded slice the bound importer can project — and
+`experimentUnitMask` closes that set over in-group causation, so the version-1
+envelope's cause chain never dangles outside the unit. A portable member whose
+in-group causal ancestor is not portable is retained evidence, not a syncable
+fact, and a group with no portable member at all stays out of `PendingUpload`.
+
+`exchangeExport` projects each captured group through `experimentPortableUnit`
+before the envelope is sealed. A fully portable group exports unchanged. A
+mixed group exports a separately identified *derivative*: `Actions` are
+exactly the portable members in command order, `Derivative.Parent` names the
+raw command group (its shared correlation/origin event), and
+`Derivative.Omitted` retains every other member's untouched `ExperimentAction`
+— baseline, parent and ancestor evidence included — as inspectable proof,
+never classified and never an effect. The wire stays version 1:
+`group_id`, `source_repo_id` and the per-action Repo/causation checks are
+unchanged, and omitted members are evidence inside the source, not actions.
+A group with no portable member keeps its raw source on explicit upload, so
+unsupported families remain retained receiver-side conflicts exactly as
+before; only automatic eligibility changed.
+
+Identity mapping is unchanged: shared business IDs stay source IDs, local
+effects get fresh native IDs recorded in `experiment_actions.effect`, and
+private ledger keys stay scoped to the target Repo. Integration enters only
+through `ExperimentImportBound`/`ApplyExchangeInbox` → `experimentImport` →
+`experimentEvaluate`, whose savepoint makes the unit atomic on its own — a
+conflicting later member rolls back earlier portable effects, and omitted
+evidence cannot leak an effect. `Store.Rebuild` replays the same
+`applyEventVersion` folds, so maintained and rebuilt projections agree.
+Integration effects carry the fixed `system:shared-store-experiment` actor
+and no delivery authority; they are never re-exported as originals.
+
+Covered by `TestSharedStorePortableDerivativeExchange` and
+`TestSharedStorePortableDerivativeConflictAtomic` on a stateful fake feed,
+and `TestLaravelExchangePortableDerivative` against real Cloud retention and
+receiver integration.
 
 Offline `status` separates pending upload, server retention, downloaded/evaluated
 inbox entries, integrated groups, waiting groups and conflicts. Evaluation does
