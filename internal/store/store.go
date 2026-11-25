@@ -58,6 +58,18 @@ func SystemActor(source string) Actor { return Actor("system:" + source) }
 // migration stamps the identical token rather than retyping the source string.
 var ActorMigration = SystemActor("migration")
 
+// integrationEffectActor is the actor every portable-sync effect is stamped
+// with when the experiment import path (shared_store_experiment.go) appends
+// one. The fold reads it as the durable line between imported work and native
+// work: an effect projects the same facts — the node, its content, its edges,
+// its gates — but queues no delivery or execution authority, because authority
+// is the receiver's to earn and never travels inside an export. It is a var
+// for the same reason ActorMigration is: every stamp site and every fold guard
+// compares the identical token rather than retyping the source string. The
+// actor lives in the event envelope itself, so live application, Commit and
+// Rebuild all reach the same answer without a flag a caller could forget.
+var integrationEffectActor = SystemActor("shared-store-experiment")
+
 // Role returns the role name a `role:` actor claims, if it is one.
 func (a Actor) Role() (RoleName, bool) {
 	if len(a) > len("role:") && a[:len("role:")] == "role:" {

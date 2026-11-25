@@ -7,10 +7,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -239,6 +241,26 @@ func labRebuild(t *testing.T, s *store.Store) {
 	}
 }
 
+// labOpenExecution counts open Run/Dispatch/Role projection rows — the
+// active execution state an integration effect must never mint.
+func labOpenExecution(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	total := 0
+	for _, table := range []string{"runs", "dispatches", "roles"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE state='open'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		total += n
+	}
+	return total
+}
+
 func TestSharedStoreSameBaselineAndMissingEffect(t *testing.T) {
 	for _, both := range []bool{true, false} {
 		t.Run(fmt.Sprint("both=", both), func(t *testing.T) {
@@ -327,9 +349,19 @@ func TestSharedStoreSameBaselineAndMissingEffect(t *testing.T) {
 						t.Fatalf("reopen lost original time/host/group or effect mapping: %+v", activity)
 					}
 				}
+				// Only a native start queues a tracker candidate. When fluke's
+				// sole start arrived as an integration effect it projects the
+				// work but no delivery authority, so its outbox stays empty.
+				wantCandidates := 1
+				if !both && s == p.fluke {
+					wantCandidates = 0
+				}
 				outbox, err := reopened.Outbox(labCtx, p.repo)
-				if err != nil || len(outbox) != 1 || !strings.Contains(outbox[0].IdempotencyKey, ":state:fixture:T-1") {
-					t.Fatalf("expected one native tracker candidate, no duplicate on exchange: %+v %v", outbox, err)
+				if err != nil || len(outbox) != wantCandidates {
+					t.Fatalf("outbox = %+v (err %v), want %d native candidates", outbox, err, wantCandidates)
+				}
+				if wantCandidates == 1 && !strings.Contains(outbox[0].IdempotencyKey, ":state:fixture:T-1") {
+					t.Fatalf("expected the native tracker candidate, got %+v", outbox)
 				}
 				labState(t, reopened, p.matter, store.InProgress)
 				if _, err := writesurface.Start(labCtx, reopened, store.ActorHuman, p.repo, "shared"); err == nil {
@@ -670,4 +702,783 @@ func TestSharedStoreConcurrentSubprocesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("three companion imports and three CLI starts: one native start; long-lived/backwards-clock writer advanced safely")
+}
+
+func TestSharedStoreEffectProjectsWorkWithoutDeliveryAuthority(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	// The source store queued its candidate natively — the payload the
+	// receiver imports below carries a boundary that would queue here too.
+	native, err := p.hybrid.Outbox(labCtx, p.repo)
+	if err != nil || len(native) != 1 {
+		t.Fatalf("native start outbox = %+v (err %v), want one candidate", native, err)
+	}
+	d := labImport(t, p.fluke, h, "integrated")
+	if len(d.Effects) != 1 || d.Effects[0] == "" {
+		t.Fatalf("expected one integrated effect, got %+v", d)
+	}
+	labState(t, p.fluke, p.matter, store.InProgress)
+
+	// The effect kept the source's push-level snapshot verbatim; the fold
+	// guard — not a lost payload — is what kept it from queueing.
+	var transition store.Transition
+	seen := false
+	for _, e := range labEvents(t, p.fluke) {
+		if e.ID == d.Effects[0] {
+			if e.Actor != store.SystemActor("shared-store-experiment") {
+				t.Fatalf("effect actor = %q, want system:shared-store-experiment", e.Actor)
+			}
+			if err := json.Unmarshal(e.Payload, &transition); err != nil {
+				t.Fatal(err)
+			}
+			seen = true
+		}
+	}
+	if !seen || transition.TrackerPushLevel != store.TrackerPushBoundary {
+		t.Fatalf("effect payload = %+v (seen %v), want a boundary transition", transition, seen)
+	}
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("integration effect queued delivery candidates: %+v %v", outbox, err)
+	}
+	// The received effect mints no active execution state either: no open
+	// Run, Dispatch or Role exists for imported work.
+	if open := labOpenExecution(t, p.fluke.Path()); open != 0 {
+		t.Fatalf("integration effect opened %d execution rows", open)
+	}
+	labRebuild(t, p.fluke)
+	if outbox, err = p.fluke.Outbox(labCtx, p.repo); err != nil || len(outbox) != 0 {
+		t.Fatalf("rebuild resurrected delivery candidates: %+v %v", outbox, err)
+	}
+	if open := labOpenExecution(t, p.fluke.Path()); open != 0 {
+		t.Fatalf("rebuild opened %d execution rows for the effect", open)
+	}
+
+	// Native control: the same transition authored on this store queues.
+	if _, err := writesurface.CreateMatter(labCtx, p.fluke, store.ActorHuman, p.repo, "Control", "control"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Bind(labCtx, p.fluke, store.ActorHuman, p.repo, "control", "fixture:T-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(labCtx, p.fluke, store.ActorHuman, p.repo, "control"); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err = p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 1 || outbox[0].Kind != "state" || outbox[0].Ref != "fixture:T-2" {
+		t.Fatalf("native control outbox = %+v (err %v), want one state candidate for fixture:T-2", outbox, err)
+	}
+}
+
+func TestSharedStoreProjectionBumpDropsImportedCandidates(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	d := labImport(t, p.fluke, h, "integrated")
+	if len(d.Effects) != 1 || d.Effects[0] == "" {
+		t.Fatalf("expected one integrated effect, got %+v", d)
+	}
+	// Simulate a store folded under projection v11: the effect had already
+	// queued the candidate the older rules derived, and the recorded version
+	// is what the bump exists to invalidate on next open.
+	db, err := sql.Open("sqlite", p.fluke.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleID := p.fluke.NewID()
+	if _, err := db.Exec(`INSERT INTO outbox_entries
+		(id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
+		VALUES (?,?,'state','queued',?,?,'stale:imported-candidate','{"disposition":"active"}',?,?)`,
+		staleID, p.repo, p.matter, "fixture:T-1", d.Effects[0], d.Effects[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE store_meta SET value='11' WHERE key='projection_version'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := p.fluke.Path()
+	if err := p.fluke.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p.fluke = labOpen(t, path)
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("stale imported candidate survived projection refold: %+v %v", outbox, err)
+	}
+	labState(t, p.fluke, p.matter, store.InProgress)
+}
+
+func TestSharedStoreEffectDelegationRecordsFactWithoutOutbox(t *testing.T) {
+	p := newLabPair(t)
+	entry, err := writesurface.BacklogAdd(labCtx, p.fluke, store.ActorHuman, p.repo,
+		store.ProvenanceFound, "Delegate me", "found mid-flight", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The family is admitted now, but the guard is still exercised directly:
+	// the same actor stamp ExperimentImport writes, on the one write path
+	// every event takes.
+	sourceOutbox := p.fluke.NewID()
+	if _, err := p.fluke.Commit(labCtx, store.Request{
+		Actor: store.SystemActor("shared-store-experiment"),
+		Env:   store.Env{Repo: p.repo},
+	}, func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeBacklogDelegated,
+			Subject: entry.ID,
+			Payload: store.BacklogDelegated{Outbox: sourceOutbox, IdempotencyKey: "backlog:" + entry.ID},
+		}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := p.fluke.BacklogEntry(labCtx, p.repo, entry.ID)
+	if err != nil || !found || got.State != "delegated" || got.Outbox != sourceOutbox {
+		t.Fatalf("delegated entry = %+v (found %v, err %v), want delegated naming %s", got, found, err, sourceOutbox)
+	}
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("effect delegation queued delivery: %+v %v", outbox, err)
+	}
+	active, err := p.fluke.ActiveBacklog(labCtx, p.repo)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("dangling delegation stayed active: %+v %v", active, err)
+	}
+	labRebuild(t, p.fluke)
+	got, found, err = p.fluke.BacklogEntry(labCtx, p.repo, entry.ID)
+	if err != nil || !found || got.State != "delegated" || got.Outbox != sourceOutbox {
+		t.Fatalf("rebuild lost the delegation fact: %+v (found %v, err %v)", got, found, err)
+	}
+	if outbox, err = p.fluke.Outbox(labCtx, p.repo); err != nil || len(outbox) != 0 {
+		t.Fatalf("rebuild resurrected delivery: %+v %v", outbox, err)
+	}
+
+	// Native control: a human delegation on this store queues the create.
+	native, err := writesurface.BacklogAdd(labCtx, p.fluke, store.ActorHuman, p.repo,
+		store.ProvenanceFound, "Native delegate", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.BacklogDelegate(labCtx, p.fluke, store.ActorHuman, p.repo, native.ID); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err = p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 1 || outbox[0].Kind != "create" {
+		t.Fatalf("native delegation outbox = %+v (err %v), want one create", outbox, err)
+	}
+}
+
+// labGroup commits drafts as one chain on s and exports the resulting source
+// group. Each draft causally follows its predecessor so the export is a real
+// ordered group rather than unrelated origins sharing a correlation.
+func labGroup(t *testing.T, s *store.Store, host, repo string, decide func(*store.Tx) ([]store.Draft, error)) store.ExperimentSource {
+	t.Helper()
+	events, err := s.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: store.Env{Repo: repo}}, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		drafts, err := decide(tx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range drafts {
+			if i > 0 {
+				drafts[i].Cause = i - 1
+			}
+		}
+		return drafts, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := s.ExperimentExport(labCtx, host, events[0].Correlation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+func labImportBound(t *testing.T, s *store.Store, source store.ExperimentSource, repo, disposition string) store.ExperimentDecision {
+	t.Helper()
+	d, err := s.ExperimentImportBound(labCtx, source, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Disposition != disposition {
+		t.Fatalf("got %+v, want %s", d, disposition)
+	}
+	return d
+}
+
+// A Stage and Step may be non-origin members of one group: their NodeBirth
+// payloads name parents by shared identity, and classification sees the Matter
+// and Stage effects earlier members just folded into candidate state.
+func TestSharedStorePortableBirthGroup(t *testing.T) {
+	p := newLabPair(t)
+	var mid, sid, tid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Portable", Locator: "portable", SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do-01", Parent: sid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if len(d.Effects) != 3 {
+		t.Fatalf("effects=%v", d.Effects)
+	}
+	m, err := p.fluke.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Locator != "portable" || m.Parent != "" || m.Matter != mid || m.Lifecycle != store.Planned {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := p.fluke.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid || sn.Matter != mid || sn.Lifecycle != store.Planned {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	tn, err := p.fluke.Node(labCtx, tid)
+	if err != nil || tn.Kind != store.ScaleStep || tn.Parent != sid || tn.Matter != mid || tn.Lifecycle != store.Planned {
+		t.Fatalf("step = %+v %v", tn, err)
+	}
+	events := labEvents(t, p.fluke)
+	if len(events) != before+3 {
+		t.Fatalf("native count %d -> %d", before, len(events))
+	}
+	for i, effect := range d.Effects {
+		ev := events[before+i]
+		if ev.ID != effect || ev.Type != source.Actions[i].Event.Type || ev.Correlation != d.Effects[0] || (i > 0 && ev.Causation != d.Effects[i-1]) {
+			t.Fatalf("effect %d = %+v, want aligned chained fold of %s", i, ev, source.Actions[i].Event.Type)
+		}
+	}
+	labRebuild(t, p.fluke)
+	// An exact retry returns the retained decision without new effects.
+	again := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if !reflect.DeepEqual(d, again) || len(labEvents(t, p.fluke)) != before+3 {
+		t.Fatal("exact retry was not inert", again)
+	}
+	// The verified self-echo on the origin store maps back to native ids.
+	hybridBefore := len(labEvents(t, p.hybrid))
+	echo := labImportBound(t, p.hybrid, source, p.repo, "integrated")
+	if len(echo.Effects) != 3 || len(labEvents(t, p.hybrid)) != hybridBefore {
+		t.Fatal("verified echo was not inert", echo)
+	}
+	for i, effect := range echo.Effects {
+		if effect != source.Actions[i].Event.ID {
+			t.Fatalf("echo effect %d = %s, want native %s", i, effect, source.Actions[i].Event.ID)
+		}
+	}
+}
+
+// Dependent members see same-group candidate state end to end: the Brief's
+// baseline is the Matter birth and the start's baseline is the Brief, both
+// resolved through the ledger rows written earlier in the same pass.
+func TestSharedStorePortableDependentGroup(t *testing.T) {
+	p := newLabPair(t)
+	var mid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid = tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("portable brief"))
+		if err != nil {
+			return nil, err
+		}
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Chained", Locator: "chained", SortKey: 0}},
+			brief,
+			{Type: store.TypeMatterStarted, Subject: mid, Payload: store.Transition{From: store.Planned, To: store.InProgress}},
+		}, nil
+	})
+	d := labImportBound(t, p.fluke, source, p.repo, "integrated")
+	if len(d.Effects) != 3 {
+		t.Fatalf("effects=%v", d.Effects)
+	}
+	labState(t, p.fluke, mid, store.InProgress)
+	content, err := p.fluke.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(content) != "portable brief" {
+		t.Fatalf("brief = %q %v", content, err)
+	}
+	history, err := p.fluke.EventsOfSubject(labCtx, mid)
+	if err != nil || len(history) != 3 {
+		t.Fatalf("subject history=%v %v", history, err)
+	}
+	for i, effect := range d.Effects {
+		if history[i].ID != effect || history[i].Type != source.Actions[i].Event.Type {
+			t.Fatalf("history[%d]=%+v, want folded effect %s", i, history[i], effect)
+		}
+	}
+	labRebuild(t, p.fluke)
+}
+
+// A birth whose parent has not arrived waits with the whole group; once the
+// parent group integrates, explicit recheck folds the children against the
+// now-live parent and the same-group stage.
+func TestSharedStorePortablePendingParent(t *testing.T) {
+	p := newLabPair(t)
+	var mid string
+	ancestor := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid = tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Root", Locator: "root", SortKey: 0}},
+		}, nil
+	})
+	var sid, tid string
+	child := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		sid, tid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do-01", Parent: sid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	pending := labImportBound(t, p.fluke, child, p.repo, "pending")
+	if len(pending.Effects) != 0 || len(labEvents(t, p.fluke)) != before || !strings.Contains(pending.Reason, "awaiting parent") {
+		t.Fatalf("pending group wrote effects or lost its reason: %+v", pending)
+	}
+	if _, err := p.fluke.Node(labCtx, sid); err == nil {
+		t.Fatal("pending parent produced a node")
+	}
+	// Redelivery never reconsiders; only explicit recheck does.
+	labImportBound(t, p.fluke, child, p.repo, "pending")
+	if len(labEvents(t, p.fluke)) != before {
+		t.Fatal("redelivery applied pending work")
+	}
+	labImportBound(t, p.fluke, ancestor, p.repo, "integrated")
+	integrated := followRecheck(t, p.fluke, child, "integrated")
+	if len(integrated.Effects) != 2 {
+		t.Fatalf("recheck effects=%v", integrated.Effects)
+	}
+	sn, err := p.fluke.Node(labCtx, sid)
+	if err != nil || sn.Parent != mid || sn.Matter != mid {
+		t.Fatalf("stage after recheck = %+v %v", sn, err)
+	}
+	tn, err := p.fluke.Node(labCtx, tid)
+	if err != nil || tn.Parent != sid || tn.Matter != mid {
+		t.Fatalf("step after recheck = %+v %v", tn, err)
+	}
+	followHistory(t, p.fluke, child.Actions[0].Event.ID, 2)
+	labRebuild(t, p.fluke)
+}
+
+// One conflicting member condemns the whole group: earlier members' effects
+// and ledger rows roll back to the savepoint, every action stays retained with
+// no effect, and the decision is an inspectable conflict — never a merge. The
+// target already occupies the second Stage's address with its own node, so the
+// source group is valid on its origin yet incompatible here.
+func TestSharedStorePortableConflictAtomic(t *testing.T) {
+	p := newLabPair(t)
+	if _, err := writesurface.CreateStage(labCtx, p.fluke, store.ActorHuman, p.repo, "shared", "Taken"); err != nil {
+		t.Fatal(err)
+	}
+	var s1, s2 string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		s1, s2 = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeStageCreated, Subject: s1, Payload: store.NodeBirth{Title: "Free", Locator: "free", Parent: p.matter, SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: s2, Payload: store.NodeBirth{Title: "Taken", Locator: "taken", Parent: p.matter, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatalf("conflicting member left partial effects: %+v", d)
+	}
+	for _, id := range []string{s1, s2} {
+		if _, err := p.fluke.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back birth %s still projected", id)
+		}
+	}
+	db, err := sql.Open("sqlite", p.fluke.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var actions, effected int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(a.effect IS NOT NULL),0) FROM experiment_actions a JOIN experiment_sources s ON s.id=a.source_group WHERE json_extract(s.source,'$.Actions[0].Event.ID')=?`, source.Actions[0].Event.ID).Scan(&actions, &effected); err != nil {
+		t.Fatal(err)
+	}
+	if actions != 2 || effected != 0 {
+		t.Fatalf("ledger retained %d actions, %d effected; want 2/0", actions, effected)
+	}
+	followRecheck(t, p.fluke, source, "conflict")
+	followHistory(t, p.fluke, source.Actions[0].Event.ID, 1)
+}
+
+// A Matter's locator is unique per Repo, not per Matter — the (matter,
+// locator) index cannot see across Matters, so the source may legally carry
+// two same-slug Matters. The bounded import still refuses the second as an
+// occupied repo address and keeps the whole group non-integrated.
+func TestSharedStorePortableMatterLocatorScope(t *testing.T) {
+	p := newLabPair(t)
+	var m1, m2 string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		m1, m2 = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: m1, Payload: store.NodeBirth{Title: "One", Locator: "dup", SortKey: 0}},
+			{Type: store.TypeMatterCreated, Subject: m2, Payload: store.NodeBirth{Title: "Two", Locator: "dup", SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImportBound(t, p.fluke, source, p.repo, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatalf("same-slug Matters merged or partially applied: %+v", d)
+	}
+	for _, id := range []string{m1, m2} {
+		if _, err := p.fluke.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back matter %s still projected", id)
+		}
+	}
+}
+
+// Births live only in the bounded slice: the unscoped lab import keeps the
+// historical conflict rather than guessing a target.
+func TestSharedStorePortableBirthRequiresBoundTarget(t *testing.T) {
+	p := newLabPair(t)
+	var mid, sid string
+	source := labGroup(t, p.hybrid, "Hybrid", p.repo, func(tx *store.Tx) ([]store.Draft, error) {
+		mid, sid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Scoped", Locator: "scoped", SortKey: 0}},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}},
+		}, nil
+	})
+	before := len(labEvents(t, p.fluke))
+	d := labImport(t, p.fluke, source, "conflict")
+	if len(d.Effects) != 0 || len(labEvents(t, p.fluke)) != before {
+		t.Fatal("unbound import applied bounded births", d)
+	}
+}
+
+// labCommitMixed commits drafts verbatim — Cause values are the fixture's own —
+// so a test controls exactly which in-group member each event was caused by.
+func labCommitMixed(t *testing.T, s *store.Store, repo string, decide func(context.Context, *store.Tx) ([]store.Draft, error)) []store.Event {
+	t.Helper()
+	events, err := s.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: store.Env{Repo: repo}}, decide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+// A mixed command group uploads only its portable unit: portable members stay
+// Actions of an explicitly identified derivative of the raw group, every other
+// member — including a portable-typed member whose in-group cause is not
+// portable — is retained under Omitted as untouched evidence, and the receiver
+// integrates exactly the unit atomically through the real version-1 wire.
+func TestSharedStorePortableDerivativeExchange(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	ba, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	var mid, sid, tid, nid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("deriv brief"))
+		if err != nil {
+			return nil, err
+		}
+		brief.Cause = 0
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Deriv", Locator: "deriv", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: "v"}, Cause: 0},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}, Cause: 0},
+			// Portable type, but its in-group cause is the non-portable member:
+			// it is retained as evidence, never silently dropped or admitted.
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
+			brief,
+		}, nil
+	})
+	mixed := events[0].Correlation
+	events = labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		nid = tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "local.key", Value: "v"}},
+			{Type: store.TypeMatterCreated, Subject: nid, Payload: store.NodeBirth{Title: "Local", Locator: "local-only", SortKey: 0}, Cause: 0},
+		}, nil
+	})
+	local := events[0].Correlation
+	status, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(status.PendingUpload, mixed) || !reflect.DeepEqual(status.PendingUpload, []string{mixed}) {
+		t.Fatalf("mixed group is not the only upload candidate: %+v", status.PendingUpload)
+	}
+	if !slices.Contains(status.Unsupported, local) {
+		t.Fatalf("non-portable group not retained as local inventory: %+v", status.Unsupported)
+	}
+	saEvents := len(labEvents(t, sa))
+	if _, err := sa.RunExchange(labCtx, client, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 1 {
+		t.Fatalf("feed received %d changes, want exactly the mixed derivative", len(feed.changes))
+	}
+	wire := feed.changes[0]
+	if wire.Version != 1 || wire.GroupID != mixed || wire.SourceRepoID != a.repo {
+		t.Fatalf("envelope identity = %+v", wire)
+	}
+	var unit store.ExperimentSource
+	if err := json.Unmarshal([]byte(wire.Source), &unit); err != nil {
+		t.Fatal(err)
+	}
+	if unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+		t.Fatalf("wire source is not the identified portable unit: %+v", unit)
+	}
+	var actionTypes, omittedTypes []string
+	for _, a := range unit.Actions {
+		actionTypes = append(actionTypes, a.Event.Type)
+	}
+	for _, a := range unit.Derivative.Omitted {
+		omittedTypes = append(omittedTypes, a.Event.Type)
+	}
+	if !reflect.DeepEqual(actionTypes, []string{store.TypeMatterCreated, store.TypeStageCreated, store.TypeContentCreated}) ||
+		!reflect.DeepEqual(omittedTypes, []string{store.TypeConfigSet, store.TypeStepCreated}) {
+		t.Fatalf("unit actions=%v omitted=%v", actionTypes, omittedTypes)
+	}
+	// A group with no portable member keeps its raw source on explicit upload:
+	// the receiver retains it as evidence and never applies it, exactly as an
+	// unsupported family always has. Automatic eligibility is unchanged.
+	if err := sa.ExchangePass(labCtx, client, ba.Binding, []string{local}); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 2 {
+		t.Fatalf("feed received %d changes, want the derivative plus the raw local group", len(feed.changes))
+	}
+	done, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil || !slices.Contains(done.Retained, mixed) || slices.Contains(done.PendingUpload, mixed) {
+		t.Fatal("uploaded derivative was not acknowledged as retained", done, err)
+	}
+
+	sbEvents := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 2 {
+		t.Fatalf("receiver pass disturbed the feed: %d changes", len(feed.changes))
+	}
+	if got := len(labEvents(t, sb)); got != sbEvents+3 {
+		t.Fatalf("receiver events %d -> %d, want exactly the three portable effects", sbEvents, got)
+	}
+	m, err := sb.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Repo != b.repo || m.Locator != "deriv" {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := sb.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid || sn.Matter != mid {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	brief, err := sb.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(brief) != "deriv brief" {
+		t.Fatalf("brief = %q %v", brief, err)
+	}
+	if _, err := sb.Node(labCtx, tid); err == nil {
+		t.Fatal("portable-typed member with a non-portable in-group cause integrated")
+	}
+	if _, err := sb.Node(labCtx, nid); err == nil {
+		t.Fatal("local-only group member arrived")
+	}
+	if d := sourceDecision(t, sb, local, "conflict"); len(d.Effects) != 0 {
+		t.Fatalf("raw non-portable group produced effects: %+v", d)
+	}
+	if value, found, err := sb.Config(labCtx, b.repo, "deriv.key"); err != nil || found || value != "" {
+		t.Fatalf("omitted config.set produced an effect: %q %v %v", value, found, err)
+	}
+	d := sourceDecision(t, sb, mixed, "integrated")
+	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
+		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
+	}
+	var sawConfig, sawStep bool
+	for _, a := range d.Source.Derivative.Omitted {
+		switch a.Event.Type {
+		case store.TypeConfigSet:
+			sawConfig = true
+			var p store.ConfigSet
+			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Key != "deriv.key" || p.Value != "v" {
+				t.Fatalf("omitted config evidence altered: %s", a.Event.Payload)
+			}
+		case store.TypeStepCreated:
+			sawStep = true
+			var p store.NodeBirth
+			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Parent != sid {
+				t.Fatalf("omitted step evidence altered: %s", a.Event.Payload)
+			}
+		}
+	}
+	if !sawConfig || !sawStep {
+		t.Fatal("omitted evidence incomplete")
+	}
+	// Malformed derivatives are refused before any retention: the parent must
+	// name the raw group and every omitted link must stay inside it.
+	badParent := unit
+	badParent.Derivative = &store.ExperimentDerivative{Parent: "not-the-group", Omitted: unit.Derivative.Omitted}
+	if _, err := sb.ExperimentImportBound(labCtx, badParent, b.repo); err == nil || !strings.Contains(err.Error(), "derivative") {
+		t.Fatal("derivative naming a foreign parent imported", err)
+	}
+	badCause := unit
+	omitted := append([]store.ExperimentAction{}, unit.Derivative.Omitted...)
+	omitted[0].Event.Causation = "dangling"
+	badCause.Derivative = &store.ExperimentDerivative{Parent: mixed, Omitted: omitted}
+	if _, err := sb.ExperimentImportBound(labCtx, badCause, b.repo); err == nil || !strings.Contains(err.Error(), "malformed derivative") {
+		t.Fatal("omitted member with a dangling cause imported", err)
+	}
+	// The verified self-echo on the origin store maps back to native ids and
+	// appends nothing; the raw source evidence stays exactly as exported.
+	echo := sourceDecision(t, sa, mixed, "integrated")
+	if len(echo.Effects) != 3 {
+		t.Fatalf("self-echo effects = %v", echo.Effects)
+	}
+	for i, effect := range echo.Effects {
+		if effect != unit.Actions[i].Event.ID {
+			t.Fatalf("echo effect %d = %s, want native %s", i, effect, unit.Actions[i].Event.ID)
+		}
+	}
+	if len(labEvents(t, sa)) != saEvents {
+		t.Fatal("export or echo appended native events")
+	}
+	// An exact wire retry is inert: the cursor already passed the committed
+	// page and re-import returns the retained decision.
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("wire retry duplicated effects")
+	}
+	if again := sourceDecision(t, sb, mixed, "integrated"); !reflect.DeepEqual(d, again) {
+		t.Fatal("retry changed the retained decision", again)
+	}
+	labRebuild(t, sb)
+}
+
+// The portable source carries its own schema marker beside the version-1
+// envelope: exports stamp the current version, an absent marker is the
+// legacy version-1 shape, and any other version is retained whole as an
+// inspectable conflict — applied to nothing, stable across recheck and
+// redelivery.
+func TestSharedStoreSourceVersion(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	if h.Version != 1 {
+		t.Fatalf("exported source version = %d, want 1", h.Version)
+	}
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"Version":1`) {
+		t.Fatalf("exported source JSON lacks the version marker: %s", raw)
+	}
+	// A pre-marker export is the same version-1 shape: Version absent
+	// marshals byte-identically and imports exactly as before.
+	legacy := h
+	legacy.Version = 0
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacyRaw), `"Version"`) {
+		t.Fatalf("legacy source emitted a version marker: %s", legacyRaw)
+	}
+	before := len(labEvents(t, p.fluke))
+	d := labImport(t, p.fluke, legacy, "integrated")
+	if d.Source.Version != 0 || len(d.Effects) != len(h.Actions) {
+		t.Fatalf("legacy import = %+v", d)
+	}
+	if len(labEvents(t, p.fluke)) != before+len(d.Effects) {
+		t.Fatal("legacy import did not append exactly its effects")
+	}
+	// Unreadable versions are retained conflicts, never applied: no effects,
+	// no native writes, an unmistakable reason, and stable recheck/redelivery.
+	for i, version := range []int{2, 99} {
+		src := labStart(t, p, p.hybrid, "Hybrid", fmt.Sprintf("shared/step-%02d", i+1))
+		src.Version = version
+		before := len(labEvents(t, p.fluke))
+		d := labImport(t, p.fluke, src, "conflict")
+		if !strings.Contains(d.Reason, fmt.Sprintf("incompatible source version %d", version)) || len(d.Effects) != 0 {
+			t.Fatalf("version %d decision = %+v", version, d)
+		}
+		if len(labEvents(t, p.fluke)) != before {
+			t.Fatalf("version %d appended native events", version)
+		}
+		if again := sourceDecision(t, p.fluke, src.Actions[0].Event.ID, "conflict"); !strings.Contains(again.Reason, "incompatible source version") {
+			t.Fatalf("version %d not inspectable: %+v", version, again)
+		}
+		followRecheck(t, p.fluke, src, "conflict")
+		labImport(t, p.fluke, src, "conflict")
+		if len(labEvents(t, p.fluke)) != before {
+			t.Fatalf("version %d retry/recheck appended events", version)
+		}
+	}
+}
+
+// The portable unit is atomic on its own: when a later portable member
+// conflicts, the earlier portable effect rolls back with it. Omitted evidence
+// changes nothing about unit atomicity, and the retained conflict stays put
+// across an explicit recheck.
+func TestSharedStorePortableDerivativeConflictAtomic(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	if _, err := sa.PairExchange(labCtx, a.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	var xid, yid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		xid, yid = tx.NewID(), tx.NewID()
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: xid, Payload: store.NodeBirth{Title: "Dup A", Locator: "dup", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "dup.key", Value: "v"}, Cause: 0},
+			// Same repo-scoped Matter locator as its own group sibling: legal in
+			// the raw command, but the second portable member conflicts once the
+			// first member's effect occupies the address.
+			{Type: store.TypeMatterCreated, Subject: yid, Payload: store.NodeBirth{Title: "Dup B", Locator: "dup", SortKey: 1}, Cause: 0},
+		}, nil
+	})
+	conflict := events[0].Correlation
+	if _, err := sa.RunExchange(labCtx, client, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.changes) != 1 {
+		t.Fatalf("feed received %d changes, want the conflict derivative", len(feed.changes))
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("conflicted unit appended integration effects")
+	}
+	d := sourceDecision(t, sb, conflict, "conflict")
+	if len(d.Effects) != 0 {
+		t.Fatalf("conflicted unit retained effects: %+v", d.Effects)
+	}
+	for _, id := range []string{xid, yid} {
+		if _, err := sb.Node(labCtx, id); err == nil {
+			t.Fatalf("rolled-back portable member %s still projected", id)
+		}
+	}
+	// The retained conflict is stable: reconsidering the same immutable source
+	// reaches the same atomic refusal rather than integrating partially.
+	again, err := sb.ExperimentRecheckBound(labCtx, b.repo, conflict)
+	if err != nil || again.Disposition != "conflict" || len(again.Effects) != 0 {
+		t.Fatalf("recheck drifted: %+v %v", again, err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("recheck appended effects")
+	}
+	labRebuild(t, sb)
 }

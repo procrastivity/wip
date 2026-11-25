@@ -4,17 +4,23 @@ package store_test
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -221,6 +227,285 @@ func sourceDecision(t *testing.T, s *store.Store, group, want string) store.Expe
 	return store.ExperimentDecision{}
 }
 
+// labExchangeFeed is a minimal stateful exchange endpoint: it stores uploaded
+// changes under contiguous server sequences and serves committed pages, so
+// portable-derivative coverage exercises the real version-1 wire contract
+// without a Laravel fixture. It also keeps a digest-keyed blob store with the
+// same verify-then-acknowledge contract as Cloud, and records request order so
+// tests can prove blobs land before the changes that name them.
+type labExchangeFeed struct {
+	mu       sync.Mutex
+	changes  []store.ExchangeChange
+	blobs    map[string][]byte
+	requests []string
+	// blobPutStatus/blobGetStatus, when non-zero, are the status every blob
+	// PUT/GET returns — the transient-failure controls.
+	blobPutStatus, blobGetStatus int
+	// blobGetTruncate makes GET declare a Content-Length beyond the bytes
+	// written, so the client's body read dies mid-stream like a dropped
+	// connection.
+	blobGetTruncate bool
+	// failNextChangesPost commits the next POST /changes then answers 500 —
+	// the acknowledgement-lost-after-commit control.
+	failNextChangesPost bool
+}
+
+func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
+	t.Helper()
+	feed := &labExchangeFeed{blobs: map[string][]byte{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		feed.mu.Lock()
+		defer feed.mu.Unlock()
+		feed.requests = append(feed.requests, r.Method+" "+r.URL.Path)
+		blob := strings.Contains(r.URL.Path, "/blobs/")
+		if blob {
+			feed.serveBlob(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/origins"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/changes"):
+			var body struct {
+				Changes []store.ExchangeChange `json:"changes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Changes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// Cloud's idempotent replay: an identical re-post of a committed
+			// (installation, group) is already stored; a different source under
+			// the same identity conflicts and stores nothing.
+			committed := append([]store.ExchangeChange(nil), feed.changes...)
+			for _, change := range body.Changes {
+				seen := false
+				for _, existing := range committed {
+					if existing.InstallationID == change.InstallationID && existing.GroupID == change.GroupID {
+						if existing.Source != change.Source || existing.SourceRepoID != change.SourceRepoID {
+							w.WriteHeader(http.StatusConflict)
+							return
+						}
+						seen = true
+						break
+					}
+				}
+				if seen {
+					continue
+				}
+				change.Sequence = int64(len(committed)) + 1
+				committed = append(committed, change)
+			}
+			feed.changes = committed
+			if feed.failNextChangesPost {
+				feed.failNextChangesPost = false
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/changes"):
+			after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+			var page struct {
+				Changes []store.ExchangeChange `json:"changes"`
+				Cursor  int64                  `json:"cursor"`
+			}
+			for _, change := range feed.changes {
+				if change.Sequence > after {
+					page.Changes = append(page.Changes, change)
+					page.Cursor = change.Sequence
+				}
+			}
+			if len(page.Changes) == 0 {
+				page.Cursor = after
+			}
+			_ = json.NewEncoder(w).Encode(page)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return feed, server.URL + "/api/organizations/org/repos/repo"
+}
+
+// blobDigest extracts the {digest} path segment of a /blobs/ request.
+func (f *labExchangeFeed) blobDigest(r *http.Request) string {
+	return r.URL.Path[strings.LastIndex(r.URL.Path, "/blobs/")+len("/blobs/"):]
+}
+
+// labBlobMaxBytes mirrors Cloud's whole-object cap so oversized PUTs fail
+// here exactly as they would against the real service.
+const labBlobMaxBytes = 32 << 20
+
+// serveBlob implements the Cloud blob contract: PUT verifies the declared
+// length and content digest before storing (201 first store, 200 exact
+// retry), GET serves verified bytes under X-Blob-SHA256, and HEAD probes
+// availability. Absent and unauthorized are the same indistinguishable 404.
+func (f *labExchangeFeed) serveBlob(w http.ResponseWriter, r *http.Request) {
+	digest := f.blobDigest(r)
+	switch r.Method {
+	case "PUT":
+		if f.blobPutStatus != 0 {
+			w.WriteHeader(f.blobPutStatus)
+			return
+		}
+		declared, _ := strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
+		if declared > labBlobMaxBytes {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		if r.URL.Query().Get("length") != strconv.Itoa(len(data)) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != digest {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		_, exists := f.blobs[digest]
+		f.blobs[digest] = data
+		w.Header().Set("Content-Type", "application/json")
+		if !exists {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"digest": digest, "byte_length": len(data), "created": !exists})
+	case "GET", "HEAD":
+		if f.blobGetStatus != 0 {
+			w.WriteHeader(f.blobGetStatus)
+			return
+		}
+		data, ok := f.blobs[digest]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Blob-SHA256", digest)
+		if f.blobGetTruncate && r.Method == "GET" {
+			// Declared length exceeds the body written: the server closes the
+			// connection short and the client's ReadAll fails mid-body.
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)+1))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data[:len(data)/2])
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method == "GET" {
+			_, _ = w.Write(data)
+		}
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// serveBlobStatus arms the transient-failure controls; status 0 restores
+// normal blob serving.
+func (f *labExchangeFeed) serveBlobStatus(put, get int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobPutStatus, f.blobGetStatus = put, get
+}
+
+// truncateBlobGets makes the next blob GETs die mid-body until cleared.
+func (f *labExchangeFeed) truncateBlobGets(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobGetTruncate = on
+}
+
+// failNextChanges arms the commit-then-500 control for the next POST /changes.
+func (f *labExchangeFeed) failNextChanges() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNextChangesPost = true
+}
+
+// requestIndex returns the position of the first request matching method and
+// path suffix, or -1 — the ordering oracle for upload-before-commit.
+func (f *labExchangeFeed) requestIndex(method, suffix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range f.requests {
+		if strings.HasPrefix(r, method+" ") && strings.HasSuffix(r, suffix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasRequest reports whether any recorded request matches method and
+// contains frag — for assertions suffix matching cannot express, like "any
+// blob GET at all".
+func (f *labExchangeFeed) hasRequest(method, frag string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.requests {
+		if strings.HasPrefix(r, method+" ") && strings.Contains(r, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// blob serves the stored bytes for digest, for corrupt-then-serve fixtures.
+func (f *labExchangeFeed) blob(digest string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.blobs[digest]
+	return data, ok
+}
+
+// setBlob injects or replaces stored bytes directly — the server-side
+// corruption control a verifying PUT can never produce.
+func (f *labExchangeFeed) setBlob(digest string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobs[digest] = data
+}
+
+// removeBlob drops stored bytes, simulating a blob the server never received.
+func (f *labExchangeFeed) removeBlob(digest string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.blobs, digest)
+}
+
+// changeCount reports how many changes the feed has committed.
+func (f *labExchangeFeed) changeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.changes)
+}
+
+// changeOrder lists committed group IDs in feed sequence order.
+func (f *labExchangeFeed) changeOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.changes))
+	for i, c := range f.changes {
+		out[i] = c.GroupID
+	}
+	return out
+}
+
+// postChangesIndices returns the request-log positions of every POST /changes,
+// in arrival order — paired with changeOrder it proves each blob PUT landed
+// before the changes POST that made its group receivable.
+func (f *labExchangeFeed) postChangesIndices() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []int
+	for i, r := range f.requests {
+		if strings.HasPrefix(r, "POST ") && strings.HasSuffix(r, "/changes") {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // The response is lost only AFTER the real Laravel request commits. The same
 // wrapper permits an ordinary CLI process to write while HTTP is in progress.
 type lostExchangeResponse struct {
@@ -387,17 +672,22 @@ func TestLaravelExchangeRoundTrip(t *testing.T) {
 		if node, err := sa.Node(labCtx, other.ID); err != nil || node.Repo != a.repo {
 			t.Fatal("independent Matter did not arrive", err)
 		}
-		// Actual unsupported local pause remains retained, never replayed as start.
-		labCLICommand(t, a, true, "plumbing", "pause", "seeded", "--json")
+		// Actual unsupported local work remains retained, never replayed as
+		// sync. Gate and reference facts are portable now, so the
+		// retained-evidence fixture is a config.set — a family no classifier
+		// admits.
+		if err := sa.SetConfig(labCtx, a.repo, "fixture.unsupported", "1"); err != nil {
+			t.Fatal(err)
+		}
 		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
 		if err != nil {
 			t.Fatal(err)
 		}
-		pause := sourceGroup(t, sa, seeded.ID, store.TypeMatterPaused)
-		exchangePass(t, sa, ca, ba, pause)
+		unsupported := sourceGroup(t, sa, a.repo, store.TypeConfigSet)
+		exchangePass(t, sa, ca, ba, unsupported)
 		exchangePass(t, sb, cb, bb)
-		sourceDecision(t, sb, pause, "conflict")
-		if _, err := sb.ExperimentAcknowledge(labCtx, pause); err != nil {
+		sourceDecision(t, sb, unsupported, "conflict")
+		if _, err := sb.ExperimentAcknowledge(labCtx, unsupported); err != nil {
 			t.Fatal(err)
 		}
 		if node, err := sb.Node(labCtx, seeded.ID); err != nil || node.Lifecycle != store.InProgress {
@@ -812,13 +1102,15 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 	}
 	// An ordinary unsupported source remains canonical conflict activity. The
 	// correction must exclude collision groups, not all conflicted decisions.
-	cli := p
-	cli.db = p.fluke.Path()
-	labCLICommand(t, cli, true, "plumbing", "pause", "shared/step-01", "--json")
-	pauseGroup := sourceGroup(t, p.fluke, p.step1, store.TypeStepPaused)
-	exchangePass(t, p.fluke, cb, bb, pauseGroup)
+	// Gate and reference facts are portable now, so the unsupported fixture
+	// is a config.set — a family no classifier admits.
+	if err := p.fluke.SetConfig(labCtx, p.repo, "fixture.unsupported", "1"); err != nil {
+		t.Fatal(err)
+	}
+	unsupportedGroup := sourceGroup(t, p.fluke, p.repo, store.TypeConfigSet)
+	exchangePass(t, p.fluke, cb, bb, unsupportedGroup)
 	exchangePass(t, p.hybrid, ca, ba)
-	pause := sourceDecision(t, p.hybrid, pauseGroup, "conflict")
+	unsupported := sourceDecision(t, p.hybrid, unsupportedGroup, "conflict")
 	before := followPreview(t, p.hybrid, ba.InstallationID)
 	nativeLog := labEvents(t, p.hybrid)
 	claim := store.ExperimentSource{Host: "33333333-3333-4333-8333-333333333333", Actions: []store.ExperimentAction{native.Actions[0], foreign.Actions[1]}}
@@ -850,7 +1142,7 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 		}
 		var conflictVisible bool
 		for _, a := range after.Activities {
-			if a.Event.ID == pauseGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, pause.Source.Actions[0].Event) {
+			if a.Event.ID == unsupportedGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, unsupported.Source.Actions[0].Event) {
 				conflictVisible = true
 			}
 		}
@@ -951,4 +1243,493 @@ func TestLaravelExchangeCommittedPages(t *testing.T) {
 		t.Fatal("page replay duplicated effects")
 	}
 	t.Log("103 actual Go-created Matters crossed 100+3 committed feed pages, exact source bytes retained, mapped once into the other native Repo")
+}
+
+// A mixed command group crosses the real exchange as its portable unit: the
+// committed feed carries the separately identified derivative, the omitted
+// members stay evidence, and the receiver integrates exactly the unit.
+func TestLaravelExchangePortableDerivative(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}, Token: f.Member}
+	var mid, sid, tid string
+	events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+		mid, sid, tid = tx.NewID(), tx.NewID(), tx.NewID()
+		brief, err := tx.ContentDraft(mid, store.KindBrief, []byte("deriv brief"))
+		if err != nil {
+			return nil, err
+		}
+		brief.Cause = 0
+		return []store.Draft{
+			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Deriv", Locator: "deriv", SortKey: 0}},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: "v"}, Cause: 0},
+			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}, Cause: 0},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
+			brief,
+		}, nil
+	})
+	mixed := events[0].Correlation
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	// The committed feed carries the separately identified portable unit; the
+	// raw mixed group itself is never the envelope.
+	var page struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes?after=0", f.Member, nil, 200), &page); err != nil {
+		t.Fatal(err)
+	}
+	var unit store.ExperimentSource
+	found := false
+	for _, change := range page.Changes {
+		if change.GroupID == mixed {
+			found = true
+			if err := json.Unmarshal([]byte(change.Source), &unit); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !found || unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+		t.Fatalf("Laravel did not retain the portable-unit envelope: %+v", unit)
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, cb, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before+3 {
+		t.Fatal("receiver did not integrate exactly the portable unit")
+	}
+	m, err := sb.Node(labCtx, mid)
+	if err != nil || m.Kind != store.ScaleMatter || m.Repo != b.repo || m.Locator != "deriv" {
+		t.Fatalf("matter = %+v %v", m, err)
+	}
+	sn, err := sb.Node(labCtx, sid)
+	if err != nil || sn.Kind != store.ScaleStage || sn.Parent != mid {
+		t.Fatalf("stage = %+v %v", sn, err)
+	}
+	brief, err := sb.Content(labCtx, mid, store.KindBrief)
+	if err != nil || string(brief) != "deriv brief" {
+		t.Fatalf("brief = %q %v", brief, err)
+	}
+	if _, err := sb.Node(labCtx, tid); err == nil {
+		t.Fatal("portable-typed member with a non-portable in-group cause integrated")
+	}
+	d := sourceDecision(t, sb, mixed, "integrated")
+	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
+		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
+	}
+	var sawConfig, sawStep bool
+	for _, a := range d.Source.Derivative.Omitted {
+		sawConfig = sawConfig || a.Event.Type == store.TypeConfigSet
+		sawStep = sawStep || a.Event.Type == store.TypeStepCreated
+	}
+	if !sawConfig || !sawStep {
+		t.Fatal("omitted evidence incomplete")
+	}
+	labRebuild(t, sb)
+	t.Log("mixed command crossed real Laravel as its identified portable unit; omitted members retained as evidence only")
+}
+
+// An incompatible source version is apply-time evidence, not a receipt
+// failure: receipt still validates the envelope structure, the committed
+// page and cursor land intact, the record is retained as an inspectable
+// conflict, and later rows in the same feed still apply and redeliver
+// inertly.
+func TestSharedStoreIncompatibleSourceVersionExchange(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	ba, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	post := func(src store.ExperimentSource) string {
+		t.Helper()
+		raw, err := json.Marshal(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change := store.ExchangeChange{Version: 1, InstallationID: src.Host, GroupID: src.Actions[0].Event.ID, SourceRepoID: a.repo, Source: string(raw)}
+		fixtureHTTP(t, "POST", endpoint+"/changes", "token", map[string]any{"changes": []store.ExchangeChange{change}}, http.StatusNoContent)
+		return change.GroupID
+	}
+	var badGroup, goodGroup, goodMatter string
+	for i, title := range []string{"Incompatible first", "Compatible second"} {
+		n, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, title, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+		src, err := sa.ExperimentExport(labCtx, ba.Binding.InstallationID, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if src.Version != 1 {
+			t.Fatalf("exported source version = %d, want 1", src.Version)
+		}
+		if i == 0 {
+			src.Version = 2
+			badGroup = post(src)
+		} else {
+			goodGroup, goodMatter = post(src), n.ID
+		}
+	}
+	if len(feed.changes) != 2 || feed.changes[0].GroupID != badGroup || feed.changes[1].GroupID != goodGroup {
+		t.Fatalf("feed order = %+v", feed.changes)
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	// Receipt kept both committed records: cursor and inbox applied together,
+	// the incompatible one retained as a conflict naming its version.
+	status, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || status.Downloaded != 2 || status.Evaluated != 2 || status.Conflicts != 1 {
+		t.Fatalf("status = %+v %v", status, err)
+	}
+	bad := sourceDecision(t, sb, badGroup, "conflict")
+	if !strings.Contains(bad.Reason, "incompatible source version 2") || len(bad.Effects) != 0 {
+		t.Fatalf("incompatible decision = %+v", bad)
+	}
+	good := sourceDecision(t, sb, goodGroup, "integrated")
+	if len(good.Effects) != 1 {
+		t.Fatalf("compatible decision = %+v", good)
+	}
+	m, err := sb.Node(labCtx, goodMatter)
+	if err != nil || m.Repo != b.repo {
+		t.Fatalf("compatible matter did not integrate after the incompatible record: %+v %v", m, err)
+	}
+	if got := len(labEvents(t, sb)); got != before+1 {
+		t.Fatalf("receiver events %d -> %d, want exactly the one compatible effect", before, got)
+	}
+	// Redelivery is inert: the cursor already passed the page and the stored
+	// decisions answer again without new effects.
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if again := sourceDecision(t, sb, badGroup, "conflict"); !reflect.DeepEqual(bad, again) {
+		t.Fatal("redelivery changed the retained incompatible decision", again)
+	}
+	if got := len(labEvents(t, sb)); got != before+1 {
+		t.Fatal("redelivery appended effects")
+	}
+	t.Log("incompatible source version retained as conflict at sequence 1; compatible record at sequence 2 integrated; cursor/inbox complete and redelivery inert")
+}
+
+// Stage-3 discovery scope: one ordinary pass on the actively paired Repo
+// backfills every eligible original — including work that predates the
+// recorded pairing boundary — exactly once, while sibling projects in the
+// same store that never paired or are paused contribute nothing to the
+// feed and keep their local work untouched.
+func TestLaravelExchangeDiscoveryScope(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	known := map[string]bool{a.repo: true}
+	// Two more native Repos share this store: one never pairs, one pairs and
+	// is then paused. Both keep ordinary supported work that must stay local.
+	siblingRepo := func() string {
+		t.Helper()
+		p := labPair{dir: t.TempDir(), db: a.db}
+		if out, err := exec.Command("git", "init", "--quiet", p.dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v %s", err, out)
+		}
+		labCLICommand(t, p, true, "init", "--json")
+		repos, err := sa.Repos(labCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range repos {
+			if !known[r.ID] {
+				known[r.ID] = true
+				return r.ID
+			}
+		}
+		t.Fatal("new Repo not visible in shared store")
+		return ""
+	}
+	unpairedRepo := siblingRepo()
+	pausedRepo := siblingRepo()
+
+	// Supported work that predates pairing on the active Repo.
+	old, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Old supported", "old-supported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := []byte("# Pre-pair Brief\n\nSupported bytes older than the boundary.\n")
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, old.Locator, store.KindBrief, brief); err != nil {
+		t.Fatal(err)
+	}
+	oldBirth := sourceGroup(t, sa, old.ID, store.TypeMatterCreated)
+	oldBrief := sourceGroup(t, sa, old.ID, store.TypeContentCreated)
+	paired, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil || !paired.Paired || !paired.Active {
+		t.Fatal("pairing failed", paired, err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Member}
+	// The first ordinary pass discovers and acknowledges the pre-pair
+	// originals: they are the retained originals later passes must not
+	// upload again.
+	first, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.PendingUpload) != 0 || !reflect.DeepEqual(first.Retained, []string{oldBirth, oldBrief}) {
+		t.Fatalf("pre-pair originals not acknowledged once: %+v", first)
+	}
+
+	// Newer supported work on the active Repo, plus pending originals on the
+	// unpaired and paused sibling projects.
+	newer, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Newer work", "newer-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, newer.Locator); err != nil {
+		t.Fatal(err)
+	}
+	newBirth := sourceGroup(t, sa, newer.ID, store.TypeMatterCreated)
+	newStart := sourceGroup(t, sa, newer.ID, store.TypeMatterStarted)
+	if _, err := sa.PairExchange(labCtx, pausedRepo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	pausedMatter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, pausedRepo, "Paused work", "paused-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, pausedRepo, pausedMatter.Locator, store.KindBrief, []byte("paused bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sa.UnpairExchange(labCtx, pausedRepo); err != nil {
+		t.Fatal(err)
+	}
+	unpairedMatter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, unpairedRepo, "Never paired", "never-paired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, unpairedRepo, unpairedMatter.Locator, store.KindBrief, []byte("unpaired bytes")); err != nil {
+		t.Fatal(err)
+	}
+	siblingGroups := []string{
+		sourceGroup(t, sa, unpairedMatter.ID, store.TypeMatterCreated),
+		sourceGroup(t, sa, unpairedMatter.ID, store.TypeContentCreated),
+		sourceGroup(t, sa, pausedMatter.ID, store.TypeMatterCreated),
+		sourceGroup(t, sa, pausedMatter.ID, store.TypeContentCreated),
+	}
+
+	beforeUnpaired, err := sa.ExchangeStatus(labCtx, unpairedRepo)
+	if err != nil || beforeUnpaired.Paired || len(beforeUnpaired.PendingUpload) != 0 || beforeUnpaired.EarlierGroups == 0 {
+		t.Fatal("unpaired preview claimed outgoing work", beforeUnpaired, err)
+	}
+	beforePaused, err := sa.ExchangeStatus(labCtx, pausedRepo)
+	if err != nil || !beforePaused.Paired || beforePaused.Active || len(beforePaused.PendingUpload) != 2 {
+		t.Fatal("paused pairing lost its pending originals", beforePaused, err)
+	}
+	// Neither non-active project can run an ordinary pass; both refusals
+	// happen before any HTTP, so the feed is untouched.
+	for _, repo := range []string{unpairedRepo, pausedRepo} {
+		if _, err := sa.RunExchange(labCtx, ca, repo); err == nil || !strings.Contains(err.Error(), "not actively paired") {
+			t.Fatalf("non-active Repo %s exchanged: %v", repo, err)
+		}
+	}
+	feed := func() []store.ExchangeChange {
+		t.Helper()
+		var page struct {
+			Changes []store.ExchangeChange `json:"changes"`
+			Cursor  int64                  `json:"cursor"`
+		}
+		if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &page); err != nil {
+			t.Fatal(err)
+		}
+		return page.Changes
+	}
+	if got := len(feed()); got != 2 {
+		t.Fatalf("feed before backfill = %d changes, want the 2 acknowledged originals", got)
+	}
+
+	// The ordinary pass backfills exactly the newer eligible originals; the
+	// acknowledged originals and both sibling projects stay out of the feed.
+	second, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.PendingUpload) != 0 || second.Cursor != 4 || !reflect.DeepEqual(second.Retained, []string{oldBirth, oldBrief, newBirth, newStart}) {
+		t.Fatalf("backfill did not acknowledge exactly the eligible originals: %+v", second)
+	}
+	changes := feed()
+	if len(changes) != 4 {
+		t.Fatalf("feed = %d changes, want exactly the 4 eligible originals", len(changes))
+	}
+	want := map[string]bool{oldBirth: true, oldBrief: true, newBirth: true, newStart: true}
+	for _, change := range changes {
+		if !want[change.GroupID] || change.SourceRepoID != a.repo || change.InstallationID != second.Binding.InstallationID {
+			t.Fatalf("feed carries work outside the active pairing: %+v", change)
+		}
+		delete(want, change.GroupID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("eligible originals missing from feed: %v", want)
+	}
+	for _, group := range siblingGroups {
+		for _, change := range changes {
+			if change.GroupID == group {
+				t.Fatalf("sibling project group %s reached the feed", group)
+			}
+		}
+	}
+
+	// A repeated ordinary pass changes nothing: acknowledged originals are
+	// not re-uploaded, the pairing is not re-created and the boundary stays.
+	third, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.PendingUpload) != 0 || len(third.Retained) != 4 || len(feed()) != 4 || third.Cursor != second.Cursor {
+		t.Fatal("repeated ordinary pass re-uploaded acknowledged originals", third)
+	}
+	if third.Binding != second.Binding || third.Boundary != second.Boundary {
+		t.Fatal("ordinary passes re-paired or moved the boundary", third)
+	}
+	afterUnpaired, err := sa.ExchangeStatus(labCtx, unpairedRepo)
+	if err != nil || afterUnpaired.Paired || len(afterUnpaired.PendingUpload) != 0 || afterUnpaired.EarlierGroups != beforeUnpaired.EarlierGroups {
+		t.Fatal("ordinary pass touched the unpaired project", afterUnpaired, err)
+	}
+	afterPaused, err := sa.ExchangeStatus(labCtx, pausedRepo)
+	if err != nil || !afterPaused.Paired || afterPaused.Active || !reflect.DeepEqual(afterPaused.PendingUpload, beforePaused.PendingUpload) {
+		t.Fatal("ordinary pass touched the paused pairing", afterPaused, err)
+	}
+	if got, err := sa.Content(labCtx, unpairedMatter.ID, store.KindBrief); err != nil || string(got) != "unpaired bytes" {
+		t.Fatal("unpaired project's local work changed", err)
+	}
+	if got, err := sa.Content(labCtx, pausedMatter.ID, store.KindBrief); err != nil || string(got) != "paused bytes" {
+		t.Fatal("paused project's local work changed", err)
+	}
+
+	// The second store receives the whole backfill in one ordinary pass; the
+	// sibling projects' work never leaves the sender.
+	b, sb := exchangeHost(t)
+	received, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil || !received.Paired {
+		t.Fatal("receiver pairing failed", received, err)
+	}
+	done, err := sb.RunExchange(labCtx, cb, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Cursor != 4 || done.Integrated != 4 || done.Conflicts != 0 {
+		t.Fatalf("receiver did not integrate the backfilled originals once: %+v", done)
+	}
+	if got, err := sb.Node(labCtx, old.ID); err != nil || got.Repo != b.repo || got.Lifecycle != store.Planned {
+		t.Fatalf("acknowledged original did not arrive: %+v %v", got, err)
+	}
+	if got, err := sb.Node(labCtx, newer.ID); err != nil || got.Repo != b.repo || got.Lifecycle != store.InProgress {
+		t.Fatalf("newer work did not arrive: %+v %v", got, err)
+	}
+	if got, err := sb.Content(labCtx, old.ID, store.KindBrief); err != nil || string(got) != string(brief) {
+		t.Fatalf("pre-pair Brief bytes changed: %q %v", got, err)
+	}
+	for _, absent := range []string{unpairedMatter.ID, pausedMatter.ID} {
+		if _, err := sb.Node(labCtx, absent); err == nil {
+			t.Fatal("non-active project work reached the receiver", absent)
+		}
+	}
+	t.Log("pre-pair Matter/Brief acknowledged once, newer work backfilled once, unpaired and paused sibling Repos untouched; second store received all four originals")
+}
+
+// Concurrent ordinary passes on one pairing must not duplicate originals:
+// the server dedups by installation+group, local acknowledgements and the
+// cursor stay idempotent, and every pass converges to the same retained
+// status with operation identity and payloads unchanged.
+func TestLaravelExchangeConcurrentPasses(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	n, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Raced originals", "raced-originals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, n.Locator, store.KindBrief, []byte("concurrent pass bytes")); err != nil {
+		t.Fatal(err)
+	}
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	brief := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}
+	const passes = 4
+	var wg sync.WaitGroup
+	errs := make([]error, passes)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = sa.RunExchange(labCtx, ca, a.repo)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent pass %d: %v", i, err)
+		}
+	}
+	var feed struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Changes) != 2 {
+		t.Fatalf("concurrent passes duplicated originals: %d feed changes", len(feed.Changes))
+	}
+	seen := map[string]bool{}
+	for _, change := range feed.Changes {
+		if change.GroupID != birth && change.GroupID != brief {
+			t.Fatalf("unexpected group %s on feed", change.GroupID)
+		}
+		if change.SourceRepoID != a.repo || seen[change.GroupID] {
+			t.Fatalf("feed carries duplicated or foreign work: %+v", change)
+		}
+		seen[change.GroupID] = true
+	}
+	done, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done.PendingUpload) != 0 || len(done.Retained) != 2 || done.Cursor != 2 || done.Downloaded != 2 || done.Evaluated != 2 {
+		t.Fatal("concurrent passes left unstable transfer state", done)
+	}
+	// A repeated pass after the race changes nothing: same retained
+	// originals, cursor and binding, no new effects.
+	again, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.PendingUpload) != 0 || len(again.Retained) != 2 || again.Cursor != done.Cursor || again.Binding != done.Binding || again.Boundary != done.Boundary {
+		t.Fatal("post-race pass changed retained state", again)
+	}
+	if got, err := sa.Node(labCtx, n.ID); err != nil || got.Lifecycle != store.Planned {
+		t.Fatal("raced originals did not project once", err)
+	}
+	if segments, err := sa.ContentSegments(labCtx, n.ID, store.KindBrief); err != nil || len(segments) != 1 {
+		t.Fatal("Brief duplicated under concurrent passes", err)
+	}
+	t.Log("four concurrent ordinary passes: server kept one copy per original, local acks/cursor converged, post-race pass inert")
 }

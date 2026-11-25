@@ -81,7 +81,13 @@ func TestExchangeForgetLateResponse(t *testing.T) {
 				t.Fatal(err)
 			}
 			fresh, err := s.PairExchangeConnection(labCtx, p.repo, endpoint, "office", "2")
-			if err != nil || fresh.Binding.InstallationID == old.Binding.InstallationID || fresh.Generation == old.Generation || len(fresh.PendingUpload) != 0 {
+			// The fresh association keeps no old receipts, but supported
+			// originals remain eligible regardless of the reset boundary.
+			wantPending := 0
+			if phase == "upload" {
+				wantPending = 1
+			}
+			if err != nil || fresh.Binding.InstallationID == old.Binding.InstallationID || fresh.Generation == old.Generation || len(fresh.PendingUpload) != wantPending {
 				t.Fatal("fresh association borrowed old state", old, fresh, err)
 			}
 			transport := syncRowCounts(t, p.db)
@@ -312,7 +318,7 @@ func TestLaravelConnectionResetCLI(t *testing.T) {
 	if _, err := sa.Node(labCtx, cloudOnly.ID); err != nil {
 		t.Fatal("deletion erased source machine's local work", err)
 	}
-	cb.matter(t, "During offline fallback")
+	offline := cb.matter(t, "During offline fallback")
 	f.start(t)
 	other.sync(t, true, "run")
 	if !reflect.DeepEqual(controlBefore, other.status(t)) {
@@ -321,8 +327,16 @@ func TestLaravelConnectionResetCLI(t *testing.T) {
 	login(cb, "member@example.test")
 	cb.sync(t, true, "pair", "--connection", "office", "--org", f.Org, "--server-repo", replacement.ID)
 	fresh := cb.status(t)
-	if fresh.Binding.InstallationID == old.Binding.InstallationID || len(fresh.PendingUpload) != 0 || fresh.Cursor != 0 {
-		t.Fatal("reconnect reused old state or exported pre-reset work", old, fresh)
+	// Project-wide scope makes the pre-reset original eligible again under the
+	// fresh association: exactly the offline matter's group, nothing retired.
+	var offlineGroup string
+	for _, ev := range labEvents(t, sb) {
+		if ev.Subject == offline.ID {
+			offlineGroup = ev.Correlation
+		}
+	}
+	if fresh.Binding.InstallationID == old.Binding.InstallationID || fresh.Cursor != 0 || !reflect.DeepEqual(fresh.PendingUpload, []string{offlineGroup}) {
+		t.Fatal("reconnect reused old state or missed eligible pre-reset work", old, fresh)
 	}
 	cb.sync(t, true, "run")
 	cb.matter(t, "New shared work")
@@ -330,11 +344,19 @@ func TestLaravelConnectionResetCLI(t *testing.T) {
 	var feed struct {
 		Changes []store.ExchangeChange `json:"changes"`
 	}
-	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.base+"/api/organizations/"+f.Org+"/repos/"+replacement.ID+"/changes", f.Owner, nil, 200), &feed); err != nil || len(feed.Changes) != 1 {
-		t.Fatal("new destination received pre-reset history or integration effects", len(feed.Changes), err)
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.base+"/api/organizations/"+f.Org+"/repos/"+replacement.ID+"/changes", f.Owner, nil, 200), &feed); err != nil || len(feed.Changes) != 2 {
+		t.Fatal("new destination missed eligible originals or received retired effects", len(feed.Changes), err)
 	}
-	if !strings.Contains(feed.Changes[0].Source, "New shared work") || strings.Contains(feed.Changes[0].Source, "Retained shared") {
-		t.Fatal("wrong future-only source", feed.Changes[0].Source)
+	var offlineFallback, sharedWork bool
+	for _, change := range feed.Changes {
+		if strings.Contains(change.Source, "Retained shared") {
+			t.Fatal("new destination received retired or effect work", change.Source)
+		}
+		offlineFallback = offlineFallback || strings.Contains(change.Source, "During offline fallback")
+		sharedWork = sharedWork || strings.Contains(change.Source, "New shared work")
 	}
-	t.Log("actual Laravel: owner-only deletion, lost reply and ambiguous retry, stale-ID rejection, offline local preservation, fresh origin and future-only reconnect passed")
+	if !offlineFallback || !sharedWork {
+		t.Fatal("new destination missed eligible pre-reset or new originals", feed.Changes)
+	}
+	t.Log("actual Laravel: owner-only deletion, lost reply and ambiguous retry, stale-ID rejection, offline local preservation, fresh origin and project-wide reconnect passed")
 }

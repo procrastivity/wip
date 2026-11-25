@@ -23,7 +23,7 @@ import (
 // the same operations; ordinary writes have no network dependency.
 func Command(streams *iostreams.Streams) *cobra.Command {
 	var server, repo, connection string
-	root := &cobra.Command{Use: "sync", Short: "experimental explicit pairing and one-pass sync (bounded work families)"}
+	root := &cobra.Command{Use: "sync", Short: "experimental explicit pairing and one-pass sync (bounded work families)", Long: "Explicit pairing and one explicit pass per invocation; never a background loop. Pairing is the only sync opt-in: once paired, old, new and previously imported portable work all follow one policy — no re-pairing, per-project grant, migration acceptance, mandatory preview or acknowledgement gate."}
 	root.PersistentFlags().StringVar(&server, "server", "", "explicit Laravel origin (use HTTPS except disposable local testing)")
 	root.PersistentFlags().StringVar(&repo, "repo", "", "native Repo locator; defaults to current clone")
 	root.PersistentFlags().StringVar(&connection, "connection", "", "named server/account connection; bound Repos retain their selection")
@@ -203,7 +203,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 	}})
 	var org, remote string
 	var dryPair bool
-	pair := &cobra.Command{Use: "pair", Short: "explicit future-work association; no existing-history merge or Git changes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	pair := &cobra.Command{Use: "pair", Short: "explicit project association; portable originals sync regardless of age; no Git changes", Long: "Pairing is the only sync opt-in. Once paired, every supported original — old, new and previously imported work alike — follows this one policy: no re-pairing, per-project grant or migration acceptance. Unsupported families, missing prerequisites and incompatible formats stay local and inspectable. --dry-run previews selection without writes; inspection never gates application.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return withRepo(cmd, func(s *store.Store, r store.Repo) error {
 			if org == "" || remote == "" || strings.ContainsAny(org+remote, "/?#%") {
 				return wiperr.New("refusal.destination", "choose --org and --server-repo stable IDs from sync repos")
@@ -237,7 +237,7 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 					return err
 				}
 			}
-			return write(cmd, map[string]any{"dry_run": dryPair, "selection": selected, "local": status, "destination": destination, "organization_id": org, "server_repo_id": remote, "destination_revalidated": !dryPair, "endpoint": endpoint, "initial_scope": "future originals only; earlier history not adopted; required pre-boundary dependencies may wait", "installation": "allocated only on apply; reused on retry", "git_and_checkout": "unchanged; paths not transmitted"})
+			return write(cmd, map[string]any{"dry_run": dryPair, "selection": selected, "local": status, "destination": destination, "organization_id": org, "server_repo_id": remote, "destination_revalidated": !dryPair, "endpoint": endpoint, "initial_scope": "all supported unsynced originals regardless of age; unsupported families, missing prerequisites and incompatible formats remain inspectable local states", "installation": "allocated only on apply; reused on retry", "git_and_checkout": "unchanged; paths not transmitted"})
 		})
 	}}
 	pair.Flags().StringVar(&org, "org", "", "explicit organization stable ID")
@@ -257,7 +257,11 @@ func Command(streams *iostreams.Streams) *cobra.Command {
 			args = cobra.MaximumNArgs(1)
 			use += " [group-id]"
 		}
-		cmd := &cobra.Command{Use: use, Short: map[string]string{"status": "offline transfer and reconciliation inventory", "unpair": "stop exchange; preserve evidence, work and resumable cursor", "run": "one explicit exchange pass; never a background loop", "activity": "offline canonical source-time observations and separate retained claims", "recheck": "reconsider canonical decisions, never force application", "ack": "acknowledge local handling, not shared resolution"}[name], Args: args, RunE: func(cmd *cobra.Command, args []string) error {
+		cmd := &cobra.Command{Use: use, Short: map[string]string{"status": "offline transfer and reconciliation inventory", "unpair": "stop exchange; preserve evidence, work and resumable cursor", "run": "one explicit exchange pass; never a background loop", "activity": "offline canonical source-time observations and separate retained claims", "recheck": "reconsider canonical decisions, never force application", "ack": "acknowledge local handling, not shared resolution"}[name], Long: map[string]string{
+			"status":   "Offline inventory of one Repo's exchange state; never contacts the server and never claims convergence. Categories: Queued portable originals awaiting upload acknowledgement; Acknowledged uploads the server retained; Received durable remote envelopes; Waiting received groups pending application, split into WaitingBytes held for spilled content and WaitingDependencies held for any other prerequisite; Applied groups integrated as local work; Conflicts retained conflict and collision claims; Excluded local command groups with no portable member, which never sync by design. Pairing is the only opt-in; old, new and imported work follow this one policy.",
+			"run":      "One explicit exchange pass: upload queued originals, receive remote work and apply retained decisions, then re-report status. Never a background loop; safe to repeat because acknowledgements and cursors make retries idempotent. There is no mandatory preview or acknowledgement before application — pairing is the only opt-in.",
+			"activity": "Offline canonical source-time observations retained from applied decisions, plus separately retained collision claims and local acknowledgements. Reported time is source observation, not remote liveness or duration. Inspection only: it never gates `sync run`, and pairing is the only opt-in.",
+		}[name], Args: args, RunE: func(cmd *cobra.Command, args []string) error {
 			return withRepo(cmd, func(s *store.Store, r store.Repo) error {
 				status, err := s.ExchangeStatus(cmd.Context(), r.ID)
 				if err != nil {

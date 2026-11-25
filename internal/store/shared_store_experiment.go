@@ -32,10 +32,42 @@ type ExperimentBaseline struct {
 	NativeEvent    string `json:",omitempty"`
 }
 
+// experimentSourceVersion is the portable-source schema this build writes and
+// interprets. The absent field is the same version-1 shape every export
+// predating the marker already used, so only a nonzero marker can be
+// incompatible.
+const experimentSourceVersion = 1
+
+// experimentSourceCompatible reports whether this build can interpret the
+// marked source schema. Absent (0) is the legacy version-1 shape; anything
+// else is retained as an inspectable conflict, never applied.
+func experimentSourceCompatible(version int) bool {
+	return version == 0 || version == experimentSourceVersion
+}
+
 // ExperimentSource is one complete committed source command and its origin.
+// Version is the portable-source schema marker: absent (0) is the legacy
+// version-1 shape, so stored envelopes and captured retries stay readable;
+// ExperimentExport stamps experimentSourceVersion explicitly.
 type ExperimentSource struct {
+	Version int `json:",omitempty"`
 	Host    string
 	Actions []ExperimentAction
+	// Derivative is nil for a complete raw group. When set, this source is the
+	// separately identified portable unit of the raw group Parent names, never
+	// a truncation of it: Actions are exactly the portable members and every
+	// other member is retained under Omitted as evidence only.
+	Derivative *ExperimentDerivative `json:",omitempty"`
+}
+
+// ExperimentDerivative marks an exported source as the portable unit of one
+// raw command group. Parent is that group's identity — the shared origin
+// event — and Omitted retains every non-portable member's untouched
+// ExperimentAction: inspectable evidence, never classified and never an
+// effect. The unit's atomicity covers Actions alone.
+type ExperimentDerivative struct {
+	Parent  string
+	Omitted []ExperimentAction `json:",omitempty"`
 }
 
 // ExperimentDecision links retained source activity to local representation.
@@ -58,6 +90,21 @@ func experimentKey(repo, id string) string {
 
 func experimentOriginalID(key string) string {
 	return key[strings.LastIndex(key, ":")+1:]
+}
+
+// experimentOriginVerified reports whether the claimed host is recorded export
+// provenance for this native event. The first origin stays immutable;
+// experiment_native_origin_hosts appends every installation that exported the
+// same event, so a retired association's fresh installation still verifies.
+// Stores predating that table fall back to the single first origin.
+func experimentOriginVerified(ctx context.Context, q querier, id, host string, hostsTable bool) (bool, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_native_origins WHERE id=? AND host=?`, id, host).Scan(&n)
+	if err != nil || n != 0 || !hostsTable {
+		return n != 0, err
+	}
+	err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_native_origin_hosts WHERE id=? AND host=?`, id, host).Scan(&n)
+	return n != 0, err
 }
 
 func experimentSourceKey(ctx context.Context, q querier, repo, id string) (string, error) {
@@ -140,6 +187,8 @@ func (s *Store) EnableSharedStoreExperiment(ctx context.Context) error {
 	 CREATE TABLE IF NOT EXISTS experiment_acknowledgements (
 	 source_group TEXT PRIMARY KEY REFERENCES experiment_sources(id), acknowledgement TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS experiment_native_origins (id TEXT PRIMARY KEY REFERENCES events(id), host TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS experiment_native_origin_hosts (
+	 id TEXT NOT NULL REFERENCES events(id), host TEXT NOT NULL, PRIMARY KEY(id, host));
 	 CREATE TABLE IF NOT EXISTS experiment_collisions (
 	 id TEXT NOT NULL, source TEXT NOT NULL, target_repo TEXT NOT NULL, decision TEXT NOT NULL,
 	 PRIMARY KEY(source, target_repo));
@@ -170,13 +219,13 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 	if host == "" || len(group) == 0 {
 		return ExperimentSource{}, fmt.Errorf("experiment: host and committed group required")
 	}
-	out := ExperimentSource{Host: host}
+	out := ExperimentSource{Version: experimentSourceVersion, Host: host}
 	for _, ev := range group {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, ev.ID).Scan(&count); err != nil {
 			return out, err
 		}
-		if count != 0 || ev.Actor == SystemActor("shared-store-experiment") {
+		if count != 0 || ev.Actor == integrationEffectActor {
 			return out, fmt.Errorf("experiment: integration effects are not source actions")
 		}
 		history, err := v.EventsOfSubject(ctx, ev.Subject)
@@ -185,14 +234,52 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		}
 		a := ExperimentAction{Event: ev}
 		for _, prior := range history {
-			if prior.ID < ev.ID {
+			if prior.ID >= ev.ID {
+				continue
+			}
+			if prior.Type == TypeMatterCreated || prior.Type == TypeStageCreated || prior.Type == TypeStepCreated || prior.Type == TypeStepInserted {
+				var birth NodeBirth
+				if err := decode(prior, &birth); err != nil {
+					return out, err
+				}
+				a.Parent = birth.Parent
+			}
+			// Baseline names the last prior event a paired receiver can
+			// actually hold — the portable-plane tail. Non-portable families
+			// never leave this store, so naming one would make every later
+			// portable event on the subject an unresolvable dependency on a
+			// fresh peer: permanent pending, a silent stall.
+			if experimentPortableBaseline(prior, ev.Repo) {
 				a.Baseline = prior.ID
-				if prior.Type == TypeMatterCreated || prior.Type == TypeStageCreated || prior.Type == TypeStepCreated || prior.Type == TypeStepInserted {
-					var birth NodeBirth
-					if err := decode(prior, &birth); err != nil {
+			}
+		}
+		if a.Parent == "" {
+			// step.replaced files a replacement's birth under the replaced
+			// node's subject, so this node's own history never shows one;
+			// the projection's birth_event still names it. Recover the
+			// structural evidence across that subject boundary — the
+			// replaced node's parent is the one the replacement inherited —
+			// and, for the first event on the node, anchor its baseline on
+			// the birth itself.
+			var birthID string
+			err := tx.QueryRowContext(ctx, `SELECT birth_event FROM nodes WHERE id=?`, ev.Subject).Scan(&birthID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return out, err
+			}
+			if err == nil {
+				var replacedID, birthType string
+				if err := tx.QueryRowContext(ctx, `SELECT subject, type FROM events WHERE id=?`, birthID).Scan(&replacedID, &birthType); err != nil {
+					return out, err
+				}
+				if birthType == TypeStepReplaced {
+					var parent string
+					if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent,'') FROM nodes WHERE id=?`, replacedID).Scan(&parent); err != nil {
 						return out, err
 					}
-					a.Parent = birth.Parent
+					a.Parent = parent
+					if a.Baseline == "" {
+						a.Baseline = birthID
+					}
 				}
 			}
 		}
@@ -202,19 +289,27 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				return out, err
 			}
 			b := ExperimentBaseline{Subject: parent}
-			next := ""
 			for _, prior := range history {
 				if prior.ID >= group[0].ID {
 					break
 				}
-				b.Event = prior.ID
-				if prior.Type == TypeStageCreated {
-					var birth NodeBirth
-					if err := decode(prior, &birth); err != nil {
-						return out, err
-					}
-					next = birth.Parent
+				// Same portable-plane rule as the action baseline: the
+				// ancestor evidence a receiver compares against its own
+				// portable tail must name an event sync can actually carry.
+				if experimentPortableBaseline(prior, ev.Repo) {
+					b.Event = prior.ID
 				}
+			}
+			// The chain continues through the projected parent, never through
+			// whichever event happens to be last: a started, finished or
+			// otherwise-transitioned ancestor still has exactly one parent,
+			// including one born inside this same group.
+			var next string
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent,'') FROM nodes WHERE id=?`, parent).Scan(&next); err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return out, err
+				}
+				next = ""
 			}
 			a.Ancestors = append(a.Ancestors, b)
 			parent = next
@@ -249,21 +344,60 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		}
 		out.Actions = append(out.Actions, a)
 	}
-	// Remember locally supplied provenance before any echo can claim it. This
-	// is fixture attribution, not authority conferred by an incoming envelope.
+	// Remember locally supplied provenance before any echo can claim it. The
+	// first origin stays immutable; a retired association may re-export the
+	// same native event under its fresh installation, recorded append-only.
+	// This is fixture attribution, not authority conferred by an incoming envelope.
 	for _, ev := range group {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_native_origins VALUES (?,?)`, ev.ID, host); err != nil {
 			return out, err
 		}
-		var origin string
-		if err := tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, ev.ID).Scan(&origin); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_native_origin_hosts VALUES (?,?)`, ev.ID, host); err != nil {
 			return out, err
-		}
-		if origin != host {
-			return out, fmt.Errorf("experiment: native export origin is immutable")
 		}
 	}
 	return out, tx.Commit()
+}
+
+// experimentPortableUnit projects one complete exported group into the
+// portable unit a paired exchange may carry. A fully portable group returns
+// unchanged; a mixed group returns its separately identified derivative —
+// portable members as Actions, the rest retained under Derivative.Omitted.
+// ok=false means no portable unit exists: the caller keeps the raw source,
+// which explicit uploads retain as receiver-side evidence while
+// ExchangeStatus keeps the group out of automatic PendingUpload. The
+// projection is deterministic, so exchange_exports retries emit identical
+// bytes and receivers dedup on the same source identity.
+func experimentPortableUnit(source ExperimentSource, repo string) (ExperimentSource, bool) {
+	if len(source.Actions) == 0 {
+		return source, false
+	}
+	events := make([]Event, len(source.Actions))
+	for i, a := range source.Actions {
+		events[i] = a.Event
+	}
+	mask := experimentUnitMask(events, repo)
+	unit := 0
+	for _, member := range mask {
+		if member {
+			unit++
+		}
+	}
+	if unit == 0 {
+		return source, false
+	}
+	if unit == len(mask) {
+		return source, true
+	}
+	out := ExperimentSource{Version: source.Version, Host: source.Host, Derivative: &ExperimentDerivative{Parent: source.Actions[0].Event.Correlation}}
+	for i, a := range source.Actions {
+		if mask[i] {
+			out.Actions = append(out.Actions, a)
+		} else {
+			out.Derivative.Omitted = append(out.Derivative.Omitted, a)
+		}
+	}
+	return out, true
 }
 
 // ExperimentImport retains even unsupported content and conflicted groups.
@@ -274,7 +408,8 @@ func (s *Store) ExperimentImport(ctx context.Context, source ExperimentSource) (
 }
 
 // ExperimentImportBound retains foreign Repo identity and projects only into an
-// explicitly chosen native Repo. It also enables the bounded Matter/Brief slice.
+// explicitly chosen native Repo. It also enables the bounded portable slice:
+// node births, planned starts and the create-once content writes.
 func (s *Store) ExperimentImportBound(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
 	if _, err := s.Repo(ctx, repo); err != nil {
 		return ExperimentDecision{}, err
@@ -294,6 +429,32 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 			return ExperimentDecision{}, fmt.Errorf("experiment: incomplete or malformed source group")
 		}
 		seen[e.ID] = true
+	}
+	// A derivative is the sender's explicit statement that only portable
+	// members carry syncable facts: its Actions stay a closed chain and every
+	// omitted member is retained evidence whose links still name members of
+	// the same raw group. Omitted members are never classified and never get
+	// effects; the unit's atomicity covers Actions alone.
+	if d := source.Derivative; d != nil {
+		if d.Parent != group {
+			return ExperimentDecision{}, fmt.Errorf("experiment: derivative does not name its source group")
+		}
+		claimed := make(map[string]bool, len(seen)+len(d.Omitted))
+		for id := range seen {
+			claimed[id] = true
+		}
+		for _, a := range d.Omitted {
+			e := a.Event
+			if !IsIdentityShaped(e.ID) || claimed[e.ID] || e.Correlation != group {
+				return ExperimentDecision{}, fmt.Errorf("experiment: malformed derivative evidence")
+			}
+			claimed[e.ID] = true
+		}
+		for _, a := range d.Omitted {
+			if e := a.Event; e.Causation == e.ID || !claimed[e.Causation] {
+				return ExperimentDecision{}, fmt.Errorf("experiment: malformed derivative evidence")
+			}
+		}
 	}
 	raw, err := json.Marshal(source)
 	if err != nil {
@@ -317,31 +478,43 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 	// Compare untouched original evidence before Repo/baseline mapping and before
 	// reserving source/action IDs that a later genuine self-echo must still use.
 	v := View{q: tx, schemaVersion: s.version}
-	for _, a := range source.Actions {
-		native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
-		if err != nil {
-			return ExperimentDecision{}, err
+	originHosts, err := exchangeTableExists(ctx, tx, "experiment_native_origin_hosts")
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
+	// An unreadable source schema is never matched against native evidence
+	// under the wrong interpretation: its retained conflict names the
+	// rejected version, not a coincidental identity comparison.
+	if experimentSourceCompatible(source.Version) {
+		claims := append([]ExperimentAction{}, source.Actions...)
+		if source.Derivative != nil {
+			claims = append(claims, source.Derivative.Omitted...)
 		}
-		if len(native) == 0 {
-			continue
+		for _, a := range claims {
+			native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if len(native) == 0 {
+				continue
+			}
+			verified, err := experimentOriginVerified(ctx, tx, a.Event.ID, source.Host, originHosts)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if reflect.DeepEqual(native[0], a.Event) && verified {
+				continue
+			}
+			result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), scope, string(encoded)); err != nil {
+				return ExperimentDecision{}, err
+			}
+			return result, tx.Commit()
 		}
-		var origin string
-		err = tx.QueryRowContext(ctx, `SELECT host FROM experiment_native_origins WHERE id=?`, a.Event.ID).Scan(&origin)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ExperimentDecision{}, err
-		}
-		if reflect.DeepEqual(native[0], a.Event) && origin == source.Host {
-			continue
-		}
-		result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			return ExperimentDecision{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), scope, string(encoded)); err != nil {
-			return ExperimentDecision{}, err
-		}
-		return result, tx.Commit()
 	}
 	key, err := experimentSourceKey(ctx, tx, repo, group)
 	if err != nil {
@@ -463,46 +636,77 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 		return ExperimentDecision{}, err
 	}
 	effects := make([]string, len(source.Actions))
-	needed := make([]bool, len(source.Actions))
 	subjects := map[string]bool{}
 	for _, a := range source.Actions {
 		subjects[a.Event.Subject] = true
 	}
-	// Classify the complete group before appending any business effect.
+	// One pass over the group: member i is classified against candidate state —
+	// committed rows plus the folded effects of members 0..i-1 — then its effect
+	// is appended and its ledger row written before member i+1 is read, so a
+	// same-group baseline or parent resolves through the same experiment_actions
+	// JOIN prior groups use. The savepoint keeps the unit atomic: the first
+	// non-integrated member rolls every effect and ledger write back, and the
+	// ledger is rewritten exactly as two-phase classification left it — every
+	// action retained, none with an effect.
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT experiment_candidate`); err != nil {
+		return ExperimentDecision{}, err
+	}
+	var local []Event
 	for i, a := range source.Actions {
+		baseline, eventID := a.Baseline, a.Event.ID
+		sourceRepo := a.Event.Repo
 		if target != "" {
 			a.Event.Repo = target
-			if a.Baseline != "" {
-				a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
-				if err != nil {
-					return ExperimentDecision{}, err
-				}
+			// gate.declared keys at its Repo (D42, D54): the source subject
+			// is the source Repo's own identity, so on a bound target it
+			// maps to the paired Repo exactly as ev.Repo does. The fold
+			// refuses any subject that is not the Repo, so the remap must
+			// land before classification and stamping see one pair; a
+			// subject naming anything else stays put and conflicts.
+			if a.Event.Type == TypeGateDeclared && a.Event.Subject == sourceRepo {
+				a.Event.Subject = target
+			}
+		}
+		if a.Baseline != "" {
+			a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
+			if err != nil {
+				return ExperimentDecision{}, err
 			}
 		}
 		var disposition, reason, effect string
 		var need bool
-		if target != "" && (a.Event.Type == TypeMatterCreated || a.Event.Type == TypeContentCreated) {
-			disposition, reason, effect, need, err = experimentClassifyUseful(ctx, v, a)
+		if !experimentSourceCompatible(source.Version) {
+			// The schema marker is a group-level property: an unreadable
+			// version takes the same atomic path as a first-member conflict —
+			// every action retained as evidence, none effected — so receipt,
+			// cursor and later feed records are unaffected.
+			disposition, reason = "conflict", fmt.Sprintf("incompatible source version %d", source.Version)
+		} else if target != "" && experimentPortableMember(a.Event.Type) {
+			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a, s)
 		} else {
-			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target)
+			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target, s)
 		}
 		if err != nil {
 			return ExperimentDecision{}, err
 		}
 		if disposition != "integrated" {
 			result.Disposition, result.Reason = disposition, reason
+			if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT experiment_candidate`); err != nil {
+				return ExperimentDecision{}, err
+			}
+			for _, member := range source.Actions {
+				if err := experimentRecordAction(ctx, tx, group, scope, member.Event.ID, member.Baseline, "", previous == nil); err != nil {
+					return ExperimentDecision{}, err
+				}
+			}
 			break
 		}
-		effects[i], needed[i] = effect, need
-	}
-	var local []Event
-	for i, a := range source.Actions {
-		if result.Disposition == "integrated" && needed[i] {
+		if need {
 			repo := a.Event.Repo
 			if target != "" {
 				repo = target
 			}
-			ev, err := s.stamp(Request{Actor: SystemActor("shared-store-experiment"), Env: Env{Repo: repo}}, Draft{Type: a.Event.Type, Subject: a.Event.Subject, Payload: a.Event.Payload})
+			ev, err := s.stamp(Request{Actor: integrationEffectActor, Env: Env{Repo: repo}}, Draft{Type: a.Event.Type, Subject: a.Event.Subject, Payload: a.Event.Payload})
 			if err != nil {
 				return ExperimentDecision{}, err
 			}
@@ -521,20 +725,15 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			}
 			local = append(local, ev)
 			effects[i] = ev.ID
-		}
-		effect := ""
-		if result.Disposition == "integrated" {
-			effect = effects[i]
-		}
-		if previous == nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, experimentKey(scope, a.Event.ID), group, nullable(effect), a.Baseline); err != nil {
-				return ExperimentDecision{}, err
-			}
 		} else {
-			if _, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), experimentKey(scope, a.Event.ID), a.Event.ID, group); err != nil {
-				return ExperimentDecision{}, err
-			}
+			effects[i] = effect
 		}
+		if err := experimentRecordAction(ctx, tx, group, scope, eventID, baseline, effects[i], previous == nil); err != nil {
+			return ExperimentDecision{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT experiment_candidate`); err != nil {
+		return ExperimentDecision{}, err
 	}
 	if result.Disposition == "integrated" {
 		result.Effects = effects
@@ -573,26 +772,74 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 	return result, nil
 }
 
-func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string) (string, string, string, bool, error) {
+// experimentRecordAction writes one member's ledger row inside the group's
+// single pass: first evaluation inserts, recheck updates the retained effect in
+// place. The baseline column always keeps the untouched source-space value,
+// never the locally mapped one, so later exports and rechecks read the same
+// immutable correspondence.
+func experimentRecordAction(ctx context.Context, tx *sql.Tx, group, scope, eventID, baseline, effect string, insert bool) error {
+	key := experimentKey(scope, eventID)
+	if insert {
+		_, err := tx.ExecContext(ctx, `INSERT INTO experiment_actions VALUES (?, ?, ?, ?)`, key, group, nullable(effect), baseline)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE experiment_actions SET effect=? WHERE (id=? OR id=?) AND source_group=?`, nullable(effect), key, eventID, group)
+	return err
+}
+
+func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string, s *Store) (string, string, string, bool, error) {
 	e := a.Event
 	conflict := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	pending := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
-	if e.Type != TypeMatterStarted && e.Type != TypeStageStarted && e.Type != TypeStepStarted {
+	// The step amendment family mutates an already-paired object like the
+	// lifecycle matrix does, so it shares this bound-and-unbound path; only
+	// step.inserted joins the birth classifier, bound-only like *.created.
+	// The backlog outcome family is Repo-durable paired state in the same
+	// position — entered births the entry row, the three exits mutate it — so
+	// it classifies here on both paths too. Findings appends mutate an
+	// existing node or backlog entry the same way, so content.appended joins
+	// them here while content.created stays bound-only with the births.
+	if e.Type == TypeStepReordered || e.Type == TypeStepReplaced || e.Type == TypeStepRemoved {
+		return experimentClassifyAmendment(ctx, v, a)
+	}
+	if e.Type == TypeBacklogEntered || e.Type == TypeBacklogPlanned ||
+		e.Type == TypeBacklogDeclined || e.Type == TypeBacklogDelegated {
+		return experimentClassifyBacklog(ctx, v, a)
+	}
+	if e.Type == TypeContentAppended {
+		return experimentClassifyFinding(ctx, v, a, s)
+	}
+	if e.Type == TypeDependencyAdded || e.Type == TypeDependencyRemoved {
+		return experimentClassifyDependency(ctx, v, a)
+	}
+	if e.Type == TypeGateDeclared || e.Type == TypeGateClosed ||
+		e.Type == TypeGateDismissed || e.Type == TypeGateExemptionRepaired {
+		return experimentClassifyGate(ctx, v, a)
+	}
+	if e.Type == TypeReferenceAdded || e.Type == TypeReferenceRemoved ||
+		e.Type == TypeReferenceRebound {
+		return experimentClassifyReference(ctx, v, a)
+	}
+	spec, admitted := experimentLifecycleEdges[e.Type]
+	if !admitted {
 		return conflict("unsupported family; original payload retained, no content overwritten")
 	}
 	var p Transition
 	if err := decodeStrict(e, &p); err != nil {
 		return conflict("invalid transition payload")
 	}
-	if p.From != Planned || p.To != InProgress || p.Reason != "" {
-		return conflict("not a planned start")
+	// The payload must be exactly what the verb emits: fixed From/To per edge,
+	// Reason only where the edge records one (cancel), Cascade only where the
+	// verb moves ancestors on its own initiative (start). Anything else is not
+	// a native lifecycle move and stays retained evidence.
+	if p.From != spec.from || p.To != spec.to || (!spec.reason && p.Reason != "") || (!spec.cascade && p.Cascade) {
+		return conflict("not a native " + spec.verb)
 	}
 	n, err := v.Node(ctx, e.Subject)
 	if err != nil {
 		return pending("missing live paired object")
 	}
-	expected := map[Scale]string{ScaleMatter: TypeMatterStarted, ScaleStage: TypeStageStarted, ScaleStep: TypeStepStarted}
-	if n.Repo != e.Repo || n.Parent != a.Parent || expected[n.Kind] != e.Type {
+	if n.Repo != e.Repo || n.Parent != a.Parent || n.Kind != spec.kind {
 		return conflict("paired structure differs")
 	}
 	if a.Baseline == "" {
@@ -602,74 +849,108 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if err != nil {
 		return "", "", "", false, err
 	}
-	baseline := -1
-	for i, prior := range history {
-		if prior.ID == a.Baseline {
-			baseline = i
-		}
+	baseline, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
 	}
-	if baseline < 0 {
+	if baseline < 0 && !anchored {
 		return pending("unknown baseline dependency")
 	}
-	for parent := n.Parent; parent != ""; {
-		ancestor, err := v.Node(ctx, parent)
-		if err != nil {
-			return pending("missing ancestor")
-		}
-		if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
-			return conflict("incompatible ancestor lifecycle")
-		}
-		if !subjects[parent] {
-			if ancestor.Lifecycle == Planned {
-				return pending("incomplete ancestor cascade")
-			}
-			history, err := v.EventsOfSubject(ctx, parent)
+	// The subject's portable-plane tail: non-portable families legitimately
+	// diverge between paired stores — they never sync — so "the last event"
+	// every check below compares against the mapped baseline means the last
+	// admitted portable-family event, integration effects and native
+	// portable-type events alike.
+	tail := experimentPortableTail(history)
+	if spec.verb == "started" {
+		for parent := n.Parent; parent != ""; {
+			ancestor, err := v.Node(ctx, parent)
 			if err != nil {
-				return "", "", "", false, err
+				return pending("missing ancestor")
 			}
-			last := history[len(history)-1]
-			if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
-				return conflict("ancestor history diverged from its start")
+			if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
+				return conflict("incompatible ancestor lifecycle")
 			}
-			observed := ""
-			for _, b := range a.Ancestors {
-				if b.Subject == parent {
-					observed = b.Event
+			if !subjects[parent] {
+				if ancestor.Lifecycle == Planned {
+					return pending("incomplete ancestor cascade")
 				}
-			}
-			if observed == "" {
-				return pending("missing ancestor baseline evidence")
-			}
-			mapped, err := experimentMappedEvidence(ctx, v, observed, target)
-			if err != nil {
-				return "", "", "", false, err
-			}
-			if mapped != last.ID {
-				var count int
-				if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id=?`, mapped).Scan(&count); err != nil {
+				history, err := v.EventsOfSubject(ctx, parent)
+				if err != nil {
 					return "", "", "", false, err
 				}
-				if count == 0 {
-					return pending("unknown ancestor correspondence")
+				at := experimentPortableTail(history)
+				if at < 0 {
+					return conflict("ancestor history diverged from its start")
 				}
-				return conflict("ancestor history differs from source observation")
+				last := history[at]
+				if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
+					return conflict("ancestor history diverged from its start")
+				}
+				observed := ""
+				for _, b := range a.Ancestors {
+					if b.Subject == parent {
+						observed = b.Event
+					}
+				}
+				if observed == "" {
+					return pending("missing ancestor baseline evidence")
+				}
+				mapped, err := experimentMappedEvidence(ctx, v, observed, target)
+				if err != nil {
+					return "", "", "", false, err
+				}
+				if mapped != last.ID {
+					var count int
+					if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id=?`, mapped).Scan(&count); err != nil {
+						return "", "", "", false, err
+					}
+					if count == 0 {
+						return pending("unknown ancestor correspondence")
+					}
+					return conflict("ancestor history differs from source observation")
+				}
 			}
+			parent = ancestor.Parent
 		}
-		parent = ancestor.Parent
 	}
-	last := history[len(history)-1]
-	if n.Lifecycle == InProgress && len(history) >= 2 && history[len(history)-2].ID == a.Baseline && last.Type == e.Type {
+	if tail < 0 {
+		// Only a step.replaced birth leaves a node with no portable entry in
+		// its own subject history — the fold files that birth under the
+		// replaced node's subject — and a history holding only non-portable
+		// events is the same as-born state on the portable plane, so the
+		// baseline resolved above is the birth anchor and nothing else. The
+		// node is still as-born, so only a transition the fold can make from
+		// Planned may apply.
+		if n.Lifecycle != spec.from {
+			return conflict("lifecycle or subject history diverged; never reopen or infer from current " + string(n.Lifecycle))
+		}
+		return "integrated", "", "", true, nil
+	}
+	last := history[tail]
+	// The portable event before the newest is the baseline anchor: the
+	// portable-plane predecessor ordinarily, the birth_event itself for a
+	// step.replaced-born node's first event — the only case where the anchor
+	// is not in portable history.
+	before := experimentPortableBefore(history, tail)
+	if before == "" && anchored {
+		before = a.Baseline
+	}
+	if n.Lifecycle == spec.to && before == a.Baseline && last.Type == e.Type {
 		var represented Transition
 		if err := decodeStrict(last, &represented); err != nil {
 			return "", "", "", false, err
 		}
-		if represented.TrackerPushLevel != p.TrackerPushLevel {
-			return conflict("tracker policy snapshots differ")
+		// Cascade legitimately varies between a cascade member and a direct
+		// start of the same node; every other payload field must be identical
+		// for the existing effect to represent this source.
+		if represented.From != p.From || represented.To != p.To || represented.Reason != p.Reason || represented.TrackerPushLevel != p.TrackerPushLevel {
+			return conflict("transition snapshots differ")
 		}
 		return "integrated", "", last.ID, false, nil
 	}
-	if n.Lifecycle != Planned || last.ID != a.Baseline {
-		return conflict("lifecycle or subject history diverged; never reopen or infer from current InProgress")
+	if n.Lifecycle != spec.from || last.ID != a.Baseline {
+		return conflict("lifecycle or subject history diverged; never reopen or infer from current " + string(n.Lifecycle))
 	}
 	return "integrated", "", "", true, nil
 }
@@ -691,7 +972,14 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 	subjects := map[string]bool{}
 	var evidence []string
 	for _, a := range source.Actions {
-		subjects[a.Event.Subject] = true
+		// gate.declared's subject is its Repo: on a bound target the effect
+		// lands under the paired Repo, so evidence must watch that subject
+		// rather than the source-space one.
+		subject := a.Event.Subject
+		if target != "" && a.Event.Type == TypeGateDeclared && subject == a.Event.Repo {
+			subject = target
+		}
+		subjects[subject] = true
 		if a.Parent != "" {
 			subjects[a.Parent] = true
 		}
@@ -711,7 +999,9 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 		}
 		last := "missing"
 		for _, event := range history {
-			if target == "" || event.Repo == target {
+			// Evidence tracks the portable plane the classifiers consult:
+			// a local non-portable fact is not a changed decision input.
+			if (target == "" || event.Repo == target) && experimentPortableType(event.Type) {
 				last = event.ID
 			}
 		}
@@ -916,7 +1206,7 @@ func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, rep
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, e.ID).Scan(&effect); err != nil {
 			return nil, err
 		}
-		if effect != 0 || e.Actor == SystemActor("shared-store-experiment") {
+		if effect != 0 || e.Actor == integrationEffectActor {
 			continue
 		}
 		activities[e.ID] = ExperimentActivity{Event: e, Origin: localOrigin, Disposition: "local"}
@@ -959,7 +1249,7 @@ func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, rep
 		for i, a := range d.Source.Actions {
 			key := experimentKey(d.target, a.Event.ID)
 			activity := ExperimentActivity{Event: a.Event, Origin: d.Source.Host, Disposition: d.Disposition, ReceivedAt: received, LastRecordedEvaluationAt: evaluated, Acknowledgement: ack}
-			if e, ok := native[a.Event.ID]; ok && e.Actor != SystemActor("shared-store-experiment") {
+			if e, ok := native[a.Event.ID]; ok && e.Actor != integrationEffectActor {
 				// A conflicting claim is inspectable in ExperimentActivities, not a
 				// replacement for authentic work. Even exact echoes cannot supply
 				// native attribution that was unknown to this local reader.

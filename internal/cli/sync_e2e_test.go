@@ -199,6 +199,17 @@ func TestSyncScopedOfflineRecheck(t *testing.T) {
 	if err != nil || before.Waiting != 1 || before.Active {
 		t.Fatal("unpaired A needs one waiting child", before, err)
 	}
+	// The retained pending child waits on its unarrived parent — a dependency
+	// wait, never a byte wait — and the categories mirror the retained
+	// counters exactly, queued included.
+	if before.Categories.Waiting != 1 || before.Categories.WaitingDependencies != 1 || before.Categories.WaitingBytes != 0 {
+		t.Fatal("pending child must surface as one dependency wait, never a byte wait", before.Categories)
+	}
+	if before.Categories.Queued != len(before.PendingUpload) || before.Categories.Acknowledged != len(before.Retained) ||
+		before.Categories.Received != int(before.Downloaded) || before.Categories.Applied != before.Integrated ||
+		before.Categories.Conflicts != before.Conflicts || before.Categories.Excluded != len(before.Unsupported) {
+		t.Fatal("categories must mirror the retained counters", before.Categories)
+	}
 	prior, err := destination.EventsOfSubject(ctx, step.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -259,6 +270,8 @@ func TestSyncScopedOfflineRecheck(t *testing.T) {
 	if err := os.WriteFile(credential, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// `run` applies retained decisions with no preview, acknowledgement or
+	// activity inspection first — inspection is optional, never a gate.
 	for _, args := range [][]string{{"recheck"}, {"run"}, {"recheck", sources[1].Actions[0].Event.ID}} {
 		command(len(args) == 1, args...)
 		after, err := destination.ExchangeStatus(ctx, repo)
@@ -282,6 +295,10 @@ func TestSyncScopedOfflineRecheck(t *testing.T) {
 	if err != nil || after.Waiting != 0 || after.Integrated != before.Integrated+1 {
 		t.Fatal("explicit A did not recover offline without credentials", after, err)
 	}
+	if after.Categories.Waiting != 0 || after.Categories.WaitingBytes != 0 || after.Categories.WaitingDependencies != 0 ||
+		after.Categories.Applied != after.Integrated {
+		t.Fatal("applied child must leave every waiting bucket and land in applied", after.Categories)
+	}
 	node, err := destination.Node(ctx, step.ID)
 	if err != nil || node.Lifecycle != store.InProgress {
 		t.Fatal("offline recovery did not apply child", node, err)
@@ -298,5 +315,34 @@ func TestSyncScopedOfflineRecheck(t *testing.T) {
 	retryEvents, err := destination.Events(ctx)
 	if err != nil || !reflect.DeepEqual(beforeRetry, retryEvents) {
 		t.Fatal("offline retry changed native event history", err)
+	}
+}
+
+// Sync help must state the release contract plainly: pairing is the only
+// opt-in, old/new/imported work follows one policy, status names its
+// categories, and inspection is never a mandatory preview/apply gate.
+func TestSyncHelpStatesSingleOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		contains []string
+	}{
+		{[]string{"plumbing", "sync", "--help"}, []string{"only sync opt-in", "one policy"}},
+		{[]string{"plumbing", "sync", "pair", "--help"}, []string{"only sync opt-in", "one policy", "inspection never gates"}},
+		{[]string{"plumbing", "sync", "status", "--help"}, []string{
+			"Queued", "Acknowledged", "Received", "Waiting", "WaitingBytes", "WaitingDependencies",
+			"Applied", "Conflicts", "Excluded", "only opt-in", "one policy",
+		}},
+		{[]string{"plumbing", "sync", "run", "--help"}, []string{"explicit exchange pass", "no mandatory preview", "only opt-in"}},
+		{[]string{"plumbing", "sync", "activity", "--help"}, []string{"Inspection only", "only opt-in"}},
+	} {
+		r := run(t, nil, tc.args...)
+		if r.exitCode != 0 {
+			t.Fatalf("%v exit %d: %s", tc.args, r.exitCode, r.stderr)
+		}
+		for _, want := range tc.contains {
+			if !strings.Contains(r.stdout, want) {
+				t.Fatalf("%v help missing %q:\n%s", tc.args, want, r.stdout)
+			}
+		}
 	}
 }

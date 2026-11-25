@@ -139,9 +139,9 @@ func TestLaravelInitOnboardingCLI(t *testing.T) {
 	}
 	ca := newClient(t, "owner@example.test")
 	// Ordinary init remains local until explicitly configured, even with a
-	// saved login. Its earlier work must not be silently adopted by pairing.
+	// saved login. Earlier supported work is eligible once pairing opts in.
 	local := initialize(t, ca, true, "")
-	private := ca.matter(t, "Before onboarding remains private")
+	earlier := ca.matter(t, "Before onboarding syncs as supported original")
 	configure(t, ca, "auto")
 	a := initialize(t, ca, true, "synced")
 	if a.Repo != local.Repo || a.Onboarding.Binding == nil || a.Onboarding.Sync == nil {
@@ -167,13 +167,13 @@ func TestLaravelInitOnboardingCLI(t *testing.T) {
 		t.Fatal("independent machine/native/account identities conflated")
 	}
 	for _, status := range []store.ExchangeStatus{pa, pb} {
-		if status.Binding.Endpoint != server.URL+strings.TrimPrefix(f.endpoint(), f.base) || status.Binding.Connection != "office" || status.Binding.Account == "" || status.Cursor != 3 || status.Conflicts != 0 {
+		if status.Binding.Endpoint != server.URL+strings.TrimPrefix(f.endpoint(), f.base) || status.Binding.Connection != "office" || status.Binding.Account == "" || status.Cursor != 4 || status.Conflicts != 0 {
 			t.Fatal("wrong shared destination or first-pass result", status)
 		}
 	}
 	sa, sb := labOpen(t, ca.host.db), labOpen(t, cb.host.db)
-	if _, err := sb.Node(labCtx, private.ID); err == nil {
-		t.Fatal("pre-pair history adopted")
+	if got, err := sb.Node(labCtx, earlier.ID); err != nil || got.Repo != b.Repo || got.Title != earlier.Title {
+		t.Fatal("eligible pre-pair original did not arrive under receiver's native Repo", got, err)
 	}
 	if got, err := sb.Node(labCtx, n.ID); err != nil || got.Repo != b.Repo || got.Lifecycle != store.InProgress || got.Title != n.Title {
 		t.Fatal("Matter/start did not arrive under receiver's native Repo", got, err)
@@ -184,11 +184,12 @@ func TestLaravelInitOnboardingCLI(t *testing.T) {
 	var feed struct {
 		Changes []store.ExchangeChange `json:"changes"`
 	}
-	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &feed); err != nil || len(feed.Changes) != 3 {
-		t.Fatal("expected exactly three supported originals", err)
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &feed); err != nil || len(feed.Changes) != 4 {
+		t.Fatal("expected exactly four supported originals", err)
 	}
-	for i, kind := range []string{store.TypeMatterCreated, store.TypeContentCreated, store.TypeMatterStarted} {
-		original, err := sa.ExperimentExport(labCtx, pa.Binding.InstallationID, sourceGroup(t, sa, n.ID, kind))
+	checkOriginal := func(i int, subject, kind string) {
+		t.Helper()
+		original, err := sa.ExperimentExport(labCtx, pa.Binding.InstallationID, sourceGroup(t, sa, subject, kind))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -205,6 +206,10 @@ func TestLaravelInitOnboardingCLI(t *testing.T) {
 		if !found {
 			t.Fatal("receiver did not retain exact supported original", kind)
 		}
+	}
+	checkOriginal(0, earlier.ID, store.TypeMatterCreated)
+	for i, kind := range []string{store.TypeMatterCreated, store.TypeContentCreated, store.TypeMatterStarted} {
+		checkOriginal(i+1, n.ID, kind)
 	}
 	// Pending work makes an accidental repeated-init exchange observable both
 	// on the HTTP boundary and in the durable cursor/upload state.
@@ -253,7 +258,7 @@ func TestLaravelInitOnboardingCLI(t *testing.T) {
 			t.Fatal("init retried a retained first-pass failure implicitly")
 		}
 		c.sync(t, true, "run")
-		if got := c.status(t); got.Cursor != 4 || got.Binding != before.Binding || got.Conflicts != 0 {
+		if got := c.status(t); got.Cursor != 5 || got.Binding != before.Binding || got.Conflicts != 0 {
 			t.Fatal("explicit retry did not recover retained binding", got)
 		}
 	})
@@ -376,7 +381,7 @@ func TestLaravelNamedConnections(t *testing.T) {
 	if out, err := exec.Command("git", "-C", a.dir, "remote", "add", "origin", "git@github.com:Me/Personal.git").CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}
-	ca.matter(t, "Before pairing explicitly adopts selected remote")
+	ca.matter(t, "Before pairing syncs as supported original")
 	// Distinct native Repos in one client store, not isolated client databases.
 	b := labPair{dir: t.TempDir(), db: a.db}
 	if out, err := exec.Command("git", "init", "--quiet", b.dir).CombinedOutput(); err != nil {
@@ -477,7 +482,7 @@ func TestLaravelNamedConnections(t *testing.T) {
 	na, nb := ca.matter(t, "Only personal"), cb.matter(t, "Only work")
 	ca.sync(t, true, "run")
 	cb.sync(t, true, "run")
-	if ca.status(t).Cursor != 1 || cb.status(t).Cursor != 1 {
+	if ca.status(t).Cursor != 2 || cb.status(t).Cursor != 1 {
 		t.Fatal("cross-server upload or missing own echo")
 	}
 	if got, err := s.Node(labCtx, na.ID); err != nil || got.Repo != a.repo {
@@ -526,7 +531,7 @@ func TestLaravelNamedConnections(t *testing.T) {
 	ca.sync(t, true, "run")
 	cb.sync(t, true, "run")
 	pa, pb := ca.status(t), cb.status(t)
-	if pa.Integrated != 4 || pb.Conflicts != 3 || pb.Cursor != 4 {
+	if pa.Integrated != 5 || pb.Conflicts != 3 || pb.Cursor != 4 {
 		t.Fatal("foreign mappings crossed destinations", pa, pb)
 	}
 	content, err := s.Content(labCtx, n.ID, store.KindBrief)
@@ -869,7 +874,7 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 			}
 		}
 	}
-	before := ca.matter(t, "Before pairing stays private")
+	before := ca.matter(t, "Before pairing syncs as supported original")
 	ca.sync(t, false, "pair", "--org", f.OtherOrg, "--server-repo", f.Repo)
 	if ca.status(t).Paired {
 		t.Fatal("failed destination selection paired locally")
@@ -899,7 +904,7 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 	cb.matter(t, "Independent source B")
 	pre := ca.status(t)
 	local := syncRowCounts(t, a.db)
-	if len(pre.PendingUpload) != 2 {
+	if len(pre.PendingUpload) != 3 {
 		t.Fatal("complete original selection", pre)
 	}
 	ca.sync(t, true, "run", "--dry-run")
@@ -909,8 +914,8 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 	ca.sync(t, true, "run")
 	cb.sync(t, true, "run")
 	ca.sync(t, true, "run")
-	if _, err := sb.Node(labCtx, before.ID); err == nil {
-		t.Fatal("pre-pair history silently adopted")
+	if got, err := sb.Node(labCtx, before.ID); err != nil || got.Title != before.Title {
+		t.Fatal("eligible pre-pair original did not arrive", got, err)
 	}
 	segments, err := sb.ContentSegments(labCtx, n.ID, store.KindBrief)
 	if err != nil || len(segments) != 1 {
@@ -922,7 +927,7 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 	}
 	for _, c := range []syncCLI{ca, cb} {
 		s := c.status(t)
-		if len(s.PendingUpload) != 0 || len(s.Retained) == 0 || s.Cursor != 3 || s.Evaluated != 3 || s.Integrated != 3 || s.Conflicts != 0 {
+		if len(s.PendingUpload) != 0 || len(s.Retained) == 0 || s.Cursor != 4 || s.Evaluated != 4 || s.Integrated != 4 || s.Conflicts != 0 {
 			t.Fatal("transport/application outcomes", s)
 		}
 	}
@@ -1046,7 +1051,8 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 		}
 	}
 	// Unsupported ordinary local work is not falsely declared synchronized.
-	ca.command(t, true, "plumbing", "finding", "add", n.Locator, "local finding remains usable")
+	// Findings are portable now, so the retained fixture is a dependency edge.
+	ca.command(t, true, "plumbing", "depend", "add", n.Locator, "--blocked-by", competing.Locator)
 	if len(ca.status(t).Unsupported) == 0 {
 		t.Fatal("unsupported work hidden")
 	}
@@ -1404,5 +1410,184 @@ func TestLaravelExplicitSyncCLIScopedRecheck(t *testing.T) {
 				t.Fatal("offline retry changed effects or unrelated Repo", err)
 			}
 		})
+	}
+}
+
+// Supported unsynced originals are eligible regardless of pair-time age;
+// unsupported families stay local, integration effects never re-export, and
+// native-origin bookkeeping survives a retired association's fresh host.
+func TestSharedStoreExchangeProjectScope(t *testing.T) {
+	p, s := exchangeHost(t)
+	n, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, "Pre-pair matter", "pre-pair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := writesurface.CreateStage(labCtx, s, store.ActorHuman, p.repo, n.Locator, "Stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := writesurface.CreateStep(labCtx, s, store.ActorHuman, p.repo, n.Locator+"/"+stage.Locator, "Step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := writesurface.Start(labCtx, s, store.ActorHuman, p.repo, n.Locator+"/"+stage.Locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matterGroup := sourceGroup(t, s, n.ID, store.TypeMatterCreated)
+	startGroup := started[0].Correlation
+	stageGroup := sourceGroup(t, s, stage.ID, store.TypeStageCreated)
+	stepGroup := sourceGroup(t, s, step.ID, store.TypeStepCreated)
+	var stageCreated string
+	for _, ev := range labEvents(t, s) {
+		if ev.Subject == stage.ID && ev.Type == store.TypeStageCreated {
+			stageCreated = ev.ID
+		}
+	}
+	if stageCreated == "" {
+		t.Fatal("stage birth event missing")
+	}
+	preview, err := s.ExchangeStatus(labCtx, p.repo)
+	if err != nil || preview.Paired || len(preview.PendingUpload) != 0 || preview.EarlierGroups == 0 {
+		t.Fatal("unpaired preview claimed outgoing work", preview, err)
+	}
+	var uploads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/origins"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/changes"):
+			uploads.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "GET":
+			_, _ = w.Write([]byte(`{"changes":[],"cursor":0}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	endpoint := server.URL + "/api/organizations/org/repos/repo"
+	status, err := s.PairExchange(labCtx, p.repo, endpoint)
+	if err != nil || !status.Paired || !status.Active {
+		t.Fatal("pairing failed", status, err)
+	}
+	// Every command group predates the recorded boundary, yet the supported
+	// originals — the three births and the start cascade — are outgoing.
+	if !reflect.DeepEqual(status.PendingUpload, []string{matterGroup, stageGroup, stepGroup, startGroup}) {
+		t.Fatal("age excluded supported originals", status.PendingUpload)
+	}
+	for _, group := range status.Unsupported {
+		if group == stageGroup || group == stepGroup {
+			t.Fatal("portable birth stayed local inventory", group, status.Unsupported)
+		}
+	}
+	db, err := sql.Open("sqlite", "file:"+p.db+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT correlation) FROM events WHERE repo=?`, p.repo).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if status.EarlierGroups != total {
+		t.Fatal("boundary count is not plain inventory", status.EarlierGroups, total)
+	}
+	wantDependency := startGroup + ": depends on subject evidence " + stageCreated + " in group " + stageGroup + " (not portable)"
+	for _, dependency := range status.Dependencies {
+		if strings.Contains(dependency, "(not adopted)") {
+			t.Fatal("stale pre-boundary claim", dependency)
+		}
+		if dependency == wantDependency {
+			t.Fatal("portable prior group still reported as a blocker", dependency)
+		}
+	}
+	if err := s.UnpairExchange(labCtx, p.repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RunExchange(labCtx, store.ExchangeClient{HTTP: http.DefaultClient}, p.repo); err == nil || !strings.Contains(err.Error(), "not actively paired") {
+		t.Fatal("paused pairing exchanged", err)
+	}
+	resumed, err := s.PairExchange(labCtx, p.repo, endpoint)
+	if err != nil || resumed.Boundary != status.Boundary || !reflect.DeepEqual(resumed.PendingUpload, status.PendingUpload) {
+		t.Fatal("re-pairing moved boundary or scope", resumed, err)
+	}
+	done, err := s.RunExchange(labCtx, store.ExchangeClient{HTTP: http.DefaultClient}, p.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploads.Load() != int32(len(status.PendingUpload)) || len(done.PendingUpload) != 0 || len(done.Retained) != len(status.PendingUpload) {
+		t.Fatal("eligible originals were not uploaded and acknowledged", uploads.Load(), done)
+	}
+	var nativeEvents, recordedHosts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE correlation IN (?,?)`, matterGroup, startGroup).Scan(&nativeEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM experiment_native_origin_hosts WHERE host=? AND id IN (SELECT id FROM events WHERE correlation IN (?,?))`, done.Binding.InstallationID, matterGroup, startGroup).Scan(&recordedHosts); err != nil {
+		t.Fatal(err)
+	}
+	if nativeEvents == 0 || recordedHosts != nativeEvents {
+		t.Fatal("export origin bookkeeping incomplete", nativeEvents, recordedHosts)
+	}
+	// A retired association's fresh installation re-exports the same native
+	// originals; the first origin stays immutable while hosts append.
+	otherHost := "33333333-3333-4333-8333-333333333333"
+	if _, err := s.ExperimentExport(labCtx, otherHost, matterGroup); err != nil {
+		t.Fatal("successive installation could not re-export retained originals", err)
+	}
+	var firstOrigin string
+	if err := db.QueryRow(`SELECT host FROM experiment_native_origins WHERE id=(SELECT id FROM events WHERE correlation=? AND type=? LIMIT 1)`, matterGroup, store.TypeMatterCreated).Scan(&firstOrigin); err != nil {
+		t.Fatal(err)
+	}
+	if firstOrigin != done.Binding.InstallationID {
+		t.Fatal("first origin was relabeled", firstOrigin)
+	}
+	var appended int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM experiment_native_origin_hosts WHERE id=(SELECT id FROM events WHERE correlation=? AND type=? LIMIT 1) AND host=?`, matterGroup, store.TypeMatterCreated, otherHost).Scan(&appended); err != nil || appended != 1 {
+		t.Fatal("successive export host not recorded", appended, err)
+	}
+	// A verified echo of retained originals is inert; an unrecorded host
+	// claiming the same native identity is an inspectable conflict.
+	source, err := s.ExperimentExport(labCtx, done.Binding.InstallationID, matterGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo, err := s.ExperimentImportBound(labCtx, source, p.repo)
+	if err != nil || echo.Disposition != "integrated" {
+		t.Fatal("verified self-echo was not inert", echo, err)
+	}
+	forged := source
+	forged.Host = "44444444-4444-4444-8444-444444444444"
+	claim, err := s.ExperimentImportBound(labCtx, forged, p.repo)
+	if err != nil || claim.Disposition != "conflict" {
+		t.Fatal("unverified origin claimed native identity", claim, err)
+	}
+	// Received integration effects are never fresh-original export candidates,
+	// even when a caller names their group explicitly.
+	q, sq := exchangeHost(t)
+	foreignGroup := followCreate(t, q, sq, "foreign-matter")
+	foreign, err := sq.ExperimentExport(labCtx, "55555555-5555-4555-8555-555555555555", foreignGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming, err := s.ExperimentImportBound(labCtx, foreign, p.repo)
+	if err != nil || incoming.Disposition != "integrated" || len(incoming.Effects) != 1 {
+		t.Fatal("foreign original did not integrate", incoming, err)
+	}
+	if _, err := s.ExperimentExport(labCtx, "66666666-6666-4666-8666-666666666666", incoming.Effects[0]); err == nil || !strings.Contains(err.Error(), "integration effects") {
+		t.Fatal("integration effect exported as a fresh original", err)
+	}
+	if err := s.ExchangePass(labCtx, store.ExchangeClient{HTTP: http.DefaultClient}, done.Binding, []string{incoming.Effects[0]}); err == nil || !strings.Contains(err.Error(), "integration effects") {
+		t.Fatal("explicit pass exported an integration effect", err)
+	}
+	final, err := s.ExchangeStatus(labCtx, p.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range final.PendingUpload {
+		if group == incoming.Effects[0] {
+			t.Fatal("integration effect became pending upload", final.PendingUpload)
+		}
 	}
 }

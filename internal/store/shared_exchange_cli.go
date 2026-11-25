@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
-// ExchangeStatus is an offline inventory, not a claim of convergence. Boundary
-// excludes pre-pair history; unsupported local work remains fully usable.
+// ExchangeStatus is an offline inventory, not a claim of convergence. For a
+// paired Repo the recorded boundary is retained pairing evidence only: every
+// supported unsynced original group is eligible regardless of age.
+// EarlierGroups counts command groups at or before that boundary as inventory;
+// unsupported local work remains fully usable.
 type ExchangeStatus struct {
 	Binding                              ExchangeBinding
 	Generation                           string
@@ -23,6 +27,29 @@ type ExchangeStatus struct {
 	Collisions                           []ExperimentDecision
 	Acknowledged                         map[string]ExperimentAcknowledgement
 	Dependencies                         []string
+	Categories                           ExchangeStatusCategories
+}
+
+// ExchangeStatusCategories groups the counters above under the release's
+// named lifecycle categories, so `sync status` distinguishes queued,
+// acknowledged, received, waiting, applied, conflict and excluded work
+// without any preview or acknowledgement step. Queued and Acknowledged
+// count this Repo's outgoing portable originals; Received counts durable
+// remote envelopes; Waiting splits retained pending decisions into byte
+// waits (spilled content not yet installed and verified) and every other
+// prerequisite wait; Applied and Conflicts count retained remote decisions,
+// collision claims included; Excluded counts local command groups with no
+// portable member, which never sync by design.
+type ExchangeStatusCategories struct {
+	Queued              int
+	Acknowledged        int
+	Received            int
+	Waiting             int
+	WaitingBytes        int
+	WaitingDependencies int
+	Applied             int
+	Conflicts           int
+	Excluded            int
 }
 
 func (s *Store) exchangeCLIExists(ctx context.Context) (bool, error) {
@@ -79,8 +106,9 @@ func (s *Store) ExchangeBindings(ctx context.Context) ([]ExchangeBindingInfo, er
 	return out, rows.Err()
 }
 
-// PairExchange pins a future-only history boundary once. Repeat pairing resumes
-// the same destination and cursor; no installation or state is created by preview.
+// PairExchange records the pairing boundary once; it is retained evidence,
+// not an export exclusion. Repeat pairing resumes the same destination and
+// cursor; no installation or state is created by preview.
 func (s *Store) PairExchange(ctx context.Context, repo, endpoint string) (ExchangeStatus, error) {
 	preview, err := s.ExchangeStatus(ctx, repo)
 	if err != nil {
@@ -182,8 +210,10 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			}
 		}
 	}
-	// Scan entire command groups, not individual eligible actions. Mixed or
-	// unsupported groups must never be silently truncated into new originals.
+	// Scan entire command groups. Eligibility is per member, not per group: a
+	// mixed command still uploads its portable unit as an explicitly identified
+	// derivative, while a group with no portable member stays local inventory.
+	// Nothing is ever silently truncated into new originals.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT correlation FROM events WHERE repo=? ORDER BY correlation`, repo)
 	if err != nil {
 		return out, err
@@ -205,50 +235,74 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 	if !out.Paired && len(groups) > 0 {
 		out.Boundary = groups[len(groups)-1]
 	}
-	for _, group := range groups {
-		if group <= out.Boundary {
-			out.EarlierGroups++
-			continue
-		}
-		events, err := s.EventsOfChain(ctx, group)
-		if err != nil {
-			return out, err
-		}
-		var effect int
-		if out.Paired {
+	// A paired Repo evaluates every command group regardless of the recorded
+	// boundary, which remains pairing evidence rather than an export exclusion.
+	// An unpaired preview keeps the latest-group boundary, so every group is
+	// inventory and nothing counts as outgoing work.
+	type groupScan struct {
+		unit   []Event // portable-unit members; empty when the group cannot sync
+		effect bool
+	}
+	scans := make([]groupScan, len(groups))
+	unitEvents := map[string]bool{}
+	if out.Paired {
+		for i, group := range groups {
+			events, err := s.EventsOfChain(ctx, group)
+			if err != nil {
+				return out, err
+			}
+			var effect int
 			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events e JOIN experiment_effects x ON x.id=e.id WHERE e.correlation=?`, group).Scan(&effect); err != nil {
 				return out, err
 			}
+			scans[i].effect = effect != 0
+			if scans[i].effect {
+				continue
+			}
+			for j, portable := range experimentUnitMask(events, repo) {
+				if portable {
+					scans[i].unit = append(scans[i].unit, events[j])
+					unitEvents[events[j].ID] = true
+				}
+			}
 		}
-		if effect != 0 {
+	}
+	for i, group := range groups {
+		if group <= out.Boundary {
+			out.EarlierGroups++
+			if !out.Paired {
+				continue
+			}
+		}
+		scan := scans[i]
+		if scan.effect {
 			continue
 		}
-		for _, ev := range events {
-			var prior string
-			if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),'') FROM events WHERE subject=? AND id<?`, ev.Subject, ev.ID).Scan(&prior); err != nil {
+		for _, ev := range scan.unit {
+			var prior, priorGroup string
+			// The dependency a portable member actually carries is its
+			// portable-plane predecessor — the same event ExperimentExport
+			// names as baseline — never the literal subject-history tail,
+			// which non-portable families legitimately diverge on.
+			err := s.db.QueryRowContext(ctx, `SELECT id,correlation FROM events WHERE subject=? AND id<? AND type IN (`+experimentPortableTypeSQL+`) ORDER BY id DESC LIMIT 1`, ev.Subject, ev.ID).Scan(&prior, &priorGroup)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return out, err
 			}
-			if prior != "" && prior <= out.Boundary {
-				out.Dependencies = append(out.Dependencies, group+": depends on pre-boundary subject evidence "+prior+" (not adopted)")
+			if prior == "" || priorGroup == group || unitEvents[prior] {
+				continue
 			}
+			var effect int
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, prior).Scan(&effect); err != nil {
+				return out, err
+			}
+			// An integration effect is never a portable original, but its
+			// retained source evidence resolves the dependency instead.
+			if effect != 0 {
+				continue
+			}
+			out.Dependencies = append(out.Dependencies, group+": depends on subject evidence "+prior+" in group "+priorGroup+" (not portable)")
 		}
-		supported := true
-		for _, ev := range events {
-			if ev.Repo != repo || ev.Actor == SystemActor("shared-store-experiment") {
-				supported = false
-			}
-			switch ev.Type {
-			case TypeMatterCreated, TypeMatterStarted, TypeStageStarted, TypeStepStarted:
-			case TypeContentCreated:
-				var p ContentWritten
-				if json.Unmarshal(ev.Payload, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" {
-					supported = false
-				}
-			default:
-				supported = false
-			}
-		}
-		if !supported {
+		if len(scan.unit) == 0 {
 			out.Unsupported = append(out.Unsupported, group)
 			continue
 		}
@@ -327,6 +381,32 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			out.Acknowledged[id] = a
 		}
 	}
+	out.Categories = ExchangeStatusCategories{
+		Queued:       len(out.PendingUpload),
+		Acknowledged: len(out.Retained),
+		Received:     int(out.Downloaded),
+		Waiting:      out.Waiting,
+		Applied:      out.Integrated,
+		Conflicts:    out.Conflicts,
+		Excluded:     len(out.Unsupported),
+	}
+	// The waiting split reuses retained reasons only — "content bytes …"
+	// waits on spilled payload installation, every other pending reason is a
+	// prerequisite/dependency wait. No new state is recorded, and the two
+	// buckets always sum to Waiting because both come from the same retained
+	// decisions and collision claims.
+	for _, retained := range [][]ExperimentDecision{out.Decisions, out.Collisions} {
+		for _, d := range retained {
+			if d.Disposition != "pending" {
+				continue
+			}
+			if strings.HasPrefix(d.Reason, "content bytes") {
+				out.Categories.WaitingBytes++
+			} else {
+				out.Categories.WaitingDependencies++
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -354,6 +434,12 @@ func (s *Store) RunExchange(ctx context.Context, c ExchangeClient, repo string) 
 	for _, id := range status.PendingUpload {
 		change, err := s.exchangeExport(ctx, status.Binding, id)
 		if err != nil {
+			return status, err
+		}
+		// Spilled bytes must reach the server before the change that names
+		// them: a blob failure aborts before this group's POST, so nothing
+		// ack-able uploads without its content.
+		if err := s.exchangeUploadChangeBlobs(ctx, c, status.Binding, change); err != nil {
 			return status, err
 		}
 		if err := c.request(ctx, "POST", status.Binding.Endpoint+"/changes", map[string]any{"changes": []ExchangeChange{change}}, nil); err != nil {

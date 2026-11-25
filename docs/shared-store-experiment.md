@@ -63,8 +63,8 @@ work/period view, including their non-native action IDs. They stay inspectable i
 `ExperimentActivities` without replacing canonical native or foreign originals.
 Ordinary canonical conflict activities remain visible. Even exact echoes cannot
 fill unknown local attribution from an incoming claim.
-Inline Brief content IDs are also global: reuse is a retained conflict even when
-the existing row belongs to another Matter or is tombstoned. Accepted bytes remain
+Content IDs are also global: reuse is a retained conflict even when
+the existing row belongs to another subject or is tombstoned. Accepted bytes remain
 unchanged and unrelated later inbox records can still be processed.
 
 ## Explicit reconsideration is separate from delivery
@@ -175,9 +175,13 @@ The original lab tables are not a general migration/upgrade contract for earlier
 experiment databases. The CLI extension defines its own version-1 pairing state
 below, without changing ordinary store migrations.
 
-The inline content conflict preserves source bytes; spilled content is retained
-only as its original unsupported payload/reference, not downloaded or made
-offline-ready. No blob-transfer or cleanup coordination is implemented.
+The inline content conflict preserves source bytes. Spilled content
+(`blob_ref` set, `bytes` absent) is a portable member too, but it never
+projects a row whose bytes cannot be served: the classifier checks the
+store-owned sidecar blob against the payload's recorded `byte_len`/`sha256`
+and the group pends — atomically, with the full `ContentWritten` payload
+retained as inspectable evidence — until verified bytes are installed.
+Blob transport itself is the sync-content work's seam, not this importer's.
 
 Source-time reporting is demonstrated only in the opt-in preview, not integrated
 into Session/status. Native Session still sees the fresh local effect timestamp;
@@ -233,14 +237,24 @@ API does not persist tokens; the CLI keeps credentials outside the store.
 HTTP happens outside every local writer transaction; redirects
 are refused rather than forwarding bearer credentials.
 
+The embedded `ExperimentSource` carries its own optional `Version` schema
+marker beside that envelope version: absent is the legacy version-1 shape every
+pre-marker export already used, so stored envelopes and captured retries stay
+readable, and exports stamp the current version explicitly. Receivers accept
+only versions they can interpret; anything else is retained whole as an
+inspectable conflict naming the rejected version — an apply-time outcome that
+never rejects receipt, loses cursor/feed progress, or blocks later records.
+Cloud validates only the marker's type and stores source bytes verbatim;
+compatibility is always the receiver's decision.
+
 When an observed baseline was a generated local effect, export retains that
 observation as `NativeBaseline` (or ancestor `NativeEvent`) and supplies its
 portable original source identity as `Baseline`/`Event`. Incoming original source
 is immutable. `ExperimentImportBound` maps only the generated effect's Repo to
 the chosen native Repo and resolves portable baseline correspondence. It never
 rewrites retained source events or native Repo/Clone/path rows. New Matter object
-IDs and inline Brief content IDs remain shared business identities; incompatible
-identities, occupied addresses and competing Brief bytes are not merged.
+IDs and content IDs remain shared business identities; incompatible
+identities, occupied addresses and competing create-once bytes are not merged.
 
 Each downloaded committed page and its cursor commit together into the durable
 inbox before classification. A failure during receipt rolls both back. A failure
@@ -259,8 +273,8 @@ offline recovery, post-effect/pre-inbox-mark failure, 100+3 committed pages,
 tenant/credential/origin revocation and ordinary CLI/server-unavailable controls.
 Existing tagged/race and ordinary CLI suites remain controls. This extends only
 fresh-fixture Matter birth and inline create-once Brief integration; it does not
-enable generalized families, blob transfer, existing-history adoption, a default
-daemon or any production synchronization activation.
+enable generalized families, blob transfer, generalized existing-history
+adoption, a default daemon or any production synchronization activation.
 
 ## Explicit pairing and one-pass CLI extension
 
@@ -386,25 +400,72 @@ for both session authentication and bearer exchange. Logout revokes the saved
 token and removes its file; an already-revoked token (HTTP 401) can also be
 forgotten. A network failure does not pretend revocation succeeded.
 
-**History scope is future-only.** Pairing inventories existing command groups and
-pins their maximum correlation ID as the initial boundary. Older work is not
-silently adopted, uploaded or merged, and pre-boundary dependency findings are
-reported. Applying pairing commits installation, immutable destination, active
-flag, boundary and local version together before origin-registration HTTP. A
-lost registration response can be retried with that same identity/boundary.
-Normal native Repo IDs, local clone/path associations and Git configuration are
-unchanged. Lookup deliberately avoids ordinary opportunistic remote adoption.
+**History scope is project-wide for supported originals.** Pairing inventories
+existing command groups and pins their maximum correlation ID as the recorded
+boundary, which is retained pairing evidence rather than an export exclusion.
+Every unsynced original group with a portable unit is eligible regardless of
+age; groups without one stay local and inspectable, and dependency findings
+report the prior event's own command group and whether that event itself is
+portable in the same scan. Applying pairing commits installation, immutable
+destination, active flag, boundary and local version together before
+origin-registration HTTP. A lost registration response can be retried with
+that same identity/boundary. Normal native Repo IDs, local clone/path
+associations and Git configuration are unchanged. Lookup deliberately avoids
+ordinary opportunistic remote adoption.
 
-`RunExchange` selects complete original commands in that Repo after the boundary,
-not caller-supplied IDs. It captures every eligible exact envelope before HTTP,
+`RunExchange` selects complete original commands in that Repo, not
+caller-supplied IDs. It captures every eligible exact envelope before HTTP,
 uploads in local command order and acknowledges each group durably after the
 server accepts it. A lost response resends the same cached key/bytes. Concurrent
 new local work remains eligible for the next pass. Supported Matter births,
-inline create-once Briefs and starts use the existing bounded importer; generated
-effects and unrelated Repo/clone lookup work are never re-exported. Unsupported
-families stay usable locally and appear in the unsupported inventory. Required
-supported births/Brief baselines are included in command order when inside the
+the create-once content writes (Brief, Workplan, body) and starts use the
+existing bounded importer; findings appends classify on the same bound-and-
+unbound path as the lifecycle matrix and backlog outcomes. A mixed
+group crosses only as its portable unit, described below. Generated effects and
+unrelated Repo/clone lookup work are never re-exported. Unsupported families
+stay usable locally and appear in the unsupported inventory. Required
+supported births/content baselines are included in command order when inside the
 scope; old or unsupported dependencies are not silently synthesized.
+
+### Portable units for mixed command groups
+
+Eligibility is per member, not per group. `experimentExchangePortable` is the
+single predicate: a member qualifies only as a repo-scoped original of an
+admitted family — the same bounded slice the bound importer can project — and
+`experimentUnitMask` closes that set over in-group causation, so the version-1
+envelope's cause chain never dangles outside the unit. A portable member whose
+in-group causal ancestor is not portable is retained evidence, not a syncable
+fact, and a group with no portable member at all stays out of `PendingUpload`.
+
+`exchangeExport` projects each captured group through `experimentPortableUnit`
+before the envelope is sealed. A fully portable group exports unchanged. A
+mixed group exports a separately identified *derivative*: `Actions` are
+exactly the portable members in command order, `Derivative.Parent` names the
+raw command group (its shared correlation/origin event), and
+`Derivative.Omitted` retains every other member's untouched `ExperimentAction`
+— baseline, parent and ancestor evidence included — as inspectable proof,
+never classified and never an effect. The wire stays version 1:
+`group_id`, `source_repo_id` and the per-action Repo/causation checks are
+unchanged, and omitted members are evidence inside the source, not actions.
+A group with no portable member keeps its raw source on explicit upload, so
+unsupported families remain retained receiver-side conflicts exactly as
+before; only automatic eligibility changed.
+
+Identity mapping is unchanged: shared business IDs stay source IDs, local
+effects get fresh native IDs recorded in `experiment_actions.effect`, and
+private ledger keys stay scoped to the target Repo. Integration enters only
+through `ExperimentImportBound`/`ApplyExchangeInbox` → `experimentImport` →
+`experimentEvaluate`, whose savepoint makes the unit atomic on its own — a
+conflicting later member rolls back earlier portable effects, and omitted
+evidence cannot leak an effect. `Store.Rebuild` replays the same
+`applyEventVersion` folds, so maintained and rebuilt projections agree.
+Integration effects carry the fixed `system:shared-store-experiment` actor
+and no delivery authority; they are never re-exported as originals.
+
+Covered by `TestSharedStorePortableDerivativeExchange` and
+`TestSharedStorePortableDerivativeConflictAtomic` on a stateful fake feed,
+and `TestLaravelExchangePortableDerivative` against real Cloud retention and
+receiver integration.
 
 Offline `status` separates pending upload, server retention, downloaded/evaluated
 inbox entries, integrated groups, waiting groups and conflicts. Evaluation does
@@ -434,7 +495,7 @@ cursor state. Pairing the same association resumes it; it cannot silently switch
 destinations or reuse a cursor elsewhere. Logout is separate and does not unpair
 or erase local data. Local pairing persistence is version 1. Missing CLI tables
 are initialized only on apply; an older low-level lab binding can opt in with its
-existing endpoint/installation/cursor and a newly explicit future boundary. An
+existing endpoint/installation/cursor and a freshly recorded boundary. An
 unknown CLI version refuses without rewriting it. No generalized real-history
 upgrade/adoption guarantee is claimed.
 
@@ -691,8 +752,9 @@ For a new unpaired project, `auto` uses a complete read-only lookup to find
 exactly one accessible server Repo with the same normalized selected Git remote
 within the configured organization. It revalidates access, pairs and immediately
 runs **one real sync pass**, including supported upload/download. It never
-creates a server Repo automatically, adopts arbitrary pre-pair history or starts
-a recurring worker. Zero or multiple matches require an explicit choice; JSON
+creates a server Repo automatically or starts a recurring worker; supported
+portable originals sync regardless of age while unsupported work stays local.
+Zero or multiple matches require an explicit choice; JSON
 or unattended init reports incomplete onboarding rather than prompting.
 
 Use `join: {mode: ask}` (or omit `join`) for prompted joining. In a terminal,
@@ -769,7 +831,7 @@ including inactive associations (legacy unnamed associations belong to `default`
 Native work, IDs, Repo/Clone/worktree identity, Git configuration and original
 provenance are preserved. Transport state is retired rather than silently reused
 by a later pairing. A newly explicit pairing starts a fresh association and
-future-work boundary; forgetting is not existing-history adoption or server cleanup.
+pairing boundary; forgetting is not existing-history adoption or server cleanup.
 The server's old data and issued token remain unchanged: use online deletion or
 revocation separately when wanted and possible, **before** forgetting the login.
 
