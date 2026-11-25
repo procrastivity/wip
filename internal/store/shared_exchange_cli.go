@@ -256,7 +256,11 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 		}
 		for _, ev := range scan.unit {
 			var prior, priorGroup string
-			err := s.db.QueryRowContext(ctx, `SELECT id,correlation FROM events WHERE subject=? AND id<? ORDER BY id DESC LIMIT 1`, ev.Subject, ev.ID).Scan(&prior, &priorGroup)
+			// The dependency a portable member actually carries is its
+			// portable-plane predecessor — the same event ExperimentExport
+			// names as baseline — never the literal subject-history tail,
+			// which non-portable families legitimately diverge on.
+			err := s.db.QueryRowContext(ctx, `SELECT id,correlation FROM events WHERE subject=? AND id<? AND type IN (`+experimentPortableTypeSQL+`) ORDER BY id DESC LIMIT 1`, ev.Subject, ev.ID).Scan(&prior, &priorGroup)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return out, err
 			}

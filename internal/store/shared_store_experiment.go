@@ -234,15 +234,23 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		}
 		a := ExperimentAction{Event: ev}
 		for _, prior := range history {
-			if prior.ID < ev.ID {
-				a.Baseline = prior.ID
-				if prior.Type == TypeMatterCreated || prior.Type == TypeStageCreated || prior.Type == TypeStepCreated || prior.Type == TypeStepInserted {
-					var birth NodeBirth
-					if err := decode(prior, &birth); err != nil {
-						return out, err
-					}
-					a.Parent = birth.Parent
+			if prior.ID >= ev.ID {
+				continue
+			}
+			if prior.Type == TypeMatterCreated || prior.Type == TypeStageCreated || prior.Type == TypeStepCreated || prior.Type == TypeStepInserted {
+				var birth NodeBirth
+				if err := decode(prior, &birth); err != nil {
+					return out, err
 				}
+				a.Parent = birth.Parent
+			}
+			// Baseline names the last prior event a paired receiver can
+			// actually hold — the portable-plane tail. Non-portable families
+			// never leave this store, so naming one would make every later
+			// portable event on the subject an unresolvable dependency on a
+			// fresh peer: permanent pending, a silent stall.
+			if experimentPortableBaseline(prior, ev.Repo) {
+				a.Baseline = prior.ID
 			}
 		}
 		if a.Parent == "" {
@@ -285,7 +293,12 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				if prior.ID >= group[0].ID {
 					break
 				}
-				b.Event = prior.ID
+				// Same portable-plane rule as the action baseline: the
+				// ancestor evidence a receiver compares against its own
+				// portable tail must name an event sync can actually carry.
+				if experimentPortableBaseline(prior, ev.Repo) {
+					b.Event = prior.ID
+				}
 			}
 			// The chain continues through the projected parent, never through
 			// whichever event happens to be last: a started, finished or
@@ -822,6 +835,12 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if baseline < 0 && !anchored {
 		return pending("unknown baseline dependency")
 	}
+	// The subject's portable-plane tail: non-portable families legitimately
+	// diverge between paired stores — they never sync — so "the last event"
+	// every check below compares against the mapped baseline means the last
+	// admitted portable-family event, integration effects and native
+	// portable-type events alike.
+	tail := experimentPortableTail(history)
 	if spec.verb == "started" {
 		for parent := n.Parent; parent != ""; {
 			ancestor, err := v.Node(ctx, parent)
@@ -839,7 +858,11 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 				if err != nil {
 					return "", "", "", false, err
 				}
-				last := history[len(history)-1]
+				at := experimentPortableTail(history)
+				if at < 0 {
+					return conflict("ancestor history diverged from its start")
+				}
+				last := history[at]
 				if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
 					return conflict("ancestor history diverged from its start")
 				}
@@ -870,25 +893,26 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 			parent = ancestor.Parent
 		}
 	}
-	if len(history) == 0 {
-		// Only a step.replaced birth leaves a node with no entry in its own
-		// subject history — the fold files that birth under the replaced
-		// node's subject — so the baseline resolved above is the birth
-		// anchor and nothing else. The node is still as-born, so only a
-		// transition the fold can make from Planned may apply.
+	if tail < 0 {
+		// Only a step.replaced birth leaves a node with no portable entry in
+		// its own subject history — the fold files that birth under the
+		// replaced node's subject — and a history holding only non-portable
+		// events is the same as-born state on the portable plane, so the
+		// baseline resolved above is the birth anchor and nothing else. The
+		// node is still as-born, so only a transition the fold can make from
+		// Planned may apply.
 		if n.Lifecycle != spec.from {
 			return conflict("lifecycle or subject history diverged; never reopen or infer from current " + string(n.Lifecycle))
 		}
 		return "integrated", "", "", true, nil
 	}
-	last := history[len(history)-1]
-	// The event before the newest subject event is the baseline anchor:
-	// history[-2] ordinarily, the birth_event itself for a step.replaced-born
-	// node's first event — the only case where the anchor is not in history.
-	before := ""
-	if len(history) >= 2 {
-		before = history[len(history)-2].ID
-	} else if anchored {
+	last := history[tail]
+	// The portable event before the newest is the baseline anchor: the
+	// portable-plane predecessor ordinarily, the birth_event itself for a
+	// step.replaced-born node's first event — the only case where the anchor
+	// is not in portable history.
+	before := experimentPortableBefore(history, tail)
+	if before == "" && anchored {
 		before = a.Baseline
 	}
 	if n.Lifecycle == spec.to && before == a.Baseline && last.Type == e.Type {
@@ -947,7 +971,9 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 		}
 		last := "missing"
 		for _, event := range history {
-			if target == "" || event.Repo == target {
+			// Evidence tracks the portable plane the classifiers consult:
+			// a local non-portable fact is not a changed decision input.
+			if (target == "" || event.Repo == target) && experimentPortableType(event.Type) {
 				last = event.ID
 			}
 		}

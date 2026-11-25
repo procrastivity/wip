@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 )
 
 // experimentPortableMember reports whether the type belongs to the bounded
@@ -66,6 +67,89 @@ var experimentLifecycleEdges = map[string]experimentLifecycleEdge{
 	TypeStepResumed:    {verb: "resumed", from: Paused, to: InProgress, kind: ScaleStep},
 }
 
+// experimentPortableTypeNames is the non-lifecycle half of the admitted
+// portable family, in declaration order. experimentLifecycleEdges supplies
+// the lifecycle half; together they are the single list experimentPortableType,
+// the export whitelist and the exchange status dependency scan all derive
+// from, so the three can never drift apart.
+var experimentPortableTypeNames = []string{
+	TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted,
+	TypeStepReordered, TypeStepReplaced, TypeStepRemoved,
+	TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated,
+	TypeContentCreated, TypeContentAppended,
+}
+
+// experimentPortableTypes is every admitted portable event type — the
+// lifecycle matrix plus experimentPortableTypeNames — materialized once,
+// sorted, for both the Go predicate and the status scan's SQL IN clause.
+var experimentPortableTypes = func() []string {
+	types := make([]string, 0, len(experimentLifecycleEdges)+len(experimentPortableTypeNames))
+	for typ := range experimentLifecycleEdges {
+		types = append(types, typ)
+	}
+	types = append(types, experimentPortableTypeNames...)
+	slices.Sort(types)
+	return types
+}()
+
+// experimentPortableTypeSQL is experimentPortableTypes as a quoted,
+// comma-separated SQL literal list for IN clauses.
+var experimentPortableTypeSQL = func() string {
+	quoted := make([]string, len(experimentPortableTypes))
+	for i, typ := range experimentPortableTypes {
+		quoted[i] = "'" + typ + "'"
+	}
+	return strings.Join(quoted, ",")
+}()
+
+// experimentPortableType is the admitted portable family at type level —
+// every event type experimentExchangePortable can carry to a paired
+// receiver, without the export-side Repo, actor and payload-shape checks.
+// Receiver-side tail checks share it so "portable history" means one thing
+// everywhere: an event already in local history is an observed fact on the
+// portable plane whatever its bytes, and a divergent one must conflict
+// rather than be ignored, so payload shape is deliberately not consulted
+// here.
+func experimentPortableType(typ string) bool {
+	return slices.Contains(experimentPortableTypes, typ)
+}
+
+// experimentPortableEvent is portable admission minus the original-work
+// exclusions — an admitted family type carrying a well-formed payload where
+// the family has one. experimentExchangePortable layers Repo and the
+// integration-effect actor check on top for export eligibility;
+// experimentPortableBaseline uses it without the actor check because a
+// generated effect is never an exportable original yet IS portable-family
+// history a baseline may name — canonical() rewrites it to the retained
+// source identity.
+func experimentPortableEvent(ev Event) bool {
+	if !experimentPortableType(ev.Type) {
+		return false
+	}
+	switch ev.Type {
+	case TypeContentCreated:
+		var p ContentWritten
+		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableCreated(p)
+	case TypeContentAppended:
+		var p ContentWritten
+		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableFinding(p)
+	}
+	return true
+}
+
+// experimentPortableBaseline reports whether a subject-history predecessor
+// can appear in a paired receiver's portable history — the export half of
+// baseline selection. It is experimentPortableEvent scoped to the exchanged
+// Repo: integration effects count because canonical() maps them back to
+// their retained source identity, and any actor is fine because the
+// receiver's tail is a type-level plane. A predecessor outside the Repo —
+// of an unadmitted family, or a content write whose payload cannot sync —
+// can never arrive, so it must never be named as the baseline a receiver
+// has to resolve.
+func experimentPortableBaseline(ev Event, repo string) bool {
+	return ev.Repo == repo && experimentPortableEvent(ev)
+}
+
 // experimentExchangePortable is the single per-member predicate behind
 // ExchangeStatus eligibility and portable derivatives: the event must be a
 // repo-scoped original of an admitted family — the node births including the
@@ -83,22 +167,7 @@ func experimentExchangePortable(ev Event, repo string) bool {
 	if ev.Repo != repo || ev.Actor == integrationEffectActor {
 		return false
 	}
-	if _, ok := experimentLifecycleEdges[ev.Type]; ok {
-		return true
-	}
-	switch ev.Type {
-	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted,
-		TypeStepReordered, TypeStepReplaced, TypeStepRemoved,
-		TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated:
-		return true
-	case TypeContentCreated:
-		var p ContentWritten
-		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableCreated(p)
-	case TypeContentAppended:
-		var p ContentWritten
-		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableFinding(p)
-	}
-	return false
+	return experimentPortableEvent(ev)
 }
 
 // experimentPortableContentShape is the storage half of the content family's
@@ -340,11 +409,14 @@ func experimentClassifyContent(ctx context.Context, v View, a ExperimentAction, 
 	if index < 0 && !anchored {
 		return wait("unknown baseline dependency")
 	}
-	// The baseline must be the tail: the last subject-history event, or the
-	// replaced-birth anchor when the subject has no events of its own yet.
+	// The baseline must be the tail: the last portable-plane event, or the
+	// replaced-birth anchor when the subject has no portable events of its
+	// own yet. Non-portable families never sync, so a local reference, gate
+	// or render fact after the baseline is not divergence.
+	tail := experimentPortableTail(history)
 	last := ""
-	if len(history) > 0 {
-		last = history[len(history)-1].ID
+	if tail >= 0 {
+		last = history[tail].ID
 	} else if anchored {
 		last = a.Baseline
 	}
@@ -502,6 +574,35 @@ func (s *Store) spilledContentState(ref string, byteLen int64, digest string) (s
 	return "ready", nil
 }
 
+// experimentPortableTail returns the index of the last admitted portable-
+// family event in subject history, or -1 when the portable plane is empty.
+// Non-portable families — references, gates, config, tracker, outbox, tier,
+// execution — legitimately diverge between paired stores because they never
+// sync, so every "subject tail" the classifiers compare against a mapped
+// baseline is defined over this plane only. Integration effects and native
+// portable-type events both count: either way they are the receiver's
+// portable history.
+func experimentPortableTail(history []Event) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		if experimentPortableType(history[i].Type) {
+			return i
+		}
+	}
+	return -1
+}
+
+// experimentPortableBefore returns the ID of the portable-family event
+// immediately preceding history[tail] — the portable-plane analogue of
+// history[-2] — or "" when tail is the subject's first portable event.
+func experimentPortableBefore(history []Event, tail int) string {
+	for i := tail - 1; i >= 0; i-- {
+		if experimentPortableType(history[i].Type) {
+			return history[i].ID
+		}
+	}
+	return ""
+}
+
 // experimentBaselineIndex locates the mapped baseline inside the subject's
 // local history. The ordinary answer is a history index; a node born by
 // step.replaced is the exception — that birth is filed under the replaced
@@ -509,7 +610,8 @@ func (s *Store) spilledContentState(ref string, byteLen int64, digest string) (s
 // and anchors on nodes.birth_event instead, which the mapped baseline names
 // directly. index is -1 when the baseline is not a subject-history event;
 // anchored then says whether it is the birth anchor (true) or resolves to
-// nothing local (false).
+// nothing local (false). Callers use the result as a resolution check only —
+// positional comparison against the tail is experimentPortableTail's job.
 func experimentBaselineIndex(ctx context.Context, v View, subject string, history []Event, baseline string) (index int, anchored bool, err error) {
 	for i, prior := range history {
 		if prior.ID == baseline {
@@ -610,14 +712,14 @@ func experimentClassifyAmendment(ctx context.Context, v View, a ExperimentAction
 	// Echo first: a successful replace or remove leaves its subject
 	// tombstoned, so liveness cannot be asked before the history tail has
 	// been recognized as this source's own effect. The predecessor of the
-	// newest subject event is the baseline — history[-2] ordinarily, the
-	// birth anchor for a step.replaced-born node's first event.
-	if len(history) > 0 {
-		last := history[len(history)-1]
-		before := ""
-		if len(history) >= 2 {
-			before = history[len(history)-2].ID
-		} else if anchored {
+	// newest portable event is the baseline — the portable-plane analogue of
+	// history[-2], with the birth anchor for a step.replaced-born node's
+	// first event. Non-portable families legitimately diverge between
+	// paired stores, so they never enter this comparison.
+	if tail := experimentPortableTail(history); tail >= 0 {
+		last := history[tail]
+		before := experimentPortableBefore(history, tail)
+		if before == "" && anchored {
 			before = a.Baseline
 		}
 		if before == a.Baseline && last.Type == e.Type && same(last) {
@@ -860,9 +962,11 @@ func experimentClassifyBacklog(ctx context.Context, v View, a ExperimentAction) 
 	}
 
 	// The three exits share entered -> terminal: the mapped baseline must be
-	// the subject-history tail the source observed, an equal-payload tail of
+	// the portable-plane tail the source observed, an equal-payload tail of
 	// this same type is the echo, and anything else is divergence the fold's
-	// state='entered' guard could never absorb.
+	// state='entered' guard could never absorb. Non-portable families
+	// legitimately diverge between paired stores, so only admitted portable
+	// events count as observed successors here.
 	if a.Baseline == "" {
 		return wait("missing baseline evidence")
 	}
@@ -877,12 +981,9 @@ func experimentClassifyBacklog(ctx context.Context, v View, a ExperimentAction) 
 	if baseline < 0 {
 		return wait("unknown baseline dependency")
 	}
-	if len(history) > 0 {
-		last := history[len(history)-1]
-		before := ""
-		if len(history) >= 2 {
-			before = history[len(history)-2].ID
-		}
+	if tail := experimentPortableTail(history); tail >= 0 {
+		last := history[tail]
+		before := experimentPortableBefore(history, tail)
 		if before == a.Baseline && last.Type == e.Type && same(last) {
 			return "integrated", "", last.ID, false, nil
 		}

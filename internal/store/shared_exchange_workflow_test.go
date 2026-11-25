@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -873,5 +874,294 @@ func TestSharedStoreExchangeFamilySyncMintsNoDelivery(t *testing.T) {
 	outbox, err = sb.Outbox(labCtx, b.repo)
 	if err != nil || len(outbox) != 1 || outbox[0].Kind != "state" || outbox[0].Ref != "fixture:R-1" {
 		t.Fatalf("native control outbox = %+v %v, want one state candidate for fixture:R-1", outbox, err)
+	}
+}
+
+// Portable-tail baselines end to end over the real wire. Every portable
+// family — births, the lifecycle matrix, amendments, backlog outcomes,
+// create-once prose and findings appends — is interleaved on its subject
+// with events that never sync (tracker binds, blocked-by edges, render
+// bookkeeping). Each portable action must baseline on the last portable
+// predecessor, so a fresh peer resolves every dependency instead of
+// pending "unknown baseline dependency" forever; the receiver's own
+// non-portable divergence must not conflict, while divergent portable work
+// still must.
+func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
+	_, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}}
+	statusA, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba, bb := statusA.Binding, statusB.Binding
+
+	// render.performed folds to nothing but still lands on any subject as
+	// local-only history; execution-scoped types need the repo's tier env.
+	clones, err := sa.ClonesOfRepo(labCtx, a.repo)
+	if err != nil || len(clones) == 0 {
+		t.Fatalf("host repo has no clone: %+v %v", clones, err)
+	}
+	worktrees, err := sa.WorktreesOfClone(labCtx, clones[0].ID)
+	if err != nil || len(worktrees) == 0 {
+		t.Fatalf("host clone has no worktree: %+v %v", worktrees, err)
+	}
+	tier := store.Env{Repo: a.repo, Clone: clones[0].ID, Worktree: worktrees[0].ID}
+	stamp := func(subject string) {
+		t.Helper()
+		if _, err := sa.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: tier},
+			func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+				return []store.Draft{{Type: store.TypeRenderPerformed, Subject: subject}}, nil
+			}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Phase 1 — births and starts, with non-portable predecessors already
+	// sitting on the Matter, Stage and Step subjects.
+	matter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Wedge", "wedge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := writesurface.CreateStage(labCtx, sa, store.ActorHuman, a.repo, matter.Locator, "Phase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step1, err := writesurface.CreateStep(labCtx, sa, store.ActorHuman, a.repo,
+		matter.Locator+"/"+stage.Locator, "Alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step2, err := writesurface.CreateStep(labCtx, sa, store.ActorHuman, a.repo,
+		matter.Locator+"/"+stage.Locator, "Beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp := func(n store.Node) string { return matter.Locator + "/" + n.Locator }
+	if _, err = writesurface.Bind(labCtx, sa, store.ActorHuman, a.repo, matter.Locator, "fixture:W-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.DependAdd(labCtx, sa, store.ActorHuman, a.repo, mp(stage), matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.DependAdd(labCtx, sa, store.ActorHuman, a.repo, mp(step1), matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	stamp(step1.ID)
+	stamp(step2.ID)
+	if _, err = writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	matterStart := sourceGroup(t, sa, matter.ID, store.TypeMatterStarted)
+	if _, err = writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, mp(step1)); err != nil {
+		t.Fatal(err)
+	}
+	cascadeGroup := sourceGroup(t, sa, step1.ID, store.TypeStepStarted)
+	if _, err = writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, mp(step2)); err != nil {
+		t.Fatal(err)
+	}
+	step2Start := sourceGroup(t, sa, step2.ID, store.TypeStepStarted)
+	birthGroups := []string{
+		sourceGroup(t, sa, matter.ID, store.TypeMatterCreated),
+		sourceGroup(t, sa, stage.ID, store.TypeStageCreated),
+		sourceGroup(t, sa, step1.ID, store.TypeStepCreated),
+		sourceGroup(t, sa, step2.ID, store.TypeStepCreated),
+	}
+
+	// The exported start names the portable birth as baseline, never the
+	// reference.added that literally precedes it.
+	var createdID string
+	for _, ev := range labEvents(t, sa) {
+		if ev.Subject == matter.ID && ev.Type == store.TypeMatterCreated {
+			createdID = ev.ID
+		}
+	}
+	startSource, err := sa.ExperimentExport(labCtx, "pin", matterStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := false
+	for _, act := range startSource.Actions {
+		if act.Event.Type == store.TypeMatterStarted {
+			pinned = true
+			if act.Baseline != createdID {
+				t.Fatalf("started baseline = %q, want portable birth %q", act.Baseline, createdID)
+			}
+		}
+	}
+	if !pinned {
+		t.Fatal("start source has no matter.started action")
+	}
+
+	done, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil || len(done.PendingUpload) != 0 {
+		t.Fatalf("phase 1 left groups un-uploaded: %+v %v", done, err)
+	}
+	exchangePass(t, sb, cb, bb)
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || st.Waiting != 0 || st.Conflicts != 0 {
+		t.Fatalf("phase 1 receiver status = %+v %v", st, err)
+	}
+	for _, group := range append(birthGroups, matterStart, cascadeGroup, step2Start) {
+		sourceDecision(t, sb, group, "integrated")
+	}
+	for _, id := range []string{matter.ID, stage.ID, step1.ID, step2.ID} {
+		labState(t, sb, id, store.InProgress)
+	}
+	// No non-portable family ever crossed the wire.
+	for _, ev := range labEvents(t, sb) {
+		switch ev.Type {
+		case store.TypeReferenceAdded, store.TypeReferenceRemoved, store.TypeReferenceRebound,
+			store.TypeDependencyAdded, store.TypeDependencyRemoved, store.TypeRenderPerformed:
+			t.Fatalf("non-portable event %s reached the receiver", ev.Type)
+		}
+	}
+
+	// Phase 2 — every remaining portable family, each behind a non-portable
+	// predecessor on its own subject.
+	brief := []byte("# wedge brief\n")
+	if _, err = writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, matter.Locator, store.KindBrief, brief); err != nil {
+		t.Fatal(err)
+	}
+	workplan := []byte("phase workplan\n")
+	if _, err = writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, mp(stage), store.KindWorkplan, workplan); err != nil {
+		t.Fatal(err)
+	}
+	stamp(stage.ID)
+	if _, err = writesurface.ReorderStep(labCtx, sa, store.ActorHuman, a.repo, mp(stage),
+		[]string{mp(step2), mp(step1)}); err != nil {
+		t.Fatal(err)
+	}
+	stamp(step1.ID)
+	body := []byte("alpha body\n")
+	if _, err = writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, mp(step1), store.KindBody, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Finish(labCtx, sa, store.ActorHuman, a.repo, mp(step1)); err != nil {
+		t.Fatal(err)
+	}
+	// Findings on the Matter and a backlog entry; the entry's plan waits
+	// behind render bookkeeping on its own subject.
+	if _, err = writesurface.AppendFinding(labCtx, sa, store.ActorHuman, a.repo, matter.Locator,
+		[]byte("first matter finding")); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := writesurface.BacklogAdd(labCtx, sa, store.ActorHuman, a.repo,
+		store.ProvenanceIntake, "Entry item", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.AppendFinding(labCtx, sa, store.ActorHuman, a.repo, entry.ID,
+		[]byte("triage note")); err != nil {
+		t.Fatal(err)
+	}
+	stamp(entry.ID)
+	if _, err = writesurface.BacklogPlan(labCtx, sa, store.ActorHuman, a.repo, entry.ID, matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	stamp(matter.ID)
+	if _, err = writesurface.AppendFinding(labCtx, sa, store.ActorHuman, a.repo, matter.Locator,
+		[]byte("second matter finding")); err != nil {
+		t.Fatal(err)
+	}
+
+	done, err = sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil || len(done.PendingUpload) != 0 {
+		t.Fatalf("phase 2 left groups un-uploaded: %+v %v", done, err)
+	}
+	exchangePass(t, sb, cb, bb)
+	st, err = sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || st.Waiting != 0 || st.Conflicts != 0 {
+		t.Fatalf("phase 2 receiver status = %+v %v", st, err)
+	}
+	if got, err := sb.Content(labCtx, matter.ID, store.KindBrief); err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief = %q (%v)", got, err)
+	}
+	if got, err := sb.Content(labCtx, stage.ID, store.KindWorkplan); err != nil || !bytes.Equal(got, workplan) {
+		t.Fatalf("receiver workplan = %q (%v)", got, err)
+	}
+	if got, err := sb.Content(labCtx, step1.ID, store.KindBody); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("receiver body = %q (%v)", got, err)
+	}
+	if order := labChildIDs(t, sb, stage.ID); !reflect.DeepEqual(order, []string{step2.ID, step1.ID}) {
+		t.Fatalf("receiver stage order = %v", order)
+	}
+	labState(t, sb, step1.ID, store.Done)
+	if got := labBacklog(t, sb, b.repo, entry.ID); got.State != "planned" || got.Matter != matter.ID {
+		t.Fatalf("receiver backlog entry = %+v", got)
+	}
+	segs, err := sb.ContentSegments(labCtx, matter.ID, store.KindFindings)
+	if err != nil || len(segs) != 2 {
+		t.Fatalf("receiver matter findings = %+v %v", segs, err)
+	}
+
+	// Phase 3 — the receiver's own tracker bind is local-only divergence on
+	// the same subject; the sender's pause and resume must still integrate.
+	if _, err = writesurface.Bind(labCtx, sb, store.ActorHuman, b.repo, matter.Locator, "fixture:LOCAL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writesurface.Pause(labCtx, sa, store.ActorHuman, a.repo, matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	matterPause := sourceGroup(t, sa, matter.ID, store.TypeMatterPaused)
+	if _, err = writesurface.Resume(labCtx, sa, store.ActorHuman, a.repo, matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	matterResume := sourceGroup(t, sa, matter.ID, store.TypeMatterResumed)
+	if _, err = sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, matterPause, "integrated")
+	sourceDecision(t, sb, matterResume, "integrated")
+	labState(t, sb, matter.ID, store.InProgress)
+	// The receiver's local bind never became sender history.
+	var binds int
+	for _, ev := range labEvents(t, sa) {
+		if ev.Subject == matter.ID && ev.Type == store.TypeReferenceAdded {
+			binds++
+		}
+	}
+	if binds != 1 {
+		t.Fatalf("sender matter carries %d reference.added events, want only its own", binds)
+	}
+
+	// Phase 4 — divergent portable work still conflicts both ways: the
+	// receiver pauses Beta locally while the sender finishes it.
+	if _, err = writesurface.Pause(labCtx, sb, store.ActorHuman, b.repo, mp(step2)); err != nil {
+		t.Fatal(err)
+	}
+	step2Pause := sourceGroup(t, sb, step2.ID, store.TypeStepPaused)
+	if _, err = writesurface.Finish(labCtx, sa, store.ActorHuman, a.repo, mp(step2)); err != nil {
+		t.Fatal(err)
+	}
+	step2Finish := sourceGroup(t, sa, step2.ID, store.TypeStepFinished)
+	exchangePass(t, sa, ca, ba, step2Finish)
+	exchangePass(t, sb, cb, bb, step2Pause)
+	exchangePass(t, sa, ca, ba)
+	sourceDecision(t, sa, step2Pause, "conflict")
+	sourceDecision(t, sb, step2Finish, "conflict")
+	labState(t, sa, step2.ID, store.Done)
+	labState(t, sb, step2.ID, store.Paused)
+
+	// Retry, reopen and rebuild preserve the outcomes.
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, bb)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("retry appended effects")
+	}
+	labRebuild(t, sa)
+	labRebuild(t, sb)
+	labState(t, sa, step2.ID, store.Done)
+	labState(t, sb, step2.ID, store.Paused)
+	st, err = sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || st.Waiting != 0 || st.Conflicts != 1 {
+		t.Fatalf("final receiver status = %+v %v", st, err)
 	}
 }

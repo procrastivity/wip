@@ -452,3 +452,59 @@ func TestSharedStoreLifecycleExchangeWire(t *testing.T) {
 		t.Fatalf("imported lifecycle work queued delivery candidates: %+v %v", outbox, err)
 	}
 }
+
+// A portable action's baseline is the receiver's portable-plane tail — the
+// last prior subject event sync can actually carry — never the literal
+// history tail. reference.added never leaves its store, so a start whose
+// literal prior is a tracker bind must still name the portable birth;
+// otherwise a peer that never saw the bind pends "unknown baseline
+// dependency" forever. fluke is a native copy made before the bind, so it
+// is exactly the fresh peer this must not wedge — and its own later
+// non-portable divergence must not conflict with the next portable fact.
+func TestSharedStorePortableBaselineSkipsLocalFamilies(t *testing.T) {
+	p := newLabPair(t)
+	matter, err := writesurface.CreateMatter(labCtx, p.hybrid, store.ActorHuman, p.repo, "Bound", "bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The birth itself must arrive before the start can classify: fluke was
+	// copied before this Matter existed.
+	created := labBacklogSource(t, p.hybrid, "Hybrid", matter.ID, store.TypeMatterCreated)
+	labImportBound(t, p.fluke, created, p.repo, "integrated")
+	if _, err = writesurface.Bind(labCtx, p.hybrid, store.ActorHuman, p.repo, matter.Locator, "fixture:B-1"); err != nil {
+		t.Fatal(err)
+	}
+	start := labStart(t, p, p.hybrid, "Hybrid", matter.Locator)
+	// The exported start must baseline on the portable birth, not on the
+	// reference.added that literally precedes it in subject history.
+	var started store.ExperimentAction
+	for _, a := range start.Actions {
+		if a.Event.Type == store.TypeMatterStarted {
+			started = a
+		}
+	}
+	var birth string
+	for _, ev := range labEvents(t, p.hybrid) {
+		if ev.Subject == matter.ID && ev.Type == store.TypeMatterCreated {
+			birth = ev.ID
+		}
+	}
+	if started.Event.Type == "" {
+		t.Fatal("start source has no matter.started action")
+	}
+	if started.Baseline != birth {
+		t.Fatalf("start baseline = %q, want portable birth %q", started.Baseline, birth)
+	}
+	labImportBound(t, p.fluke, start, p.repo, "integrated")
+	labState(t, p.fluke, matter.ID, store.InProgress)
+	// fluke's own tracker bind is local-only divergence on the same subject:
+	// the next portable fact must still integrate on the portable plane.
+	if _, err = writesurface.Bind(labCtx, p.fluke, store.ActorHuman, p.repo, matter.Locator, "fixture:LOCAL"); err != nil {
+		t.Fatal(err)
+	}
+	pause := labExportAfter(t, p.hybrid, "Hybrid", matter.ID, store.TypeMatterPaused,
+		labVerbPause(p.hybrid, p.repo, matter.Locator))
+	labImportBound(t, p.fluke, pause, p.repo, "integrated")
+	labState(t, p.fluke, matter.ID, store.Paused)
+	labRebuild(t, p.fluke)
+}
