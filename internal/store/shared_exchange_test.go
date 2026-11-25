@@ -1202,3 +1202,302 @@ func TestSharedStoreIncompatibleSourceVersionExchange(t *testing.T) {
 	}
 	t.Log("incompatible source version retained as conflict at sequence 1; compatible record at sequence 2 integrated; cursor/inbox complete and redelivery inert")
 }
+
+// Stage-3 discovery scope: one ordinary pass on the actively paired Repo
+// backfills every eligible original — including work that predates the
+// recorded pairing boundary — exactly once, while sibling projects in the
+// same store that never paired or are paused contribute nothing to the
+// feed and keep their local work untouched.
+func TestLaravelExchangeDiscoveryScope(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	known := map[string]bool{a.repo: true}
+	// Two more native Repos share this store: one never pairs, one pairs and
+	// is then paused. Both keep ordinary supported work that must stay local.
+	siblingRepo := func() string {
+		t.Helper()
+		p := labPair{dir: t.TempDir(), db: a.db}
+		if out, err := exec.Command("git", "init", "--quiet", p.dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v %s", err, out)
+		}
+		labCLICommand(t, p, true, "init", "--json")
+		repos, err := sa.Repos(labCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range repos {
+			if !known[r.ID] {
+				known[r.ID] = true
+				return r.ID
+			}
+		}
+		t.Fatal("new Repo not visible in shared store")
+		return ""
+	}
+	unpairedRepo := siblingRepo()
+	pausedRepo := siblingRepo()
+
+	// Supported work that predates pairing on the active Repo.
+	old, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Old supported", "old-supported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := []byte("# Pre-pair Brief\n\nSupported bytes older than the boundary.\n")
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, old.Locator, store.KindBrief, brief); err != nil {
+		t.Fatal(err)
+	}
+	oldBirth := sourceGroup(t, sa, old.ID, store.TypeMatterCreated)
+	oldBrief := sourceGroup(t, sa, old.ID, store.TypeContentCreated)
+	paired, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil || !paired.Paired || !paired.Active {
+		t.Fatal("pairing failed", paired, err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Member}
+	// The first ordinary pass discovers and acknowledges the pre-pair
+	// originals: they are the retained originals later passes must not
+	// upload again.
+	first, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.PendingUpload) != 0 || !reflect.DeepEqual(first.Retained, []string{oldBirth, oldBrief}) {
+		t.Fatalf("pre-pair originals not acknowledged once: %+v", first)
+	}
+
+	// Newer supported work on the active Repo, plus pending originals on the
+	// unpaired and paused sibling projects.
+	newer, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Newer work", "newer-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, newer.Locator); err != nil {
+		t.Fatal(err)
+	}
+	newBirth := sourceGroup(t, sa, newer.ID, store.TypeMatterCreated)
+	newStart := sourceGroup(t, sa, newer.ID, store.TypeMatterStarted)
+	if _, err := sa.PairExchange(labCtx, pausedRepo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	pausedMatter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, pausedRepo, "Paused work", "paused-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, pausedRepo, pausedMatter.Locator, store.KindBrief, []byte("paused bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sa.UnpairExchange(labCtx, pausedRepo); err != nil {
+		t.Fatal(err)
+	}
+	unpairedMatter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, unpairedRepo, "Never paired", "never-paired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, unpairedRepo, unpairedMatter.Locator, store.KindBrief, []byte("unpaired bytes")); err != nil {
+		t.Fatal(err)
+	}
+	siblingGroups := []string{
+		sourceGroup(t, sa, unpairedMatter.ID, store.TypeMatterCreated),
+		sourceGroup(t, sa, unpairedMatter.ID, store.TypeContentCreated),
+		sourceGroup(t, sa, pausedMatter.ID, store.TypeMatterCreated),
+		sourceGroup(t, sa, pausedMatter.ID, store.TypeContentCreated),
+	}
+
+	beforeUnpaired, err := sa.ExchangeStatus(labCtx, unpairedRepo)
+	if err != nil || beforeUnpaired.Paired || len(beforeUnpaired.PendingUpload) != 0 || beforeUnpaired.EarlierGroups == 0 {
+		t.Fatal("unpaired preview claimed outgoing work", beforeUnpaired, err)
+	}
+	beforePaused, err := sa.ExchangeStatus(labCtx, pausedRepo)
+	if err != nil || !beforePaused.Paired || beforePaused.Active || len(beforePaused.PendingUpload) != 2 {
+		t.Fatal("paused pairing lost its pending originals", beforePaused, err)
+	}
+	// Neither non-active project can run an ordinary pass; both refusals
+	// happen before any HTTP, so the feed is untouched.
+	for _, repo := range []string{unpairedRepo, pausedRepo} {
+		if _, err := sa.RunExchange(labCtx, ca, repo); err == nil || !strings.Contains(err.Error(), "not actively paired") {
+			t.Fatalf("non-active Repo %s exchanged: %v", repo, err)
+		}
+	}
+	feed := func() []store.ExchangeChange {
+		t.Helper()
+		var page struct {
+			Changes []store.ExchangeChange `json:"changes"`
+			Cursor  int64                  `json:"cursor"`
+		}
+		if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &page); err != nil {
+			t.Fatal(err)
+		}
+		return page.Changes
+	}
+	if got := len(feed()); got != 2 {
+		t.Fatalf("feed before backfill = %d changes, want the 2 acknowledged originals", got)
+	}
+
+	// The ordinary pass backfills exactly the newer eligible originals; the
+	// acknowledged originals and both sibling projects stay out of the feed.
+	second, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.PendingUpload) != 0 || second.Cursor != 4 || !reflect.DeepEqual(second.Retained, []string{oldBirth, oldBrief, newBirth, newStart}) {
+		t.Fatalf("backfill did not acknowledge exactly the eligible originals: %+v", second)
+	}
+	changes := feed()
+	if len(changes) != 4 {
+		t.Fatalf("feed = %d changes, want exactly the 4 eligible originals", len(changes))
+	}
+	want := map[string]bool{oldBirth: true, oldBrief: true, newBirth: true, newStart: true}
+	for _, change := range changes {
+		if !want[change.GroupID] || change.SourceRepoID != a.repo || change.InstallationID != second.Binding.InstallationID {
+			t.Fatalf("feed carries work outside the active pairing: %+v", change)
+		}
+		delete(want, change.GroupID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("eligible originals missing from feed: %v", want)
+	}
+	for _, group := range siblingGroups {
+		for _, change := range changes {
+			if change.GroupID == group {
+				t.Fatalf("sibling project group %s reached the feed", group)
+			}
+		}
+	}
+
+	// A repeated ordinary pass changes nothing: acknowledged originals are
+	// not re-uploaded, the pairing is not re-created and the boundary stays.
+	third, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.PendingUpload) != 0 || len(third.Retained) != 4 || len(feed()) != 4 || third.Cursor != second.Cursor {
+		t.Fatal("repeated ordinary pass re-uploaded acknowledged originals", third)
+	}
+	if third.Binding != second.Binding || third.Boundary != second.Boundary {
+		t.Fatal("ordinary passes re-paired or moved the boundary", third)
+	}
+	afterUnpaired, err := sa.ExchangeStatus(labCtx, unpairedRepo)
+	if err != nil || afterUnpaired.Paired || len(afterUnpaired.PendingUpload) != 0 || afterUnpaired.EarlierGroups != beforeUnpaired.EarlierGroups {
+		t.Fatal("ordinary pass touched the unpaired project", afterUnpaired, err)
+	}
+	afterPaused, err := sa.ExchangeStatus(labCtx, pausedRepo)
+	if err != nil || !afterPaused.Paired || afterPaused.Active || !reflect.DeepEqual(afterPaused.PendingUpload, beforePaused.PendingUpload) {
+		t.Fatal("ordinary pass touched the paused pairing", afterPaused, err)
+	}
+	if got, err := sa.Content(labCtx, unpairedMatter.ID, store.KindBrief); err != nil || string(got) != "unpaired bytes" {
+		t.Fatal("unpaired project's local work changed", err)
+	}
+	if got, err := sa.Content(labCtx, pausedMatter.ID, store.KindBrief); err != nil || string(got) != "paused bytes" {
+		t.Fatal("paused project's local work changed", err)
+	}
+
+	// The second store receives the whole backfill in one ordinary pass; the
+	// sibling projects' work never leaves the sender.
+	b, sb := exchangeHost(t)
+	received, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil || !received.Paired {
+		t.Fatal("receiver pairing failed", received, err)
+	}
+	done, err := sb.RunExchange(labCtx, cb, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Cursor != 4 || done.Integrated != 4 || done.Conflicts != 0 {
+		t.Fatalf("receiver did not integrate the backfilled originals once: %+v", done)
+	}
+	if got, err := sb.Node(labCtx, old.ID); err != nil || got.Repo != b.repo || got.Lifecycle != store.Planned {
+		t.Fatalf("acknowledged original did not arrive: %+v %v", got, err)
+	}
+	if got, err := sb.Node(labCtx, newer.ID); err != nil || got.Repo != b.repo || got.Lifecycle != store.InProgress {
+		t.Fatalf("newer work did not arrive: %+v %v", got, err)
+	}
+	if got, err := sb.Content(labCtx, old.ID, store.KindBrief); err != nil || string(got) != string(brief) {
+		t.Fatalf("pre-pair Brief bytes changed: %q %v", got, err)
+	}
+	for _, absent := range []string{unpairedMatter.ID, pausedMatter.ID} {
+		if _, err := sb.Node(labCtx, absent); err == nil {
+			t.Fatal("non-active project work reached the receiver", absent)
+		}
+	}
+	t.Log("pre-pair Matter/Brief acknowledged once, newer work backfilled once, unpaired and paused sibling Repos untouched; second store received all four originals")
+}
+
+// Concurrent ordinary passes on one pairing must not duplicate originals:
+// the server dedups by installation+group, local acknowledgements and the
+// cursor stay idempotent, and every pass converges to the same retained
+// status with operation identity and payloads unchanged.
+func TestLaravelExchangeConcurrentPasses(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	n, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Raced originals", "raced-originals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, n.Locator, store.KindBrief, []byte("concurrent pass bytes")); err != nil {
+		t.Fatal(err)
+	}
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	brief := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}
+	const passes = 4
+	var wg sync.WaitGroup
+	errs := make([]error, passes)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = sa.RunExchange(labCtx, ca, a.repo)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent pass %d: %v", i, err)
+		}
+	}
+	var feed struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes", f.Owner, nil, 200), &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Changes) != 2 {
+		t.Fatalf("concurrent passes duplicated originals: %d feed changes", len(feed.Changes))
+	}
+	seen := map[string]bool{}
+	for _, change := range feed.Changes {
+		if change.GroupID != birth && change.GroupID != brief {
+			t.Fatalf("unexpected group %s on feed", change.GroupID)
+		}
+		if change.SourceRepoID != a.repo || seen[change.GroupID] {
+			t.Fatalf("feed carries duplicated or foreign work: %+v", change)
+		}
+		seen[change.GroupID] = true
+	}
+	done, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done.PendingUpload) != 0 || len(done.Retained) != 2 || done.Cursor != 2 || done.Downloaded != 2 || done.Evaluated != 2 {
+		t.Fatal("concurrent passes left unstable transfer state", done)
+	}
+	// A repeated pass after the race changes nothing: same retained
+	// originals, cursor and binding, no new effects.
+	again, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.PendingUpload) != 0 || len(again.Retained) != 2 || again.Cursor != done.Cursor || again.Binding != done.Binding || again.Boundary != done.Boundary {
+		t.Fatal("post-race pass changed retained state", again)
+	}
+	if got, err := sa.Node(labCtx, n.ID); err != nil || got.Lifecycle != store.Planned {
+		t.Fatal("raced originals did not project once", err)
+	}
+	if segments, err := sa.ContentSegments(labCtx, n.ID, store.KindBrief); err != nil || len(segments) != 1 {
+		t.Fatal("Brief duplicated under concurrent passes", err)
+	}
+	t.Log("four concurrent ordinary passes: server kept one copy per original, local acks/cursor converged, post-race pass inert")
+}

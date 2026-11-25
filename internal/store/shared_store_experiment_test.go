@@ -241,6 +241,26 @@ func labRebuild(t *testing.T, s *store.Store) {
 	}
 }
 
+// labOpenExecution counts open Run/Dispatch/Role projection rows — the
+// active execution state an integration effect must never mint.
+func labOpenExecution(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	total := 0
+	for _, table := range []string{"runs", "dispatches", "roles"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE state='open'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		total += n
+	}
+	return total
+}
+
 func TestSharedStoreSameBaselineAndMissingEffect(t *testing.T) {
 	for _, both := range []bool{true, false} {
 		t.Run(fmt.Sprint("both=", both), func(t *testing.T) {
@@ -721,9 +741,17 @@ func TestSharedStoreEffectProjectsWorkWithoutDeliveryAuthority(t *testing.T) {
 	if err != nil || len(outbox) != 0 {
 		t.Fatalf("integration effect queued delivery candidates: %+v %v", outbox, err)
 	}
+	// The received effect mints no active execution state either: no open
+	// Run, Dispatch or Role exists for imported work.
+	if open := labOpenExecution(t, p.fluke.Path()); open != 0 {
+		t.Fatalf("integration effect opened %d execution rows", open)
+	}
 	labRebuild(t, p.fluke)
 	if outbox, err = p.fluke.Outbox(labCtx, p.repo); err != nil || len(outbox) != 0 {
 		t.Fatalf("rebuild resurrected delivery candidates: %+v %v", outbox, err)
+	}
+	if open := labOpenExecution(t, p.fluke.Path()); open != 0 {
+		t.Fatalf("rebuild opened %d execution rows for the effect", open)
 	}
 
 	// Native control: the same transition authored on this store queues.
