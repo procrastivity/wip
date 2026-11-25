@@ -429,17 +429,19 @@ func exchangeDigestShaped(s string) bool {
 
 // exchangeSpilledPayload decodes one action payload as ContentWritten and
 // reports the admitted spill shape: bytes absent, blob reference equal to the
-// identity-shaped content id, and a well-formed digest. It is deliberately
-// the classifier's storage shape and nothing more — payloads outside it are
-// retained evidence whose bytes sync-content can never install, so their
-// blobs are never transferred.
+// identity-shaped content id, a well-formed digest, and a length inside the
+// blob route's whole-object cap — anything larger can never be installed, so
+// its bytes are never transferred. It is deliberately the classifier's
+// storage shape and nothing more — payloads outside it are retained evidence
+// whose blobs sync-content can never install.
 func exchangeSpilledPayload(raw json.RawMessage) (ContentWritten, bool) {
 	var p ContentWritten
 	if json.Unmarshal(raw, &p) != nil {
 		return ContentWritten{}, false
 	}
 	if p.Bytes != nil || p.BlobRef == "" || p.BlobRef != p.Content ||
-		!IsIdentityShaped(p.Content) || !exchangeDigestShaped(p.SHA256) {
+		!IsIdentityShaped(p.Content) || !exchangeDigestShaped(p.SHA256) ||
+		p.ByteLen > exchangeBlobMaxBytes {
 		return ContentWritten{}, false
 	}
 	return p, true

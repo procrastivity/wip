@@ -175,8 +175,14 @@ func experimentExchangePortable(ev Event, repo string) bool {
 // either inline bytes or a blob reference, never both and never neither —
 // the same XOR insertContent enforces. A spilled payload's BlobRef is the
 // content identity itself, the only form ContentDraft ever writes and the
-// only key sync-content can install verified bytes against.
+// only key sync-content can install verified bytes against. ByteLen is
+// bounded by the blob route's whole-object cap: larger content can never be
+// installed on a peer, so it stays local evidence instead of wedging the
+// sender's upload queue on a permanent rejection.
 func experimentPortableContentShape(p ContentWritten) bool {
+	if p.ByteLen > exchangeBlobMaxBytes {
+		return false
+	}
 	if p.Bytes != nil && p.BlobRef == "" {
 		return true
 	}

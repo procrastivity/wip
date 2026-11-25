@@ -5,13 +5,16 @@ package store_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -556,6 +559,16 @@ func labDigest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func labCount(list []string, want string) int {
+	n := 0
+	for _, s := range list {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
 // labBlobPutBeforeChange asserts the feed saw a PUT for digest strictly
 // between the changes POSTs surrounding group's position in feed order —
 // upload-before-commit, not merely "a PUT happened someday".
@@ -873,4 +886,744 @@ func TestLaravelExchangeSpilledContent(t *testing.T) {
 		t.Fatalf("receiver brief bytes = %d %v", len(got), err)
 	}
 	labRebuild(t, sb)
+}
+
+// labFillBytes is a deterministic byte pattern for size-boundary fixtures.
+func labFillBytes(n int, seed byte) []byte {
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = byte(i)*seed + seed
+	}
+	return data
+}
+
+// labUnicodeBytes repeats a six-byte multibyte unit (λ + 🧪) to length n, so
+// spilled fixtures exercise non-ASCII content at scale.
+func labUnicodeBytes(n int) []byte {
+	return bytes.Repeat([]byte("λ🧪"), n/6+1)[:n]
+}
+
+// Step-07's round-trip matrix: every admitted content kind on every supported
+// owner — Matter/Stage/Step nodes and backlog entries for findings — across
+// empty, small, non-ASCII, exactly-SpillThreshold (inline: spill is strictly
+// greater) and larger-than-1 MiB payloads. Everything crosses the real feed
+// transport, and after both stores reopen and the receiver rebuilds every
+// segment is compared byte-exact against independently computed length and
+// SHA-256 of the source bytes — never against the other store's copy.
+func TestSharedStoreContentRoundTripMatrix(t *testing.T) {
+	_, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 30 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 30 * time.Second}}
+	if _, err := sa.PairExchange(labCtx, a.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	matter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Matrix", "matrix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := writesurface.CreateStage(labCtx, sa, store.ActorHuman, a.repo, "matrix", "Phase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := writesurface.CreateStep(labCtx, sa, store.ActorHuman, a.repo, "matrix/phase", "Do")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := writesurface.BacklogAdd(labCtx, sa, store.ActorHuman, a.repo,
+		store.ProvenanceIntake, "Triage", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type cell struct {
+		subject string
+		kind    store.ContentKind
+		data    []byte
+		spilled bool
+		group   string
+	}
+	cells := []cell{
+		{matter.ID, store.KindBrief, []byte{}, false, ""},
+		{matter.ID, store.KindWorkplan, []byte("plan: λ  🧪 — naïve"), false, ""},
+		{stage.ID, store.KindBody, bytes.Repeat([]byte{'x'}, store.SpillThreshold), false, ""},
+		{step.ID, store.KindBrief, labFillBytes(store.SpillThreshold+1, 5), true, ""},
+		{stage.ID, store.KindWorkplan, labFillBytes(2*store.SpillThreshold+77, 9), true, ""},
+		{step.ID, store.KindBody, labUnicodeBytes(3*store.SpillThreshold + 123), true, ""},
+		{matter.ID, store.KindFindings, []byte{}, false, ""},
+		{step.ID, store.KindFindings, []byte("finding: π r², , 🧪"), false, ""},
+		{entry.ID, store.KindFindings, bytes.Repeat([]byte{'f'}, store.SpillThreshold), false, ""},
+		{matter.ID, store.KindFindings, labFillBytes(store.SpillThreshold+1, 3), true, ""},
+		{step.ID, store.KindFindings, labFillBytes(4*store.SpillThreshold, 7), true, ""},
+		{entry.ID, store.KindFindings, labUnicodeBytes(1024), false, ""},
+		{entry.ID, store.KindFindings, labFillBytes(store.SpillThreshold+33, 11), true, ""},
+	}
+	// wants[subject|kind][digest] is the independently computed expectation:
+	// the source bytes themselves, their length and their spill placement.
+	type wantBytes struct {
+		data    []byte
+		spilled bool
+	}
+	wants := map[string]map[string]wantBytes{}
+	for i := range cells {
+		c := &cells[i]
+		var err error
+		if c.kind.AppendOnlyKind() {
+			_, err = writesurface.AppendFinding(labCtx, sa, store.ActorHuman, a.repo, c.subject, c.data)
+		} else {
+			_, err = writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, c.subject, c.kind, c.data)
+		}
+		if err != nil {
+			t.Fatalf("%s on %s: %v", c.kind, c.subject, err)
+		}
+		eventType := store.TypeContentCreated
+		if c.kind.AppendOnlyKind() {
+			eventType = store.TypeContentAppended
+		}
+		c.group = sourceGroup(t, sa, c.subject, eventType)
+		key := c.subject + "|" + string(c.kind)
+		if wants[key] == nil {
+			wants[key] = map[string]wantBytes{}
+		}
+		wants[key][labDigest(c.data)] = wantBytes{data: c.data, spilled: c.spilled}
+	}
+
+	// One ordinary sender pass carries births, the backlog entry and every
+	// content group — spilled blobs land before the changes that name them.
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	// Receiver pass one retains and pends the spilled groups; pass two
+	// fetches, verifies, installs and flips them whole.
+	exchangePass(t, sb, cb, bb)
+	exchangePass(t, sb, cb, bb)
+	for _, c := range cells {
+		sourceDecision(t, sb, c.group, "integrated")
+	}
+
+	// Reopen both stores, rebuild the receiver's projection, then verify
+	// every segment on both sides against the source bytes' own metadata.
+	saPath, sbPath := sa.Path(), sb.Path()
+	if err := sa.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sa, sb = labOpen(t, saPath), labOpen(t, sbPath)
+	labRebuild(t, sb)
+	verify := func(s *store.Store, label string) {
+		t.Helper()
+		for key, expected := range wants {
+			parts := strings.SplitN(key, "|", 2)
+			segs, err := s.ContentSegments(labCtx, parts[0], store.ContentKind(parts[1]))
+			if err != nil {
+				t.Fatalf("%s %s: %v", label, key, err)
+			}
+			if len(segs) != len(expected) {
+				t.Fatalf("%s %s: %d segments, want %d", label, key, len(segs), len(expected))
+			}
+			for _, seg := range segs {
+				want, ok := expected[seg.SHA256]
+				if !ok {
+					t.Fatalf("%s %s: unexpected segment %s", label, key, seg.ID)
+				}
+				if seg.ByteLen != int64(len(want.data)) || seg.Spilled != want.spilled {
+					t.Fatalf("%s %s segment %s: len=%d spilled=%v, want len=%d spilled=%v",
+						label, key, seg.ID, seg.ByteLen, seg.Spilled, len(want.data), want.spilled)
+				}
+				got, err := s.SegmentBytes(labCtx, seg.ID)
+				if err != nil || !bytes.Equal(got, want.data) {
+					t.Fatalf("%s %s segment %s: %d bytes %v", label, key, seg.ID, len(got), err)
+				}
+				sum := sha256.Sum256(got)
+				if hex.EncodeToString(sum[:]) != seg.SHA256 {
+					t.Fatalf("%s %s segment %s: read-back digest contradicts record", label, key, seg.ID)
+				}
+			}
+		}
+	}
+	verify(sa, "sender")
+	verify(sb, "receiver")
+
+	// The concatenating read API agrees: the Matter's findings are the empty
+	// append plus the spilled one, and the Step's body is the 3 MiB blob.
+	got, err := sb.Content(labCtx, matter.ID, store.KindFindings)
+	if err != nil || !bytes.Equal(got, cells[9].data) {
+		t.Fatalf("receiver matter findings = %d bytes %v", len(got), err)
+	}
+	got, err = sb.Content(labCtx, step.ID, store.KindBody)
+	if err != nil || !bytes.Equal(got, cells[5].data) {
+		t.Fatalf("receiver step body = %d bytes %v", len(got), err)
+	}
+	got, err = sa.Content(labCtx, entry.ID, store.KindFindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entryWant []byte
+	for _, c := range cells[8:] {
+		if c.subject == entry.ID {
+			entryWant = append(entryWant, c.data...)
+		}
+	}
+	if !bytes.Equal(got, entryWant) {
+		t.Fatal("sender entry findings concatenation differs")
+	}
+}
+
+// A changes POST that commits server-side but loses its response is retried
+// whole: the blob re-PUT is idempotent, the feed dedups the re-posted group
+// exactly like Cloud's (installation, group) key, and the receiver sees one
+// copy of the work — never a duplicate effect.
+func TestSharedStoreContentBlobAckLost(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	status, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba := status.Binding
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Ack Lost", 29)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	digest := labDigest(brief)
+	exchangePass(t, sa, ca, ba, birth)
+
+	feed.failNextChanges()
+	if err := sa.ExchangePass(labCtx, ca, ba, []string{content}); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("lost-ack pass = %v", err)
+	}
+	// The change committed despite the failed response; the local ack did not.
+	if got := labCount(feed.changeOrder(), content); got != 1 {
+		t.Fatalf("committed copies of %s = %d", content, got)
+	}
+	st, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil || !slices.Contains(st.PendingUpload, content) {
+		t.Fatalf("unacknowledged group not pending: %+v %v", st, err)
+	}
+
+	// Retry: same cached envelope, idempotent blob PUT, deduped re-post.
+	exchangePass(t, sa, ca, ba, content)
+	if got := labCount(feed.changeOrder(), content); got != 1 {
+		t.Fatal("retry duplicated the committed change")
+	}
+	if got, ok := feed.blob(digest); !ok || !bytes.Equal(got, brief) {
+		t.Fatal("blob retry stored wrong bytes")
+	}
+	exchangePass(t, sb, cb, bb)
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "integrated")
+	segs, err := sb.ContentSegments(labCtx, n.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("receiver brief segments = %+v %v", segs, err)
+	}
+	got, err := sb.SegmentBytes(labCtx, segs[0].ID)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief bytes = %d %v", len(got), err)
+	}
+	labRebuild(t, sb)
+}
+
+// A blob GET that dies mid-body fails the pass honestly — cursor and inbox
+// rows are already durable — installs nothing, and the next healthy pass
+// completes the install. A crashed install's leftover temp file is debris
+// the reaper collects, never mistaken for content.
+func TestSharedStoreContentBlobDownloadInterrupted(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	ba := exchangeBind(t, sa, a, endpoint)
+	bb := exchangeBind(t, sb, b, endpoint)
+	blobDir := filepath.Join(filepath.Dir(sb.Path()), "blobs")
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Truncated Get", 31)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	exchangePass(t, sa, ca, ba, birth, content)
+	exchangePass(t, sb, cb, bb) // retains the changes; the group pends
+
+	feed.truncateBlobGets(true)
+	err := sb.ExchangePass(labCtx, cb, bb, nil)
+	feed.truncateBlobGets(false)
+	if err == nil {
+		t.Fatal("truncated blob GET did not fail the pass")
+	}
+	d := sourceDecision(t, sb, content, "pending")
+	p := labContentPayload(t, d.Source, 0)
+	if _, err := os.Stat(filepath.Join(blobDir, p.BlobRef)); !os.IsNotExist(err) {
+		t.Fatal("truncated download installed bytes")
+	}
+
+	// The temp-file half of the install crash window: a stale
+	// .exchange-blob-* file is an unreferenced orphan, collected by the
+	// reaper without touching the pending group's (absent) blob.
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blobDir, ".exchange-blob-crashed"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reaped, err := sb.ReapOrphanBlobs(labCtx, time.Now())
+	if err != nil || !slices.Contains(reaped, ".exchange-blob-crashed") {
+		t.Fatalf("stale installer temp not reaped: %v %v", reaped, err)
+	}
+
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "integrated")
+	segs, err := sb.ContentSegments(labCtx, n.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("receiver brief segments = %+v %v", segs, err)
+	}
+	got, err := sb.SegmentBytes(labCtx, segs[0].ID)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief bytes = %d %v", len(got), err)
+	}
+	// A completed install leaves no staging residue behind.
+	entries, err := os.ReadDir(blobDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".exchange-blob-") {
+			t.Fatalf("installer temp residue %s", e.Name())
+		}
+	}
+	labRebuild(t, sb)
+}
+
+// Verified bytes and the local effect commit are separate durable steps: an
+// apply crash after the blob install leaves the group pending with its bytes
+// already in place, and a reopened store completes it exactly once.
+func TestSharedStoreContentBlobApplyCrash(t *testing.T) {
+	_, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	ba := exchangeBind(t, sa, a, endpoint)
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Apply Crash", 37)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	exchangePass(t, sa, ca, ba, birth, content)
+	exchangePass(t, sb, cb, bb) // retains; the spilled group pends
+
+	// The fault fires inside ApplyExchangeInbox's effect insert — after this
+	// pass's blob fetch already installed verified bytes.
+	db, err := sql.Open("sqlite", b.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TRIGGER reject_effect BEFORE INSERT ON events
+		WHEN NEW.actor='system:shared-store-experiment' BEGIN SELECT RAISE(ABORT,'injected integration failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sb.ExchangePass(labCtx, cb, bb, nil); err == nil {
+		t.Fatal("apply fault did not fire")
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_effect`); err != nil {
+		t.Fatal(err)
+	}
+	d := sourceDecision(t, sb, content, "pending")
+	p := labContentPayload(t, d.Source, 0)
+	got, err := os.ReadFile(filepath.Join(filepath.Dir(sb.Path()), "blobs", p.BlobRef))
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatal("verified blob did not survive the apply crash")
+	}
+
+	if err := sb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sb = labOpen(t, b.db)
+	// Offline completion needs no server: the durable inbox rechecks the
+	// pending group against the already-installed bytes.
+	if err := sb.ApplyExchangeInbox(labCtx, bb); err != nil {
+		t.Fatal(err)
+	}
+	sourceDecision(t, sb, content, "integrated")
+	segs, err := sb.ContentSegments(labCtx, n.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("receiver brief segments = %+v %v", segs, err)
+	}
+	before := len(labEvents(t, sb))
+	if err := sb.ApplyExchangeInbox(labCtx, bb); err != nil {
+		t.Fatal(err)
+	}
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("inbox replay duplicated effects")
+	}
+	got, err = sb.SegmentBytes(labCtx, segs[0].ID)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief bytes = %d %v", len(got), err)
+	}
+	labRebuild(t, sb)
+}
+
+// Missing or corrupt source bytes are reported honestly and never published:
+// the cached envelope still names the blob, but SegmentBytes cannot serve it,
+// so the pass fails before any PUT or changes POST — and a restored file
+// completes the same group on retry.
+func TestSharedStoreContentBlobMissingSource(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	ba := exchangeBind(t, sa, a, endpoint)
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Missing Source", 41)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	exchangePass(t, sa, ca, ba, birth)
+	segs, err := sa.ContentSegments(labCtx, n.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("sender brief segments = %+v %v", segs, err)
+	}
+	blobPath := filepath.Join(filepath.Dir(sa.Path()), "blobs", segs[0].ID)
+	digest := labDigest(brief)
+
+	for _, corrupt := range []bool{false, true} {
+		if corrupt {
+			if err := os.WriteFile(blobPath, []byte("corrupt source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.Remove(blobPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := sa.ExchangePass(labCtx, ca, ba, []string{content}); err == nil {
+			t.Fatalf("corrupt=%v: unservable source bytes did not fail the pass", corrupt)
+		}
+		if feed.hasRequest("PUT", "/blobs/"+digest) {
+			t.Fatal("blob PUT attempted without verifiable source bytes")
+		}
+		if slices.Contains(feed.changeOrder(), content) {
+			t.Fatal("change published without its blob")
+		}
+	}
+	if err := os.WriteFile(blobPath, brief, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, sa, ca, ba, content)
+	if got, ok := feed.blob(digest); !ok || !bytes.Equal(got, brief) {
+		t.Fatal("restored source bytes uploaded wrong")
+	}
+	exchangePass(t, sb, cb, bb)
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "integrated")
+	got, err := sb.Content(labCtx, n.ID, store.KindBrief)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief = %d bytes %v", len(got), err)
+	}
+	labRebuild(t, sb)
+}
+
+// Wrong recorded metadata never installs: a spilled claim whose byte_len
+// contradicts the served bytes, and one whose sha256 names different bytes,
+// both stay pending with inspectable evidence — the group is never projected
+// onto an unreadable reference.
+func TestSharedStoreContentBlobMetadataMismatch(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	status, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba := status.Binding
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	matter, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Meta", "meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	birth := sourceGroup(t, sa, matter.ID, store.TypeMatterCreated)
+	exchangePass(t, sa, ca, ba, birth)
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, birth, "integrated")
+	base, err := sa.ExperimentExport(labCtx, ba.InstallationID, birth)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(src store.ExperimentSource) string {
+		t.Helper()
+		raw, err := json.Marshal(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change := store.ExchangeChange{
+			Version: 1, InstallationID: ba.InstallationID,
+			GroupID: src.Actions[0].Event.ID, SourceRepoID: a.repo, Source: string(raw),
+		}
+		fixtureHTTP(t, "POST", endpoint+"/changes", "token",
+			map[string]any{"changes": []store.ExchangeChange{change}}, http.StatusNoContent)
+		return change.GroupID
+	}
+	blobDir := filepath.Join(filepath.Dir(sb.Path()), "blobs")
+
+	// Length lie: the payload records one more byte than the blob holds.
+	data := labFillBytes(store.SpillThreshold+64, 13)
+	lengthLie := labContentClaim(t, sa, base, store.TypeContentCreated, store.KindBrief,
+		matter.ID, birth, data, true)
+	lp := labContentPayload(t, lengthLie, 0)
+	lp.ByteLen++
+	payload, err := json.Marshal(lp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lengthLie.Actions[0].Event.Payload = payload
+	lengthGroup := post(lengthLie)
+	feed.setBlob(lp.SHA256, data)
+
+	// Digest lie: the payload names bytes that are not what the route serves.
+	other := labFillBytes(4096, 17)
+	otherDigest := labDigest(other)
+	digestLie := labContentClaim(t, sa, base, store.TypeContentCreated, store.KindBody,
+		matter.ID, birth, data, true)
+	dp := labContentPayload(t, digestLie, 0)
+	dp.SHA256 = otherDigest
+	payload, err = json.Marshal(dp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestLie.Actions[0].Event.Payload = payload
+	digestGroup := post(digestLie)
+	feed.setBlob(otherDigest, data) // served bytes hash to lp.SHA256, not otherDigest
+
+	for range 2 {
+		exchangePass(t, sb, cb, bb)
+	}
+	for _, group := range []string{lengthGroup, digestGroup} {
+		d := sourceDecision(t, sb, group, "pending")
+		if d.Reason != "content bytes unavailable" {
+			t.Fatalf("%s pending reason = %q", group, d.Reason)
+		}
+	}
+	// Neither claim projected a content row or installed sidecar bytes.
+	for _, ref := range []string{lp.BlobRef, dp.BlobRef} {
+		if _, err := os.Stat(filepath.Join(blobDir, ref)); !os.IsNotExist(err) {
+			t.Fatalf("unverified bytes installed at %s", ref)
+		}
+	}
+	if segs, err := sb.ContentSegments(labCtx, matter.ID, store.KindBrief); err != nil || len(segs) != 0 {
+		t.Fatalf("length-lie brief projected: %+v %v", segs, err)
+	}
+	labRebuild(t, sb)
+}
+
+// Content has no authoring ceiling — only the spill floor — so a Brief can
+// exceed the blob route's whole-object cap. Such content is simply outside
+// the admitted portable set: the group stays local evidence, never enters
+// PendingUpload, and cannot wedge the groups queued behind it. An explicit
+// upload still carries the envelope as receiver-side conflict evidence,
+// without attempting a blob the route would reject forever.
+func TestSharedStoreContentOversizeStaysLocal(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}}
+	status, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba := status.Binding
+	bb := exchangeBind(t, sb, b, endpoint)
+
+	big, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Too Big", "too-big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversize := labFillBytes(labBlobMaxBytes+1, 19)
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, big.Locator, store.KindBrief, oversize); err != nil {
+		t.Fatal(err)
+	}
+	oversizeGroup := sourceGroup(t, sa, big.ID, store.TypeContentCreated)
+	normal, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Normal", "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, normal.Locator, store.KindBrief, []byte("fine")); err != nil {
+		t.Fatal(err)
+	}
+	normalGroup := sourceGroup(t, sa, normal.ID, store.TypeContentCreated)
+
+	done, err := sa.RunExchange(labCtx, ca, a.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(done.PendingUpload, oversizeGroup) {
+		t.Fatal("oversize group entered the upload queue")
+	}
+	if !slices.Contains(done.Unsupported, oversizeGroup) {
+		t.Fatalf("oversize group not retained as unsupported: %+v", done)
+	}
+	if !slices.Contains(feed.changeOrder(), normalGroup) || slices.Contains(feed.changeOrder(), oversizeGroup) {
+		t.Fatal("feed carries the wrong groups")
+	}
+
+	// An explicit upload is the evidence path: the envelope crosses as
+	// receiver-side conflict, and no oversized blob is ever attempted.
+	exchangePass(t, sa, ca, ba, oversizeGroup)
+	if feed.hasRequest("PUT", "/blobs/") {
+		t.Fatal("oversize blob PUT attempted")
+	}
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, oversizeGroup, "conflict")
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, normalGroup, "integrated")
+	got, err := sb.Content(labCtx, normal.ID, store.KindBrief)
+	if err != nil || string(got) != "fine" {
+		t.Fatalf("unrelated work blocked by oversize group: %q %v", got, err)
+	}
+	// The oversize bytes stay readable locally on the sender.
+	segs, err := sa.ContentSegments(labCtx, big.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 || !segs[0].Spilled {
+		t.Fatalf("sender oversize segments = %+v %v", segs, err)
+	}
+	back, err := sa.SegmentBytes(labCtx, segs[0].ID)
+	if err != nil || !bytes.Equal(back, oversize) {
+		t.Fatalf("sender oversize bytes = %d %v", len(back), err)
+	}
+	labRebuild(t, sb)
+}
+
+// Transfer-size measurements through the in-process feed: PUT and
+// GET+verify timings for representative spilled payloads. These are
+// loopback numbers — real transport adds network and PHP runtime cost —
+// but they bound the work the client performs per blob.
+func TestSharedStoreContentBlobSizing(t *testing.T) {
+	_, endpoint := newLabExchangeFeed(t)
+	c := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}}
+	for _, size := range []int{1 << 20, 4 << 20, 8 << 20} {
+		data := labFillBytes(size, byte(size>>20))
+		digest := labDigest(data)
+		start := time.Now()
+		if err := c.UploadBlob(labCtx, endpoint, digest, int64(size), bytes.NewReader(data)); err != nil {
+			t.Fatalf("PUT %d bytes: %v", size, err)
+		}
+		put := time.Since(start)
+		start = time.Now()
+		body, err := c.FetchBlob(labCtx, endpoint, digest)
+		if err != nil {
+			t.Fatalf("GET %d bytes: %v", size, err)
+		}
+		got, err := io.ReadAll(body)
+		_ = body.Close()
+		if err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("GET %d bytes verify: %v", size, err)
+		}
+		get := time.Since(start)
+		t.Logf("in-process feed blob %d B: PUT %v, GET+read %v", size, put, get)
+	}
+}
+
+// Blob routes are member-token scoped by design — bytes carry no origin
+// authority, so a revoked publisher loses the changes channel while blob
+// bytes stay member-readable/writable; the receiver only ever installs bytes
+// a verified pending payload names. Outsiders and wrong-length/wrong-digest
+// writes get the same indistinguishable refusals Cloud gives. Real
+// PUT/GET timings through the Laravel fixture bound the transport cost.
+func TestLaravelExchangeBlobAccessAndSizing(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	ba := exchangeBind(t, sa, a, f.endpoint())
+	bb := exchangeBind(t, sb, b, f.endpoint())
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Member}
+
+	// Register the sender's origin so revocation has something to revoke.
+	fixtureHTTP(t, "POST", f.endpoint()+"/origins", f.Owner,
+		map[string]string{"installation_id": ba.InstallationID}, http.StatusOK)
+
+	data := []byte("publisher boundary bytes")
+	digest := labDigest(data)
+	if err := cb.UploadBlob(labCtx, f.endpoint(), digest, int64(len(data)), bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	// Outsider sees the same 404 for present and absent digests; a member's
+	// wrong declared length is refused before the body is trusted.
+	fixtureHTTP(t, "GET", f.endpoint()+"/blobs/"+digest, f.Outsider, nil, http.StatusNotFound)
+	fixtureHTTP(t, "GET", f.endpoint()+"/blobs/"+labDigest([]byte("absent")), f.Outsider, nil, http.StatusNotFound)
+	rawPut := func(url, token string, body []byte, want int) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != want {
+			t.Fatalf("PUT %s -> %d, want %d", url, resp.StatusCode, want)
+		}
+	}
+	// A fresh digest with a wrong declared length is refused 422 before the
+	// body is trusted; an outsider's write is the indistinguishable 404.
+	freshDigest := labDigest([]byte("never stored"))
+	rawPut(f.endpoint()+"/blobs/"+freshDigest+"?length="+strconv.Itoa(len(data)+1), f.Member, data, http.StatusUnprocessableEntity)
+	rawPut(f.endpoint()+"/blobs/"+digest+"?length="+strconv.Itoa(len(data)), f.Outsider, data, http.StatusNotFound)
+
+	// Revoke the origin: the changes channel refuses it, blob bytes do not.
+	fixtureHTTP(t, "DELETE", f.endpoint()+"/origins/"+ba.InstallationID, f.Owner, nil, http.StatusOK)
+	if err := sa.ExchangePass(labCtx, ca, ba, nil); err == nil {
+		t.Fatal("revoked origin synchronized changes")
+	}
+	body, err := cb.FetchBlob(labCtx, f.endpoint(), digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("member blob read after revocation: %v", err)
+	}
+	more := []byte("still writable bytes")
+	if err := cb.UploadBlob(labCtx, f.endpoint(), labDigest(more), int64(len(more)), bytes.NewReader(more)); err != nil {
+		t.Fatal("member blob write after revocation:", err)
+	}
+
+	// Real transport sizing: PUT and GET+verify through PHP/Laravel.
+	for _, size := range []int{1 << 20, 4 << 20} {
+		blob := labFillBytes(size, byte(size>>20))
+		d := labDigest(blob)
+		start := time.Now()
+		if err := cb.UploadBlob(labCtx, f.endpoint(), d, int64(size), bytes.NewReader(blob)); err != nil {
+			t.Fatalf("Laravel PUT %d: %v", size, err)
+		}
+		put := time.Since(start)
+		start = time.Now()
+		body, err := cb.FetchBlob(labCtx, f.endpoint(), d)
+		if err != nil {
+			t.Fatalf("Laravel GET %d: %v", size, err)
+		}
+		got, err := io.ReadAll(body)
+		_ = body.Close()
+		if err != nil || !bytes.Equal(got, blob) {
+			t.Fatalf("Laravel GET %d verify: %v", size, err)
+		}
+		get := time.Since(start)
+		t.Logf("Laravel blob %d B: PUT %v, GET+verify %v", size, put, get)
+	}
+	_ = bb
 }

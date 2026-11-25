@@ -241,6 +241,13 @@ type labExchangeFeed struct {
 	// blobPutStatus/blobGetStatus, when non-zero, are the status every blob
 	// PUT/GET returns — the transient-failure controls.
 	blobPutStatus, blobGetStatus int
+	// blobGetTruncate makes GET declare a Content-Length beyond the bytes
+	// written, so the client's body read dies mid-stream like a dropped
+	// connection.
+	blobGetTruncate bool
+	// failNextChangesPost commits the next POST /changes then answers 500 —
+	// the acknowledgement-lost-after-commit control.
+	failNextChangesPost bool
 }
 
 func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
@@ -267,9 +274,33 @@ func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			// Cloud's idempotent replay: an identical re-post of a committed
+			// (installation, group) is already stored; a different source under
+			// the same identity conflicts and stores nothing.
+			committed := append([]store.ExchangeChange(nil), feed.changes...)
 			for _, change := range body.Changes {
-				change.Sequence = int64(len(feed.changes)) + 1
-				feed.changes = append(feed.changes, change)
+				seen := false
+				for _, existing := range committed {
+					if existing.InstallationID == change.InstallationID && existing.GroupID == change.GroupID {
+						if existing.Source != change.Source || existing.SourceRepoID != change.SourceRepoID {
+							w.WriteHeader(http.StatusConflict)
+							return
+						}
+						seen = true
+						break
+					}
+				}
+				if seen {
+					continue
+				}
+				change.Sequence = int64(len(committed)) + 1
+				committed = append(committed, change)
+			}
+			feed.changes = committed
+			if feed.failNextChangesPost {
+				feed.failNextChangesPost = false
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/changes"):
@@ -301,6 +332,10 @@ func (f *labExchangeFeed) blobDigest(r *http.Request) string {
 	return r.URL.Path[strings.LastIndex(r.URL.Path, "/blobs/")+len("/blobs/"):]
 }
 
+// labBlobMaxBytes mirrors Cloud's whole-object cap so oversized PUTs fail
+// here exactly as they would against the real service.
+const labBlobMaxBytes = 32 << 20
+
 // serveBlob implements the Cloud blob contract: PUT verifies the declared
 // length and content digest before storing (201 first store, 200 exact
 // retry), GET serves verified bytes under X-Blob-SHA256, and HEAD probes
@@ -311,6 +346,11 @@ func (f *labExchangeFeed) serveBlob(w http.ResponseWriter, r *http.Request) {
 	case "PUT":
 		if f.blobPutStatus != 0 {
 			w.WriteHeader(f.blobPutStatus)
+			return
+		}
+		declared, _ := strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
+		if declared > labBlobMaxBytes {
+			w.WriteHeader(http.StatusUnprocessableEntity)
 			return
 		}
 		data, _ := io.ReadAll(r.Body)
@@ -344,6 +384,14 @@ func (f *labExchangeFeed) serveBlob(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Blob-SHA256", digest)
+		if f.blobGetTruncate && r.Method == "GET" {
+			// Declared length exceeds the body written: the server closes the
+			// connection short and the client's ReadAll fails mid-body.
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)+1))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data[:len(data)/2])
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method == "GET" {
 			_, _ = w.Write(data)
@@ -359,6 +407,20 @@ func (f *labExchangeFeed) serveBlobStatus(put, get int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.blobPutStatus, f.blobGetStatus = put, get
+}
+
+// truncateBlobGets makes the next blob GETs die mid-body until cleared.
+func (f *labExchangeFeed) truncateBlobGets(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobGetTruncate = on
+}
+
+// failNextChanges arms the commit-then-500 control for the next POST /changes.
+func (f *labExchangeFeed) failNextChanges() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNextChangesPost = true
 }
 
 // requestIndex returns the position of the first request matching method and
