@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ExchangeStatus is an offline inventory, not a claim of convergence. For a
@@ -26,6 +27,29 @@ type ExchangeStatus struct {
 	Collisions                           []ExperimentDecision
 	Acknowledged                         map[string]ExperimentAcknowledgement
 	Dependencies                         []string
+	Categories                           ExchangeStatusCategories
+}
+
+// ExchangeStatusCategories groups the counters above under the release's
+// named lifecycle categories, so `sync status` distinguishes queued,
+// acknowledged, received, waiting, applied, conflict and excluded work
+// without any preview or acknowledgement step. Queued and Acknowledged
+// count this Repo's outgoing portable originals; Received counts durable
+// remote envelopes; Waiting splits retained pending decisions into byte
+// waits (spilled content not yet installed and verified) and every other
+// prerequisite wait; Applied and Conflicts count retained remote decisions,
+// collision claims included; Excluded counts local command groups with no
+// portable member, which never sync by design.
+type ExchangeStatusCategories struct {
+	Queued              int
+	Acknowledged        int
+	Received            int
+	Waiting             int
+	WaitingBytes        int
+	WaitingDependencies int
+	Applied             int
+	Conflicts           int
+	Excluded            int
 }
 
 func (s *Store) exchangeCLIExists(ctx context.Context) (bool, error) {
@@ -355,6 +379,32 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 				return out, err
 			}
 			out.Acknowledged[id] = a
+		}
+	}
+	out.Categories = ExchangeStatusCategories{
+		Queued:       len(out.PendingUpload),
+		Acknowledged: len(out.Retained),
+		Received:     int(out.Downloaded),
+		Waiting:      out.Waiting,
+		Applied:      out.Integrated,
+		Conflicts:    out.Conflicts,
+		Excluded:     len(out.Unsupported),
+	}
+	// The waiting split reuses retained reasons only — "content bytes …"
+	// waits on spilled payload installation, every other pending reason is a
+	// prerequisite/dependency wait. No new state is recorded, and the two
+	// buckets always sum to Waiting because both come from the same retained
+	// decisions and collision claims.
+	for _, retained := range [][]ExperimentDecision{out.Decisions, out.Collisions} {
+		for _, d := range retained {
+			if d.Disposition != "pending" {
+				continue
+			}
+			if strings.HasPrefix(d.Reason, "content bytes") {
+				out.Categories.WaitingBytes++
+			} else {
+				out.Categories.WaitingDependencies++
+			}
 		}
 	}
 	return out, nil

@@ -260,9 +260,19 @@ func TestLaravelExchangeCombinedReleaseFixture(t *testing.T) {
 	if err != nil || beforeUnpaired.Paired || len(beforeUnpaired.PendingUpload) != 0 || beforeUnpaired.EarlierGroups == 0 {
 		t.Fatal("unpaired preview claimed outgoing work", beforeUnpaired, err)
 	}
+	if beforeUnpaired.Categories != (store.ExchangeStatusCategories{}) {
+		t.Fatal("unpaired preview claimed category work", beforeUnpaired.Categories)
+	}
 	beforePaused, err := sa.ExchangeStatus(labCtx, pausedRepo)
 	if err != nil || !beforePaused.Paired || beforePaused.Active || len(beforePaused.PendingUpload) != 2 {
 		t.Fatal("paused pairing lost its pending originals", beforePaused, err)
+	}
+	if beforePaused.Categories.Queued != 2 || beforePaused.Categories.Waiting != 0 ||
+		beforePaused.Categories.WaitingBytes != 0 || beforePaused.Categories.WaitingDependencies != 0 ||
+		beforePaused.Categories.Applied != 0 || beforePaused.Categories.Conflicts != 0 ||
+		beforePaused.Categories.Received != 0 || beforePaused.Categories.Acknowledged != 0 ||
+		beforePaused.Categories.Excluded != len(beforePaused.Unsupported) {
+		t.Fatal("paused pairing must retain queued originals and nothing else", beforePaused.Categories)
 	}
 	for _, repo := range []string{unpairedRepo, pausedRepo} {
 		if _, err := sa.RunExchange(labCtx, store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: f.Owner}, repo); err == nil || !strings.Contains(err.Error(), "not actively paired") {
@@ -340,6 +350,9 @@ func TestLaravelExchangeCombinedReleaseFixture(t *testing.T) {
 	if len(done.PendingUpload) != 0 {
 		t.Fatalf("sender left %d groups un-uploaded: %v", len(done.PendingUpload), done.PendingUpload)
 	}
+	if done.Categories.Queued != 0 || done.Categories.Acknowledged != len(done.Retained) {
+		t.Fatalf("sender categories must show every original acknowledged: %+v", done.Categories)
+	}
 
 	// Pass 1: every non-spilled group evaluates; the four spilled content
 	// groups pend on their blobs and the collision conflicts.
@@ -355,6 +368,16 @@ func TestLaravelExchangeCombinedReleaseFixture(t *testing.T) {
 	if st.Evaluated != st.Downloaded || int64(st.Integrated+st.Waiting+st.Conflicts) != st.Evaluated {
 		t.Fatalf("receiver did not evaluate every download exactly once: %+v", st)
 	}
+	// The named categories must mirror the counters and split the four
+	// pending spilled-content groups into byte waits — every other pending
+	// reason is a prerequisite/dependency wait.
+	if st.Categories.Queued != len(st.PendingUpload) || st.Categories.Acknowledged != len(st.Retained) ||
+		st.Categories.Received != int(st.Downloaded) || st.Categories.Waiting != st.Waiting ||
+		st.Categories.WaitingBytes != spillPending || st.Categories.WaitingDependencies != 0 ||
+		st.Categories.Applied != st.Integrated || st.Categories.Conflicts != st.Conflicts ||
+		st.Categories.Excluded != len(st.Unsupported) {
+		t.Fatalf("receiver pass 1 categories = %+v, want %d byte waits inside %+v", st.Categories, spillPending, st)
+	}
 
 	// Pass 2: the pending spilled groups' blobs arrive and they integrate.
 	exchangePass(t, sb, cb, statusB.Binding)
@@ -367,6 +390,9 @@ func TestLaravelExchangeCombinedReleaseFixture(t *testing.T) {
 	}
 	if st.Evaluated != st.Downloaded || int64(st.Integrated+st.Conflicts) != st.Evaluated {
 		t.Fatalf("receiver did not converge every download: %+v", st)
+	}
+	if st.Categories.Waiting != 0 || st.Categories.WaitingBytes != 0 || st.Categories.WaitingDependencies != 0 {
+		t.Fatalf("receiver pass 2 left waiting categories: %+v", st.Categories)
 	}
 
 	// Every decision integrated except the deliberate locator collision.
