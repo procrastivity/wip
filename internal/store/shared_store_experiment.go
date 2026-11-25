@@ -245,6 +245,36 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				}
 			}
 		}
+		if a.Parent == "" {
+			// step.replaced files a replacement's birth under the replaced
+			// node's subject, so this node's own history never shows one;
+			// the projection's birth_event still names it. Recover the
+			// structural evidence across that subject boundary — the
+			// replaced node's parent is the one the replacement inherited —
+			// and, for the first event on the node, anchor its baseline on
+			// the birth itself.
+			var birthID string
+			err := tx.QueryRowContext(ctx, `SELECT birth_event FROM nodes WHERE id=?`, ev.Subject).Scan(&birthID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return out, err
+			}
+			if err == nil {
+				var replacedID, birthType string
+				if err := tx.QueryRowContext(ctx, `SELECT subject, type FROM events WHERE id=?`, birthID).Scan(&replacedID, &birthType); err != nil {
+					return out, err
+				}
+				if birthType == TypeStepReplaced {
+					var parent string
+					if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent,'') FROM nodes WHERE id=?`, replacedID).Scan(&parent); err != nil {
+						return out, err
+					}
+					a.Parent = parent
+					if a.Baseline == "" {
+						a.Baseline = birthID
+					}
+				}
+			}
+		}
 		for parent := a.Parent; parent != ""; {
 			history, err := v.EventsOfSubject(ctx, parent)
 			if err != nil {
@@ -738,6 +768,12 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	e := a.Event
 	conflict := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	pending := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	// The step amendment family mutates an already-paired object like the
+	// lifecycle matrix does, so it shares this bound-and-unbound path; only
+	// step.inserted joins the birth classifier, bound-only like *.created.
+	if e.Type == TypeStepReordered || e.Type == TypeStepReplaced || e.Type == TypeStepRemoved {
+		return experimentClassifyAmendment(ctx, v, a)
+	}
 	spec, admitted := experimentLifecycleEdges[e.Type]
 	if !admitted {
 		return conflict("unsupported family; original payload retained, no content overwritten")
@@ -767,13 +803,11 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if err != nil {
 		return "", "", "", false, err
 	}
-	baseline := -1
-	for i, prior := range history {
-		if prior.ID == a.Baseline {
-			baseline = i
-		}
+	baseline, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
 	}
-	if baseline < 0 {
+	if baseline < 0 && !anchored {
 		return pending("unknown baseline dependency")
 	}
 	if spec.verb == "started" {
@@ -824,8 +858,28 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 			parent = ancestor.Parent
 		}
 	}
+	if len(history) == 0 {
+		// Only a step.replaced birth leaves a node with no entry in its own
+		// subject history — the fold files that birth under the replaced
+		// node's subject — so the baseline resolved above is the birth
+		// anchor and nothing else. The node is still as-born, so only a
+		// transition the fold can make from Planned may apply.
+		if n.Lifecycle != spec.from {
+			return conflict("lifecycle or subject history diverged; never reopen or infer from current " + string(n.Lifecycle))
+		}
+		return "integrated", "", "", true, nil
+	}
 	last := history[len(history)-1]
-	if n.Lifecycle == spec.to && len(history) >= 2 && history[len(history)-2].ID == a.Baseline && last.Type == e.Type {
+	// The event before the newest subject event is the baseline anchor:
+	// history[-2] ordinarily, the birth_event itself for a step.replaced-born
+	// node's first event — the only case where the anchor is not in history.
+	before := ""
+	if len(history) >= 2 {
+		before = history[len(history)-2].ID
+	} else if anchored {
+		before = a.Baseline
+	}
+	if n.Lifecycle == spec.to && before == a.Baseline && last.Type == e.Type {
 		var represented Transition
 		if err := decodeStrict(last, &represented); err != nil {
 			return "", "", "", false, err
