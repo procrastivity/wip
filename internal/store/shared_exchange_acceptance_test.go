@@ -9,15 +9,29 @@ package store_test
 // originals with canonical baselines. Expectations are derived from the
 // writesurface verbs and the stores' own projections — never from the sender's
 // export helpers.
+//
+// Stage-2 coverage closes the remaining recovery/divergence/offline matrix
+// over the same real Laravel/PostgreSQL transport: an unreadable source
+// version retained as conflict, blob PUT commit-then-drop and mid-body GET
+// truncation, missing/corrupt server blobs at the storage seam, the client's
+// no-redirect guarantee, divergent reference occupancy, and feed-cursor
+// honesty while receipts wait on bytes.
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1135,4 +1149,710 @@ func TestLaravelExchangeSyntheticProvenanceReceipts(t *testing.T) {
 		t.Fatal("W appended events for work that never reached the feed")
 	}
 	t.Log("synthetic provenance over Laravel: foreign receipts imported, native edits re-exported as new originals with canonical baselines, unpaired control untouched")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: recovery, divergence and offline behavior over real transport.
+// ---------------------------------------------------------------------------
+
+// Stage-2 unsupported-format record over real Laravel transport. The feed
+// stores and serves a source whose portable-schema marker this build cannot
+// interpret — ExperimentSource.Version 2 inside an envelope that stays wire
+// version 1, the only envelope version the contract admits; the server's own
+// validation treats the source marker as opaque bytes (ExchangeController
+// stores and serves source verbatim). The receiver retains the record as an
+// inspectable conflict naming the rejected version, keeps receipt and cursor
+// honest, and still applies the compatible record queued behind it —
+// redelivery stays inert. Mirrors TestSharedStoreIncompatibleSourceVersion
+// Exchange at lab-feed level.
+func TestLaravelExchangeIncompatibleSourceVersion(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	statusA, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba, bb := statusA.Binding, statusB.Binding
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 30 * time.Second}, Token: f.Member}
+
+	// Two real sender exports posted as one committed page; the first's
+	// source marker is bumped to a schema this build cannot read while its
+	// envelope version stays 1.
+	var changes []store.ExchangeChange
+	var badGroup, goodGroup, goodMatter string
+	var badSource store.ExperimentSource
+	for i, title := range []string{"Incompatible first", "Compatible second"} {
+		n, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, title, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+		src, err := sa.ExperimentExport(labCtx, ba.InstallationID, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if src.Version != 1 {
+			t.Fatalf("exported source version = %d, want 1", src.Version)
+		}
+		if i == 0 {
+			src.Version = 2
+			badGroup, badSource = group, src
+		} else {
+			goodGroup, goodMatter = group, n.ID
+		}
+		raw, err := json.Marshal(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes = append(changes, store.ExchangeChange{
+			Version: 1, InstallationID: ba.InstallationID, GroupID: group,
+			SourceRepoID: a.repo, Source: string(raw),
+		})
+	}
+	fixtureHTTP(t, "POST", f.endpoint()+"/origins", f.Owner,
+		map[string]string{"installation_id": ba.InstallationID}, 200)
+	fixtureHTTP(t, "POST", f.endpoint()+"/changes", f.Owner,
+		map[string]any{"changes": changes}, 200)
+
+	// The feed durably stores and serves the unreadable record verbatim:
+	// envelope version 1, source marker 2, original bytes unchanged.
+	var page struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(fixtureHTTP(t, "GET", f.endpoint()+"/changes?after=0", f.Member, nil, 200), &page); err != nil {
+		t.Fatal(err)
+	}
+	sawBad := false
+	for _, change := range page.Changes {
+		if change.GroupID != badGroup {
+			continue
+		}
+		sawBad = true
+		if change.Version != 1 {
+			t.Fatalf("served envelope version = %d, want 1", change.Version)
+		}
+		var src store.ExperimentSource
+		if err := json.Unmarshal([]byte(change.Source), &src); err != nil {
+			t.Fatal(err)
+		}
+		if src.Version != 2 || !reflect.DeepEqual(src, badSource) {
+			t.Fatalf("served source = %+v, want the posted version-2 source verbatim", src)
+		}
+	}
+	if !sawBad || len(page.Changes) != 2 {
+		t.Fatalf("feed page = %+v, want both committed records", page.Changes)
+	}
+
+	// One ordinary receiver pass evaluates both records exactly once.
+	exchangePass(t, sb, cb, bb)
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Downloaded != 2 || st.Evaluated != 2 || st.Integrated != 1 || st.Conflicts != 1 {
+		t.Fatalf("receiver status = %+v", st)
+	}
+	bad := sourceDecision(t, sb, badGroup, "conflict")
+	if !strings.Contains(bad.Reason, "incompatible source version 2") || len(bad.Effects) != 0 {
+		t.Fatalf("incompatible decision = %+v", bad)
+	}
+	if !reflect.DeepEqual(bad.Source, badSource) {
+		t.Fatal("retained source lost the unreadable evidence")
+	}
+	good := sourceDecision(t, sb, goodGroup, "integrated")
+	if len(good.Effects) != 1 {
+		t.Fatalf("compatible decision = %+v", good)
+	}
+	m, err := sb.Node(labCtx, goodMatter)
+	if err != nil || m.Repo != b.repo {
+		t.Fatalf("compatible matter did not integrate behind the unreadable record: %+v %v", m, err)
+	}
+	// Redelivery is inert and the retained conflict is unchanged.
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, bb)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("redelivery appended effects")
+	}
+	again := sourceDecision(t, sb, badGroup, "conflict")
+	if !reflect.DeepEqual(bad, again) {
+		t.Fatal("redelivery changed the retained incompatible decision", again)
+	}
+	t.Log("Laravel served a version-2 source verbatim; receiver retained it as conflict 'incompatible source version 2' and integrated the queued compatible record once")
+}
+
+// lostBlobUpload is lostExchangeResponse's blob sibling: the PUT reaches
+// Laravel, BlobController's transaction commits the verified bytes and the
+// repo_blobs row, and only then is the response dropped on the wire.
+type lostBlobUpload struct {
+	lost bool
+}
+
+func (l *lostBlobUpload) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPut && strings.Contains(req.URL.Path, "/blobs/") && !l.lost {
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		l.lost = true
+		return nil, fmt.Errorf("injected loss after committed blob upload")
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// labBlobPutRaw issues one raw octet-stream blob PUT and returns the status
+// and body — fixtureHTTP's JSON envelope cannot express the blob contract.
+func labBlobPutRaw(t *testing.T, url, token string, body []byte) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, raw
+}
+
+// Stage-2 blob staging interrupt over real Laravel: the spilled blob's PUT
+// commits inside BlobController's transaction and the response is then lost.
+// The sender's pass fails honestly before any ack-able change posts, the
+// server already serves the verified bytes, an identical replay is the
+// contract's 200 created:false, and the receiver converges byte-exact with
+// no duplicate effects.
+func TestLaravelExchangeBlobCommitResponseLost(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb := statusB.Binding
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Member}
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Blob Commit Lost", 43)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	digest := labDigest(brief)
+
+	loss := &lostBlobUpload{}
+	lossy := ca
+	lossy.HTTP = &http.Client{Transport: loss, Timeout: 60 * time.Second}
+	if _, err := sa.RunExchange(labCtx, lossy, a.repo); err == nil || !loss.lost {
+		t.Fatalf("blob commit-then-loss control not exercised: %v", err)
+	}
+	// The PUT committed before its response was dropped: Laravel already
+	// serves the verified bytes, while the change naming them never posted.
+	if got := fixtureHTTP(t, "GET", f.endpoint()+"/blobs/"+digest, f.Owner, nil, 200); !bytes.Equal(got, brief) {
+		t.Fatalf("committed blob = %d bytes, want %d", len(got), len(brief))
+	}
+	for _, change := range labLaravelFeedAll(t, f) {
+		if change.GroupID == content {
+			t.Fatal("content change posted without its blob acknowledgement")
+		}
+	}
+	// The contract's idempotent replay over real transport: an identical
+	// PUT is 200 created:false — the committed row and bytes stand.
+	status, raw := labBlobPutRaw(t,
+		f.endpoint()+"/blobs/"+digest+"?length="+strconv.Itoa(len(brief)), f.Owner, brief)
+	if status != 200 || !strings.Contains(string(raw), `"created":false`) {
+		t.Fatalf("blob replay = %d %s, want 200 created:false", status, raw)
+	}
+
+	// The clean retry completes the same identities — blob replay, changes
+	// POST, durable ack — then the receiver converges in two ordinary passes.
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	var contentCopies int
+	for _, change := range labLaravelFeedAll(t, f) {
+		if change.GroupID == content {
+			contentCopies++
+		}
+	}
+	if contentCopies != 1 {
+		t.Fatalf("feed carries %d copies of the content group", contentCopies)
+	}
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "pending")
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "integrated")
+	sourceDecision(t, sb, birth, "integrated")
+	segs, err := sb.ContentSegments(labCtx, n.ID, store.KindBrief)
+	if err != nil || len(segs) != 1 || !segs[0].Spilled {
+		t.Fatalf("receiver brief segments = %+v %v", segs, err)
+	}
+	got, err := sb.SegmentBytes(labCtx, segs[0].ID)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief bytes = %d %v", len(got), err)
+	}
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, bb)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("retry appended effects")
+	}
+	t.Log("Laravel blob PUT committed then lost its response; replay returned created:false, receiver integrated byte-exact with no duplicate effects")
+}
+
+// truncatedBlobGet passes every request through untouched except armed blob
+// GETs, whose body is cut mid-stream: the client's ReadAll dies exactly like
+// a dropped connection after real Laravel bytes began arriving.
+type truncatedBlobGet struct {
+	armed bool
+}
+
+func (t *truncatedBlobGet) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil || !t.armed || req.Method != http.MethodGet || !strings.Contains(req.URL.Path, "/blobs/") {
+		return resp, err
+	}
+	limit := resp.ContentLength / 2
+	if limit < 1 {
+		limit = 1
+	}
+	resp.Body = &cutBlobBody{rc: resp.Body, remaining: limit}
+	return resp, nil
+}
+
+// cutBlobBody yields at most remaining bytes, then fails the read — a
+// mid-body truncation, never a clean EOF.
+type cutBlobBody struct {
+	rc        io.ReadCloser
+	remaining int64
+}
+
+func (b *cutBlobBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.rc.Read(p)
+	b.remaining -= int64(n)
+	if err == io.EOF && b.remaining > 0 {
+		err = io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+func (b *cutBlobBody) Close() error { return b.rc.Close() }
+
+// Stage-2 download-side interrupt over real Laravel plus feed-cursor honesty.
+// A pending spilled group's blob GET dies mid-body on the real transport:
+// the pass fails honestly, verified bytes are never installed,
+// ExchangeStatus shows the durable receipt (Downloaded) ahead of evaluation
+// (Evaluated) — receipt is not application — and the next healthy pass
+// installs and integrates exactly once.
+func TestLaravelExchangeBlobFetchTruncatedHeals(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	statusA, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba, bb := statusA.Binding, statusB.Binding
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Member}
+
+	n, brief := labSpilledBrief(t, sa, a.repo, "Truncated Blob", 47)
+	birth := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+	content := sourceGroup(t, sa, n.ID, store.TypeContentCreated)
+	// An ordinary group beside the spilled one integrates normally in the
+	// same pass — pending bytes never stall unrelated work.
+	queued, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Queued Ahead", "queued-ahead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedBirth := sourceGroup(t, sa, queued.ID, store.TypeMatterCreated)
+
+	exchangePass(t, sa, ca, ba, birth, content, queuedBirth)
+	exchangePass(t, sb, cb, bb)
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pending-blob window: every download is evaluated, but the spilled
+	// group waits on bytes — integrated effects honestly trail receipts.
+	if st.Downloaded != 3 || st.Evaluated != 3 || st.Integrated != 2 || st.Waiting != 1 {
+		t.Fatalf("pending-window status = %+v", st)
+	}
+	d := sourceDecision(t, sb, content, "pending")
+	if d.Reason != "content bytes unavailable" {
+		t.Fatalf("pending reason = %q", d.Reason)
+	}
+
+	// A new ordinary group lands on the feed behind the pending blob, then
+	// the receiver's blob GET is cut mid-body on the real transport.
+	later, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Queued Behind", "queued-behind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterBirth := sourceGroup(t, sa, later.ID, store.TypeMatterCreated)
+	exchangePass(t, sa, ca, ba, laterBirth)
+
+	cut := &truncatedBlobGet{armed: true}
+	cutClient := cb
+	cutClient.HTTP = &http.Client{Transport: cut, Timeout: 60 * time.Second}
+	err = sb.ExchangePass(labCtx, cutClient, bb, nil)
+	cut.armed = false
+	if err == nil || !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("truncated blob GET = %v", err)
+	}
+	// Nothing installed, the spilled group still waits, and the later
+	// receipt is durable but unevaluated: Downloaded ahead of Evaluated.
+	sourceDecision(t, sb, content, "pending")
+	st, err = sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Downloaded != 4 || st.Evaluated != 3 || st.Integrated != 2 || st.Waiting != 1 {
+		t.Fatalf("interrupted status = %+v, want receipt 4 ahead of evaluation 3", st)
+	}
+	blobDir := filepath.Join(filepath.Dir(sb.Path()), "blobs")
+	p := labContentPayload(t, d.Source, 0)
+	if _, err := os.Stat(filepath.Join(blobDir, p.BlobRef)); !os.IsNotExist(err) {
+		t.Fatal("truncated download installed bytes")
+	}
+
+	// The healthy pass installs verified bytes and applies the deferred
+	// receipt: exactly the two pending integrations, nothing duplicated.
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, bb)
+	sourceDecision(t, sb, content, "integrated")
+	sourceDecision(t, sb, laterBirth, "integrated")
+	if got := len(labEvents(t, sb)) - before; got != 2 {
+		t.Fatalf("healed pass appended %d events, want the two pending integrations", got)
+	}
+	got, err := sb.Content(labCtx, n.ID, store.KindBrief)
+	if err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("receiver brief = %d %v", len(got), err)
+	}
+	st, err = sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Downloaded != 4 || st.Evaluated != 4 || st.Integrated != 4 || st.Waiting != 0 {
+		t.Fatalf("healed status = %+v", st)
+	}
+	before = len(labEvents(t, sb))
+	exchangePass(t, sb, cb, bb)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("post-heal pass appended effects")
+	}
+	t.Log("truncated Laravel blob GET failed the pass honestly; receipt stayed durable ahead of evaluation and the next pass installed verified bytes once")
+}
+
+// Stage-2 missing/corrupt blob over real Laravel. Two spilled groups pend on
+// the receiver while the fixture repo's server-side blob files are removed
+// and corrupted at the storage seam; both stay pending with the honest
+// "content bytes unavailable" reason. A verified re-PUT repairs the missing
+// file through BlobController's committed-row path but never clobbers the
+// corrupt one — removing it first lets the same verified retry restore
+// byte-exact content on the next pass.
+func TestLaravelExchangeServerBlobMissingOrCorrupt(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if _, err := sa.PairExchange(labCtx, a.repo, f.endpoint()); err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 60 * time.Second}, Token: f.Member}
+
+	missing, missingBrief := labSpilledBrief(t, sa, a.repo, "Blob Vanishes", 53)
+	corrupt, corruptBrief := labSpilledBrief(t, sa, a.repo, "Blob Corrupts", 59)
+	missingContent := sourceGroup(t, sa, missing.ID, store.TypeContentCreated)
+	corruptContent := sourceGroup(t, sa, corrupt.ID, store.TypeContentCreated)
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, sb, cb, statusB.Binding)
+	st, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || st.Downloaded != 4 || st.Evaluated != 4 || st.Integrated != 2 || st.Waiting != 2 {
+		t.Fatalf("receiver status = %+v %v", st, err)
+	}
+	sourceDecision(t, sb, missingContent, "pending")
+	sourceDecision(t, sb, corruptContent, "pending")
+
+	// The fixture repo's blob directory is disposable with its database —
+	// each seed mints a fresh repo ULID — so the whole subtree is removed
+	// afterwards rather than ever touching another repo's stored bytes.
+	blobRoot := filepath.Join(f.path, "storage", "app", "private", "blobs", f.Repo)
+	t.Cleanup(func() { _ = os.RemoveAll(blobRoot) })
+	missingDigest, corruptDigest := labDigest(missingBrief), labDigest(corruptBrief)
+	missingPath := filepath.Join(blobRoot, missingDigest)
+	corruptPath := filepath.Join(blobRoot, corruptDigest)
+	if _, err := os.Stat(missingPath); err != nil {
+		t.Fatal("server never stored the missing-case blob", err)
+	}
+	if _, err := os.Stat(corruptPath); err != nil {
+		t.Fatal("server never stored the corrupt-case blob", err)
+	}
+	if err := os.Remove(missingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corruptPath, []byte("server-side corruption"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	exchangePass(t, sb, cb, statusB.Binding)
+	for _, group := range []string{missingContent, corruptContent} {
+		d := sourceDecision(t, sb, group, "pending")
+		if d.Reason != "content bytes unavailable" {
+			t.Fatalf("%s pending reason = %q", group, d.Reason)
+		}
+	}
+	st, err = sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || st.Waiting != 2 {
+		t.Fatalf("corrupted status = %+v %v", st, err)
+	}
+
+	// Verified re-upload heals the absent file through the committed-row
+	// repair path — but the contract never clobbers an existing file, so
+	// the corrupt bytes survive the same retry untouched.
+	if err := cb.UploadBlob(labCtx, f.endpoint(), missingDigest, int64(len(missingBrief)), bytes.NewReader(missingBrief)); err != nil {
+		t.Fatal("blob repair PUT:", err)
+	}
+	if err := cb.UploadBlob(labCtx, f.endpoint(), corruptDigest, int64(len(corruptBrief)), bytes.NewReader(corruptBrief)); err != nil {
+		t.Fatal("blob re-PUT:", err)
+	}
+	exchangePass(t, sb, cb, statusB.Binding)
+	sourceDecision(t, sb, missingContent, "integrated")
+	d := sourceDecision(t, sb, corruptContent, "pending")
+	if d.Reason != "content bytes unavailable" {
+		t.Fatalf("corrupt-after-retry reason = %q", d.Reason)
+	}
+	if got, err := os.ReadFile(corruptPath); err != nil || string(got) != "server-side corruption" {
+		t.Fatal("verified re-PUT did not leave the corrupt bytes untouched")
+	}
+
+	// Removing the bad file lets the same verified retry restore it; the
+	// next pass installs byte-exact content for both groups.
+	if err := os.Remove(corruptPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cb.UploadBlob(labCtx, f.endpoint(), corruptDigest, int64(len(corruptBrief)), bytes.NewReader(corruptBrief)); err != nil {
+		t.Fatal("blob restore PUT:", err)
+	}
+	exchangePass(t, sb, cb, statusB.Binding)
+	sourceDecision(t, sb, corruptContent, "integrated")
+	for _, check := range []struct {
+		n    store.Node
+		data []byte
+	}{{missing, missingBrief}, {corrupt, corruptBrief}} {
+		got, err := sb.Content(labCtx, check.n.ID, store.KindBrief)
+		if err != nil || !bytes.Equal(got, check.data) {
+			t.Fatalf("receiver %s brief = %d %v", check.n.Locator, len(got), err)
+		}
+		if n := mustNode(t, sb, check.n.ID); n.Repo != b.repo {
+			t.Fatalf("receiver node %s repo = %q", check.n.ID, n.Repo)
+		}
+	}
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, statusB.Binding)
+	if len(labEvents(t, sb)) != before {
+		t.Fatal("post-restore pass appended effects")
+	}
+	t.Log("missing and corrupt Laravel blobs stayed pending with honest reasons; verified re-PUT repaired the absent file, removal+retry restored the corrupt one, both integrated byte-exact")
+}
+
+// The exchange client never follows redirects: ExchangeClient.request and
+// blobRequest pin CheckRedirect to ErrUseLastResponse so a bearer token can
+// never be forwarded to an endpoint the binding did not name. A 302 edge
+// answering every route proves each call fails honestly on the redirect
+// itself while the target records zero hits.
+func TestExchangeClientNeverFollowsRedirects(t *testing.T) {
+	var mu sync.Mutex
+	var edgeHits, targetHits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		targetHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		edgeHits++
+		mu.Unlock()
+		http.Redirect(w, r, target.URL+r.URL.Path+"?"+r.URL.RawQuery, http.StatusFound)
+	}))
+	defer edge.Close()
+
+	endpoint := edge.URL + "/api/organizations/org/repos/repo"
+	client := store.ExchangeClient{HTTP: &http.Client{Timeout: 10 * time.Second}, Token: "token"}
+
+	// The blob siblings refuse the redirect as honest blob errors.
+	data := []byte("redirect boundary bytes")
+	digest := labDigest(data)
+	if err := client.UploadBlob(labCtx, endpoint, digest, int64(len(data)), bytes.NewReader(data)); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("blob PUT through redirect = %v", err)
+	}
+	if _, err := client.FetchBlob(labCtx, endpoint, digest); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("blob GET through redirect = %v", err)
+	}
+
+	// The JSON request path fails the same way inside a real pass: binding
+	// is local-only, the first HTTP call is POST /origins, and the 302 is
+	// the honest failure — never a followed request carrying the token.
+	p, s := exchangeHost(t)
+	b := exchangeBind(t, s, p, endpoint)
+	if err := s.ExchangePass(labCtx, client, b, nil); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("exchange pass through redirect = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if targetHits != 0 {
+		t.Fatalf("redirect target recorded %d hits — token-bearing requests were followed", targetHits)
+	}
+	if edgeHits != 3 {
+		t.Fatalf("edge recorded %d hits, want the three refused requests", edgeHits)
+	}
+	t.Logf("302 edge absorbed %d requests; redirect target saw zero — bearer token never forwarded", edgeHits)
+}
+
+// Stage-2 consolidated divergence over real Laravel: after the portable
+// family converges, the two stores bind the same tracker reference to
+// different synced Matters — divergent occupancy. Each side's claim uploads
+// as a new original and conflicts on the other with the named "occupied"
+// reason, local bindings stay put, unrelated work keeps integrating, and
+// nothing wedges. The finish-vs-pause half of this matrix already ran in
+// TestLaravelExchangeThirdStoreEcho; this adds the relations-family
+// divergence that only existed at lab-feed level.
+func TestLaravelExchangeReferenceOccupancyConflict(t *testing.T) {
+	f := startLaravelFixture(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	statusA, err := sa.PairExchange(labCtx, a.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := sb.PairExchange(labCtx, b.repo, f.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := store.ExchangeClient{HTTP: &http.Client{Timeout: 30 * time.Second}, Token: f.Owner}
+	cb := store.ExchangeClient{HTTP: &http.Client{Timeout: 30 * time.Second}, Token: f.Member}
+
+	shared, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Shared occupancy", "shared-occ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Other occupancy", "other-occ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, sb, cb, statusB.Binding)
+
+	// The contested ref: the sender binds it to "other", the receiver binds
+	// it locally to "shared" — same identity, divergent occupancy.
+	if _, err := writesurface.Bind(labCtx, sa, store.ActorHuman, a.repo, other.Locator, "fixture:OCC"); err != nil {
+		t.Fatal(err)
+	}
+	senderBind := sourceGroup(t, sa, other.ID, store.TypeReferenceAdded)
+	if _, err := writesurface.Bind(labCtx, sb, store.ActorHuman, b.repo, shared.Locator, "fixture:OCC"); err != nil {
+		t.Fatal(err)
+	}
+	receiverBind := sourceGroup(t, sb, shared.ID, store.TypeReferenceAdded)
+
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.RunExchange(labCtx, cb, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	exchangePass(t, sa, ca, statusA.Binding)
+
+	// Each side's claim is a retained conflict naming the occupancy.
+	for _, check := range []struct {
+		s     *store.Store
+		group string
+	}{
+		{sb, senderBind},
+		{sa, receiverBind},
+	} {
+		d := sourceDecision(t, check.s, check.group, "conflict")
+		if !strings.Contains(d.Reason, "occupied") {
+			t.Fatalf("occupancy conflict reason = %q", d.Reason)
+		}
+	}
+	// Divergent occupancy retained: each store keeps its own local claim and
+	// the synced claim never merged into it.
+	if refs := matterRefs(t, sb, shared.ID); !slices.Equal(refs, []string{"fixture:OCC"}) {
+		t.Fatalf("receiver shared refs = %v", refs)
+	}
+	if refs := matterRefs(t, sa, other.ID); !slices.Equal(refs, []string{"fixture:OCC"}) {
+		t.Fatalf("sender other refs = %v", refs)
+	}
+	if refs := matterRefs(t, sb, other.ID); len(refs) != 0 {
+		t.Fatalf("receiver other refs = %v, want none — the synced bind conflicted", refs)
+	}
+	if refs := matterRefs(t, sa, shared.ID); len(refs) != 0 {
+		t.Fatalf("sender shared refs = %v, want none — the synced bind conflicted", refs)
+	}
+
+	// Unrelated work still integrates past the retained conflicts: a fresh
+	// Matter and its Brief cross on the next ordinary pass.
+	after, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Aftermath", "aftermath-occ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterBrief := []byte("work proceeds past the conflict\n")
+	if _, err := writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, after.Locator, store.KindBrief, afterBrief); err != nil {
+		t.Fatal(err)
+	}
+	afterBirth := sourceGroup(t, sa, after.ID, store.TypeMatterCreated)
+	afterContent := sourceGroup(t, sa, after.ID, store.TypeContentCreated)
+	if _, err := sa.RunExchange(labCtx, ca, a.repo); err != nil {
+		t.Fatal(err)
+	}
+	before := len(labEvents(t, sb))
+	exchangePass(t, sb, cb, statusB.Binding)
+	sourceDecision(t, sb, afterBirth, "integrated")
+	sourceDecision(t, sb, afterContent, "integrated")
+	if got := len(labEvents(t, sb)) - before; got != 2 {
+		t.Fatalf("receiver appended %d events for the unrelated pair, want 2", got)
+	}
+	if got, err := sb.Content(labCtx, after.ID, store.KindBrief); err != nil || !bytes.Equal(got, afterBrief) {
+		t.Fatalf("receiver aftermath brief = %q %v", got, err)
+	}
+	// The conflicts stand and nothing wedges: redelivery is inert.
+	sourceDecision(t, sb, senderBind, "conflict")
+	exchangePass(t, sb, cb, statusB.Binding)
+	if len(labEvents(t, sb)) != before+2 {
+		t.Fatal("post-conflict pass appended effects")
+	}
+	t.Log("divergent tracker-reference occupancy over Laravel: both claims retained as named conflicts, local bindings untouched, unrelated work integrated")
 }
