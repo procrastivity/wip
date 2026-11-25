@@ -1109,3 +1109,96 @@ func TestLaravelExchangePortableDerivative(t *testing.T) {
 	labRebuild(t, sb)
 	t.Log("mixed command crossed real Laravel as its identified portable unit; omitted members retained as evidence only")
 }
+
+// An incompatible source version is apply-time evidence, not a receipt
+// failure: receipt still validates the envelope structure, the committed
+// page and cursor land intact, the record is retained as an inspectable
+// conflict, and later rows in the same feed still apply and redeliver
+// inertly.
+func TestSharedStoreIncompatibleSourceVersionExchange(t *testing.T) {
+	feed, endpoint := newLabExchangeFeed(t)
+	a, sa := exchangeHost(t)
+	b, sb := exchangeHost(t)
+	if a.repo == b.repo {
+		t.Fatal("independent native Repos unexpectedly identical")
+	}
+	client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+	ba, err := sa.PairExchange(labCtx, a.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.PairExchange(labCtx, b.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	post := func(src store.ExperimentSource) string {
+		t.Helper()
+		raw, err := json.Marshal(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change := store.ExchangeChange{Version: 1, InstallationID: src.Host, GroupID: src.Actions[0].Event.ID, SourceRepoID: a.repo, Source: string(raw)}
+		fixtureHTTP(t, "POST", endpoint+"/changes", "token", map[string]any{"changes": []store.ExchangeChange{change}}, http.StatusNoContent)
+		return change.GroupID
+	}
+	var badGroup, goodGroup, goodMatter string
+	for i, title := range []string{"Incompatible first", "Compatible second"} {
+		n, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, title, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := sourceGroup(t, sa, n.ID, store.TypeMatterCreated)
+		src, err := sa.ExperimentExport(labCtx, ba.Binding.InstallationID, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if src.Version != 1 {
+			t.Fatalf("exported source version = %d, want 1", src.Version)
+		}
+		if i == 0 {
+			src.Version = 2
+			badGroup = post(src)
+		} else {
+			goodGroup, goodMatter = post(src), n.ID
+		}
+	}
+	if len(feed.changes) != 2 || feed.changes[0].GroupID != badGroup || feed.changes[1].GroupID != goodGroup {
+		t.Fatalf("feed order = %+v", feed.changes)
+	}
+	before := len(labEvents(t, sb))
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	// Receipt kept both committed records: cursor and inbox applied together,
+	// the incompatible one retained as a conflict naming its version.
+	status, err := sb.ExchangeStatus(labCtx, b.repo)
+	if err != nil || status.Downloaded != 2 || status.Evaluated != 2 || status.Conflicts != 1 {
+		t.Fatalf("status = %+v %v", status, err)
+	}
+	bad := sourceDecision(t, sb, badGroup, "conflict")
+	if !strings.Contains(bad.Reason, "incompatible source version 2") || len(bad.Effects) != 0 {
+		t.Fatalf("incompatible decision = %+v", bad)
+	}
+	good := sourceDecision(t, sb, goodGroup, "integrated")
+	if len(good.Effects) != 1 {
+		t.Fatalf("compatible decision = %+v", good)
+	}
+	m, err := sb.Node(labCtx, goodMatter)
+	if err != nil || m.Repo != b.repo {
+		t.Fatalf("compatible matter did not integrate after the incompatible record: %+v %v", m, err)
+	}
+	if got := len(labEvents(t, sb)); got != before+1 {
+		t.Fatalf("receiver events %d -> %d, want exactly the one compatible effect", before, got)
+	}
+	// Redelivery is inert: the cursor already passed the page and the stored
+	// decisions answer again without new effects.
+	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if again := sourceDecision(t, sb, badGroup, "conflict"); !reflect.DeepEqual(bad, again) {
+		t.Fatal("redelivery changed the retained incompatible decision", again)
+	}
+	if got := len(labEvents(t, sb)); got != before+1 {
+		t.Fatal("redelivery appended effects")
+	}
+	t.Log("incompatible source version retained as conflict at sequence 1; compatible record at sequence 2 integrated; cursor/inbox complete and redelivery inert")
+}

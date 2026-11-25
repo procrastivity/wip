@@ -233,6 +233,16 @@ API does not persist tokens; the CLI keeps credentials outside the store.
 HTTP happens outside every local writer transaction; redirects
 are refused rather than forwarding bearer credentials.
 
+The embedded `ExperimentSource` carries its own optional `Version` schema
+marker beside that envelope version: absent is the legacy version-1 shape every
+pre-marker export already used, so stored envelopes and captured retries stay
+readable, and exports stamp the current version explicitly. Receivers accept
+only versions they can interpret; anything else is retained whole as an
+inspectable conflict naming the rejected version — an apply-time outcome that
+never rejects receipt, loses cursor/feed progress, or blocks later records.
+Cloud validates only the marker's type and stores source bytes verbatim;
+compatibility is always the receiver's decision.
+
 When an observed baseline was a generated local effect, export retains that
 observation as `NativeBaseline` (or ancestor `NativeEvent`) and supplies its
 portable original source identity as `Baseline`/`Event`. Incoming original source

@@ -1329,6 +1329,67 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 	labRebuild(t, sb)
 }
 
+// The portable source carries its own schema marker beside the version-1
+// envelope: exports stamp the current version, an absent marker is the
+// legacy version-1 shape, and any other version is retained whole as an
+// inspectable conflict — applied to nothing, stable across recheck and
+// redelivery.
+func TestSharedStoreSourceVersion(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	if h.Version != 1 {
+		t.Fatalf("exported source version = %d, want 1", h.Version)
+	}
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"Version":1`) {
+		t.Fatalf("exported source JSON lacks the version marker: %s", raw)
+	}
+	// A pre-marker export is the same version-1 shape: Version absent
+	// marshals byte-identically and imports exactly as before.
+	legacy := h
+	legacy.Version = 0
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacyRaw), `"Version"`) {
+		t.Fatalf("legacy source emitted a version marker: %s", legacyRaw)
+	}
+	before := len(labEvents(t, p.fluke))
+	d := labImport(t, p.fluke, legacy, "integrated")
+	if d.Source.Version != 0 || len(d.Effects) != len(h.Actions) {
+		t.Fatalf("legacy import = %+v", d)
+	}
+	if len(labEvents(t, p.fluke)) != before+len(d.Effects) {
+		t.Fatal("legacy import did not append exactly its effects")
+	}
+	// Unreadable versions are retained conflicts, never applied: no effects,
+	// no native writes, an unmistakable reason, and stable recheck/redelivery.
+	for i, version := range []int{2, 99} {
+		src := labStart(t, p, p.hybrid, "Hybrid", fmt.Sprintf("shared/step-%02d", i+1))
+		src.Version = version
+		before := len(labEvents(t, p.fluke))
+		d := labImport(t, p.fluke, src, "conflict")
+		if !strings.Contains(d.Reason, fmt.Sprintf("incompatible source version %d", version)) || len(d.Effects) != 0 {
+			t.Fatalf("version %d decision = %+v", version, d)
+		}
+		if len(labEvents(t, p.fluke)) != before {
+			t.Fatalf("version %d appended native events", version)
+		}
+		if again := sourceDecision(t, p.fluke, src.Actions[0].Event.ID, "conflict"); !strings.Contains(again.Reason, "incompatible source version") {
+			t.Fatalf("version %d not inspectable: %+v", version, again)
+		}
+		followRecheck(t, p.fluke, src, "conflict")
+		labImport(t, p.fluke, src, "conflict")
+		if len(labEvents(t, p.fluke)) != before {
+			t.Fatalf("version %d retry/recheck appended events", version)
+		}
+	}
+}
+
 // The portable unit is atomic on its own: when a later portable member
 // conflicts, the earlier portable effect rolls back with it. Omitted evidence
 // changes nothing about unit atomicity, and the retained conflict stays put

@@ -32,8 +32,25 @@ type ExperimentBaseline struct {
 	NativeEvent    string `json:",omitempty"`
 }
 
+// experimentSourceVersion is the portable-source schema this build writes and
+// interprets. The absent field is the same version-1 shape every export
+// predating the marker already used, so only a nonzero marker can be
+// incompatible.
+const experimentSourceVersion = 1
+
+// experimentSourceCompatible reports whether this build can interpret the
+// marked source schema. Absent (0) is the legacy version-1 shape; anything
+// else is retained as an inspectable conflict, never applied.
+func experimentSourceCompatible(version int) bool {
+	return version == 0 || version == experimentSourceVersion
+}
+
 // ExperimentSource is one complete committed source command and its origin.
+// Version is the portable-source schema marker: absent (0) is the legacy
+// version-1 shape, so stored envelopes and captured retries stay readable;
+// ExperimentExport stamps experimentSourceVersion explicitly.
 type ExperimentSource struct {
+	Version int `json:",omitempty"`
 	Host    string
 	Actions []ExperimentAction
 	// Derivative is nil for a complete raw group. When set, this source is the
@@ -202,7 +219,7 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 	if host == "" || len(group) == 0 {
 		return ExperimentSource{}, fmt.Errorf("experiment: host and committed group required")
 	}
-	out := ExperimentSource{Host: host}
+	out := ExperimentSource{Version: experimentSourceVersion, Host: host}
 	for _, ev := range group {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, ev.ID).Scan(&count); err != nil {
@@ -326,7 +343,7 @@ func experimentPortableUnit(source ExperimentSource, repo string) (ExperimentSou
 	if unit == len(mask) {
 		return source, true
 	}
-	out := ExperimentSource{Host: source.Host, Derivative: &ExperimentDerivative{Parent: source.Actions[0].Event.Correlation}}
+	out := ExperimentSource{Version: source.Version, Host: source.Host, Derivative: &ExperimentDerivative{Parent: source.Actions[0].Event.Correlation}}
 	for i, a := range source.Actions {
 		if mask[i] {
 			out.Actions = append(out.Actions, a)
@@ -419,34 +436,39 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 	if err != nil {
 		return ExperimentDecision{}, err
 	}
-	claims := append([]ExperimentAction{}, source.Actions...)
-	if source.Derivative != nil {
-		claims = append(claims, source.Derivative.Omitted...)
-	}
-	for _, a := range claims {
-		native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
-		if err != nil {
-			return ExperimentDecision{}, err
+	// An unreadable source schema is never matched against native evidence
+	// under the wrong interpretation: its retained conflict names the
+	// rejected version, not a coincidental identity comparison.
+	if experimentSourceCompatible(source.Version) {
+		claims := append([]ExperimentAction{}, source.Actions...)
+		if source.Derivative != nil {
+			claims = append(claims, source.Derivative.Omitted...)
 		}
-		if len(native) == 0 {
-			continue
+		for _, a := range claims {
+			native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if len(native) == 0 {
+				continue
+			}
+			verified, err := experimentOriginVerified(ctx, tx, a.Event.ID, source.Host, originHosts)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if reflect.DeepEqual(native[0], a.Event) && verified {
+				continue
+			}
+			result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), scope, string(encoded)); err != nil {
+				return ExperimentDecision{}, err
+			}
+			return result, tx.Commit()
 		}
-		verified, err := experimentOriginVerified(ctx, tx, a.Event.ID, source.Host, originHosts)
-		if err != nil {
-			return ExperimentDecision{}, err
-		}
-		if reflect.DeepEqual(native[0], a.Event) && verified {
-			continue
-		}
-		result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			return ExperimentDecision{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO experiment_collisions VALUES (?,?,?,?)`, group, string(raw), scope, string(encoded)); err != nil {
-			return ExperimentDecision{}, err
-		}
-		return result, tx.Commit()
 	}
 	key, err := experimentSourceKey(ctx, tx, repo, group)
 	if err != nil {
@@ -597,7 +619,13 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 		}
 		var disposition, reason, effect string
 		var need bool
-		if target != "" && experimentPortableMember(a.Event.Type) {
+		if !experimentSourceCompatible(source.Version) {
+			// The schema marker is a group-level property: an unreadable
+			// version takes the same atomic path as a first-member conflict —
+			// every action retained as evidence, none effected — so receipt,
+			// cursor and later feed records are unaffected.
+			disposition, reason = "conflict", fmt.Sprintf("incompatible source version %d", source.Version)
+		} else if target != "" && experimentPortableMember(a.Event.Type) {
 			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a)
 		} else {
 			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target)
