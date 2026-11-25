@@ -327,9 +327,19 @@ func TestSharedStoreSameBaselineAndMissingEffect(t *testing.T) {
 						t.Fatalf("reopen lost original time/host/group or effect mapping: %+v", activity)
 					}
 				}
+				// Only a native start queues a tracker candidate. When fluke's
+				// sole start arrived as an integration effect it projects the
+				// work but no delivery authority, so its outbox stays empty.
+				wantCandidates := 1
+				if !both && s == p.fluke {
+					wantCandidates = 0
+				}
 				outbox, err := reopened.Outbox(labCtx, p.repo)
-				if err != nil || len(outbox) != 1 || !strings.Contains(outbox[0].IdempotencyKey, ":state:fixture:T-1") {
-					t.Fatalf("expected one native tracker candidate, no duplicate on exchange: %+v %v", outbox, err)
+				if err != nil || len(outbox) != wantCandidates {
+					t.Fatalf("outbox = %+v (err %v), want %d native candidates", outbox, err, wantCandidates)
+				}
+				if wantCandidates == 1 && !strings.Contains(outbox[0].IdempotencyKey, ":state:fixture:T-1") {
+					t.Fatalf("expected the native tracker candidate, got %+v", outbox)
 				}
 				labState(t, reopened, p.matter, store.InProgress)
 				if _, err := writesurface.Start(labCtx, reopened, store.ActorHuman, p.repo, "shared"); err == nil {
@@ -670,4 +680,160 @@ func TestSharedStoreConcurrentSubprocesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("three companion imports and three CLI starts: one native start; long-lived/backwards-clock writer advanced safely")
+}
+
+func TestSharedStoreEffectProjectsWorkWithoutDeliveryAuthority(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	// The source store queued its candidate natively — the payload the
+	// receiver imports below carries a boundary that would queue here too.
+	native, err := p.hybrid.Outbox(labCtx, p.repo)
+	if err != nil || len(native) != 1 {
+		t.Fatalf("native start outbox = %+v (err %v), want one candidate", native, err)
+	}
+	d := labImport(t, p.fluke, h, "integrated")
+	if len(d.Effects) != 1 || d.Effects[0] == "" {
+		t.Fatalf("expected one integrated effect, got %+v", d)
+	}
+	labState(t, p.fluke, p.matter, store.InProgress)
+
+	// The effect kept the source's push-level snapshot verbatim; the fold
+	// guard — not a lost payload — is what kept it from queueing.
+	var transition store.Transition
+	seen := false
+	for _, e := range labEvents(t, p.fluke) {
+		if e.ID == d.Effects[0] {
+			if e.Actor != store.SystemActor("shared-store-experiment") {
+				t.Fatalf("effect actor = %q, want system:shared-store-experiment", e.Actor)
+			}
+			if err := json.Unmarshal(e.Payload, &transition); err != nil {
+				t.Fatal(err)
+			}
+			seen = true
+		}
+	}
+	if !seen || transition.TrackerPushLevel != store.TrackerPushBoundary {
+		t.Fatalf("effect payload = %+v (seen %v), want a boundary transition", transition, seen)
+	}
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("integration effect queued delivery candidates: %+v %v", outbox, err)
+	}
+	labRebuild(t, p.fluke)
+	if outbox, err = p.fluke.Outbox(labCtx, p.repo); err != nil || len(outbox) != 0 {
+		t.Fatalf("rebuild resurrected delivery candidates: %+v %v", outbox, err)
+	}
+
+	// Native control: the same transition authored on this store queues.
+	if _, err := writesurface.CreateMatter(labCtx, p.fluke, store.ActorHuman, p.repo, "Control", "control"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Bind(labCtx, p.fluke, store.ActorHuman, p.repo, "control", "fixture:T-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(labCtx, p.fluke, store.ActorHuman, p.repo, "control"); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err = p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 1 || outbox[0].Kind != "state" || outbox[0].Ref != "fixture:T-2" {
+		t.Fatalf("native control outbox = %+v (err %v), want one state candidate for fixture:T-2", outbox, err)
+	}
+}
+
+func TestSharedStoreProjectionBumpDropsImportedCandidates(t *testing.T) {
+	p := newLabPair(t)
+	h := labStart(t, p, p.hybrid, "Hybrid", "shared")
+	d := labImport(t, p.fluke, h, "integrated")
+	if len(d.Effects) != 1 || d.Effects[0] == "" {
+		t.Fatalf("expected one integrated effect, got %+v", d)
+	}
+	// Simulate a store folded under projection v11: the effect had already
+	// queued the candidate the older rules derived, and the recorded version
+	// is what the bump exists to invalidate on next open.
+	db, err := sql.Open("sqlite", p.fluke.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleID := p.fluke.NewID()
+	if _, err := db.Exec(`INSERT INTO outbox_entries
+		(id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
+		VALUES (?,?,'state','queued',?,?,'stale:imported-candidate','{"disposition":"active"}',?,?)`,
+		staleID, p.repo, p.matter, "fixture:T-1", d.Effects[0], d.Effects[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE store_meta SET value='11' WHERE key='projection_version'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := p.fluke.Path()
+	if err := p.fluke.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p.fluke = labOpen(t, path)
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("stale imported candidate survived projection refold: %+v %v", outbox, err)
+	}
+	labState(t, p.fluke, p.matter, store.InProgress)
+}
+
+func TestSharedStoreEffectDelegationRecordsFactWithoutOutbox(t *testing.T) {
+	p := newLabPair(t)
+	entry, err := writesurface.BacklogAdd(labCtx, p.fluke, store.ActorHuman, p.repo,
+		store.ProvenanceFound, "Delegate me", "found mid-flight", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// backlog.* is outside the import classifier's admitted families, so the
+	// guard is exercised directly: the same actor stamp ExperimentImport
+	// writes, on the one write path every event takes.
+	sourceOutbox := p.fluke.NewID()
+	if _, err := p.fluke.Commit(labCtx, store.Request{
+		Actor: store.SystemActor("shared-store-experiment"),
+		Env:   store.Env{Repo: p.repo},
+	}, func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{
+			Type:    store.TypeBacklogDelegated,
+			Subject: entry.ID,
+			Payload: store.BacklogDelegated{Outbox: sourceOutbox, IdempotencyKey: "backlog:" + entry.ID},
+		}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := p.fluke.BacklogEntry(labCtx, p.repo, entry.ID)
+	if err != nil || !found || got.State != "delegated" || got.Outbox != sourceOutbox {
+		t.Fatalf("delegated entry = %+v (found %v, err %v), want delegated naming %s", got, found, err, sourceOutbox)
+	}
+	outbox, err := p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 0 {
+		t.Fatalf("effect delegation queued delivery: %+v %v", outbox, err)
+	}
+	active, err := p.fluke.ActiveBacklog(labCtx, p.repo)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("dangling delegation stayed active: %+v %v", active, err)
+	}
+	labRebuild(t, p.fluke)
+	got, found, err = p.fluke.BacklogEntry(labCtx, p.repo, entry.ID)
+	if err != nil || !found || got.State != "delegated" || got.Outbox != sourceOutbox {
+		t.Fatalf("rebuild lost the delegation fact: %+v (found %v, err %v)", got, found, err)
+	}
+	if outbox, err = p.fluke.Outbox(labCtx, p.repo); err != nil || len(outbox) != 0 {
+		t.Fatalf("rebuild resurrected delivery: %+v %v", outbox, err)
+	}
+
+	// Native control: a human delegation on this store queues the create.
+	native, err := writesurface.BacklogAdd(labCtx, p.fluke, store.ActorHuman, p.repo,
+		store.ProvenanceFound, "Native delegate", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.BacklogDelegate(labCtx, p.fluke, store.ActorHuman, p.repo, native.ID); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err = p.fluke.Outbox(labCtx, p.repo)
+	if err != nil || len(outbox) != 1 || outbox[0].Kind != "create" {
+		t.Fatalf("native delegation outbox = %+v (err %v), want one create", outbox, err)
+	}
 }

@@ -237,7 +237,7 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 			}
 			supported := true
 			for _, ev := range events {
-				if ev.Repo != repo || ev.Actor == SystemActor("shared-store-experiment") {
+				if ev.Repo != repo || ev.Actor == integrationEffectActor {
 					supported = false
 				}
 				switch ev.Type {

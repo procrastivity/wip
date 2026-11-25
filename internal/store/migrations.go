@@ -90,7 +90,14 @@ func latestVersion(reg []migration) int {
 // refolds the whole log — the synthetic events included — which is where
 // "reproduces state identical to the pre-migration rows" actually happens
 // (see the migration test).
-const projectionVersion = 11
+//
+// It moved to 12 when the fold learned the integration-effect boundary
+// (integrationEffectActor, store.go): an imported event projects work facts
+// but queues no delivery candidates. Stores that already logged such effects
+// may carry the candidates the older rules derived; the bump is what makes
+// the next open refold them away — the retroactive application a fold-rule
+// change is exactly for.
+const projectionVersion = 12
 
 // projectionVersionKey is where the store records the projection version it was
 // last folded under.

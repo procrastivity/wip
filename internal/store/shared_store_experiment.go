@@ -193,7 +193,7 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, ev.ID).Scan(&count); err != nil {
 			return out, err
 		}
-		if count != 0 || ev.Actor == SystemActor("shared-store-experiment") {
+		if count != 0 || ev.Actor == integrationEffectActor {
 			return out, fmt.Errorf("experiment: integration effects are not source actions")
 		}
 		history, err := v.EventsOfSubject(ctx, ev.Subject)
@@ -520,7 +520,7 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			if target != "" {
 				repo = target
 			}
-			ev, err := s.stamp(Request{Actor: SystemActor("shared-store-experiment"), Env: Env{Repo: repo}}, Draft{Type: a.Event.Type, Subject: a.Event.Subject, Payload: a.Event.Payload})
+			ev, err := s.stamp(Request{Actor: integrationEffectActor, Env: Env{Repo: repo}}, Draft{Type: a.Event.Type, Subject: a.Event.Subject, Payload: a.Event.Payload})
 			if err != nil {
 				return ExperimentDecision{}, err
 			}
@@ -934,7 +934,7 @@ func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, rep
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_effects WHERE id=?`, e.ID).Scan(&effect); err != nil {
 			return nil, err
 		}
-		if effect != 0 || e.Actor == SystemActor("shared-store-experiment") {
+		if effect != 0 || e.Actor == integrationEffectActor {
 			continue
 		}
 		activities[e.ID] = ExperimentActivity{Event: e, Origin: localOrigin, Disposition: "local"}
@@ -977,7 +977,7 @@ func (s *Store) experimentActivitySnapshot(ctx context.Context, localOrigin, rep
 		for i, a := range d.Source.Actions {
 			key := experimentKey(d.target, a.Event.ID)
 			activity := ExperimentActivity{Event: a.Event, Origin: d.Source.Host, Disposition: d.Disposition, ReceivedAt: received, LastRecordedEvaluationAt: evaluated, Acknowledgement: ack}
-			if e, ok := native[a.Event.ID]; ok && e.Actor != SystemActor("shared-store-experiment") {
+			if e, ok := native[a.Event.ID]; ok && e.Actor != integrationEffectActor {
 				// A conflicting claim is inspectable in ExperimentActivities, not a
 				// replacement for authentic work. Even exact echoes cannot supply
 				// native attribution that was unknown to this local reader.

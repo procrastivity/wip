@@ -848,24 +848,35 @@ func delegateBacklogEntry(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if repo != ev.Repo {
 		return fmt.Errorf("store: %s backlog entry belongs to another Repo", ev.Type)
 	}
-	payload, err := json.Marshal(struct {
-		Kind       string `json:"kind"`
-		Backlog    string `json:"backlog"`
-		Provenance string `json:"provenance"`
-		Title      string `json:"title"`
-		Detail     string `json:"detail,omitempty"`
-		Origin     string `json:"origin_node,omitempty"`
-	}{"create", ev.Subject, provenance, title, detail, origin})
-	if err != nil {
-		return fmt.Errorf("store: project %s payload: %w", ev.Type, err)
-	}
 
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO outbox_entries
-		 (id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
-		 VALUES (?,?,'create','queued',?,NULL,?,?,?,?)`,
-		p.Outbox, ev.Repo, ev.Subject, p.IdempotencyKey, string(payload), ev.ID, ev.ID); err != nil {
-		return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+	// An integration effect still records the delegation — the entry is
+	// delegated and names the outbox identity the *source* store minted — but
+	// writes no outbox_entries row here, because that row is the delivery
+	// authority and imported work does not carry any (integrationEffectActor).
+	// backlog_entries.outbox has no foreign key into outbox_entries
+	// (schema_v5.go), so the recorded source identity simply dangles: the
+	// ActiveBacklog LEFT JOIN reads the absent row as nothing to deliver, and
+	// Backlog keeps the fact for audit and rebuild.
+	if ev.Actor != integrationEffectActor {
+		payload, err := json.Marshal(struct {
+			Kind       string `json:"kind"`
+			Backlog    string `json:"backlog"`
+			Provenance string `json:"provenance"`
+			Title      string `json:"title"`
+			Detail     string `json:"detail,omitempty"`
+			Origin     string `json:"origin_node,omitempty"`
+		}{"create", ev.Subject, provenance, title, detail, origin})
+		if err != nil {
+			return fmt.Errorf("store: project %s payload: %w", ev.Type, err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO outbox_entries
+			 (id,repo,kind,state,subject,ref,idempotency_key,payload,birth_event,last_event)
+			 VALUES (?,?,'create','queued',?,NULL,?,?,?,?)`,
+			p.Outbox, ev.Repo, ev.Subject, p.IdempotencyKey, string(payload), ev.ID, ev.ID); err != nil {
+			return fmt.Errorf("store: project %s outbox: %w", ev.Type, err)
+		}
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE backlog_entries SET state='delegated',outbox=?,last_event=?
@@ -1004,6 +1015,12 @@ func projectLegacyMatterReference(ctx context.Context, tx *sql.Tx, ev Event) err
 // relevant. Their deterministic identities let live projection and rebuild
 // reproduce the same outbox rows without a second event family.
 func projectTransitionCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	// An integration effect moves the node but queues no candidate: the
+	// payload's TrackerPushLevel is the *source* store's policy snapshot, and
+	// imported work carries no delivery authority here (integrationEffectActor).
+	if ev.Actor == integrationEffectActor {
+		return nil
+	}
 	var p Transition
 	if err := decode(ev, &p); err != nil {
 		return err
@@ -1044,6 +1061,11 @@ func projectTransitionCandidates(ctx context.Context, tx *sql.Tx, ev Event) erro
 }
 
 func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	// Same boundary as projectTransitionCandidates: an integration effect
+	// seals or dismisses the gate fact but queues no delivery candidate.
+	if ev.Actor == integrationEffectActor {
+		return nil
+	}
 	var level TrackerPushLevel
 	switch ev.Type {
 	case TypeGateClosed:
@@ -1116,6 +1138,11 @@ func projectGateCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
 }
 
 func projectReferenceCandidates(ctx context.Context, tx *sql.Tx, ev Event) error {
+	// Same boundary as projectTransitionCandidates: an integration effect
+	// changes the reference set but queues no delivery candidate.
+	if ev.Actor == integrationEffectActor {
+		return nil
+	}
 	var level TrackerPushLevel
 	var refs []string
 	switch ev.Type {
@@ -1284,6 +1311,13 @@ func insertTrackerCandidate(ctx context.Context, tx *sql.Tx, ev Event, kind, sub
 // push-level of off still queues it; only an explicit approve, not the
 // repo's ambient push policy, decides whether it ever reaches a provider.
 func projectAdhocCandidate(ctx context.Context, tx *sql.Tx, ev Event) error {
+	// Same boundary as projectTransitionCandidates: even an operator-shaped
+	// proposal arriving as an integration effect queues nothing — the
+	// proposal's human boundary is this store's own outbox approve, which an
+	// import cannot pre-answer (integrationEffectActor).
+	if ev.Actor == integrationEffectActor {
+		return nil
+	}
 	var p TrackerAdhocProposed
 	if err := decodeStrict(ev, &p); err != nil {
 		return err

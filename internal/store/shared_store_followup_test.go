@@ -687,12 +687,15 @@ func TestSharedStoreFollowupRecheckRaces(t *testing.T) {
 			if history[1].Decision.Disposition != result.Disposition {
 				t.Fatal("history and current outcome diverged")
 			}
+			// Every transition on this store arrived as an integration effect,
+			// and an effect carries no delivery authority: no candidate —
+			// native or imported — may sit in the outbox.
 			outbox, err := p.fluke.Outbox(labCtx, p.repo)
-			if err != nil || len(outbox) != 1 {
-				t.Fatalf("race duplicated native candidate: %+v %v", outbox, err)
+			if err != nil || len(outbox) != 0 {
+				t.Fatalf("integration effects queued delivery candidates: %+v %v", outbox, err)
 			}
 			labRebuild(t, p.fluke)
-			t.Logf("two independent rechecks + CLI %s: %s, child starts=%d, candidate=1, decision records=2", verb, result.Disposition, count)
+			t.Logf("two independent rechecks + CLI %s: %s, child starts=%d, candidates=0, decision records=2", verb, result.Disposition, count)
 		})
 	}
 }
