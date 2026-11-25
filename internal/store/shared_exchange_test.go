@@ -447,17 +447,17 @@ func TestLaravelExchangeRoundTrip(t *testing.T) {
 		if node, err := sa.Node(labCtx, other.ID); err != nil || node.Repo != a.repo {
 			t.Fatal("independent Matter did not arrive", err)
 		}
-		// Actual unsupported local pause remains retained, never replayed as start.
-		labCLICommand(t, a, true, "plumbing", "pause", "seeded", "--json")
+		// Actual unsupported local work remains retained, never replayed as sync.
+		labCLICommand(t, a, true, "plumbing", "finding", "add", "seeded", "local finding stays local")
 		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
 		if err != nil {
 			t.Fatal(err)
 		}
-		pause := sourceGroup(t, sa, seeded.ID, store.TypeMatterPaused)
-		exchangePass(t, sa, ca, ba, pause)
+		finding := sourceGroup(t, sa, seeded.ID, store.TypeContentAppended)
+		exchangePass(t, sa, ca, ba, finding)
 		exchangePass(t, sb, cb, bb)
-		sourceDecision(t, sb, pause, "conflict")
-		if _, err := sb.ExperimentAcknowledge(labCtx, pause); err != nil {
+		sourceDecision(t, sb, finding, "conflict")
+		if _, err := sb.ExperimentAcknowledge(labCtx, finding); err != nil {
 			t.Fatal(err)
 		}
 		if node, err := sb.Node(labCtx, seeded.ID); err != nil || node.Lifecycle != store.InProgress {
@@ -874,11 +874,11 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 	// correction must exclude collision groups, not all conflicted decisions.
 	cli := p
 	cli.db = p.fluke.Path()
-	labCLICommand(t, cli, true, "plumbing", "pause", "shared/step-01", "--json")
-	pauseGroup := sourceGroup(t, p.fluke, p.step1, store.TypeStepPaused)
-	exchangePass(t, p.fluke, cb, bb, pauseGroup)
+	labCLICommand(t, cli, true, "plumbing", "finding", "add", "shared/step-01", "unsupported local observation")
+	unsupportedGroup := sourceGroup(t, p.fluke, p.step1, store.TypeContentAppended)
+	exchangePass(t, p.fluke, cb, bb, unsupportedGroup)
 	exchangePass(t, p.hybrid, ca, ba)
-	pause := sourceDecision(t, p.hybrid, pauseGroup, "conflict")
+	unsupported := sourceDecision(t, p.hybrid, unsupportedGroup, "conflict")
 	before := followPreview(t, p.hybrid, ba.InstallationID)
 	nativeLog := labEvents(t, p.hybrid)
 	claim := store.ExperimentSource{Host: "33333333-3333-4333-8333-333333333333", Actions: []store.ExperimentAction{native.Actions[0], foreign.Actions[1]}}
@@ -910,7 +910,7 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 		}
 		var conflictVisible bool
 		for _, a := range after.Activities {
-			if a.Event.ID == pauseGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, pause.Source.Actions[0].Event) {
+			if a.Event.ID == unsupportedGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, unsupported.Source.Actions[0].Event) {
 				conflictVisible = true
 			}
 		}

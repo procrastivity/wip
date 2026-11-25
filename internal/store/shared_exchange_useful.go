@@ -10,7 +10,7 @@ import (
 
 // experimentPortableMember reports whether the type belongs to the bounded
 // portable slice: the three node births and the inline create-once Brief.
-// Planned starts and everything else keep their own classifiers.
+// Lifecycle transitions and everything else keep their own classifiers.
 func experimentPortableMember(typ string) bool {
 	switch typ {
 	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeContentCreated:
@@ -19,9 +19,46 @@ func experimentPortableMember(typ string) bool {
 	return false
 }
 
+// experimentLifecycleEdge is the admitted shape of one lifecycle event type —
+// exactly what writesurface's verb emits (MODEL §2.2): the payload's From/To
+// are fixed per edge, Reason is set only where the verb records one (cancel
+// alone says why work ended without sealing) and Cascade is set only where the
+// verb moves ancestors on its own initiative (start alone). The terminal To
+// values — done and canceled — are never reopened: the fold moves a node only
+// while its live lifecycle equals From, so no admitted edge leaves them.
+type experimentLifecycleEdge struct {
+	verb     string
+	from, to Lifecycle
+	reason   bool
+	cascade  bool
+	kind     Scale
+}
+
+// experimentLifecycleEdges is the whole admitted lifecycle matrix, keyed by
+// event type so the export whitelist and the import classifier share one
+// source of truth and cannot drift apart.
+var experimentLifecycleEdges = map[string]experimentLifecycleEdge{
+	TypeMatterStarted:  {verb: "started", from: Planned, to: InProgress, cascade: true, kind: ScaleMatter},
+	TypeStageStarted:   {verb: "started", from: Planned, to: InProgress, cascade: true, kind: ScaleStage},
+	TypeStepStarted:    {verb: "started", from: Planned, to: InProgress, cascade: true, kind: ScaleStep},
+	TypeMatterFinished: {verb: "finished", from: InProgress, to: Done, kind: ScaleMatter},
+	TypeStageFinished:  {verb: "finished", from: InProgress, to: Done, kind: ScaleStage},
+	TypeStepFinished:   {verb: "finished", from: InProgress, to: Done, kind: ScaleStep},
+	TypeMatterCanceled: {verb: "canceled", from: InProgress, to: Canceled, reason: true, kind: ScaleMatter},
+	TypeStageCanceled:  {verb: "canceled", from: InProgress, to: Canceled, reason: true, kind: ScaleStage},
+	TypeStepCanceled:   {verb: "canceled", from: InProgress, to: Canceled, reason: true, kind: ScaleStep},
+	TypeMatterPaused:   {verb: "paused", from: InProgress, to: Paused, kind: ScaleMatter},
+	TypeStagePaused:    {verb: "paused", from: InProgress, to: Paused, kind: ScaleStage},
+	TypeStepPaused:     {verb: "paused", from: InProgress, to: Paused, kind: ScaleStep},
+	TypeMatterResumed:  {verb: "resumed", from: Paused, to: InProgress, kind: ScaleMatter},
+	TypeStageResumed:   {verb: "resumed", from: Paused, to: InProgress, kind: ScaleStage},
+	TypeStepResumed:    {verb: "resumed", from: Paused, to: InProgress, kind: ScaleStep},
+}
+
 // experimentExchangePortable is the single per-member predicate behind
 // ExchangeStatus eligibility and portable derivatives: the event must be a
-// repo-scoped original of an admitted family — exactly the bounded slice
+// repo-scoped original of an admitted family — the node births, the inline
+// create-once Brief and the lifecycle matrix above, exactly what
 // experimentClassifyPortable and experimentClassify can project on a bound
 // target. Batch/execution-scoped events carry no Repo, generated integration
 // effects are never originals, and every unadmitted family stays local. The
@@ -31,9 +68,11 @@ func experimentExchangePortable(ev Event, repo string) bool {
 	if ev.Repo != repo || ev.Actor == integrationEffectActor {
 		return false
 	}
+	if _, ok := experimentLifecycleEdges[ev.Type]; ok {
+		return true
+	}
 	switch ev.Type {
-	case TypeMatterCreated, TypeMatterStarted, TypeStageCreated, TypeStageStarted,
-		TypeStepCreated, TypeStepStarted:
+	case TypeMatterCreated, TypeStageCreated, TypeStepCreated:
 		return true
 	case TypeContentCreated:
 		var p ContentWritten

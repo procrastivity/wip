@@ -251,19 +251,22 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				return out, err
 			}
 			b := ExperimentBaseline{Subject: parent}
-			next := ""
 			for _, prior := range history {
 				if prior.ID >= group[0].ID {
 					break
 				}
 				b.Event = prior.ID
-				if prior.Type == TypeStageCreated {
-					var birth NodeBirth
-					if err := decode(prior, &birth); err != nil {
-						return out, err
-					}
-					next = birth.Parent
+			}
+			// The chain continues through the projected parent, never through
+			// whichever event happens to be last: a started, finished or
+			// otherwise-transitioned ancestor still has exactly one parent,
+			// including one born inside this same group.
+			var next string
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent,'') FROM nodes WHERE id=?`, parent).Scan(&next); err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return out, err
 				}
+				next = ""
 			}
 			a.Ancestors = append(a.Ancestors, b)
 			parent = next
@@ -735,22 +738,26 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	e := a.Event
 	conflict := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	pending := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
-	if e.Type != TypeMatterStarted && e.Type != TypeStageStarted && e.Type != TypeStepStarted {
+	spec, admitted := experimentLifecycleEdges[e.Type]
+	if !admitted {
 		return conflict("unsupported family; original payload retained, no content overwritten")
 	}
 	var p Transition
 	if err := decodeStrict(e, &p); err != nil {
 		return conflict("invalid transition payload")
 	}
-	if p.From != Planned || p.To != InProgress || p.Reason != "" {
-		return conflict("not a planned start")
+	// The payload must be exactly what the verb emits: fixed From/To per edge,
+	// Reason only where the edge records one (cancel), Cascade only where the
+	// verb moves ancestors on its own initiative (start). Anything else is not
+	// a native lifecycle move and stays retained evidence.
+	if p.From != spec.from || p.To != spec.to || (!spec.reason && p.Reason != "") || (!spec.cascade && p.Cascade) {
+		return conflict("not a native " + spec.verb)
 	}
 	n, err := v.Node(ctx, e.Subject)
 	if err != nil {
 		return pending("missing live paired object")
 	}
-	expected := map[Scale]string{ScaleMatter: TypeMatterStarted, ScaleStage: TypeStageStarted, ScaleStep: TypeStepStarted}
-	if n.Repo != e.Repo || n.Parent != a.Parent || expected[n.Kind] != e.Type {
+	if n.Repo != e.Repo || n.Parent != a.Parent || n.Kind != spec.kind {
 		return conflict("paired structure differs")
 	}
 	if a.Baseline == "" {
@@ -769,65 +776,70 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if baseline < 0 {
 		return pending("unknown baseline dependency")
 	}
-	for parent := n.Parent; parent != ""; {
-		ancestor, err := v.Node(ctx, parent)
-		if err != nil {
-			return pending("missing ancestor")
-		}
-		if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
-			return conflict("incompatible ancestor lifecycle")
-		}
-		if !subjects[parent] {
-			if ancestor.Lifecycle == Planned {
-				return pending("incomplete ancestor cascade")
-			}
-			history, err := v.EventsOfSubject(ctx, parent)
+	if spec.verb == "started" {
+		for parent := n.Parent; parent != ""; {
+			ancestor, err := v.Node(ctx, parent)
 			if err != nil {
-				return "", "", "", false, err
+				return pending("missing ancestor")
 			}
-			last := history[len(history)-1]
-			if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
-				return conflict("ancestor history diverged from its start")
+			if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
+				return conflict("incompatible ancestor lifecycle")
 			}
-			observed := ""
-			for _, b := range a.Ancestors {
-				if b.Subject == parent {
-					observed = b.Event
+			if !subjects[parent] {
+				if ancestor.Lifecycle == Planned {
+					return pending("incomplete ancestor cascade")
 				}
-			}
-			if observed == "" {
-				return pending("missing ancestor baseline evidence")
-			}
-			mapped, err := experimentMappedEvidence(ctx, v, observed, target)
-			if err != nil {
-				return "", "", "", false, err
-			}
-			if mapped != last.ID {
-				var count int
-				if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id=?`, mapped).Scan(&count); err != nil {
+				history, err := v.EventsOfSubject(ctx, parent)
+				if err != nil {
 					return "", "", "", false, err
 				}
-				if count == 0 {
-					return pending("unknown ancestor correspondence")
+				last := history[len(history)-1]
+				if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
+					return conflict("ancestor history diverged from its start")
 				}
-				return conflict("ancestor history differs from source observation")
+				observed := ""
+				for _, b := range a.Ancestors {
+					if b.Subject == parent {
+						observed = b.Event
+					}
+				}
+				if observed == "" {
+					return pending("missing ancestor baseline evidence")
+				}
+				mapped, err := experimentMappedEvidence(ctx, v, observed, target)
+				if err != nil {
+					return "", "", "", false, err
+				}
+				if mapped != last.ID {
+					var count int
+					if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id=?`, mapped).Scan(&count); err != nil {
+						return "", "", "", false, err
+					}
+					if count == 0 {
+						return pending("unknown ancestor correspondence")
+					}
+					return conflict("ancestor history differs from source observation")
+				}
 			}
+			parent = ancestor.Parent
 		}
-		parent = ancestor.Parent
 	}
 	last := history[len(history)-1]
-	if n.Lifecycle == InProgress && len(history) >= 2 && history[len(history)-2].ID == a.Baseline && last.Type == e.Type {
+	if n.Lifecycle == spec.to && len(history) >= 2 && history[len(history)-2].ID == a.Baseline && last.Type == e.Type {
 		var represented Transition
 		if err := decodeStrict(last, &represented); err != nil {
 			return "", "", "", false, err
 		}
-		if represented.TrackerPushLevel != p.TrackerPushLevel {
-			return conflict("tracker policy snapshots differ")
+		// Cascade legitimately varies between a cascade member and a direct
+		// start of the same node; every other payload field must be identical
+		// for the existing effect to represent this source.
+		if represented.From != p.From || represented.To != p.To || represented.Reason != p.Reason || represented.TrackerPushLevel != p.TrackerPushLevel {
+			return conflict("transition snapshots differ")
 		}
 		return "integrated", "", last.ID, false, nil
 	}
-	if n.Lifecycle != Planned || last.ID != a.Baseline {
-		return conflict("lifecycle or subject history diverged; never reopen or infer from current InProgress")
+	if n.Lifecycle != spec.from || last.ID != a.Baseline {
+		return conflict("lifecycle or subject history diverged; never reopen or infer from current " + string(n.Lifecycle))
 	}
 	return "integrated", "", "", true, nil
 }
