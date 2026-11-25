@@ -7,6 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 )
@@ -14,10 +17,11 @@ import (
 // experimentPortableMember reports whether the type belongs to the bounded
 // portable slice routed through experimentClassifyPortable on a bound target:
 // the four node births — step.inserted is the positioned-birth verb's event,
-// the same NodeBirth fold as step.created — and the inline create-once Brief.
-// The step amendment family (reorder/replace/remove) is not here: like the
-// lifecycle matrix it mutates an already-paired object, so experimentClassify
-// admits it on both the bound and the unbound path.
+// the same NodeBirth fold as step.created — and the create-once content
+// writes. The step amendment family (reorder/replace/remove), the lifecycle
+// matrix, the backlog outcomes and content.appended are not here: like the
+// lifecycle matrix they mutate an already-paired object, so experimentClassify
+// admits them on both the bound and the unbound path.
 func experimentPortableMember(typ string) bool {
 	switch typ {
 	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted, TypeContentCreated:
@@ -65,15 +69,16 @@ var experimentLifecycleEdges = map[string]experimentLifecycleEdge{
 // experimentExchangePortable is the single per-member predicate behind
 // ExchangeStatus eligibility and portable derivatives: the event must be a
 // repo-scoped original of an admitted family — the node births including the
-// positioned step.inserted, the step amendment family, the inline
-// create-once Brief, the lifecycle matrix above and the backlog outcome
-// family, exactly what experimentClassifyPortable and experimentClassify can
-// project on a bound target. The predicate is per event, not per subject:
-// reordered names the parent, replaced the old step and removed the step,
-// and each classifier resolves its own subject shape. Batch/execution-scoped
-// events carry no Repo, generated integration effects are never originals,
-// and every unadmitted family stays local. The whitelist lives only here and
-// in the import classifiers, never in a second list that could drift.
+// positioned step.inserted, the step amendment family, the lifecycle matrix
+// above, the backlog outcome family and the content family (the create-once
+// writes and findings appends), exactly what experimentClassifyPortable and
+// experimentClassify can project on a bound target. The predicate is per
+// event, not per subject: reordered names the parent, replaced the old step
+// and removed the step, and each classifier resolves its own subject shape.
+// Batch/execution-scoped events carry no Repo, generated integration effects
+// are never originals, and every unadmitted family stays local. The
+// whitelist lives only here and in the import classifiers, never in a
+// second list that could drift.
 func experimentExchangePortable(ev Event, repo string) bool {
 	if ev.Repo != repo || ev.Actor == integrationEffectActor {
 		return false
@@ -88,9 +93,41 @@ func experimentExchangePortable(ev Event, repo string) bool {
 		return true
 	case TypeContentCreated:
 		var p ContentWritten
-		return json.Unmarshal(ev.Payload, &p) == nil && p.Kind == KindBrief && p.Bytes != nil && p.BlobRef == ""
+		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableCreated(p)
+	case TypeContentAppended:
+		var p ContentWritten
+		return json.Unmarshal(ev.Payload, &p) == nil && experimentPortableFinding(p)
 	}
 	return false
+}
+
+// experimentPortableContentShape is the storage half of the content family's
+// whitelist, shared by both content classifiers: ContentWritten carries
+// either inline bytes or a blob reference, never both and never neither —
+// the same XOR insertContent enforces. A spilled payload's BlobRef is the
+// content identity itself, the only form ContentDraft ever writes and the
+// only key sync-content can install verified bytes against.
+func experimentPortableContentShape(p ContentWritten) bool {
+	if p.Bytes != nil && p.BlobRef == "" {
+		return true
+	}
+	return p.Bytes == nil && p.BlobRef != "" && p.BlobRef == p.Content
+}
+
+// experimentPortableCreated reports whether a content.created payload is in
+// the admitted create-once family — Brief, Workplan or body — with a
+// well-formed content identity. Findings are append-only and never belong
+// here; the fold refuses the pairing.
+func experimentPortableCreated(p ContentWritten) bool {
+	return (p.Kind == KindBrief || p.Kind == KindWorkplan || p.Kind == KindBody) &&
+		IsIdentityShaped(p.Content) && experimentPortableContentShape(p)
+}
+
+// experimentPortableFinding reports whether a content.appended payload is a
+// well-formed findings segment: append-only kind, identity-shaped content id,
+// inline-or-blob storage.
+func experimentPortableFinding(p ContentWritten) bool {
+	return p.Kind == KindFindings && IsIdentityShaped(p.Content) && experimentPortableContentShape(p)
 }
 
 // experimentUnitMask reports which members of one committed chain form its
@@ -127,7 +164,7 @@ func experimentUnitMask(events []Event, repo string) []bool {
 // members just created. Whole-group atomicity is the caller's savepoint, not
 // this classifier's. Colliding identities/addresses/content remain retained
 // conflicts, never merges.
-func experimentClassifyPortable(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+func experimentClassifyPortable(ctx context.Context, v View, a ExperimentAction, s *Store) (string, string, string, bool, error) {
 	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	e := a.Event
 	history, err := v.EventsOfSubject(ctx, e.Subject)
@@ -147,7 +184,7 @@ func experimentClassifyPortable(ctx context.Context, v View, a ExperimentAction)
 	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted:
 		return experimentClassifyBirth(ctx, v, a, history)
 	case TypeContentCreated:
-		return experimentClassifyBrief(ctx, v, a, history)
+		return experimentClassifyContent(ctx, v, a, history, s)
 	}
 	return refuse("unsupported family; original payload retained, no content overwritten")
 }
@@ -228,23 +265,38 @@ func experimentClassifyBirth(ctx context.Context, v View, a ExperimentAction, hi
 	return "integrated", "", "", true, nil
 }
 
-// experimentClassifyBrief is the create-once inline Brief rule, unchanged from
-// the standalone-group era: integrity-verified bytes, a globally unused content
-// identity, a live Matter target and an untouched subject history tail.
-func experimentClassifyBrief(ctx context.Context, v View, a ExperimentAction, history []Event) (string, string, string, bool, error) {
+// experimentClassifyContent admits one create-once content write — Brief,
+// Workplan or body — the writesurface WriteOnce verbs' events. It stays
+// bound-only like the births it may share a group with: the payload mints a
+// new content identity, so it needs the same target-Repo mapping a birth
+// does. Every precondition insertContent enforces is pre-validated here —
+// a fold failure would roll the whole unit back — with the fold's own
+// subject rule: any node row carries create-once content (contentSubjectExists
+// counts tombstoned rows too, and the native WriteOnce resolves any live
+// node kind), while a backlog entry can never take one. Ordering is strict:
+// the mapped baseline must be the subject-history tail, because a
+// create-once write asserts "the subject as last observed", never a fact
+// concurrent with later writes.
+func experimentClassifyContent(ctx context.Context, v View, a ExperimentAction, history []Event, s *Store) (string, string, string, bool, error) {
 	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
 	e := a.Event
 	var p ContentWritten
-	if decodeStrict(e, &p) != nil || p.Kind != KindBrief || p.Bytes == nil || p.BlobRef != "" || !IsIdentityShaped(p.Content) {
-		return refuse("only inline Brief supported; bytes unavailable or unsupported kind")
+	if decodeStrict(e, &p) != nil || !experimentPortableCreated(p) {
+		return refuse("unsupported or invalid create-once content")
 	}
-	sum := sha256.Sum256(p.Bytes)
-	if p.ByteLen != int64(len(p.Bytes)) || hex.EncodeToString(sum[:]) != p.SHA256 {
-		return refuse("Brief integrity mismatch")
+	ready, err := experimentContentReady(s, p)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if !ready.integrity {
+		return refuse("content integrity mismatch")
+	}
+	if !ready.bytes {
+		return wait(ready.reason)
 	}
 	// Content identity is global, including tombstoned rows. A different
-	// original cannot reuse it on another Matter (or revive its old slot).
+	// original cannot reuse it on another subject (or revive its old slot).
 	var count int
 	if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM content WHERE id=?`, p.Content).Scan(&count); err != nil {
 		return "", "", "", false, err
@@ -252,30 +304,202 @@ func experimentClassifyBrief(ctx context.Context, v View, a ExperimentAction, hi
 	if count != 0 {
 		return refuse("content identity already exists; accepted bytes unchanged")
 	}
-	if len(history) == 0 {
-		return wait("Brief awaiting Matter")
-	}
-	n, err := v.Node(ctx, e.Subject)
+	var subjectRepo string
+	err = v.q.QueryRowContext(ctx, `SELECT repo FROM nodes WHERE id=?`, e.Subject).Scan(&subjectRepo)
 	if err != nil {
-		return "", "", "", false, err
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", "", false, err
+		}
+		// The subject may be a backlog entry — create-once kinds can never
+		// land there, so that is a permanent incompatibility, not a wait.
+		if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM backlog_entries WHERE id=?`, e.Subject).Scan(&count); qerr != nil {
+			return "", "", "", false, qerr
+		}
+		if count != 0 {
+			return refuse("create-once content is written on nodes; backlog entries carry findings only")
+		}
+		return wait("content awaiting subject")
 	}
-	if n.Repo != e.Repo || n.Kind != ScaleMatter {
-		return refuse("Brief target differs")
+	if subjectRepo != e.Repo {
+		return refuse("content target belongs to another Repo")
 	}
-	segments, err := v.ContentSegments(ctx, e.Subject, KindBrief)
+	segments, err := v.ContentSegments(ctx, e.Subject, p.Kind)
 	if err != nil {
 		return "", "", "", false, err
 	}
 	if len(segments) > 0 {
-		return refuse("competing Brief retained; accepted bytes unchanged")
+		return refuse("competing " + string(p.Kind) + " retained; accepted bytes unchanged")
 	}
 	if a.Baseline == "" {
-		return wait("missing Brief baseline")
+		return wait("missing content baseline")
 	}
-	if history[len(history)-1].ID != a.Baseline {
-		return refuse("Brief subject history diverged")
+	index, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if index < 0 && !anchored {
+		return wait("unknown baseline dependency")
+	}
+	// The baseline must be the tail: the last subject-history event, or the
+	// replaced-birth anchor when the subject has no events of its own yet.
+	last := ""
+	if len(history) > 0 {
+		last = history[len(history)-1].ID
+	} else if anchored {
+		last = a.Baseline
+	}
+	if last != a.Baseline {
+		return refuse("content subject history diverged; create-once content never reorders observed facts")
 	}
 	return "integrated", "", "", true, nil
+}
+
+// experimentClassifyFinding admits one findings append — the only
+// append-only content kind, written on nodes and backlog entries alike. Like
+// the amendment family it mutates an already-paired object, so
+// experimentClassify routes it on both the bound and the unbound path. The
+// subject rule is contentSubjectExists's own: a node row in any lifecycle
+// state (the fold counts tombstoned rows) or a backlog entry, in the mapped
+// Repo. Ordering is causal, not positional: the mapped baseline must resolve
+// inside the subject's local history — or the replaced-birth anchor — but
+// need not be the tail, because two sources appending findings against the
+// same observed tail are independent facts that both survive; the content
+// rows order themselves by segment identity. A baseline that resolves
+// nowhere waits, and a source event already in subject history is the
+// verified self-echo.
+func experimentClassifyFinding(ctx context.Context, v View, a ExperimentAction, s *Store) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	for _, prior := range history {
+		if prior.ID == e.ID {
+			// Repo is intentionally mapped, all other original evidence must match.
+			if reflect.DeepEqual(prior, e) {
+				return "integrated", "", prior.ID, false, nil
+			}
+			return refuse("source identity differs from native history")
+		}
+	}
+	var p ContentWritten
+	if decodeStrict(e, &p) != nil || !experimentPortableFinding(p) {
+		return refuse("unsupported or invalid findings append")
+	}
+	ready, err := experimentContentReady(s, p)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if !ready.integrity {
+		return refuse("findings integrity mismatch")
+	}
+	if !ready.bytes {
+		return wait(ready.reason)
+	}
+	// Content identity is global, including tombstoned rows — same floor as
+	// the create-once classifier.
+	var count int
+	if err := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM content WHERE id=?`, p.Content).Scan(&count); err != nil {
+		return "", "", "", false, err
+	}
+	if count != 0 {
+		return refuse("content identity already exists; accepted bytes unchanged")
+	}
+	var subjectRepo string
+	err = v.q.QueryRowContext(ctx, `SELECT repo FROM nodes WHERE id=?`, e.Subject).Scan(&subjectRepo)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", "", false, err
+		}
+		err = v.q.QueryRowContext(ctx, `SELECT repo FROM backlog_entries WHERE id=?`, e.Subject).Scan(&subjectRepo)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return wait("finding awaiting subject")
+			}
+			return "", "", "", false, err
+		}
+	}
+	if subjectRepo != e.Repo {
+		return refuse("finding target belongs to another Repo")
+	}
+	if a.Baseline == "" {
+		return wait("missing finding baseline")
+	}
+	index, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if index < 0 && !anchored {
+		return wait("unknown baseline dependency")
+	}
+	return "integrated", "", "", true, nil
+}
+
+// experimentContentReadiness is the classifier's view of one ContentWritten
+// payload's bytes: integrity reports whether inline bytes verify against the
+// recorded length and digest (always true for spilled payloads — the blob
+// check below covers them), and bytes reports whether the payload's bytes
+// are servable at all, with reason naming why not when they are not.
+type experimentContentReadiness struct {
+	integrity bool
+	bytes     bool
+	reason    string
+}
+
+// experimentContentReady verifies a content payload's storage half. Inline
+// bytes must match byte_len and sha256 exactly as insertContent enforces; a
+// spilled payload — Bytes absent, BlobRef naming the content identity — must
+// already be installed where this store can read it, because a projected
+// content row whose bytes cannot be served is exactly what portable sync
+// must never create.
+func experimentContentReady(s *Store, p ContentWritten) (experimentContentReadiness, error) {
+	if p.Bytes != nil {
+		sum := sha256.Sum256(p.Bytes)
+		return experimentContentReadiness{
+			integrity: p.ByteLen == int64(len(p.Bytes)) && hex.EncodeToString(sum[:]) == p.SHA256,
+			bytes:     true,
+		}, nil
+	}
+	state, err := s.spilledContentState(p.BlobRef, p.ByteLen, p.SHA256)
+	if err != nil {
+		return experimentContentReadiness{}, err
+	}
+	switch state {
+	case "ready":
+		return experimentContentReadiness{integrity: true, bytes: true}, nil
+	case "missing":
+		return experimentContentReadiness{integrity: true, bytes: false, reason: "content bytes unavailable"}, nil
+	default:
+		return experimentContentReadiness{integrity: true, bytes: false, reason: "content bytes failed verification"}, nil
+	}
+}
+
+// spilledContentState is the content-readiness seam the sync-content work
+// plugs into. It reports what this store can actually serve for a spilled
+// payload: the sidecar file blobDir/<ref> — safe because the classifiers
+// only admit BlobRef == the identity-shaped content id — checked against the
+// payload's own byte_len and sha256 exactly as SegmentBytes will check it on
+// every later read. "missing" and "invalid" both pend the importing group —
+// sync-content's verified, atomic install is what flips either to "ready"
+// on the next recheck — and neither ever becomes an empty or invented row.
+func (s *Store) spilledContentState(ref string, byteLen int64, digest string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(s.blobDir, ref))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "missing", nil
+		}
+		return "", fmt.Errorf("store: read spilled content %s: %w", ref, err)
+	}
+	if int64(len(data)) != byteLen {
+		return "invalid", nil
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != digest {
+		return "invalid", nil
+	}
+	return "ready", nil
 }
 
 // experimentBaselineIndex locates the mapped baseline inside the subject's

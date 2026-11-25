@@ -447,17 +447,20 @@ func TestLaravelExchangeRoundTrip(t *testing.T) {
 		if node, err := sa.Node(labCtx, other.ID); err != nil || node.Repo != a.repo {
 			t.Fatal("independent Matter did not arrive", err)
 		}
-		// Actual unsupported local work remains retained, never replayed as sync.
-		labCLICommand(t, a, true, "plumbing", "finding", "add", "seeded", "local finding stays local")
+		// Actual unsupported local work remains retained, never replayed as
+		// sync. Findings are portable now, so the retained-evidence fixture is
+		// a dependency edge — a family no classifier admits.
+		labCLICommand(t, a, true, "plumbing", "matter", "create", "--title", "Blocker", "--locator", "blocker", "--json")
+		labCLICommand(t, a, true, "plumbing", "depend", "add", "seeded", "--blocked-by", "blocker")
 		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
 		if err != nil {
 			t.Fatal(err)
 		}
-		finding := sourceGroup(t, sa, seeded.ID, store.TypeContentAppended)
-		exchangePass(t, sa, ca, ba, finding)
+		unsupported := sourceGroup(t, sa, seeded.ID, store.TypeDependencyAdded)
+		exchangePass(t, sa, ca, ba, unsupported)
 		exchangePass(t, sb, cb, bb)
-		sourceDecision(t, sb, finding, "conflict")
-		if _, err := sb.ExperimentAcknowledge(labCtx, finding); err != nil {
+		sourceDecision(t, sb, unsupported, "conflict")
+		if _, err := sb.ExperimentAcknowledge(labCtx, unsupported); err != nil {
 			t.Fatal(err)
 		}
 		if node, err := sb.Node(labCtx, seeded.ID); err != nil || node.Lifecycle != store.InProgress {
@@ -872,10 +875,12 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 	}
 	// An ordinary unsupported source remains canonical conflict activity. The
 	// correction must exclude collision groups, not all conflicted decisions.
+	// Findings are portable now, so the unsupported fixture is a dependency
+	// edge — a family no classifier admits.
 	cli := p
 	cli.db = p.fluke.Path()
-	labCLICommand(t, cli, true, "plumbing", "finding", "add", "shared/step-01", "unsupported local observation")
-	unsupportedGroup := sourceGroup(t, p.fluke, p.step1, store.TypeContentAppended)
+	labCLICommand(t, cli, true, "plumbing", "depend", "add", "shared/step-01", "--blocked-by", "shared/step-02")
+	unsupportedGroup := sourceGroup(t, p.fluke, p.step1, store.TypeDependencyAdded)
 	exchangePass(t, p.fluke, cb, bb, unsupportedGroup)
 	exchangePass(t, p.hybrid, ca, ba)
 	unsupported := sourceDecision(t, p.hybrid, unsupportedGroup, "conflict")

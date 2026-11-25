@@ -396,7 +396,7 @@ func (s *Store) ExperimentImport(ctx context.Context, source ExperimentSource) (
 
 // ExperimentImportBound retains foreign Repo identity and projects only into an
 // explicitly chosen native Repo. It also enables the bounded portable slice:
-// node births, planned starts and the inline create-once Brief.
+// node births, planned starts and the create-once content writes.
 func (s *Store) ExperimentImportBound(ctx context.Context, source ExperimentSource, repo string) (ExperimentDecision, error) {
 	if _, err := s.Repo(ctx, repo); err != nil {
 		return ExperimentDecision{}, err
@@ -659,9 +659,9 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			// cursor and later feed records are unaffected.
 			disposition, reason = "conflict", fmt.Sprintf("incompatible source version %d", source.Version)
 		} else if target != "" && experimentPortableMember(a.Event.Type) {
-			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a)
+			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a, s)
 		} else {
-			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target)
+			disposition, reason, effect, need, err = experimentClassify(ctx, v, a, subjects, target, s)
 		}
 		if err != nil {
 			return ExperimentDecision{}, err
@@ -764,7 +764,7 @@ func experimentRecordAction(ctx context.Context, tx *sql.Tx, group, scope, event
 	return err
 }
 
-func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string) (string, string, string, bool, error) {
+func experimentClassify(ctx context.Context, v View, a ExperimentAction, subjects map[string]bool, target string, s *Store) (string, string, string, bool, error) {
 	e := a.Event
 	conflict := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	pending := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
@@ -773,13 +773,18 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	// step.inserted joins the birth classifier, bound-only like *.created.
 	// The backlog outcome family is Repo-durable paired state in the same
 	// position — entered births the entry row, the three exits mutate it — so
-	// it classifies here on both paths too.
+	// it classifies here on both paths too. Findings appends mutate an
+	// existing node or backlog entry the same way, so content.appended joins
+	// them here while content.created stays bound-only with the births.
 	if e.Type == TypeStepReordered || e.Type == TypeStepReplaced || e.Type == TypeStepRemoved {
 		return experimentClassifyAmendment(ctx, v, a)
 	}
 	if e.Type == TypeBacklogEntered || e.Type == TypeBacklogPlanned ||
 		e.Type == TypeBacklogDeclined || e.Type == TypeBacklogDelegated {
 		return experimentClassifyBacklog(ctx, v, a)
+	}
+	if e.Type == TypeContentAppended {
+		return experimentClassifyFinding(ctx, v, a, s)
 	}
 	spec, admitted := experimentLifecycleEdges[e.Type]
 	if !admitted {

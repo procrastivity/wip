@@ -1051,7 +1051,8 @@ func TestLaravelExplicitSyncCLI(t *testing.T) {
 		}
 	}
 	// Unsupported ordinary local work is not falsely declared synchronized.
-	ca.command(t, true, "plumbing", "finding", "add", n.Locator, "local finding remains usable")
+	// Findings are portable now, so the retained fixture is a dependency edge.
+	ca.command(t, true, "plumbing", "depend", "add", n.Locator, "--blocked-by", competing.Locator)
 	if len(ca.status(t).Unsupported) == 0 {
 		t.Fatal("unsupported work hidden")
 	}

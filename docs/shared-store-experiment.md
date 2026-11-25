@@ -63,8 +63,8 @@ work/period view, including their non-native action IDs. They stay inspectable i
 `ExperimentActivities` without replacing canonical native or foreign originals.
 Ordinary canonical conflict activities remain visible. Even exact echoes cannot
 fill unknown local attribution from an incoming claim.
-Inline Brief content IDs are also global: reuse is a retained conflict even when
-the existing row belongs to another Matter or is tombstoned. Accepted bytes remain
+Content IDs are also global: reuse is a retained conflict even when
+the existing row belongs to another subject or is tombstoned. Accepted bytes remain
 unchanged and unrelated later inbox records can still be processed.
 
 ## Explicit reconsideration is separate from delivery
@@ -175,9 +175,13 @@ The original lab tables are not a general migration/upgrade contract for earlier
 experiment databases. The CLI extension defines its own version-1 pairing state
 below, without changing ordinary store migrations.
 
-The inline content conflict preserves source bytes; spilled content is retained
-only as its original unsupported payload/reference, not downloaded or made
-offline-ready. No blob-transfer or cleanup coordination is implemented.
+The inline content conflict preserves source bytes. Spilled content
+(`blob_ref` set, `bytes` absent) is a portable member too, but it never
+projects a row whose bytes cannot be served: the classifier checks the
+store-owned sidecar blob against the payload's recorded `byte_len`/`sha256`
+and the group pends — atomically, with the full `ContentWritten` payload
+retained as inspectable evidence — until verified bytes are installed.
+Blob transport itself is the sync-content work's seam, not this importer's.
 
 Source-time reporting is demonstrated only in the opt-in preview, not integrated
 into Session/status. Native Session still sees the fresh local effect timestamp;
@@ -249,8 +253,8 @@ portable original source identity as `Baseline`/`Event`. Incoming original sourc
 is immutable. `ExperimentImportBound` maps only the generated effect's Repo to
 the chosen native Repo and resolves portable baseline correspondence. It never
 rewrites retained source events or native Repo/Clone/path rows. New Matter object
-IDs and inline Brief content IDs remain shared business identities; incompatible
-identities, occupied addresses and competing Brief bytes are not merged.
+IDs and content IDs remain shared business identities; incompatible
+identities, occupied addresses and competing create-once bytes are not merged.
 
 Each downloaded committed page and its cursor commit together into the durable
 inbox before classification. A failure during receipt rolls both back. A failure
@@ -414,11 +418,13 @@ caller-supplied IDs. It captures every eligible exact envelope before HTTP,
 uploads in local command order and acknowledges each group durably after the
 server accepts it. A lost response resends the same cached key/bytes. Concurrent
 new local work remains eligible for the next pass. Supported Matter births,
-inline create-once Briefs and starts use the existing bounded importer; a mixed
+the create-once content writes (Brief, Workplan, body) and starts use the
+existing bounded importer; findings appends classify on the same bound-and-
+unbound path as the lifecycle matrix and backlog outcomes. A mixed
 group crosses only as its portable unit, described below. Generated effects and
 unrelated Repo/clone lookup work are never re-exported. Unsupported families
 stay usable locally and appear in the unsupported inventory. Required
-supported births/Brief baselines are included in command order when inside the
+supported births/content baselines are included in command order when inside the
 scope; old or unsupported dependencies are not silently synthesized.
 
 ### Portable units for mixed command groups
