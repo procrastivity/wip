@@ -799,6 +799,9 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if e.Type == TypeContentAppended {
 		return experimentClassifyFinding(ctx, v, a, s)
 	}
+	if e.Type == TypeDependencyAdded || e.Type == TypeDependencyRemoved {
+		return experimentClassifyDependency(ctx, v, a)
+	}
 	spec, admitted := experimentLifecycleEdges[e.Type]
 	if !admitted {
 		return conflict("unsupported family; original payload retained, no content overwritten")

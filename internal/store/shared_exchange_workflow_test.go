@@ -950,9 +950,11 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	if _, err = writesurface.DependAdd(labCtx, sa, store.ActorHuman, a.repo, mp(stage), matter.Locator); err != nil {
 		t.Fatal(err)
 	}
+	stageBlocked := sourceGroup(t, sa, stage.ID, store.TypeDependencyAdded)
 	if _, err = writesurface.DependAdd(labCtx, sa, store.ActorHuman, a.repo, mp(step1), matter.Locator); err != nil {
 		t.Fatal(err)
 	}
+	stepBlocked := sourceGroup(t, sa, step1.ID, store.TypeDependencyAdded)
 	stamp(step1.ID)
 	stamp(step2.ID)
 	if _, err = writesurface.Start(labCtx, sa, store.ActorHuman, a.repo, matter.Locator); err != nil {
@@ -1008,17 +1010,24 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	if err != nil || st.Waiting != 0 || st.Conflicts != 0 {
 		t.Fatalf("phase 1 receiver status = %+v %v", st, err)
 	}
-	for _, group := range append(birthGroups, matterStart, cascadeGroup, step2Start) {
+	for _, group := range append(birthGroups, matterStart, cascadeGroup, step2Start, stageBlocked, stepBlocked) {
 		sourceDecision(t, sb, group, "integrated")
 	}
 	for _, id := range []string{matter.ID, stage.ID, step1.ID, step2.ID} {
 		labState(t, sb, id, store.InProgress)
 	}
+	// The synced edges landed verbatim: Stage and Step both wait on the Matter.
+	for _, blocked := range []string{stage.ID, step1.ID} {
+		edge, found, err := sb.EdgeBetween(labCtx, blocked, matter.ID)
+		if err != nil || !found || edge.Blocked != blocked || edge.Blocker != matter.ID {
+			t.Fatalf("receiver edge %s<-matter = %+v %v %v", blocked, edge, found, err)
+		}
+	}
 	// No non-portable family ever crossed the wire.
 	for _, ev := range labEvents(t, sb) {
 		switch ev.Type {
 		case store.TypeReferenceAdded, store.TypeReferenceRemoved, store.TypeReferenceRebound,
-			store.TypeDependencyAdded, store.TypeDependencyRemoved, store.TypeRenderPerformed:
+			store.TypeRenderPerformed:
 			t.Fatalf("non-portable event %s reached the receiver", ev.Type)
 		}
 	}
@@ -1043,6 +1052,12 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	if _, err = writesurface.WriteOnce(labCtx, sa, store.ActorHuman, a.repo, mp(step1), store.KindBody, body); err != nil {
 		t.Fatal(err)
 	}
+	// dependency.removed is portable too: the Stage's edge on the Matter is
+	// dissolved on the sender and must tombstone on the receiver.
+	if err = writesurface.DependRemove(labCtx, sa, store.ActorHuman, a.repo, mp(stage), matter.Locator); err != nil {
+		t.Fatal(err)
+	}
+	stageUnblocked := sourceGroup(t, sa, stage.ID, store.TypeDependencyRemoved)
 	if _, err = writesurface.Finish(labCtx, sa, store.ActorHuman, a.repo, mp(step1)); err != nil {
 		t.Fatal(err)
 	}
@@ -1091,6 +1106,13 @@ func TestSharedStoreExchangeNonPortableBaseline(t *testing.T) {
 	}
 	if order := labChildIDs(t, sb, stage.ID); !reflect.DeepEqual(order, []string{step2.ID, step1.ID}) {
 		t.Fatalf("receiver stage order = %v", order)
+	}
+	sourceDecision(t, sb, stageUnblocked, "integrated")
+	if _, found, err := sb.EdgeBetween(labCtx, stage.ID, matter.ID); err != nil || found {
+		t.Fatalf("receiver kept the removed stage edge: found=%v err=%v", found, err)
+	}
+	if _, found, err := sb.EdgeBetween(labCtx, step1.ID, matter.ID); err != nil || !found {
+		t.Fatalf("receiver lost the surviving step edge: found=%v err=%v", found, err)
 	}
 	labState(t, sb, step1.ID, store.Done)
 	if got := labBacklog(t, sb, b.repo, entry.ID); got.State != "planned" || got.Matter != matter.ID {

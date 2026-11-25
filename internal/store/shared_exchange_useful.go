@@ -77,6 +77,7 @@ var experimentPortableTypeNames = []string{
 	TypeStepReordered, TypeStepReplaced, TypeStepRemoved,
 	TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated,
 	TypeContentCreated, TypeContentAppended,
+	TypeDependencyAdded, TypeDependencyRemoved,
 }
 
 // experimentPortableTypes is every admitted portable event type — the
@@ -1029,4 +1030,254 @@ func experimentClassifyBacklog(ctx context.Context, v View, a ExperimentAction) 
 		}
 	}
 	return "integrated", "", "", true, nil
+}
+
+// experimentClassifyDependency admits the dependency edge family —
+// dependency.added and dependency.removed, the blocked-by facts
+// writesurface's depend verbs emit. Like the amendment family they mutate
+// paired state, so they classify on both the bound and the unbound path:
+// the subject is the blocked node and the edge keeps its source identity
+// verbatim, exactly as node identities do. Every fold precondition —
+// insertEdge's fresh-identity insert, edges_live's live-pair uniqueness,
+// the edges table's blocked<>blocker floor, tombstoneEdge's pair check — is
+// pre-validated here because a fold failure would roll the whole unit back
+// and wedge the inbox.
+func experimentClassifyDependency(ctx context.Context, v View, a ExperimentAction) (string, string, string, bool, error) {
+	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
+	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
+	e := a.Event
+
+	var p DependencyChange
+	if decodeStrict(e, &p) != nil || !IsIdentityShaped(p.Edge) || !IsIdentityShaped(p.Blocker) {
+		return refuse("invalid dependency change")
+	}
+	// subject is the blocked node; the payload names the edge and its
+	// blocker. A self-edge is the degenerate cycle the edges table refuses.
+	if !IsIdentityShaped(e.Subject) || e.Subject == p.Blocker {
+		return refuse("invalid dependency edge")
+	}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	for _, prior := range history {
+		if prior.ID == e.ID {
+			// Repo is intentionally mapped, all other original evidence must match.
+			if reflect.DeepEqual(prior, e) {
+				return "integrated", "", prior.ID, false, nil
+			}
+			return refuse("source identity differs from native history")
+		}
+	}
+
+	// The edge row is the fold's own floor, settled before anything that
+	// could wait: a spent edge identity, an occupied live pair, a removal
+	// naming the wrong pair or an already-tombstoned edge are permanent
+	// incompatibilities, never merges. dependency.added inserts by source
+	// identity and dependency.removed verifies the pair before tombstoning.
+	var edgeBlocked, edgeBlocker string
+	var edgeTombstone sql.NullString
+	err = v.q.QueryRowContext(ctx,
+		`SELECT blocked, blocker, tombstone_event FROM edges WHERE id=?`, p.Edge).
+		Scan(&edgeBlocked, &edgeBlocker, &edgeTombstone)
+	switch {
+	case err == nil && e.Type == TypeDependencyAdded:
+		return refuse("edge identity already exists; identities not merged")
+	case err == nil:
+		if edgeBlocked != e.Subject || edgeBlocker != p.Blocker {
+			return refuse("dependency removal names a different pair than the edge records")
+		}
+		if edgeTombstone.Valid {
+			return refuse("edge already removed; removals never reorder observed facts")
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", "", "", false, err
+	case e.Type == TypeDependencyRemoved:
+		// The add may still be in flight; only a retained edge can be
+		// tombstoned, so absence waits rather than conflicts.
+		return wait("dependency awaiting edge")
+	}
+	if e.Type == TypeDependencyAdded {
+		// edges_live is unique over live rows whatever the endpoints'
+		// liveness: a pair already carried by another edge identity can
+		// never take this one.
+		var live int
+		if err := v.q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM edges WHERE blocked=? AND blocker=? AND tombstone_event IS NULL`,
+			e.Subject, p.Blocker).Scan(&live); err != nil {
+			return "", "", "", false, err
+		}
+		if live != 0 {
+			return refuse("dependency pair already in force under another edge; identities not merged")
+		}
+		// Both ends must be live nodes of the mapped Repo — the same floor
+		// edges_in_force applies to every read of the graph. An absent end
+		// may still arrive; a tombstone, a foreign Repo or a backlog entry
+		// is a permanent incompatibility the fold's FK could never express.
+		for _, end := range []struct{ id, role string }{{e.Subject, "blocked"}, {p.Blocker, "blocker"}} {
+			n, err := v.Node(ctx, end.id)
+			if err != nil {
+				var rows int
+				if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, end.id).Scan(&rows); qerr != nil {
+					return "", "", "", false, qerr
+				}
+				if rows != 0 {
+					return refuse("dependency " + end.role + " was removed; a tombstoned node cannot hold an edge")
+				}
+				if qerr := v.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM backlog_entries WHERE id=?`, end.id).Scan(&rows); qerr != nil {
+					return "", "", "", false, qerr
+				}
+				if rows != 0 {
+					return refuse("dependency " + end.role + " is a backlog entry; edges join nodes only")
+				}
+				return wait("dependency awaiting " + end.role + " endpoint")
+			}
+			if n.Repo != e.Repo {
+				return refuse("dependency " + end.role + " belongs to another Repo")
+			}
+		}
+	}
+	if a.Baseline == "" {
+		return wait("missing baseline evidence")
+	}
+	baseline, anchored, err := experimentBaselineIndex(ctx, v, e.Subject, history, a.Baseline)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if baseline < 0 && !anchored {
+		return wait("unknown baseline dependency")
+	}
+	if e.Type != TypeDependencyAdded {
+		return "integrated", "", "", true, nil
+	}
+	// A source-side depend add can never close a cycle — the verb refuses
+	// one statically — so a would-cycle here means the receiver's live edge
+	// set diverges from what the source observed. Pending retained evidence
+	// that could still break the loop keeps the group waiting; anything
+	// else is an inspectable conflict. Evidence still on another host is
+	// indistinguishable from divergence, and conflicts re-evaluate on
+	// explicit recheck once it lands.
+	cycle, err := v.WouldCycle(ctx, e.Subject, p.Blocker)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if !cycle {
+		return "integrated", "", "", true, nil
+	}
+	edges, nodes, err := experimentCycleMembers(ctx, v, e.Subject, p.Blocker)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	resolvable, err := experimentCycleResolvable(ctx, v.q, edges, nodes)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if resolvable {
+		return wait("dependency awaits cycle resolution")
+	}
+	return refuse("dependency edge would create a cycle")
+}
+
+// experimentCycleMembers reports the live edges and nodes a would-be
+// (blocked, blocker) edge closes a loop through: every edges_in_force row
+// whose blocked end is reachable from blocker and whose blocker end can
+// still reach blocked, plus the nodes lying on those paths. It is the same
+// whole-graph read WouldCycle already pays for, at personal-store scale.
+func experimentCycleMembers(ctx context.Context, v View, blocked, blocker string) (map[string]bool, map[string]bool, error) {
+	rows, err := v.q.QueryContext(ctx, `SELECT id, blocked, blocker FROM edges_in_force`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	type liveEdge struct{ id, blocked, blocker string }
+	var edges []liveEdge
+	graph := map[string][]string{}   // blocked -> the blockers it waits for
+	reverse := map[string][]string{} // blocker -> the nodes waiting for it
+	for rows.Next() {
+		var e liveEdge
+		if err := rows.Scan(&e.id, &e.blocked, &e.blocker); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, e)
+		graph[e.blocked] = append(graph[e.blocked], e.blocker)
+		reverse[e.blocker] = append(reverse[e.blocker], e.blocked)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	reach := func(start string, next map[string][]string) map[string]bool {
+		seen := map[string]bool{start: true}
+		stack := []string{start}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, n := range next[cur] {
+				if !seen[n] {
+					seen[n] = true
+					stack = append(stack, n)
+				}
+			}
+		}
+		return seen
+	}
+	forward := reach(blocker, graph)    // what blocker transitively waits for
+	backward := reach(blocked, reverse) // what transitively waits for blocked
+	cycleEdges := map[string]bool{}
+	for _, e := range edges {
+		if forward[e.blocked] && backward[e.blocker] {
+			cycleEdges[e.id] = true
+		}
+	}
+	nodes := map[string]bool{}
+	for n := range forward {
+		if backward[n] {
+			nodes[n] = true
+		}
+	}
+	return cycleEdges, nodes, nil
+}
+
+// experimentCycleResolvable reports whether retained pending evidence could
+// still break the loop a would-be edge closes: a pending dependency.removed
+// naming a cycle edge, or a pending step removal/replacement tombstoning a
+// cycle node — the only facts that take an edge or an endpoint out of
+// force. Integrated and conflicted groups are settled; only pending work
+// is still in flight. Omitted derivative members never classify, so they
+// are correctly not evidence here.
+func experimentCycleResolvable(ctx context.Context, q querier, edges, nodes map[string]bool) (bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT decision FROM experiment_sources`)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		if raw == "" {
+			continue // the group under evaluation has no decision yet
+		}
+		var d ExperimentDecision
+		if err := json.Unmarshal([]byte(raw), &d); err != nil {
+			return false, err
+		}
+		if d.Disposition != "pending" {
+			continue
+		}
+		for _, a := range d.Source.Actions {
+			switch a.Event.Type {
+			case TypeDependencyRemoved:
+				var p DependencyChange
+				if json.Unmarshal(a.Event.Payload, &p) == nil && edges[p.Edge] {
+					return true, nil
+				}
+			case TypeStepRemoved, TypeStepReplaced:
+				if nodes[a.Event.Subject] {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, rows.Err()
 }
