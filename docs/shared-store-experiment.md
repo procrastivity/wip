@@ -263,8 +263,17 @@ without a network connection after process restart. The inbox `applied` flag mea
 handed to the importer, including durable pending/conflict outcomes, not that a
 business effect necessarily happened. Effects and source decisions commit together;
 a process failing before the inbox mark safely retries the saved decision. Once
-the incoming batch is classified, pending groups get one explicit recheck, not an
-unbounded scheduler. Redelivery itself still returns the previous decision.
+the incoming batch is classified, pending groups and recoverable historical
+conflicts get one normal recheck, not an unbounded scheduler. Recovery includes
+exact native originals verified against recorded export-host provenance, and
+the obsolete ancestor-admission conflicts. Native matching also verifies the
+action's historical parent, predecessor and ancestor observations using retained
+captures or immutable history. Equivalent original aliases remain valid; raw
+integration effects cannot replace original references. Current lifecycle and
+tombstones do not invalidate verified historical originals. Recovery never
+forces application: genuine divergent history still conflicts, and other settled
+conflicts still require an explicit recheck. Redelivery itself still returns the
+previous decision.
 
 Tests first exchange supported seeded overlapping starts through real HTTP, then
 exercise Matter/inline Brief creation, reverse-order dependencies, retained
@@ -415,8 +424,15 @@ ordinary opportunistic remote adoption.
 
 `RunExchange` selects complete original commands in that Repo, not
 caller-supplied IDs. It captures every eligible exact envelope before HTTP,
-uploads in local command order and acknowledges each group durably after the
-server accepts it. A lost response resends the same cached key/bytes. Concurrent
+then uploads in local command order in sequential batches targeting at most
+50 groups and 1 MiB of encoded JSON per request. These are transport targets,
+not work limits: a larger individual envelope travels alone, unchanged. Required
+blobs for all members reach the server before their batch is posted. After the
+server accepts an atomic batch, one short binding-fenced local transaction
+records an acknowledgement for each member. A failed or uncertain batch remains
+replayable; earlier acknowledged batches remain complete. A lost response
+resends the same cached per-group keys/bytes, even if retry batch boundaries
+change. Explicit caller-selected `ExchangePass` uploads are unchanged. Concurrent
 new local work remains eligible for the next pass. Supported Matter births,
 the create-once content writes (Brief, Workplan, body) and starts use the
 existing bounded importer; findings appends classify on the same bound-and-
@@ -751,6 +767,7 @@ sync:
   onboarding:
     on_init: true
     default_join: ask
+    sync_timeout: 15m # optional overall init sync budget; default 2m
   routes:
     - repo: github.com/YourTeam/**
       connection: office
@@ -800,9 +817,16 @@ init returns nonzero **after preserving and reporting successful local setup**.
 Pairing can already be retained when server origin registration fails; retry
 `wip plumbing sync run` to register the same installation and exchange work.
 There is no rollback of local work or reset of cursors. Discovery/pair requests
-are bounded to 30 seconds, and the first exchange attempt to two minutes; these
-are cancellation windows, not project/item quotas. An interrupted pass retains
-normal retry evidence.
+are bounded to 30 seconds. Each sync pass requested through init defaults to a
+two-minute overall budget, including local preparation and uploads. Set
+`sync.onboarding.sync_timeout` to a positive Go duration such as `15m` for a
+larger backlog; malformed, zero and negative durations fail the requested pass
+without discarding its pairing. The budget starts when the pass starts, not
+while waiting for interactive choices. Parent cancellation/earlier deadlines
+still apply, and every HTTP request retains its 30-second timeout. These are
+cancellation windows, not project/item quotas. An interrupted pass retains
+normal retry evidence. The explicit `wip plumbing sync run` alternative has no
+added whole-pass deadline and does not use this init-only setting.
 
 `wip init --json` emits one local result, optional `alreadyInitialized`, and an
 optional `onboarding` outcome containing state/message and retained binding or

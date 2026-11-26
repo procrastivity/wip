@@ -14,9 +14,110 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/procrastivity/wip/internal/store"
+	syncverb "github.com/procrastivity/wip/internal/verbs/sync"
 )
+
+func TestSyncInitSyncTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name, timeout, wantError string
+		cancelParent             bool
+	}{
+		{name: "default"},
+		{name: "short", timeout: "50ms", wantError: "context deadline exceeded"},
+		{name: "extended", timeout: "3m"},
+		{name: "invalid", timeout: "later", wantError: "sync.onboarding.sync_timeout must be a positive duration"},
+		{name: "zero", timeout: "0s", wantError: "sync.onboarding.sync_timeout must be a positive duration"},
+		{name: "negative", timeout: "-1s", wantError: "sync.onboarding.sync_timeout must be a positive duration"},
+		{name: "parent-canceled", timeout: "3m", wantError: "context canceled", cancelParent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, home := newGitRepo(t, "timeout"), t.TempDir()
+			if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/Team/Project.git").CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+			env := append(syncConfigEnv(home), "WIP_DB_PATH="+filepath.Join(home, "local.db"))
+			local := runInDir(t, dir, env, "--json", "init")
+			var initialized struct{ Repo string }
+			if local.exitCode != 0 || json.Unmarshal([]byte(local.stdout), &initialized) != nil || initialized.Repo == "" {
+				t.Fatal(local)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/me":
+					_, _ = fmt.Fprint(w, `{"id":11}`)
+				case "/api/organizations":
+					_, _ = fmt.Fprint(w, `{"data":[{"id":"Org","name":"Team"}]}`)
+				case "/api/organizations/Org/repos":
+					_, _ = fmt.Fprint(w, `{"data":[{"id":"Repo","name":"Project","remote_url":"github.com/Team/Project"}]}`)
+				case "/api/organizations/Org/repos/Repo":
+					_, _ = fmt.Fprint(w, `{"id":"Repo"}`)
+				case "/api/organizations/Org/repos/Repo/origins":
+					w.WriteHeader(http.StatusNoContent)
+				case "/api/organizations/Org/repos/Repo/changes":
+					if tc.cancelParent {
+						cancel()
+					}
+					timer := time.NewTimer(150 * time.Millisecond)
+					defer timer.Stop()
+					select {
+					case <-r.Context().Done():
+						return
+					case <-timer.C:
+						_, _ = fmt.Fprint(w, `{"changes":[],"cursor":0}`)
+					}
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			credentials := syncCredentialFile(home)
+			if err := os.MkdirAll(filepath.Dir(credentials), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(credentials, []byte(fmt.Sprintf(`{"Version":1,"Connections":{"office":{"Server":%q,"Account":"11","Token":"dummy-timeout-token"}}}`, server.URL)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			timeoutConfig := ""
+			if tc.timeout != "" {
+				timeoutConfig = fmt.Sprintf("    sync_timeout: %q\n", tc.timeout)
+			}
+			config := fmt.Sprintf("sync:\n  connections:\n    office: {server: %q}\n  onboarding:\n    on_init: true\n%s  routes:\n    - repo: github.com/Team/**\n      connection: office\n      join: {mode: auto, organization_id: Org}\n", server.URL, timeoutConfig)
+			if err := os.WriteFile(filepath.Join(home, "wip", "config.yaml"), []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range env {
+				key, value, _ := strings.Cut(entry, "=")
+				t.Setenv(key, value)
+			}
+			outcome, err := syncverb.Onboard(ctx, store.Repo{ID: initialized.Repo, RemoteURL: "github.com/Team/Project"}, strings.NewReader(""), &bytes.Buffer{}, false)
+			if outcome == nil || outcome.Binding == nil {
+				t.Fatalf("lost pairing: outcome=%+v err=%v", outcome, err)
+			}
+			if tc.wantError == "" {
+				if err != nil || outcome.State != "synced" {
+					t.Fatalf("outcome=%+v err=%v", outcome, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) || outcome.State != "failed" {
+				t.Fatalf("outcome=%+v err=%v, want %q", outcome, err, tc.wantError)
+			}
+			status := runInDir(t, dir, env, "--json", "plumbing", "sync", "status")
+			var retained store.ExchangeStatus
+			if status.exitCode != 0 || json.Unmarshal([]byte(status.stdout), &retained) != nil || !retained.Paired || !retained.Active || retained.Binding.Endpoint != outcome.Binding.Endpoint {
+				t.Fatal("pairing changed after onboarding", status)
+			}
+			if tc.name == "short" {
+				if retry := runInDir(t, dir, env, "plumbing", "sync", "run"); retry.exitCode != 0 {
+					t.Fatal("explicit sync inherited init timeout", retry)
+				}
+			}
+		})
+	}
+}
 
 func TestSyncInitOnboarding(t *testing.T) {
 	for _, mode := range []string{"auto", "ask", "disabled", "duplicate", "wrong-org", "no-match", "partial", "missing-scope", "invalid-mode", "first-sync-fails"} {

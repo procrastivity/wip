@@ -107,6 +107,187 @@ func experimentOriginVerified(ctx context.Context, q querier, id, host string, h
 	return n != 0, err
 }
 
+// A native identity authenticates the whole action, not just its Event.
+// Rechecks need the same immutable evidence proof as first imports.
+func experimentNativeMatch(ctx context.Context, v View, a ExperimentAction, host string, hostsTable bool) (present, verified bool, err error) {
+	e := a.Event
+	native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, e.ID)
+	if err != nil || len(native) == 0 {
+		return false, false, err
+	}
+	origin, err := experimentOriginVerified(ctx, v.q, e.ID, host, hostsTable)
+	if err != nil || !origin || !reflect.DeepEqual(native[0], e) {
+		return true, false, err
+	}
+	// Exact capture equality proves the action. A mismatch may instead be an
+	// earlier genuine export using another original alias of the same effect;
+	// validate that historical correspondence below, without rewriting bytes.
+	cached, err := exchangeTableExists(ctx, v.q, "exchange_exports")
+	if err != nil {
+		return true, false, err
+	}
+	if cached {
+		var raw string
+		err := v.q.QueryRowContext(ctx, `SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, e.Repo, e.Correlation).Scan(&raw)
+		if err == nil {
+			var change ExchangeChange
+			var source ExperimentSource
+			if err := json.Unmarshal([]byte(raw), &change); err != nil {
+				return true, false, err
+			}
+			if err := json.Unmarshal([]byte(change.Source), &source); err != nil {
+				return true, false, err
+			}
+			for _, original := range source.Actions {
+				if original.Event.ID == e.ID && reflect.DeepEqual(original, a) {
+					return true, true, nil
+				}
+			}
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return true, false, err
+		}
+	}
+	// Direct lab exports need no exchange cache. Derive their observations
+	// from immutable history at the action/group boundary, never live nodes.
+	expected := ExperimentAction{Event: e}
+	history, err := v.EventsOfSubject(ctx, e.Subject)
+	if err != nil {
+		return true, false, err
+	}
+	for _, prior := range history {
+		if prior.ID < e.ID && experimentPortableBaseline(prior, e.Repo) {
+			expected.Baseline = prior.ID
+		}
+	}
+	parent, replacement, err := experimentHistoricalParent(ctx, v, e.Repo, e.Subject, e.ID)
+	if err != nil {
+		return true, false, err
+	}
+	expected.Parent = parent
+	if expected.Baseline == "" {
+		expected.Baseline = replacement
+	}
+	for parent != "" {
+		b := ExperimentBaseline{Subject: parent}
+		history, err := v.EventsOfSubject(ctx, parent)
+		if err != nil {
+			return true, false, err
+		}
+		for _, prior := range history {
+			if prior.ID < e.Correlation && experimentPortableBaseline(prior, e.Repo) {
+				b.Event = prior.ID
+			}
+		}
+		expected.Ancestors = append(expected.Ancestors, b)
+		parent, _, err = experimentHistoricalParent(ctx, v, e.Repo, parent, e.ID)
+		if err != nil {
+			return true, false, err
+		}
+	}
+	// Export canonicalizes integration effects to retained original IDs.
+	// Verify that correspondence, rather than choosing today's first alias:
+	// another equivalent source may have acquired the same effect afterward.
+	observation := func(original, native, observed string) (bool, error) {
+		if original == observed {
+			if native != "" {
+				return false, nil
+			}
+			// Generated local effects must name their retained original, as
+			// the exporter does; clearing Native* cannot turn one native.
+			var effect bool
+			err := v.q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM experiment_effects WHERE id=?)`, observed).Scan(&effect)
+			return !effect, err
+		}
+		if native != observed {
+			return false, nil
+		}
+		rows, err := v.q.QueryContext(ctx, `SELECT a.id FROM experiment_actions a JOIN experiment_effects e ON a.effect=e.id WHERE a.effect=?`, observed)
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return false, err
+			}
+			if experimentOriginalID(id) == original {
+				return true, nil
+			}
+		}
+		return false, rows.Err()
+	}
+	ok, err := observation(a.Baseline, a.NativeBaseline, expected.Baseline)
+	if err != nil || !ok {
+		return true, false, err
+	}
+	expected.Baseline, expected.NativeBaseline = a.Baseline, a.NativeBaseline
+	if len(a.Ancestors) != len(expected.Ancestors) {
+		return true, false, nil
+	}
+	for i := range expected.Ancestors {
+		b, claimed := &expected.Ancestors[i], a.Ancestors[i]
+		ok, err := observation(claimed.Event, claimed.NativeEvent, b.Event)
+		if err != nil || !ok {
+			return true, false, err
+		}
+		b.Event, b.NativeEvent = claimed.Event, claimed.NativeEvent
+	}
+	return true, reflect.DeepEqual(expected, a), nil
+}
+
+// Parentage is immutable birth evidence, including replacement births filed
+// under the replaced subject. Tombstones and later lifecycle are irrelevant.
+func experimentHistoricalParent(ctx context.Context, v View, repo, subject, before string) (parent, replacement string, err error) {
+	history, err := v.EventsOfSubject(ctx, subject)
+	if err != nil {
+		return "", "", err
+	}
+	for _, e := range history {
+		if e.ID < before && (e.Type == TypeMatterCreated || e.Type == TypeStageCreated || e.Type == TypeStepCreated || e.Type == TypeStepInserted) {
+			var birth NodeBirth
+			if err := decode(e, &birth); err != nil {
+				return "", "", err
+			}
+			return birth.Parent, "", nil
+		}
+	}
+	births, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE repo=? AND type=? AND id<? AND json_extract(payload,'$.replacement')=? ORDER BY id`, repo, TypeStepReplaced, before, subject)
+	if err != nil || len(births) == 0 {
+		return "", "", err
+	}
+	parent, _, err = experimentHistoricalParent(ctx, v, repo, births[0].Subject, births[0].ID)
+	return parent, births[0].ID, err
+}
+
+// Automatic recovery is limited to the old false-echo/ancestor admission
+// outcomes. Other settled conflicts still require their existing explicit
+// recheck; a later local edit must not silently approve a dependency cycle.
+func (s *Store) experimentRecoverableConflict(ctx context.Context, d ExperimentDecision, target string) (bool, error) {
+	if d.Reason == "incompatible ancestor lifecycle" || d.Reason == "ancestor history diverged from its start" {
+		return true, nil
+	}
+	if !experimentSourceCompatible(d.Source.Version) {
+		return false, nil
+	}
+	hosts, err := exchangeTableExists(ctx, s.db, "experiment_native_origin_hosts")
+	if err != nil {
+		return false, err
+	}
+	v := View{q: s.db, schemaVersion: s.version}
+	for _, a := range d.Source.Actions {
+		if a.Event.Repo != target || !experimentExchangePortable(a.Event, target) {
+			return false, nil
+		}
+		_, verified, err := experimentNativeMatch(ctx, v, a, d.Source.Host, hosts)
+		if err != nil || !verified {
+			return false, err
+		}
+	}
+	return len(d.Source.Actions) != 0, nil
+}
+
 func experimentSourceKey(ctx context.Context, q querier, repo, id string) (string, error) {
 	scope, err := exchangeScope(ctx, q, repo)
 	if err != nil {
@@ -487,18 +668,11 @@ func (s *Store) experimentImport(ctx context.Context, source ExperimentSource, r
 			claims = append(claims, source.Derivative.Omitted...)
 		}
 		for _, a := range claims {
-			native, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE id=?`, a.Event.ID)
+			present, verified, err := experimentNativeMatch(ctx, v, a, source.Host, originHosts)
 			if err != nil {
 				return ExperimentDecision{}, err
 			}
-			if len(native) == 0 {
-				continue
-			}
-			verified, err := experimentOriginVerified(ctx, tx, a.Event.ID, source.Host, originHosts)
-			if err != nil {
-				return ExperimentDecision{}, err
-			}
-			if reflect.DeepEqual(native[0], a.Event) && verified {
+			if !present || verified {
 				continue
 			}
 			result := ExperimentDecision{Source: source, Disposition: "conflict", Reason: "source identity differs from immutable native evidence or native origin is unverified"}
@@ -627,6 +801,10 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 	if err != nil {
 		return ExperimentDecision{}, err
 	}
+	originHosts, err := exchangeTableExists(ctx, tx, "experiment_native_origin_hosts")
+	if err != nil {
+		return ExperimentDecision{}, err
+	}
 	evidence, err := experimentEvidence(ctx, v, source, target)
 	if err != nil {
 		return ExperimentDecision{}, err
@@ -651,6 +829,17 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 	for i, a := range source.Actions {
 		baseline, eventID := a.Baseline, a.Event.ID
 		sourceRepo := a.Event.Repo
+		var present, verified bool
+		if experimentSourceCompatible(source.Version) {
+			present, verified, err = experimentNativeMatch(ctx, v, a, source.Host, originHosts)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+		}
+		// Recognize the original before mapping a NULL predecessor or consulting
+		// today's subject/ancestor state. Never borrow another target's native
+		// event, an integration effect, or an excluded family's identity.
+		nativeEcho := verified && (target == "" || sourceRepo == target) && experimentExchangePortable(a.Event, sourceRepo)
 		if target != "" {
 			a.Event.Repo = target
 			// gate.declared keys at its Repo (D42, D54): the source subject
@@ -663,7 +852,7 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 				a.Event.Subject = target
 			}
 		}
-		if a.Baseline != "" {
+		if !nativeEcho && a.Baseline != "" {
 			a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
 			if err != nil {
 				return ExperimentDecision{}, err
@@ -677,6 +866,10 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			// every action retained as evidence, none effected — so receipt,
 			// cursor and later feed records are unaffected.
 			disposition, reason = "conflict", fmt.Sprintf("incompatible source version %d", source.Version)
+		} else if present && !verified {
+			disposition, reason = "conflict", "source identity differs from immutable native evidence or native origin is unverified"
+		} else if nativeEcho {
+			disposition, effect = "integrated", eventID
 		} else if target != "" && experimentPortableMember(a.Event.Type) {
 			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a, s)
 		} else {
@@ -864,9 +1057,6 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 			if err != nil {
 				return pending("missing ancestor")
 			}
-			if ancestor.Lifecycle != Planned && ancestor.Lifecycle != InProgress {
-				return conflict("incompatible ancestor lifecycle")
-			}
 			if !subjects[parent] {
 				if ancestor.Lifecycle == Planned {
 					return pending("incomplete ancestor cascade")
@@ -880,9 +1070,9 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 					return conflict("ancestor history diverged from its start")
 				}
 				last := history[at]
-				if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
-					return conflict("ancestor history diverged from its start")
-				}
+				// Native Start skips every non-planned ancestor, including a
+				// completed or paused one. Require the exact observed portable
+				// history, not a particular lifecycle or tail event type.
 				observed := ""
 				for _, b := range a.Ancestors {
 					if b.Subject == parent {
@@ -902,6 +1092,12 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 						return "", "", "", false, err
 					}
 					if count == 0 {
+						// An unseen correspondence cannot justify moving past
+						// independently advanced ancestor history. A known exact
+						// observation of that history was accepted above instead.
+						if last.Type != TypeMatterStarted && last.Type != TypeStageStarted {
+							return conflict("ancestor history diverged from its start")
+						}
 						return pending("unknown ancestor correspondence")
 					}
 					return conflict("ancestor history differs from source observation")

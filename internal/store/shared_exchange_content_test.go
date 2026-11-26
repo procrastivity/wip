@@ -569,28 +569,17 @@ func labCount(list []string, want string) int {
 	return n
 }
 
-// labBlobPutBeforeChange asserts the feed saw a PUT for digest strictly
-// between the changes POSTs surrounding group's position in feed order —
-// upload-before-commit, not merely "a PUT happened someday".
+// labBlobPutBeforeChange asserts the feed saw a PUT for digest before the
+// actual committed POST containing group, including a multi-group batch.
 func labBlobPutBeforeChange(t *testing.T, feed *labExchangeFeed, group, digest string) {
 	t.Helper()
-	posts := feed.postChangesIndices()
-	order := feed.changeOrder()
-	at := -1
-	for i, g := range order {
-		if g == group {
-			at = i
-		}
-	}
-	if at < 0 || at >= len(posts) {
+	post := feed.changePostIndex(group)
+	if post < 0 {
 		t.Fatalf("group %s has no committed changes POST", group)
 	}
 	put := feed.requestIndex("PUT", "/blobs/"+digest)
-	if put < 0 || put > posts[at] {
-		t.Fatalf("blob PUT for %s (request %d) did not precede its changes POST (request %d)", digest, put, posts[at])
-	}
-	if at > 0 && put < posts[at-1] {
-		t.Fatalf("blob PUT for %s (request %d) landed before the previous group's changes POST (request %d)", digest, put, posts[at-1])
+	if put < 0 || put >= post {
+		t.Fatalf("blob PUT for %s (request %d) did not precede its changes POST (request %d)", digest, put, post)
 	}
 }
 
@@ -826,11 +815,14 @@ func TestSharedStoreContentBlobUploadFailure(t *testing.T) {
 	if _, err := sa.RunExchange(labCtx, ca, a.repo); err == nil || !strings.Contains(err.Error(), "blob HTTP 500") {
 		t.Fatalf("blob PUT failure = %v", err)
 	}
-	if !slices.Contains(feed.changeOrder(), birth) {
-		t.Fatal("blob-free group did not upload")
+	// The birth and its content share an unsent atomic batch. A failed blob
+	// must leave both groups pending, not upload/ack a blob-free subset.
+	if feed.changeCount() != 0 {
+		t.Fatal("failed blob partially uploaded its batch")
 	}
-	if slices.Contains(feed.changeOrder(), content) {
-		t.Fatal("content group posted without its blob")
+	status, err := sa.ExchangeStatus(labCtx, a.repo)
+	if err != nil || len(status.Retained) != 0 || !slices.Contains(status.PendingUpload, birth) || !slices.Contains(status.PendingUpload, content) {
+		t.Fatal("failed blob batch lost pending originals", status.Categories, err)
 	}
 	if !feed.hasRequest("PUT", "/blobs/"+digest) {
 		t.Fatal("blob PUT was never attempted")

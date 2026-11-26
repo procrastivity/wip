@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -516,4 +517,443 @@ func TestSharedStorePortableBaselineSkipsLocalFamilies(t *testing.T) {
 	labImportBound(t, p.fluke, pause, p.repo, "integrated")
 	labState(t, p.fluke, matter.ID, store.Paused)
 	labRebuild(t, p.fluke)
+}
+
+// labRetainLegacyDecision seeds old-version outcomes only in disposable test
+// stores. Cross-version validation also produces them through 211afeb's public
+// imports; permanent regressions keep just the relevant persisted state here.
+func labRetainLegacyDecision(t *testing.T, s *store.Store, repo string, d store.ExperimentDecision) {
+	t.Helper()
+	db, err := sql.Open("sqlite", s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	raw, err := json.Marshal(d.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := repo + ":" + d.Source.Actions[0].Event.ID
+	if _, err := db.Exec(`INSERT INTO experiment_sources VALUES (?,?,?,?)`, key, string(raw), string(decision), repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range d.Source.Actions {
+		if _, err := db.Exec(`INSERT INTO experiment_actions VALUES (?,?,NULL,?)`, repo+":"+a.Event.ID, key, a.Baseline); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A returned original is correspondence, not a request to repeat its verb
+// against today's state. Later history and tombstones cannot erase it.
+func TestSharedStoreHistoricalNativeEcho(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
+			p := newLabPair(t)
+			start := labStart(t, p, p.hybrid, "Hybrid", "shared/step-01")
+			finish := labExportAfter(t, p.hybrid, "Hybrid", p.step1, store.TypeStepFinished,
+				labVerbFinish(p.hybrid, p.repo, "shared/step-01"))
+			replace := labExportAfter(t, p.hybrid, "Hybrid", p.step1, store.TypeStepReplaced,
+				labVerbReplace(p.hybrid, p.repo, "shared/step-01", "Replacement"))
+			if err := labVerbFinish(p.hybrid, p.repo, "shared/stage")(); err != nil {
+				t.Fatal(err)
+			}
+			if err := labVerbFinish(p.hybrid, p.repo, "shared")(); err != nil {
+				t.Fatal(err)
+			}
+			before := labEvents(t, p.hybrid)
+			sources := []store.ExperimentSource{finish, replace, start}
+			b := exchangeBind(t, p.hybrid, p, "http://127.0.0.1:1/api/organizations/fixture/repos/fixture")
+			if retained {
+				for _, source := range sources {
+					d := store.ExperimentDecision{Source: source, Disposition: "pending", Reason: "missing baseline evidence"}
+					switch source.Actions[0].Event.Type {
+					case store.TypeMatterStarted:
+						d.Disposition, d.Reason = "conflict", "lifecycle or subject history diverged; never reopen or infer from current done"
+					case store.TypeStepFinished:
+						d.Reason = "missing live paired object"
+					}
+					labRetainLegacyDecision(t, p.hybrid, p.repo, d)
+				}
+			}
+			// Import the dependent finish/replacement before the old cascade. None
+			// needs a reconstructed baseline when its exact original already exists.
+			for range 2 {
+				if retained {
+					if err := p.hybrid.ApplyExchangeInbox(labCtx, b); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, source := range sources {
+					d := labImportBound(t, p.hybrid, source, p.repo, "integrated")
+					want := make([]string, len(source.Actions))
+					for i, a := range source.Actions {
+						want[i] = a.Event.ID
+					}
+					if !reflect.DeepEqual(d.Effects, want) || !reflect.DeepEqual(d.Source, source) {
+						t.Fatalf("original correspondence changed: effects %v, want %v", d.Effects, want)
+					}
+					d, err := p.hybrid.ExperimentRecheckBound(labCtx, p.repo, source.Actions[0].Event.ID)
+					if err != nil || d.Disposition != "integrated" || !reflect.DeepEqual(d.Effects, want) {
+						t.Fatalf("recheck changed original correspondence: %+v %v", d, err)
+					}
+				}
+			}
+			changed := start
+			changed.Actions = append([]store.ExperimentAction(nil), start.Actions...)
+			var transition store.Transition
+			if err := json.Unmarshal(changed.Actions[0].Event.Payload, &transition); err != nil {
+				t.Fatal(err)
+			}
+			transition.TrackerPushLevel = "off"
+			var err error
+			changed.Actions[0].Event.Payload, err = json.Marshal(transition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := labImportBound(t, p.hybrid, changed, p.repo, "conflict"); len(d.Effects) != 0 {
+				t.Fatal("changed native bytes accepted")
+			}
+			if !reflect.DeepEqual(before, labEvents(t, p.hybrid)) {
+				t.Fatal("historical echoes duplicated or changed original events")
+			}
+			if _, err := p.hybrid.Node(labCtx, p.step1); err == nil {
+				t.Fatal("historical echo resurrected replaced subject")
+			}
+			labRebuild(t, p.hybrid)
+		})
+	}
+	t.Run("original-baseline-correspondence", func(t *testing.T) {
+		p := newLabPair(t)
+		labImportBound(t, p.fluke, labStart(t, p, p.hybrid, "Hybrid", "shared/step-01"), p.repo, "integrated")
+		source := labExportAfter(t, p.fluke, "Fluke", p.step1, store.TypeStepFinished, labVerbFinish(p.fluke, p.repo, "shared/step-01"))
+		if source.Actions[0].NativeBaseline == "" || source.Actions[0].Ancestors[0].NativeEvent == "" {
+			t.Fatal("fixture did not canonicalize integration evidence")
+		}
+		before := labEvents(t, p.fluke)
+		forged := source
+		forged.Actions = append([]store.ExperimentAction(nil), source.Actions...)
+		forged.Actions[0].NativeBaseline = ""
+		labImportBound(t, p.fluke, forged, p.repo, "conflict")
+		labImportBound(t, p.fluke, source, p.repo, "integrated")
+		if !reflect.DeepEqual(before, labEvents(t, p.fluke)) {
+			t.Fatal("native echo duplicated integration evidence")
+		}
+	})
+	for _, ancestor := range []bool{false, true} {
+		t.Run(fmt.Sprintf("raw-effect-observation/ancestor=%v", ancestor), func(t *testing.T) {
+			p := newLabPair(t)
+			labImportBound(t, p.fluke, labStart(t, p, p.hybrid, "Hybrid", "shared/step-01"), p.repo, "integrated")
+			source := labExportAfter(t, p.fluke, "Fluke", p.step1, store.TypeStepFinished, labVerbFinish(p.fluke, p.repo, "shared/step-01"))
+			var forged store.ExperimentSource
+			raw, _ := json.Marshal(source)
+			if err := json.Unmarshal(raw, &forged); err != nil {
+				t.Fatal(err)
+			}
+			a := &forged.Actions[0]
+			if ancestor {
+				a.Ancestors[0].Event, a.Ancestors[0].NativeEvent = a.Ancestors[0].NativeEvent, ""
+			} else {
+				a.Baseline, a.NativeBaseline = a.NativeBaseline, ""
+			}
+			labImportBound(t, p.fluke, forged, p.repo, "conflict")
+			labImportBound(t, p.fluke, source, p.repo, "integrated")
+		})
+	}
+}
+
+// Native event equality must not authenticate altered source observations.
+func TestSharedStoreNativeEchoClaims(t *testing.T) {
+	changes := map[string]func(*store.ExperimentAction){
+		"parent":           func(a *store.ExperimentAction) { a.Parent = a.Event.Subject },
+		"baseline":         func(a *store.ExperimentAction) { a.Baseline = a.Event.ID },
+		"native-baseline":  func(a *store.ExperimentAction) { a.NativeBaseline = a.Event.ID },
+		"ancestor-subject": func(a *store.ExperimentAction) { a.Ancestors[0].Subject = a.Event.Subject },
+		"ancestor-event":   func(a *store.ExperimentAction) { a.Ancestors[0].Event = a.Event.ID },
+		"ancestor-native":  func(a *store.ExperimentAction) { a.Ancestors[0].NativeEvent = a.Event.ID },
+		"missing-ancestor": func(a *store.ExperimentAction) { a.Ancestors = a.Ancestors[:1] },
+	}
+	for name, change := range changes {
+		for _, retained := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/retained=%v", name, retained), func(t *testing.T) {
+				p := newLabPair(t)
+				source := labStart(t, p, p.hybrid, "Hybrid", "shared/step-01")
+				var forged store.ExperimentSource
+				raw, _ := json.Marshal(source)
+				if err := json.Unmarshal(raw, &forged); err != nil {
+					t.Fatal(err)
+				}
+				change(&forged.Actions[len(forged.Actions)-1])
+				if err := labVerbFinish(p.hybrid, p.repo, "shared/step-01")(); err != nil {
+					t.Fatal(err)
+				}
+				before := labEvents(t, p.hybrid)
+				if retained {
+					labRetainLegacyDecision(t, p.hybrid, p.repo, store.ExperimentDecision{Source: forged, Disposition: "pending", Reason: "missing baseline evidence"})
+					d, err := p.hybrid.ExperimentRecheckBound(labCtx, p.repo, forged.Actions[0].Event.ID)
+					if err != nil || d.Disposition != "conflict" || len(d.Effects) != 0 {
+						t.Fatalf("altered retained claims accepted: %s %v", d.Disposition, err)
+					}
+				} else {
+					labImportBound(t, p.hybrid, forged, p.repo, "conflict")
+					// Invalid native claims belong to collision evidence, not the
+					// canonical source reservation needed by the genuine echo.
+					labImportBound(t, p.hybrid, source, p.repo, "integrated")
+				}
+				if !reflect.DeepEqual(before, labEvents(t, p.hybrid)) {
+					t.Fatal("claim validation changed native events")
+				}
+			})
+		}
+	}
+}
+
+func TestSharedStoreInboxRecoveryScope(t *testing.T) {
+	p := newLabPair(t)
+	b := exchangeBind(t, p.hybrid, p, "http://127.0.0.1:1/api/organizations/fixture/repos/fixture")
+	other := p.hybrid.NewID()
+	if _, err := p.hybrid.Commit(labCtx, store.Request{Actor: store.ActorHuman, Env: store.Env{Repo: other}}, func(context.Context, *store.Tx) ([]store.Draft, error) {
+		return []store.Draft{{Type: store.TypeRepoAttached, Subject: other, Payload: store.RepoAttached{Label: "other"}}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	own := labStart(t, p, p.hybrid, "Hybrid", "shared/step-01")
+	foreign := labStart(t, p, p.fluke, "Fluke", "shared/step-02")
+	labRetainLegacyDecision(t, p.hybrid, p.repo, store.ExperimentDecision{Source: own, Disposition: "pending", Reason: "missing baseline evidence"})
+	labRetainLegacyDecision(t, p.hybrid, other, store.ExperimentDecision{Source: own, Disposition: "conflict", Reason: "incompatible ancestor lifecycle"})
+	labRetainLegacyDecision(t, p.hybrid, p.repo, store.ExperimentDecision{Source: foreign, Disposition: "conflict", Reason: "cycle"})
+	conflicts := func() []store.ExperimentDecision {
+		t.Helper()
+		all, err := p.hybrid.ExperimentActivities(labCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []store.ExperimentDecision
+		for _, d := range all {
+			if d.Disposition == "conflict" {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+	before, events := conflicts(), labEvents(t, p.hybrid)
+	if len(before) != 2 {
+		t.Fatal("missing negative controls")
+	}
+	for range 2 {
+		if err := p.hybrid.ApplyExchangeInbox(labCtx, b); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, conflicts()) || !reflect.DeepEqual(events, labEvents(t, p.hybrid)) {
+			t.Fatal("recovery changed another Repo or settled conflict")
+		}
+	}
+}
+
+func TestSharedStoreCachedNativeEchoClaims(t *testing.T) {
+	p := newLabPair(t)
+	source := labStart(t, p, p.hybrid, "Hybrid", "shared/step-01")
+	feed, endpoint := newLabExchangeFeed(t)
+	b := exchangeBind(t, p.hybrid, p, endpoint)
+	feed.failNextChangesPost = true
+	if err := p.hybrid.ExchangePass(labCtx, store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}}, b, []string{source.Actions[0].Event.ID}); err == nil {
+		t.Fatal("expected disposable upload failure after capture")
+	}
+	db, err := sql.Open("sqlite", p.hybrid.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var before, after string
+	if err := db.QueryRow(`SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, p.repo, source.Actions[0].Event.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := labVerbReplace(p.hybrid, p.repo, "shared/step-01", "Replacement")(); err != nil {
+		t.Fatal(err)
+	}
+	events := labEvents(t, p.hybrid)
+	labRetainLegacyDecision(t, p.hybrid, p.repo, store.ExperimentDecision{Source: source, Disposition: "pending", Reason: "missing baseline evidence"})
+	forged := source
+	forged.Actions = append([]store.ExperimentAction(nil), source.Actions...)
+	forged.Actions[len(forged.Actions)-1].Baseline = source.Actions[0].Event.ID
+	labImportBound(t, p.hybrid, forged, p.repo, "conflict")
+	if err := p.hybrid.ApplyExchangeInbox(labCtx, b); err != nil {
+		t.Fatal(err)
+	}
+	labImportBound(t, p.hybrid, source, p.repo, "integrated")
+	if !reflect.DeepEqual(events, labEvents(t, p.hybrid)) {
+		t.Fatal("cached echo recovery changed original events")
+	}
+	if err := db.QueryRow(`SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, p.repo, source.Actions[0].Event.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("native validation rewrote captured bytes")
+	}
+}
+
+func TestSharedStoreNativeEchoEarlierAlias(t *testing.T) {
+	p := newLabPair(t)
+	path := p.fluke.Path()
+	if err := p.fluke.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(t.TempDir(), "third.db")
+	if err := os.WriteFile(copyPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.fluke = labOpen(t, path)
+	third := labOpen(t, copyPath)
+	older := labStart(t, p, p.hybrid, "Hybrid", "shared/step-01")
+	later := labStart(t, p, p.fluke, "Fluke", "shared/step-01")
+	if older.Actions[0].Event.ID >= later.Actions[0].Event.ID {
+		t.Fatal("fixture alias ordering")
+	}
+	d := labImportBound(t, third, later, p.repo, "integrated")
+	source := labStart(t, p, third, "Third", "shared/step-02")
+	observed := source.Actions[0].Ancestors[0]
+	if observed.Event != later.Actions[1].Event.ID || observed.NativeEvent != d.Effects[1] {
+		t.Fatal("fixture did not export original ancestor correspondence")
+	}
+	labImportBound(t, third, older, p.repo, "integrated")
+	feed, endpoint := newLabExchangeFeed(t)
+	b := exchangeBind(t, third, p, endpoint)
+	feed.failNextChangesPost = true
+	if err := third.ExchangePass(labCtx, store.ExchangeClient{HTTP: &http.Client{Timeout: 5 * time.Second}}, b, []string{source.Actions[0].Event.ID}); err == nil {
+		t.Fatal("expected disposable capture failure")
+	}
+	db, err := sql.Open("sqlite", third.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var before, after string
+	if err := db.QueryRow(`SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, p.repo, source.Actions[0].Event.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	var change store.ExchangeChange
+	var captured store.ExperimentSource
+	if err := json.Unmarshal([]byte(before), &change); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(change.Source), &captured); err != nil {
+		t.Fatal(err)
+	}
+	got := captured.Actions[0].Ancestors[0]
+	if got.Event != older.Actions[1].Event.ID || got.NativeEvent != observed.NativeEvent {
+		t.Fatal("fixture did not capture the earlier-sorting alias of the same effect")
+	}
+	events := labEvents(t, third)
+	for range 2 {
+		labImportBound(t, third, source, p.repo, "integrated")
+		followRecheck(t, third, source, "integrated")
+	}
+	if !reflect.DeepEqual(events, labEvents(t, third)) {
+		t.Fatal("earlier alias duplicated effects")
+	}
+	if err := db.QueryRow(`SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, p.repo, source.Actions[0].Event.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("earlier alias rewrote capture")
+	}
+}
+
+// Start skips non-planned ancestors natively. Import must accept exactly
+// that observed history, not require all ancestors to remain in-progress.
+func TestSharedStoreStartUnderNonPlannedAncestors(t *testing.T) {
+	for _, lifecycle := range []string{"done", "canceled", "paused", "divergent", "retained-done", "retained-finding"} {
+		t.Run(lifecycle, func(t *testing.T) {
+			retained := lifecycle == "retained-done" || lifecycle == "retained-finding"
+			if lifecycle == "retained-done" {
+				lifecycle = "done"
+			}
+			p := newLabPair(t)
+			b := exchangeBind(t, p.fluke, p, "http://127.0.0.1:1/api/organizations/fixture/repos/fixture")
+			stage := labStageID(t, p.hybrid, p.repo)
+			start := labStart(t, p, p.hybrid, "Hybrid", "shared/stage")
+			labImportBound(t, p.fluke, start, p.repo, "integrated")
+			kind, verb := store.TypeStageFinished, labVerbFinish(p.hybrid, p.repo, "shared/stage")
+			switch lifecycle {
+			case "canceled":
+				kind, verb = store.TypeStageCanceled, labVerbCancel(p.hybrid, p.repo, "shared/stage", "closed")
+			case "paused":
+				kind, verb = store.TypeStagePaused, labVerbPause(p.hybrid, p.repo, "shared/stage")
+			}
+			if lifecycle == "retained-finding" {
+				labLifecycle(t, p, p.hybrid, p.fluke, "Hybrid", stage, store.TypeContentAppended, "integrated", func() error {
+					_, err := writesurface.AppendFinding(labCtx, p.hybrid, store.ActorHuman, p.repo, "shared/stage", []byte("agreed evidence"))
+					return err
+				})
+			} else {
+				labLifecycle(t, p, p.hybrid, p.fluke, "Hybrid", stage, kind, "integrated", verb)
+			}
+			if lifecycle == "done" || lifecycle == "divergent" {
+				labLifecycle(t, p, p.hybrid, p.fluke, "Hybrid", p.matter, store.TypeMatterFinished, "integrated",
+					labVerbFinish(p.hybrid, p.repo, "shared"))
+			}
+			if lifecycle == "divergent" {
+				if _, err := writesurface.AppendFinding(labCtx, p.fluke, store.ActorHuman, p.repo, "shared/stage", []byte("local later evidence")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := len(labEvents(t, p.fluke))
+			for _, locator := range []string{"shared/step-01", "shared/step-02"} {
+				source := labStart(t, p, p.hybrid, "Hybrid", locator)
+				if len(source.Actions) != 1 {
+					t.Fatal("native start unexpectedly moved a non-planned ancestor")
+				}
+				want := "integrated"
+				if lifecycle == "divergent" {
+					want = "conflict"
+				}
+				if !retained {
+					labImportBound(t, p.fluke, source, p.repo, want)
+				}
+				subject := source.Actions[0].Event.Subject
+				finish := labExportAfter(t, p.hybrid, "Hybrid", subject, store.TypeStepFinished,
+					labVerbFinish(p.hybrid, p.repo, locator))
+				if retained {
+					reason := "incompatible ancestor lifecycle"
+					if lifecycle == "retained-finding" {
+						reason = "ancestor history diverged from its start"
+					}
+					labRetainLegacyDecision(t, p.fluke, p.repo, store.ExperimentDecision{Source: source, Disposition: "conflict", Reason: reason})
+					labRetainLegacyDecision(t, p.fluke, p.repo, store.ExperimentDecision{Source: finish, Disposition: "pending", Reason: "missing baseline evidence"})
+					for range 2 {
+						if err := p.fluke.ApplyExchangeInbox(labCtx, b); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if lifecycle == "divergent" {
+					labImportBound(t, p.fluke, finish, p.repo, "pending")
+					labState(t, p.fluke, subject, store.Planned)
+				} else {
+					labImportBound(t, p.fluke, finish, p.repo, "integrated")
+					labState(t, p.fluke, subject, store.Done)
+				}
+				// Retries and explicit reconsideration must not bypass either
+				// the accepted correspondence or a genuine history conflict.
+				labImportBound(t, p.fluke, source, p.repo, want)
+				followRecheck(t, p.fluke, source, want)
+			}
+			added := 4
+			if lifecycle == "divergent" {
+				added = 0
+			}
+			if got := len(labEvents(t, p.fluke)); got != before+added {
+				t.Fatalf("got %d events, want %d", got, before+added)
+			}
+			labRebuild(t, p.fluke)
+		})
+	}
 }

@@ -238,6 +238,8 @@ type labExchangeFeed struct {
 	changes  []store.ExchangeChange
 	blobs    map[string][]byte
 	requests []string
+	// First committed POST position for each group, including batched members.
+	changePosts map[string]int
 	// blobPutStatus/blobGetStatus, when non-zero, are the status every blob
 	// PUT/GET returns — the transient-failure controls.
 	blobPutStatus, blobGetStatus int
@@ -252,7 +254,7 @@ type labExchangeFeed struct {
 
 func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
 	t.Helper()
-	feed := &labExchangeFeed{blobs: map[string][]byte{}}
+	feed := &labExchangeFeed{blobs: map[string][]byte{}, changePosts: map[string]int{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		feed.mu.Lock()
 		defer feed.mu.Unlock()
@@ -297,6 +299,11 @@ func newLabExchangeFeed(t *testing.T) (*labExchangeFeed, string) {
 				committed = append(committed, change)
 			}
 			feed.changes = committed
+			for _, change := range body.Changes {
+				if _, ok := feed.changePosts[change.GroupID]; !ok {
+					feed.changePosts[change.GroupID] = len(feed.requests) - 1
+				}
+			}
 			if feed.failNextChangesPost {
 				feed.failNextChangesPost = false
 				w.WriteHeader(http.StatusInternalServerError)
@@ -491,19 +498,15 @@ func (f *labExchangeFeed) changeOrder() []string {
 	return out
 }
 
-// postChangesIndices returns the request-log positions of every POST /changes,
-// in arrival order — paired with changeOrder it proves each blob PUT landed
-// before the changes POST that made its group receivable.
-func (f *labExchangeFeed) postChangesIndices() []int {
+// changePostIndex identifies the first POST that made this group receivable.
+// Several groups can share that request position; a lost response can retry it.
+func (f *labExchangeFeed) changePostIndex(group string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []int
-	for i, r := range f.requests {
-		if strings.HasPrefix(r, "POST ") && strings.HasSuffix(r, "/changes") {
-			out = append(out, i)
-		}
+	if at, ok := f.changePosts[group]; ok {
+		return at
 	}
-	return out
+	return -1
 }
 
 // The response is lost only AFTER the real Laravel request commits. The same
@@ -672,22 +675,51 @@ func TestLaravelExchangeRoundTrip(t *testing.T) {
 		if node, err := sa.Node(labCtx, other.ID); err != nil || node.Repo != a.repo {
 			t.Fatal("independent Matter did not arrive", err)
 		}
-		// Actual unsupported local work remains retained, never replayed as
-		// sync. Gate and reference facts are portable now, so the
-		// retained-evidence fixture is a config.set — a family no classifier
-		// admits.
+		// Explicit requests cannot upload local-only configuration, even to
+		// retain it as conflict evidence. It must stay off the server feed.
 		if err := sa.SetConfig(labCtx, a.repo, "fixture.unsupported", "1"); err != nil {
 			t.Fatal(err)
 		}
-		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
+		unsupported := sourceGroup(t, sa, a.repo, store.TypeConfigSet)
+		if err := sa.ExchangePass(labCtx, ca, ba, []string{unsupported}); err == nil || !strings.Contains(err.Error(), "source group has no portable unit") {
+			t.Fatal("local-only configuration upload was not refused", err)
+		}
+		feed := fixtureHTTP(t, "GET", f.endpoint()+"/changes?after=0", f.Member, nil, 200)
+		if bytes.Contains(feed, []byte(unsupported)) || bytes.Contains(feed, []byte("fixture.unsupported")) {
+			t.Fatal("excluded configuration reached the server feed")
+		}
+		before = len(labEvents(t, sb))
+		exchangePass(t, sb, cb, bb)
+		if _, present, err := sb.Config(labCtx, b.repo, "fixture.unsupported"); err != nil || present || len(labEvents(t, sb)) != before {
+			t.Fatal("excluded configuration changed the receiver", err)
+		}
+		if value, present, err := sa.Config(labCtx, a.repo, "fixture.unsupported"); err != nil || !present || value != "1" {
+			t.Fatal("excluded configuration was not retained locally", err)
+		}
+		// A portable Matter birth with a conflicting locator still crosses
+		// transport and remains inspectable without replacing local work.
+		occupant, err := writesurface.CreateMatter(labCtx, sb, store.ActorHuman, b.repo, "Receiver occupant", "conflict-fixture")
 		if err != nil {
 			t.Fatal(err)
 		}
-		unsupported := sourceGroup(t, sa, a.repo, store.TypeConfigSet)
-		exchangePass(t, sa, ca, ba, unsupported)
+		colliding, err := writesurface.CreateMatter(labCtx, sa, store.ActorHuman, a.repo, "Sender collision", "conflict-fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		conflict := sourceGroup(t, sa, colliding.ID, store.TypeMatterCreated)
+		exchangePass(t, sa, ca, ba, conflict)
 		exchangePass(t, sb, cb, bb)
-		sourceDecision(t, sb, unsupported, "conflict")
-		if _, err := sb.ExperimentAcknowledge(labCtx, unsupported); err != nil {
+		if d := sourceDecision(t, sb, conflict, "conflict"); len(d.Effects) != 0 {
+			t.Fatal("conflicting Matter birth produced effects", d)
+		}
+		if _, err := sb.ExperimentAcknowledge(labCtx, conflict); err != nil {
+			t.Fatal(err)
+		}
+		if node, err := sb.MatterByLocator(labCtx, b.repo, occupant.Locator); err != nil || node.ID != occupant.ID {
+			t.Fatal("conflicting Matter birth replaced local work", err)
+		}
+		seeded, err := sa.MatterByLocator(labCtx, a.repo, "seeded")
+		if err != nil {
 			t.Fatal(err)
 		}
 		if node, err := sb.Node(labCtx, seeded.ID); err != nil || node.Lifecycle != store.InProgress {
@@ -1100,17 +1132,21 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 	if d := sourceDecision(t, p.hybrid, foreign.Actions[0].Event.ID, "integrated"); !reflect.DeepEqual(d.Source, foreign) {
 		t.Fatal("authentic foreign source changed during integration")
 	}
-	// An ordinary unsupported source remains canonical conflict activity. The
+	// An ordinary portable conflict remains canonical conflict activity. The
 	// correction must exclude collision groups, not all conflicted decisions.
-	// Gate and reference facts are portable now, so the unsupported fixture
-	// is a config.set — a family no classifier admits.
-	if err := p.fluke.SetConfig(labCtx, p.repo, "fixture.unsupported", "1"); err != nil {
+	// Independently created Matters claim the same locator; neither is a
+	// forged event-ID collision or local-only configuration evidence.
+	if _, err := writesurface.CreateMatter(labCtx, p.hybrid, store.ActorHuman, p.repo, "Receiver occupant", "conflict-fixture"); err != nil {
 		t.Fatal(err)
 	}
-	unsupportedGroup := sourceGroup(t, p.fluke, p.repo, store.TypeConfigSet)
-	exchangePass(t, p.fluke, cb, bb, unsupportedGroup)
+	colliding, err := writesurface.CreateMatter(labCtx, p.fluke, store.ActorHuman, p.repo, "Sender collision", "conflict-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictGroup := sourceGroup(t, p.fluke, colliding.ID, store.TypeMatterCreated)
+	exchangePass(t, p.fluke, cb, bb, conflictGroup)
 	exchangePass(t, p.hybrid, ca, ba)
-	unsupported := sourceDecision(t, p.hybrid, unsupportedGroup, "conflict")
+	conflict := sourceDecision(t, p.hybrid, conflictGroup, "conflict")
 	before := followPreview(t, p.hybrid, ba.InstallationID)
 	nativeLog := labEvents(t, p.hybrid)
 	claim := store.ExperimentSource{Host: "33333333-3333-4333-8333-333333333333", Actions: []store.ExperimentAction{native.Actions[0], foreign.Actions[1]}}
@@ -1142,7 +1178,7 @@ func TestLaravelExchangeMixedCollisionPreservesCanonicalActivity(t *testing.T) {
 		}
 		var conflictVisible bool
 		for _, a := range after.Activities {
-			if a.Event.ID == unsupportedGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, unsupported.Source.Actions[0].Event) {
+			if a.Event.ID == conflictGroup && a.Disposition == "conflict" && a.Origin == bb.InstallationID && reflect.DeepEqual(a.Event, conflict.Source.Actions[0].Event) {
 				conflictVisible = true
 			}
 		}
@@ -1727,4 +1763,129 @@ func TestLaravelExchangeConcurrentPasses(t *testing.T) {
 		t.Fatal("Brief duplicated under concurrent passes", err)
 	}
 	t.Log("four concurrent ordinary passes: server kept one copy per original, local acks/cursor converged, post-race pass inert")
+}
+
+// Both ignored upload responses and decoded feed pages must reach EOF so
+// repeated public passes can reuse a connection, including over HTTP/1.1.
+func TestExchangePassReusesConnections(t *testing.T) {
+	for _, http2 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("http2=%v", http2), func(t *testing.T) {
+			var mu sync.Mutex
+			connections, requests := 0, 0
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				mu.Unlock()
+				if (r.ProtoMajor == 2) != http2 {
+					t.Errorf("unexpected protocol %s", r.Proto)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/origins") {
+					_, _ = io.WriteString(w, `{"registered":true}`)
+				} else {
+					_, _ = io.WriteString(w, `{"changes":[],"cursor":0}`)
+				}
+				// More trailing whitespace than a JSON decoder's read-ahead:
+				// decoding one value is not sufficient to consume this body.
+				_, _ = io.WriteString(w, strings.Repeat(" ", 64<<10))
+			}))
+			server.EnableHTTP2 = http2
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					mu.Lock()
+					connections++
+					mu.Unlock()
+				}
+			}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+			p, s := exchangeHost(t)
+			b, err := s.BindExchange(labCtx, p.repo, server.URL+"/api/organizations/org/repos/repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := store.ExchangeClient{HTTP: server.Client()}
+			for range 3 {
+				if err := s.ExchangePass(labCtx, client, b, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if requests != 6 || connections != 1 {
+				t.Fatalf("requests=%d connections=%d, want 6 requests on one connection", requests, connections)
+			}
+		})
+	}
+}
+
+// A successful status followed by a truncated response is uncertain, not an
+// acknowledgement. Keep the committed group's immutable retry identity.
+func TestRunExchangeTruncatedSuccessResponse(t *testing.T) {
+	p, s := exchangeHost(t)
+	if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, "Uncertain upload", ""); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var accepted []store.ExchangeChange
+	posts, gets := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/origins"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST":
+			posts++
+			var body struct {
+				Changes []store.ExchangeChange `json:"changes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Changes) != 1 {
+				t.Error("invalid upload", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if posts == 1 {
+				accepted = body.Changes
+				w.Header().Set("Content-Length", "100")
+				_, _ = io.WriteString(w, `{}`)
+			} else if !reflect.DeepEqual(body.Changes, accepted) {
+				t.Error("retry changed original identity or bytes")
+				w.WriteHeader(http.StatusConflict)
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
+		default:
+			gets++
+			var changes []store.ExchangeChange
+			if r.URL.Query().Get("after") == "0" {
+				change := accepted[0]
+				change.Sequence = 1
+				changes = append(changes, change)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"changes": changes, "cursor": 1})
+		}
+	}))
+	t.Cleanup(server.Close)
+	before, err := s.PairExchange(labCtx, p.repo, server.URL+"/api/organizations/org/repos/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := store.ExchangeClient{HTTP: server.Client()}
+	if _, err := s.RunExchange(labCtx, client, p.repo); err != io.ErrUnexpectedEOF {
+		t.Fatalf("truncated success should fail without acknowledgement: %v", err)
+	}
+	retained, err := s.ExchangeStatus(labCtx, p.repo)
+	if err != nil || len(retained.PendingUpload) != 1 || len(retained.Retained) != 0 {
+		t.Fatal("uncertain upload was acknowledged", retained.Categories, err)
+	}
+	mu.Lock()
+	if posts != 1 || gets != 0 {
+		t.Errorf("continued after uncertain upload: posts=%d gets=%d", posts, gets)
+	}
+	mu.Unlock()
+	done, err := s.RunExchange(labCtx, client, p.repo)
+	if err != nil || len(done.PendingUpload) != 0 || len(done.Retained) != 1 || done.Binding != before.Binding {
+		t.Fatal("same-binding immutable retry failed", done.Categories, err)
+	}
 }

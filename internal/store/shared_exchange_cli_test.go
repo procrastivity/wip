@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -29,6 +30,351 @@ import (
 type syncCLI struct {
 	host   labPair
 	config string
+}
+
+// Observe the public runner's actual wire bodies, including JSON string escaping.
+type exchangeBatchTransport struct {
+	bodies    [][]byte
+	after     func(int)
+	blobAfter func(int)
+	puts      int
+	lost      int
+	gets      int
+}
+
+func (x *exchangeBatchTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	post := r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/changes")
+	if post {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		x.bodies = append(x.bodies, raw)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+	}
+	if r.Method == "GET" {
+		x.gets++
+	}
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if r.Method == "PUT" && err == nil && x.blobAfter != nil {
+		x.puts++
+		x.blobAfter(x.puts)
+	}
+	if post && err == nil {
+		if x.after != nil {
+			x.after(len(x.bodies))
+		}
+		if x.lost == len(x.bodies) {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("lost committed batch response")
+		}
+	}
+	return resp, err
+}
+
+func exchangeBatchChanges(t *testing.T, raw []byte) []store.ExchangeChange {
+	t.Helper()
+	var body struct {
+		Changes []store.ExchangeChange `json:"changes"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Changes
+}
+
+func TestRunExchangeCountBatches(t *testing.T) {
+	p, s := exchangeHost(t)
+	feed, endpoint := newLabExchangeFeed(t)
+	for i := 0; i < 103; i++ {
+		if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, fmt.Sprintf("Batch %03d", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := s.PairExchange(labCtx, p.repo, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := &exchangeBatchTransport{}
+	c := store.ExchangeClient{HTTP: &http.Client{Transport: x}}
+	if _, err := s.RunExchange(labCtx, c, p.repo); err != nil {
+		t.Fatal(err)
+	}
+	var counts []int
+	var groups []string
+	for _, raw := range x.bodies {
+		changes := exchangeBatchChanges(t, raw)
+		counts = append(counts, len(changes))
+		for _, change := range changes {
+			groups = append(groups, change.GroupID)
+		}
+	}
+	if !reflect.DeepEqual(counts, []int{50, 50, 3}) || !reflect.DeepEqual(groups, before.PendingUpload) {
+		t.Fatalf("batch counts/order: %v", counts)
+	}
+	if _, err := s.RunExchange(labCtx, c, p.repo); err != nil || len(x.bodies) != 3 || feed.changeCount() != 103 {
+		t.Fatal("repeat resent or duplicated work", len(x.bodies), err)
+	}
+}
+
+func TestRunExchangeEncodedByteBatches(t *testing.T) {
+	for _, name := range []string{"exact", "over", "escaped", "oversized"} {
+		t.Run(name, func(t *testing.T) {
+			p, s := exchangeHost(t)
+			_, endpoint := newLabExchangeFeed(t)
+			for i := 0; i < 2; i++ {
+				if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, fmt.Sprintf("Bytes %d", i), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status, err := s.PairExchange(labCtx, p.repo, endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var changes []store.ExchangeChange
+			for _, id := range status.PendingUpload {
+				source, err := s.ExperimentExport(labCtx, status.Binding.InstallationID, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := json.Marshal(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changes = append(changes, store.ExchangeChange{Version: 1, InstallationID: status.Binding.InstallationID, GroupID: id, SourceRepoID: p.repo, Source: string(raw)})
+			}
+			encode := func() []byte {
+				raw, err := json.Marshal(map[string]any{"changes": changes})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			}
+			padding := (1 << 20) - len(encode())
+			if name == "escaped" {
+				// Valid JSON whitespace in Source expands when Source itself is
+				// encoded as a JSON string. Raw-source counting would fit both.
+				changes[0].Source = strings.Repeat("\t", padding/2) + changes[0].Source
+				padding = (1 << 20) - len(encode())
+			}
+			if name != "exact" {
+				padding++
+			}
+			if name == "oversized" {
+				padding += 4096
+			}
+			changes[0].Source = strings.Repeat(" ", padding) + changes[0].Source
+			want := encode()
+			db, err := sql.Open("sqlite", p.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			for _, change := range changes {
+				raw, err := json.Marshal(change)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO exchange_exports VALUES(?,?,?)`, p.repo, change.GroupID, string(raw)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			x := &exchangeBatchTransport{}
+			if _, err := s.RunExchange(labCtx, store.ExchangeClient{HTTP: &http.Client{Transport: x}}, p.repo); err != nil {
+				t.Fatal(err)
+			}
+			if name == "exact" {
+				if len(x.bodies) != 1 || len(x.bodies[0]) != 1<<20 || !bytes.Equal(x.bodies[0], want) {
+					t.Fatal("exact body boundary", len(x.bodies))
+				}
+			} else if len(x.bodies) != 2 {
+				t.Fatal("over-boundary changes not split", len(x.bodies))
+			}
+			var got []store.ExchangeChange
+			for _, raw := range x.bodies {
+				batch := exchangeBatchChanges(t, raw)
+				if len(raw) > 1<<20 && (name != "oversized" || len(batch) != 1) {
+					t.Fatal("unexpected over-target batch", len(raw))
+				}
+				got = append(got, batch...)
+			}
+			if !reflect.DeepEqual(got, changes) || (name == "oversized" && len(x.bodies[0]) <= 1<<20) {
+				t.Fatal("changed source/key or failed oversized control")
+			}
+		})
+	}
+}
+
+func TestRunExchangeLostLaterBatch(t *testing.T) {
+	p, s := exchangeHost(t)
+	feed, endpoint := newLabExchangeFeed(t)
+	for i := 0; i < 103; i++ {
+		if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, fmt.Sprintf("Lost %d", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.PairExchange(labCtx, p.repo, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	x := &exchangeBatchTransport{lost: 2}
+	c := store.ExchangeClient{HTTP: &http.Client{Transport: x}}
+	if _, err := s.RunExchange(labCtx, c, p.repo); err == nil {
+		t.Fatal("lost response not exercised")
+	}
+	status, err := s.ExchangeStatus(labCtx, p.repo)
+	if err != nil || len(status.Retained) != 50 || len(status.PendingUpload) != 53 || x.gets != 0 || feed.changeCount() != 100 {
+		t.Fatal("noninitial failure checkpoint", status, err)
+	}
+	want := append([]byte(nil), x.bodies[1]...)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = labOpen(t, p.db)
+	if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, "New work after reopen", ""); err != nil {
+		t.Fatal(err)
+	}
+	x = &exchangeBatchTransport{}
+	c.HTTP = &http.Client{Transport: x}
+	done, err := s.RunExchange(labCtx, c, p.repo)
+	if err != nil || len(done.PendingUpload) != 0 || feed.changeCount() != 104 || len(x.bodies) != 2 || !bytes.Equal(x.bodies[0], want) {
+		t.Fatal("retry did not preserve lost batch bytes/keys", err)
+	}
+}
+
+func TestRunExchangeAtomicBatchFailures(t *testing.T) {
+	for _, mode := range []string{"collision", "ack", "binding", "unsafe"} {
+		t.Run(mode, func(t *testing.T) {
+			p, s := exchangeHost(t)
+			feed, endpoint := newLabExchangeFeed(t)
+			n := 3
+			if mode == "unsafe" {
+				n = 51
+			}
+			for i := 0; i < n; i++ {
+				if _, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, fmt.Sprintf("Atomic %d", i), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status, err := s.PairExchange(labCtx, p.repo, endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", p.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			x := &exchangeBatchTransport{}
+			switch mode {
+			case "collision":
+				feed.changes = []store.ExchangeChange{{Sequence: 1, InstallationID: status.Binding.InstallationID, GroupID: status.PendingUpload[1], SourceRepoID: p.repo, Source: "different immutable source"}}
+			case "ack":
+				if _, err := db.Exec(`CREATE TRIGGER fail_batch_ack BEFORE INSERT ON exchange_upload_ack WHEN NEW.group_id='` + status.PendingUpload[1] + `' BEGIN SELECT RAISE(ABORT,'ack failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			case "binding":
+				x.after = func(int) {
+					if _, err := db.Exec(`UPDATE exchange_bindings SET endpoint=endpoint || '/retired' WHERE repo=?`, p.repo); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "unsafe":
+				id := status.PendingUpload[50]
+				source, err := s.ExperimentExport(labCtx, status.Binding.InstallationID, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				source.Actions[0].Event.Type = "local.only"
+				raw, err := json.Marshal(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				change, err := json.Marshal(store.ExchangeChange{Version: 1, InstallationID: status.Binding.InstallationID, GroupID: id, SourceRepoID: p.repo, Source: string(raw)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO exchange_exports VALUES(?,?,?)`, p.repo, id, string(change)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.RunExchange(labCtx, store.ExchangeClient{HTTP: &http.Client{Transport: x}}, p.repo); err == nil {
+				t.Fatal("failure control did not fire")
+			}
+			var acks int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM exchange_upload_ack`).Scan(&acks); err != nil || acks != 0 || x.gets != 0 {
+				t.Fatal("partial batch acknowledgement/download", acks, x.gets, err)
+			}
+			if mode == "collision" && feed.changeCount() != 1 {
+				t.Fatal("collision partially wrote remote batch")
+			}
+			if mode != "unsafe" && (len(x.bodies) != 1 || len(exchangeBatchChanges(t, x.bodies[0])) != 3) {
+				t.Fatal("failed batch was split, skipped or retried")
+			}
+			if (mode == "ack" || mode == "binding") && feed.changeCount() != 3 {
+				t.Fatal("local rollback control did not follow remote commit")
+			}
+			if mode == "unsafe" && (len(feed.requests) != 0 || len(x.bodies) != 0) {
+				t.Fatal("unsafe tail permitted HTTP")
+			}
+		})
+	}
+}
+
+func TestRunExchangeBatchBlobs(t *testing.T) {
+	for _, mode := range []string{"success", "second blob fails", "cancel after first blob"} {
+		t.Run(mode, func(t *testing.T) {
+			p, s := exchangeHost(t)
+			feed, endpoint := newLabExchangeFeed(t)
+			for i := 0; i < 2; i++ {
+				n, err := writesurface.CreateMatter(labCtx, s, store.ActorHuman, p.repo, fmt.Sprintf("Blob %d", i), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				data := bytes.Repeat([]byte{byte('a' + i)}, store.SpillThreshold+1)
+				if _, err := writesurface.WriteOnce(labCtx, s, store.ActorHuman, p.repo, n.Locator, store.KindBrief, data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.PairExchange(labCtx, p.repo, endpoint); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(labCtx)
+			defer cancel()
+			x := &exchangeBatchTransport{blobAfter: func(n int) {
+				if n == 1 {
+					switch mode {
+					case "second blob fails":
+						feed.serveBlobStatus(500, 0)
+					case "cancel after first blob":
+						cancel()
+					}
+				}
+			}}
+			_, err := s.RunExchange(ctx, store.ExchangeClient{HTTP: &http.Client{Transport: x}}, p.repo)
+			status, statusErr := s.ExchangeStatus(labCtx, p.repo)
+			if statusErr != nil {
+				t.Fatal(statusErr)
+			}
+			if mode == "success" {
+				if err != nil || len(x.bodies) != 1 || len(exchangeBatchChanges(t, x.bodies[0])) != 4 || len(status.Retained) != 4 {
+					t.Fatal("multi-group blob batch", err)
+				}
+				feed.mu.Lock()
+				puts := 0
+				for _, request := range feed.requests {
+					if strings.HasPrefix(request, "PUT ") {
+						puts++
+					}
+					if strings.HasPrefix(request, "POST ") && strings.HasSuffix(request, "/changes") && puts != 2 {
+						t.Error("batch preceded required blobs")
+					}
+				}
+				feed.mu.Unlock()
+			} else if err == nil || len(x.bodies) != 0 || len(status.Retained) != 0 || len(status.PendingUpload) != 4 || feed.changeCount() != 0 || x.gets != 0 {
+				t.Fatal("failed/canceled blob partially sent or acked batch", err)
+			}
+		})
+	}
 }
 
 func TestLaravelInitOnboardingCLI(t *testing.T) {
@@ -1451,14 +1797,24 @@ func TestSharedStoreExchangeProjectScope(t *testing.T) {
 	if err != nil || preview.Paired || len(preview.PendingUpload) != 0 || preview.EarlierGroups == 0 {
 		t.Fatal("unpaired preview claimed outgoing work", preview, err)
 	}
-	var uploads atomic.Int32
+	var uploaded []string
+	var uploadMu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/origins"):
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/changes"):
-			uploads.Add(1)
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			uploadMu.Lock()
+			for _, change := range exchangeBatchChanges(t, raw) {
+				uploaded = append(uploaded, change.GroupID)
+			}
+			uploadMu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == "GET":
 			_, _ = w.Write([]byte(`{"changes":[],"cursor":0}`))
@@ -1517,8 +1873,11 @@ func TestSharedStoreExchangeProjectScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uploads.Load() != int32(len(status.PendingUpload)) || len(done.PendingUpload) != 0 || len(done.Retained) != len(status.PendingUpload) {
-		t.Fatal("eligible originals were not uploaded and acknowledged", uploads.Load(), done)
+	uploadMu.Lock()
+	gotUploaded := append([]string(nil), uploaded...)
+	uploadMu.Unlock()
+	if !reflect.DeepEqual(gotUploaded, status.PendingUpload) || len(done.PendingUpload) != 0 || len(done.Retained) != len(status.PendingUpload) {
+		t.Fatal("eligible originals were not uploaded and acknowledged", gotUploaded, done)
 	}
 	var nativeEvents, recordedHosts int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE correlation IN (?,?)`, matterGroup, startGroup).Scan(&nativeEvents); err != nil {

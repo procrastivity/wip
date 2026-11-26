@@ -204,9 +204,14 @@ func (c ExchangeClient) request(ctx context.Context, method, endpoint string, in
 		return fmt.Errorf("exchange: HTTP %d", resp.StatusCode)
 	}
 	if output != nil {
-		return json.NewDecoder(resp.Body).Decode(output)
+		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+			return err
+		}
 	}
-	return nil
+	// A decoded value need not reach EOF. Consume ignored responses and any
+	// remaining bytes so HTTP/1 connections can be reused for the next batch.
+	_, err = io.Copy(io.Discard, resp.Body)
+	return err
 }
 
 // ExchangeBlobError is a non-2xx blob endpoint response. Status preserves the
@@ -716,7 +721,8 @@ func (s *Store) receiveExchangePage(ctx context.Context, b ExchangeBinding, afte
 }
 
 // ApplyExchangeInbox needs no server. Restarted processes finish receipt even
-// while offline. Pending groups are reconsidered once after this incoming batch.
+// while offline. Pending groups and recoverable historical conflicts are
+// reconsidered once after this incoming batch.
 func (s *Store) ApplyExchangeInbox(ctx context.Context, b ExchangeBinding) error {
 	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
 		return err
@@ -772,14 +778,24 @@ func (s *Store) ApplyExchangeInbox(ctx context.Context, b ExchangeBinding) error
 			return err
 		}
 	}
-	// Reconsider only canonical evidence mapped to this pairing. An explicit
-	// pass must not apply pending work in another (possibly unpaired) Repo.
+	// Reconsider only canonical evidence mapped to this pairing, including
+	// recoverable false conflicts retained by older admission rules. This is
+	// normal classification, not forced application: source/origin/history
+	// checks still decide every group, collisions stay excluded, and other
+	// settled conflicts retain their explicit-recheck behavior.
 	decisions, err := experimentActivities(ctx, s.db, false, b.LocalRepo)
 	if err != nil {
 		return err
 	}
 	for _, d := range decisions {
-		if d.Disposition == "pending" {
+		recheck := d.Disposition == "pending"
+		if d.Disposition == "conflict" {
+			recheck, err = s.experimentRecoverableConflict(ctx, d, b.LocalRepo)
+			if err != nil {
+				return err
+			}
+		}
+		if recheck {
 			if _, err := s.experimentRecheck(ctx, d.key, b); err != nil {
 				return err
 			}

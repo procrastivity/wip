@@ -410,6 +410,13 @@ func (s *Store) ExchangeStatus(ctx context.Context, repo string) (ExchangeStatus
 	return out, nil
 }
 
+// These are transport targets, not server acceptance limits. An accepted
+// change larger than the byte target must still travel unchanged, alone.
+const (
+	exchangeUploadBatchGroups = 50
+	exchangeUploadBatchBytes  = 1 << 20
+)
+
 // RunExchange captures every eligible complete original before first HTTP.
 // An acknowledgement lost after server commit leaves the exact cached envelope
 // pending; replay uses the same key and bytes. Unpair never deletes this state.
@@ -426,39 +433,81 @@ func (s *Store) RunExchange(ctx context.Context, c ExchangeClient, repo string) 
 			return status, err
 		}
 	}
-	// Register/download even when nothing is outgoing. Each successful upload
-	// gets its own durable local acknowledgement, never inferred from a cursor.
+	// Register/download even when nothing is outgoing. A successful batch gets
+	// atomic per-original acknowledgements, never inferred from a cursor.
 	if err := c.request(ctx, "POST", status.Binding.Endpoint+"/origins", map[string]string{"installation_id": status.Binding.InstallationID}, nil); err != nil {
 		return status, err
 	}
-	for _, id := range status.PendingUpload {
-		change, err := s.exchangeExport(ctx, status.Binding, id)
-		if err != nil {
-			return status, err
+	var batch []ExchangeChange
+	var ids []string
+	body := []byte(`{"changes":[`)
+	flush := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		// Spilled bytes must reach the server before the change that names
-		// them: a blob failure aborts before this group's POST, so nothing
-		// ack-able uploads without its content.
-		if err := s.exchangeUploadChangeBlobs(ctx, c, status.Binding, change); err != nil {
-			return status, err
+		if len(batch) == 0 {
+			return nil
 		}
-		if err := c.request(ctx, "POST", status.Binding.Endpoint+"/changes", map[string]any{"changes": []ExchangeChange{change}}, nil); err != nil {
-			return status, err
+		// All required bytes precede the atomic batch POST. No group in an
+		// unsent batch is acknowledged when any member's blob upload fails.
+		for _, change := range batch {
+			if err := s.exchangeUploadChangeBlobs(ctx, c, status.Binding, change); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.request(ctx, "POST", status.Binding.Endpoint+"/changes", json.RawMessage(append(body, ']', '}')), nil); err != nil {
+			return err
 		}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
-			return status, err
+			return err
 		}
 		if err = checkExchangeBinding(ctx, tx, status.Binding); err == nil {
-			_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_upload_ack VALUES(?,?)`, repo, id)
+			for _, id := range ids {
+				if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO exchange_upload_ack VALUES(?,?)`, repo, id); err != nil {
+					break
+				}
+			}
 		}
 		if err == nil {
 			err = tx.Commit()
 		}
 		_ = tx.Rollback()
+		clear(batch)
+		batch, ids = batch[:0], ids[:0]
+		body = body[:len(`{"changes":[`)]
+		return err
+	}
+	for _, id := range status.PendingUpload {
+		if err := ctx.Err(); err != nil {
+			return status, err
+		}
+		change, err := s.exchangeExport(ctx, status.Binding, id)
 		if err != nil {
 			return status, err
 		}
+		encoded, err := json.Marshal(change)
+		if err != nil {
+			return status, err
+		}
+		// Include the comma and closing wrapper in the actual encoded size.
+		if len(batch) != 0 && (len(batch) == exchangeUploadBatchGroups || len(body)+1+len(encoded)+2 > exchangeUploadBatchBytes) {
+			if err := flush(); err != nil {
+				return status, err
+			}
+		}
+		if len(batch) != 0 {
+			body = append(body, ',')
+		}
+		batch = append(batch, change)
+		ids = append(ids, id)
+		body = append(body, encoded...)
+	}
+	if err := flush(); err != nil {
+		return status, err
 	}
 	if err := s.ExchangePass(ctx, c, status.Binding, nil); err != nil {
 		return status, err

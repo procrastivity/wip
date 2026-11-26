@@ -31,6 +31,7 @@ type OnboardingResult struct {
 type onboardingConfig struct {
 	OnInit      bool   `json:"on_init"`
 	DefaultJoin string `json:"default_join"`
+	SyncTimeout string `json:"sync_timeout"`
 }
 
 type remoteIdentity struct {
@@ -53,19 +54,11 @@ func Onboard(ctx context.Context, repo store.Repo, input io.Reader, output io.Wr
 	incomplete := func(err error) (*OnboardingResult, error) {
 		return &OnboardingResult{State: "incomplete", Message: "Local initialization succeeded; onboarding incomplete: " + err.Error()}, nil
 	}
-	c, err := config.Load()
+	onboarding, err := readOnboardingConfig()
 	if err != nil {
 		return incomplete(err)
 	}
-	raw, err := json.Marshal(c["sync"])
-	if err != nil {
-		return incomplete(err)
-	}
-	var block struct{ Onboarding onboardingConfig }
-	if err := json.Unmarshal(raw, &block); err != nil {
-		return incomplete(fmt.Errorf("invalid sync onboarding configuration"))
-	}
-	if !block.Onboarding.OnInit {
+	if !onboarding.OnInit {
 		return nil, nil
 	}
 	interactive := false
@@ -154,7 +147,7 @@ func Onboard(ctx context.Context, repo store.Repo, input io.Reader, output io.Wr
 	if err != nil {
 		return incomplete(err)
 	}
-	policy := joinPolicy{Mode: block.Onboarding.DefaultJoin}
+	policy := joinPolicy{Mode: onboarding.DefaultJoin}
 	if policy.Mode == "" {
 		policy.Mode = "ask"
 	}
@@ -412,7 +405,18 @@ func offerFirstSync(ctx context.Context, repo string, result *OnboardingResult, 
 }
 
 func onboardingRun(ctx context.Context, repo string, result *OnboardingResult) (*OnboardingResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	onboarding, err := readOnboardingConfig()
+	if err != nil {
+		return onboardingFailed(result, err)
+	}
+	timeout := 2 * time.Minute
+	if onboarding.SyncTimeout != "" {
+		timeout, err = time.ParseDuration(onboarding.SyncTimeout)
+		if err != nil || timeout <= 0 {
+			return onboardingFailed(result, fmt.Errorf("sync.onboarding.sync_timeout must be a positive duration (for example 15m)"))
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	s, err := tiers.OpenStore()
 	if err != nil {
@@ -431,6 +435,22 @@ func onboardingRun(ctx context.Context, repo string, result *OnboardingResult) (
 	result.Binding = &status.Binding
 	result.Sync = &status
 	return result, nil
+}
+
+func readOnboardingConfig() (onboardingConfig, error) {
+	c, err := config.Load()
+	if err != nil {
+		return onboardingConfig{}, err
+	}
+	raw, err := json.Marshal(c["sync"])
+	if err != nil {
+		return onboardingConfig{}, err
+	}
+	var block struct{ Onboarding onboardingConfig }
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return onboardingConfig{}, fmt.Errorf("invalid sync onboarding configuration")
+	}
+	return block.Onboarding, nil
 }
 
 func onboardingFailed(result *OnboardingResult, err error) (*OnboardingResult, error) {
