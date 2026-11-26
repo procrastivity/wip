@@ -39,6 +39,7 @@ import (
 	stepverb "github.com/procrastivity/wip/internal/verbs/step"
 	syncverb "github.com/procrastivity/wip/internal/verbs/sync"
 	trackerverb "github.com/procrastivity/wip/internal/verbs/tracker"
+	transferverb "github.com/procrastivity/wip/internal/verbs/transfer"
 )
 
 // Command constructs the `wip plumbing` namespace command and registers
@@ -74,9 +75,11 @@ func Command(streams *iostreams.Streams, providers *tracker.Registry) *cobra.Com
 	cmd.AddCommand(cloneverb.Command(streams))
 	cmd.AddCommand(dependverb.Command(streams))
 	cmd.AddCommand(dispatchverb.Command(streams))
+	cmd.AddCommand(transferverb.ExportCommand(streams))
 	cmd.AddCommand(contentverb.FindingCommand(streams))
 	cmd.AddCommand(lifecycleverb.FinishCommand(streams, providers))
 	cmd.AddCommand(gateverb.Command(streams, providers))
+	cmd.AddCommand(transferverb.ImportCommand(streams))
 	cmd.AddCommand(labelverb.Command(streams))
 	cmd.AddCommand(matterverb.Command(streams))
 	cmd.AddCommand(nextverb.Command(streams))

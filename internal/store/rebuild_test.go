@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/procrastivity/wip/internal/transfer"
 )
 
 // Tests for the `(D46-dependent)` half of step-03: these tables are *projections*.
@@ -79,6 +81,15 @@ func (h *harness) remove(node, reason string) Event {
 // projection's own guards actually interact.
 func richHistory(h *harness) string {
 	h.t.Helper()
+
+	// Seed the dedicated import fold before declaring gates. Both its work
+	// and durable identity/receipt projections must survive the rich rebuild.
+	if h.SchemaVersion() >= 15 {
+		source := newHarness(h.t)
+		root := source.matter("imported-fixture", "Imported fixture")
+		x := exportForTest(h.t, source, transfer.Selection{Matters: []string{root}})
+		applyForTest(h.t, h, x)
+	}
 
 	// --- Tiers: all three, mutated the three ways they can be (D37) ----------
 	h.commit(Draft{
@@ -406,6 +417,8 @@ func (h *harness) hasProjectionTable(table string) bool {
 	// schema probe into "table absent"; each case names the version that adds
 	// the projection table.
 	switch table {
+	case "transfer_origins", "transfer_receipts":
+		return h.SchemaVersion() >= 15
 	case "run_matters":
 		return h.SchemaVersion() >= 2
 	case "roles":

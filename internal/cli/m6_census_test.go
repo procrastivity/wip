@@ -126,7 +126,13 @@ var m6PinnedCLIModes = map[string]map[string]string{
 }
 
 var m6PinnedAliases = map[string]string{
-	"next": "plumbing next",
+	"next":           "plumbing next",
+	"export list":    "plumbing export list",
+	"export plan":    "plumbing export plan",
+	"export write":   "plumbing export write",
+	"import inspect": "plumbing import inspect",
+	"import plan":    "plumbing import plan",
+	"import apply":   "plumbing import apply",
 }
 
 func TestM6PinnedCLIModeExpectationsRejectMutations(t *testing.T) {
@@ -524,11 +530,11 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 			t.Errorf("manifest is missing explicit exchange path %q", path)
 		}
 	}
-	if len(verbs) != 79 {
-		t.Errorf("current manifest has %d runnable paths, want census baseline 79", len(verbs))
+	if len(verbs) != 91 {
+		t.Errorf("current manifest has %d runnable paths, want census baseline 91", len(verbs))
 	}
-	if len(rows) != 95 {
-		t.Errorf("CLI mode table has %d rows, want census baseline 95", len(rows))
+	if len(rows) != 107 {
+		t.Errorf("CLI mode table has %d rows, want census baseline 107", len(rows))
 	}
 	for _, problem := range m6PinnedCLIModeErrors(rows) {
 		t.Errorf("CLI mode expectations: %s", problem)
@@ -550,7 +556,7 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 		if !ok {
 			t.Errorf("CLI mode row %q / %q is absent from current manifest", path, mode)
 		}
-		if !oneOf(row["disposition"], "operation", "cli-local") {
+		if !oneOf(row["disposition"], "operation", "cli-local", "offline-transfer") {
 			t.Errorf("%q / %q has invalid disposition %q", path, mode, row["disposition"])
 		}
 		if strings.TrimSpace(row["current_owner"]) == "" || strings.TrimSpace(row["current_behavior"]) == "" ||
@@ -564,12 +570,20 @@ func checkCensusCLIModes(t *testing.T, rows []map[string]string, operations map[
 		if hasDuplicate(ids) {
 			t.Errorf("CLI mode %q / %q repeats an operation identity: %q", path, mode, row["operation_ids"])
 		}
-		if row["disposition"] == "cli-local" {
+		switch row["disposition"] {
+		case "offline-transfer":
+			// Explicit file workflows have no authority operation or M6 step.
+			// Import's native commit remains covered by the non-CLI census.
+			canonical := strings.TrimPrefix(path, "plumbing ")
+			if !oneOf(canonical, "export list", "export plan", "export write", "import inspect", "import plan", "import apply") || len(ids) != 0 || row["owner_step"] != "-" {
+				t.Errorf("invalid offline transfer mode %q / %q", path, mode)
+			}
+		case "cli-local":
 			if len(ids) != 0 || row["owner_step"] != "20" {
 				t.Errorf("CLI-local mode %q / %q must have no operation and owner Step 20", path, mode)
 			}
 			local[path] = true
-		} else {
+		default:
 			if len(ids) == 0 {
 				t.Errorf("domain mode %q / %q has no exact operation identity", path, mode)
 			}
@@ -652,7 +666,7 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 		if hasDuplicate(censusList(row["operation_ids"])) {
 			t.Errorf("non-CLI owner %q repeats an operation identity: %q", id, row["operation_ids"])
 		}
-		if row["kind"] != "store-commit" {
+		if row["kind"] != "store-commit" && row["kind"] != "store-commit-offline-transfer" {
 			continue
 		}
 		commitCount++
@@ -661,15 +675,19 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 		if err != nil || line < 1 || id != row["source"]+":"+row["line"] {
 			t.Errorf("Store.Commit owner %q must identify an exact source:line", id)
 		}
-		if len(censusList(row["operation_ids"])) == 0 {
+		if row["kind"] == "store-commit-offline-transfer" {
+			if row["source"] != "internal/store/transfer.go" || row["operation_ids"] != "none" || row["owner_step"] != "-" {
+				t.Errorf("invalid standalone offline Store.Commit owner %q", id)
+			}
+		} else if len(censusList(row["operation_ids"])) == 0 {
 			t.Errorf("Store.Commit owner %q has no semantic operation identity", id)
 		}
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(row["source"]))); err != nil {
 			t.Errorf("Store.Commit owner %q source does not exist: %v", id, err)
 		}
 	}
-	if commitCount != 58 {
-		t.Errorf("owner table has %d Store.Commit rows, want baseline 58", commitCount)
+	if commitCount != 59 {
+		t.Errorf("owner table has %d Store.Commit rows, want baseline 59", commitCount)
 	}
 	for _, kind := range []string{
 		"store-open", "migration", "blob-store", "blob-retention", "filesystem", "advisory-lock",
@@ -703,8 +721,8 @@ func checkCensusOwners(t *testing.T, root string, rows []map[string]string, oper
 	}
 
 	actualSites := productionDomainCommitSites(t, root)
-	if len(actualSites) != 58 {
-		t.Errorf("production Store.Commit AST scan found %d sites, want baseline 58", len(actualSites))
+	if len(actualSites) != 59 {
+		t.Errorf("production Store.Commit AST scan found %d sites, want baseline 59", len(actualSites))
 	}
 	for site := range actualSites {
 		if !commitRows[site] {

@@ -136,6 +136,16 @@ are separate and remain managed by `wip`. No mail or server settings are changed
 
 Run the helper's terminal/HTTP regression checks with `make test-registration`.
 
+## Transfer work offline
+
+Use `wip export` and `wip import` to move selected Matter snapshots and backlog
+entries, including planned entries and their linked Matters, between explicit
+local store copies. No Cloud account or checkout is required. Inspect and review
+plans before applying; preserve both host originals and their sibling blobs.
+Import never starts transport, but supported imported work follows the target
+project's existing pairing on the next ordinary sync. See the
+[offline transfer workflow and coverage](docs/local-transfer.md).
+
 ## Develop
 
 ```

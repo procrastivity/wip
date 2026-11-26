@@ -27,6 +27,7 @@ import (
 	nextverb "github.com/procrastivity/wip/internal/verbs/next"
 	plumbingverb "github.com/procrastivity/wip/internal/verbs/plumbing"
 	statusverb "github.com/procrastivity/wip/internal/verbs/status"
+	transferverb "github.com/procrastivity/wip/internal/verbs/transfer"
 	uninstallverb "github.com/procrastivity/wip/internal/verbs/uninstall"
 	versionverb "github.com/procrastivity/wip/internal/verbs/version"
 	"github.com/procrastivity/wip/internal/wiperr"
@@ -102,8 +103,7 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	root.PersistentFlags().String("experimental-wipd-profile", "", "opt in to authenticated local wipd IPC using this explicit private profile root")
 
 	// Help lists the porcelain in registration order (D112), not
-	// alphabetically — ten entries, manifest last. Every verb that isn't
-	// one of these ten lives under the plumbing namespace instead
+	// alphabetically, with manifest last. Other verbs live under plumbing
 	// (internal/verbs/plumbing), registered alphabetically there since
 	// this global also disables sorting inside that group.
 	cobra.EnableCommandSorting = false
@@ -117,6 +117,8 @@ func NewRootCommandWithProviders(streams *iostreams.Streams, build buildinfo.Inf
 	root.AddCommand(versionverb.Command(streams, build))
 	plumbingCmd := plumbingverb.Command(streams, providers)
 	root.AddCommand(plumbingCmd)
+	root.AddCommand(transferverb.PorcelainExportCommand(streams))
+	root.AddCommand(transferverb.PorcelainImportCommand(streams))
 	// manifest stays last (D112).
 	root.AddCommand(manifestverb.Command(streams, build, root, providers))
 

@@ -18,8 +18,15 @@ import (
 //
 // It returns the names of every blob it removed, for a caller to report.
 func (s *Store) ReapOrphanBlobs(ctx context.Context, cutoff time.Time) ([]string, error) {
+	// Reserve the same writer lock as content/import installation. A cutoff
+	// alone cannot protect a paused in-flight writer from a concurrent reaper.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
 	live := map[string]bool{}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`SELECT blob_ref FROM content WHERE blob_ref IS NOT NULL AND tombstone_event IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("store: read live blob references: %w", err)

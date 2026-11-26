@@ -914,6 +914,7 @@ func TestNothingReadsContentBackInFromAFile(t *testing.T) {
 	// The functions in this package that may read a file, and why.
 	allowed := map[string]string{
 		"SegmentBytes":        "resolves a spilled segment from the sidecar file the store itself wrote",
+		"ExportTransfer":      "exports verified spilled bytes from sidecars this store itself wrote; accepts no content paths",
 		"backup":              "copies the database aside before a migration",
 		"ReapOrphanBlobs":     "lists the blob sidecar directory to find files no live content row references (D68); it never reads a blob's bytes back in as content",
 		"spilledContentState": "verifies the store-owned sidecar blob a spilled content payload names is installed and reads back at its recorded length and digest — the same file SegmentBytes serves; it admits no bytes as content",
