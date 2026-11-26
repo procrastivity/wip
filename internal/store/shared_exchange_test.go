@@ -1247,7 +1247,7 @@ func TestLaravelExchangeCommittedPages(t *testing.T) {
 
 // A mixed command group crosses the real exchange as its portable unit: the
 // committed feed carries the separately identified derivative, the omitted
-// members stay evidence, and the receiver integrates exactly the unit.
+// members stay local, and the receiver integrates exactly the unit.
 func TestLaravelExchangePortableDerivative(t *testing.T) {
 	f := startLaravelFixture(t)
 	a, sa := exchangeHost(t)
@@ -1301,7 +1301,7 @@ func TestLaravelExchangePortableDerivative(t *testing.T) {
 			}
 		}
 	}
-	if !found || unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+	if !found || unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 0 {
 		t.Fatalf("Laravel did not retain the portable-unit envelope: %+v", unit)
 	}
 	before := len(labEvents(t, sb))
@@ -1330,16 +1330,11 @@ func TestLaravelExchangePortableDerivative(t *testing.T) {
 	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
 		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
 	}
-	var sawConfig, sawStep bool
-	for _, a := range d.Source.Derivative.Omitted {
-		sawConfig = sawConfig || a.Event.Type == store.TypeConfigSet
-		sawStep = sawStep || a.Event.Type == store.TypeStepCreated
-	}
-	if !sawConfig || !sawStep {
-		t.Fatal("omitted evidence incomplete")
+	if len(d.Source.Derivative.Omitted) != 0 {
+		t.Fatal("excluded raw events reached Laravel and the receiver")
 	}
 	labRebuild(t, sb)
-	t.Log("mixed command crossed real Laravel as its identified portable unit; omitted members retained as evidence only")
+	t.Log("mixed command crossed real Laravel as its identified portable unit; excluded raw events stayed local")
 }
 
 // An incompatible source version is apply-time evidence, not a receipt

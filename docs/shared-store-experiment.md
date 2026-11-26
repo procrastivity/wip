@@ -434,22 +434,33 @@ single predicate: a member qualifies only as a repo-scoped original of an
 admitted family — the same bounded slice the bound importer can project — and
 `experimentUnitMask` closes that set over in-group causation, so the version-1
 envelope's cause chain never dangles outside the unit. A portable member whose
-in-group causal ancestor is not portable is retained evidence, not a syncable
-fact, and a group with no portable member at all stays out of `PendingUpload`.
+in-group causal ancestor is not portable stays local, not a syncable fact,
+and a group with no portable member at all stays out of `PendingUpload`.
 
 `exchangeExport` projects each captured group through `experimentPortableUnit`
 before the envelope is sealed. A fully portable group exports unchanged. A
 mixed group exports a separately identified *derivative*: `Actions` are
 exactly the portable members in command order, `Derivative.Parent` names the
-raw command group (its shared correlation/origin event), and
-`Derivative.Omitted` retains every other member's untouched `ExperimentAction`
-— baseline, parent and ancestor evidence included — as inspectable proof,
-never classified and never an effect. The wire stays version 1:
+raw command group (its shared correlation/origin event), and all excluded
+members remain in the sender's local event log. Their payloads, actor/host
+dimensions, baselines and ancestor evidence are **not serialized**, even as
+non-applying metadata. The wire stays version 1:
 `group_id`, `source_repo_id` and the per-action Repo/causation checks are
-unchanged, and omitted members are evidence inside the source, not actions.
-A group with no portable member keeps its raw source on explicit upload, so
-unsupported families remain retained receiver-side conflicts exactly as
-before; only automatic eligibility changed.
+unchanged. A group with no portable member is refused even by explicit
+`ExchangePass`; explicit invocation is not permission to transmit local-only
+source evidence. Pairing remains the only project-sync opt-in.
+
+The legacy `Derivative.Omitted` field stays readable for already received
+records and rebuilds, but new exports never populate it. Before returning any
+cached export for transmission, `exchangeExport` checks that its actions are
+portable and that it contains no excluded raw members. An unsafe legacy
+capture fails the sync pass with a diagnostic naming its group; it stays
+pending, without an acknowledgement, and its cached bytes are neither sent
+nor rewritten. The server may already have committed those exact bytes before
+a lost acknowledgement, so a safe retry cannot be manufactured by silently
+editing the immutable source. There is no approval or bypass flag; reconciling
+or removing previously transmitted legacy data is a separate recovery task.
+Safe captured envelopes still retry under the same identities and exact bytes.
 
 Identity mapping is unchanged: shared business IDs stay source IDs, local
 effects get fresh native IDs recorded in `experiment_actions.effect`, and
@@ -457,7 +468,7 @@ private ledger keys stay scoped to the target Repo. Integration enters only
 through `ExperimentImportBound`/`ApplyExchangeInbox` → `experimentImport` →
 `experimentEvaluate`, whose savepoint makes the unit atomic on its own — a
 conflicting later member rolls back earlier portable effects, and omitted
-evidence cannot leak an effect. `Store.Rebuild` replays the same
+members cannot leak an effect. `Store.Rebuild` replays the same
 `applyEventVersion` folds, so maintained and rebuilt projections agree.
 Integration effects carry the fixed `system:shared-store-experiment` actor
 and no delivery authority; they are never re-exported as originals.

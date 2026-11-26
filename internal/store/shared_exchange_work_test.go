@@ -430,12 +430,8 @@ func TestSharedStoreLifecycleExchangeWire(t *testing.T) {
 	if d.Source.Derivative == nil || d.Source.Derivative.Parent != finishGroup || len(d.Effects) != 1 {
 		t.Fatalf("sealing finish did not arrive as a one-effect derivative: %+v", d)
 	}
-	var omitted []string
-	for _, a := range d.Source.Derivative.Omitted {
-		omitted = append(omitted, a.Event.Type)
-	}
-	if !reflect.DeepEqual(omitted, []string{store.TypeBatchSwept}) {
-		t.Fatalf("derivative omitted = %v, want [batch.swept]", omitted)
+	if len(d.Source.Derivative.Omitted) != 0 {
+		t.Fatal("execution-scoped sweep evidence crossed the wire")
 	}
 	labLifecycleState(t, sb, matter.ID, store.Done, &store.Transition{From: store.InProgress, To: store.Done})
 	for _, ev := range labEvents(t, sb) {

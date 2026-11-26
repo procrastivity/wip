@@ -1429,9 +1429,8 @@ func TestSharedStoreContentBlobMetadataMismatch(t *testing.T) {
 // Content has no authoring ceiling — only the spill floor — so a Brief can
 // exceed the blob route's whole-object cap. Such content is simply outside
 // the admitted portable set: the group stays local evidence, never enters
-// PendingUpload, and cannot wedge the groups queued behind it. An explicit
-// upload still carries the envelope as receiver-side conflict evidence,
-// without attempting a blob the route would reject forever.
+// PendingUpload, and cannot wedge the groups queued behind it. Explicit
+// upload cannot bypass that boundary, even as non-applying evidence.
 func TestSharedStoreContentOversizeStaysLocal(t *testing.T) {
 	feed, endpoint := newLabExchangeFeed(t)
 	a, sa := exchangeHost(t)
@@ -1477,14 +1476,17 @@ func TestSharedStoreContentOversizeStaysLocal(t *testing.T) {
 		t.Fatal("feed carries the wrong groups")
 	}
 
-	// An explicit upload is the evidence path: the envelope crosses as
-	// receiver-side conflict, and no oversized blob is ever attempted.
-	exchangePass(t, sa, ca, ba, oversizeGroup)
+	// Explicit invocation must not serialize an excluded raw envelope either.
+	if err := sa.ExchangePass(labCtx, ca, ba, []string{oversizeGroup}); err == nil || !strings.Contains(err.Error(), "no portable unit") {
+		t.Fatal("explicit upload bypassed the portable boundary", err)
+	}
+	if slices.Contains(feed.changeOrder(), oversizeGroup) {
+		t.Fatal("excluded raw envelope reached the server")
+	}
 	if feed.hasRequest("PUT", "/blobs/") {
 		t.Fatal("oversize blob PUT attempted")
 	}
 	exchangePass(t, sb, cb, bb)
-	sourceDecision(t, sb, oversizeGroup, "conflict")
 	exchangePass(t, sb, cb, bb)
 	sourceDecision(t, sb, normalGroup, "integrated")
 	got, err := sb.Content(labCtx, normal.ID, store.KindBrief)

@@ -1159,9 +1159,11 @@ func labCommitMixed(t *testing.T, s *store.Store, repo string, decide func(conte
 // A mixed command group uploads only its portable unit: portable members stay
 // Actions of an explicitly identified derivative of the raw group, every other
 // member — including a portable-typed member whose in-group cause is not
-// portable — is retained under Omitted as untouched evidence, and the receiver
+// portable — stays in the local event log, and the receiver
 // integrates exactly the unit atomically through the real version-1 wire.
 func TestSharedStorePortableDerivativeExchange(t *testing.T) {
+	const privateValue = "synthetic-local-only-credential"
+	const privateTitle = "synthetic-causally-excluded-title"
 	feed, endpoint := newLabExchangeFeed(t)
 	a, sa := exchangeHost(t)
 	b, sb := exchangeHost(t)
@@ -1186,11 +1188,11 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 		brief.Cause = 0
 		return []store.Draft{
 			{Type: store.TypeMatterCreated, Subject: mid, Payload: store.NodeBirth{Title: "Deriv", Locator: "deriv", SortKey: 0}},
-			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: "v"}, Cause: 0},
+			{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "deriv.key", Value: privateValue}, Cause: 0},
 			{Type: store.TypeStageCreated, Subject: sid, Payload: store.NodeBirth{Title: "Phase", Locator: "phase", Parent: mid, SortKey: 0}, Cause: 0},
 			// Portable type, but its in-group cause is the non-portable member:
 			// it is retained as evidence, never silently dropped or admitted.
-			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: "Do", Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
+			{Type: store.TypeStepCreated, Subject: tid, Payload: store.NodeBirth{Title: privateTitle, Locator: "do", Parent: sid, SortKey: 0}, Cause: 1},
 			brief,
 		}, nil
 	})
@@ -1214,6 +1216,10 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 		t.Fatalf("non-portable group not retained as local inventory: %+v", status.Unsupported)
 	}
 	saEvents := len(labEvents(t, sa))
+	feed.failNextChangesPost = true
+	if _, err := sa.RunExchange(labCtx, client, a.repo); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatal("lost acknowledgement control not exercised", err)
+	}
 	if _, err := sa.RunExchange(labCtx, client, a.repo); err != nil {
 		t.Fatal(err)
 	}
@@ -1228,28 +1234,25 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 	if err := json.Unmarshal([]byte(wire.Source), &unit); err != nil {
 		t.Fatal(err)
 	}
-	if unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 || len(unit.Derivative.Omitted) != 2 {
+	if strings.Contains(wire.Source, `"Omitted"`) || strings.Contains(wire.Source, privateValue) || strings.Contains(wire.Source, privateTitle) {
+		t.Fatal("excluded raw events crossed HTTP in the portable derivative")
+	}
+	if unit.Derivative == nil || unit.Derivative.Parent != mixed || len(unit.Actions) != 3 {
 		t.Fatalf("wire source is not the identified portable unit: %+v", unit)
 	}
-	var actionTypes, omittedTypes []string
+	var actionTypes []string
 	for _, a := range unit.Actions {
 		actionTypes = append(actionTypes, a.Event.Type)
 	}
-	for _, a := range unit.Derivative.Omitted {
-		omittedTypes = append(omittedTypes, a.Event.Type)
+	if !reflect.DeepEqual(actionTypes, []string{store.TypeMatterCreated, store.TypeStageCreated, store.TypeContentCreated}) {
+		t.Fatalf("unit actions=%v", actionTypes)
 	}
-	if !reflect.DeepEqual(actionTypes, []string{store.TypeMatterCreated, store.TypeStageCreated, store.TypeContentCreated}) ||
-		!reflect.DeepEqual(omittedTypes, []string{store.TypeConfigSet, store.TypeStepCreated}) {
-		t.Fatalf("unit actions=%v omitted=%v", actionTypes, omittedTypes)
+	// Even the explicit lab uploader cannot bypass the portable boundary.
+	if err := sa.ExchangePass(labCtx, client, ba.Binding, []string{local}); err == nil || !strings.Contains(err.Error(), "no portable unit") {
+		t.Fatal("local-only group was not refused", err)
 	}
-	// A group with no portable member keeps its raw source on explicit upload:
-	// the receiver retains it as evidence and never applies it, exactly as an
-	// unsupported family always has. Automatic eligibility is unchanged.
-	if err := sa.ExchangePass(labCtx, client, ba.Binding, []string{local}); err != nil {
-		t.Fatal(err)
-	}
-	if len(feed.changes) != 2 {
-		t.Fatalf("feed received %d changes, want the derivative plus the raw local group", len(feed.changes))
+	if len(feed.changes) != 1 {
+		t.Fatalf("feed received %d changes, want only the portable derivative", len(feed.changes))
 	}
 	done, err := sa.ExchangeStatus(labCtx, a.repo)
 	if err != nil || !slices.Contains(done.Retained, mixed) || slices.Contains(done.PendingUpload, mixed) {
@@ -1260,7 +1263,7 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 	if _, err := sb.RunExchange(labCtx, client, b.repo); err != nil {
 		t.Fatal(err)
 	}
-	if len(feed.changes) != 2 {
+	if len(feed.changes) != 1 {
 		t.Fatalf("receiver pass disturbed the feed: %d changes", len(feed.changes))
 	}
 	if got := len(labEvents(t, sb)); got != sbEvents+3 {
@@ -1284,23 +1287,25 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 	if _, err := sb.Node(labCtx, nid); err == nil {
 		t.Fatal("local-only group member arrived")
 	}
-	if d := sourceDecision(t, sb, local, "conflict"); len(d.Effects) != 0 {
-		t.Fatalf("raw non-portable group produced effects: %+v", d)
-	}
 	if value, found, err := sb.Config(labCtx, b.repo, "deriv.key"); err != nil || found || value != "" {
 		t.Fatalf("omitted config.set produced an effect: %q %v %v", value, found, err)
 	}
 	d := sourceDecision(t, sb, mixed, "integrated")
-	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 {
+	if d.Source.Derivative == nil || d.Source.Derivative.Parent != mixed || len(d.Effects) != 3 || len(d.Source.Derivative.Omitted) != 0 {
 		t.Fatalf("receiver decision lost derivative identity or effects: %+v", d)
 	}
+	// Exclusion changes only the wire: complete original evidence stays local.
+	original, err := sa.ExperimentExport(labCtx, ba.Binding.InstallationID, mixed)
+	if err != nil || len(original.Actions) != 5 {
+		t.Fatal("local command evidence was lost", original, err)
+	}
 	var sawConfig, sawStep bool
-	for _, a := range d.Source.Derivative.Omitted {
+	for _, a := range original.Actions {
 		switch a.Event.Type {
 		case store.TypeConfigSet:
 			sawConfig = true
 			var p store.ConfigSet
-			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Key != "deriv.key" || p.Value != "v" {
+			if err := json.Unmarshal(a.Event.Payload, &p); err != nil || p.Key != "deriv.key" || p.Value != privateValue {
 				t.Fatalf("omitted config evidence altered: %s", a.Event.Payload)
 			}
 		case store.TypeStepCreated:
@@ -1314,15 +1319,15 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 	if !sawConfig || !sawStep {
 		t.Fatal("omitted evidence incomplete")
 	}
-	// Malformed derivatives are refused before any retention: the parent must
-	// name the raw group and every omitted link must stay inside it.
+	// Malformed derivatives are refused before any retention, including old
+	// incoming sources that still contain the legacy Omitted field.
 	badParent := unit
 	badParent.Derivative = &store.ExperimentDerivative{Parent: "not-the-group", Omitted: unit.Derivative.Omitted}
 	if _, err := sb.ExperimentImportBound(labCtx, badParent, b.repo); err == nil || !strings.Contains(err.Error(), "derivative") {
 		t.Fatal("derivative naming a foreign parent imported", err)
 	}
 	badCause := unit
-	omitted := append([]store.ExperimentAction{}, unit.Derivative.Omitted...)
+	omitted := []store.ExperimentAction{original.Actions[1], original.Actions[3]}
 	omitted[0].Event.Causation = "dangling"
 	badCause.Derivative = &store.ExperimentDerivative{Parent: mixed, Omitted: omitted}
 	if _, err := sb.ExperimentImportBound(labCtx, badCause, b.repo); err == nil || !strings.Contains(err.Error(), "malformed derivative") {
@@ -1355,6 +1360,85 @@ func TestSharedStorePortableDerivativeExchange(t *testing.T) {
 		t.Fatal("retry changed the retained decision", again)
 	}
 	labRebuild(t, sb)
+}
+
+// An upgrade must not replay an unsafe legacy capture or replace its bytes
+// under an identity the server may already have committed. Old received
+// derivatives remain readable and rebuildable without becoming exportable.
+func TestSharedStoreLegacyUnsafeExport(t *testing.T) {
+	for _, shape := range []string{"raw-mixed", "derivative"} {
+		t.Run(shape, func(t *testing.T) {
+			feed, endpoint := newLabExchangeFeed(t)
+			a, sa := exchangeHost(t)
+			paired, err := sa.PairExchange(labCtx, a.repo, endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			events := labCommitMixed(t, sa, a.repo, func(_ context.Context, tx *store.Tx) ([]store.Draft, error) {
+				return []store.Draft{
+					{Type: store.TypeMatterCreated, Subject: tx.NewID(), Payload: store.NodeBirth{Title: "Legacy", Locator: "legacy"}},
+					{Type: store.TypeConfigSet, Subject: a.repo, Payload: store.ConfigSet{Key: "private", Value: "synthetic-secret"}, Cause: 0},
+				}, nil
+			})
+			group := events[0].Correlation
+			source, err := sa.ExperimentExport(labCtx, paired.Binding.InstallationID, group)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if shape == "derivative" {
+				source.Derivative = &store.ExperimentDerivative{Parent: group, Omitted: source.Actions[1:]}
+				source.Actions = source.Actions[:1]
+			}
+			encoded, err := json.Marshal(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change := store.ExchangeChange{Version: 1, InstallationID: source.Host, GroupID: group, SourceRepoID: a.repo, Source: string(encoded)}
+			captured, err := json.Marshal(change)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Simulate a capture left by an older executable, not a new write.
+			db, err := sql.Open("sqlite", a.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if _, err := db.Exec(`INSERT INTO exchange_exports VALUES(?,?,?)`, a.repo, group, string(captured)); err != nil {
+				t.Fatal(err)
+			}
+			client := store.ExchangeClient{HTTP: http.DefaultClient, Token: "token"}
+			if _, err := sa.RunExchange(labCtx, client, a.repo); err == nil || !strings.Contains(err.Error(), "refusing to transmit or rewrite") {
+				t.Fatal("automatic retry did not refuse unsafe cached bytes", err)
+			}
+			if err := sa.ExchangePass(labCtx, client, paired.Binding, []string{group}); err == nil || !strings.Contains(err.Error(), "refusing to transmit or rewrite") {
+				t.Fatal("explicit retry bypassed the cached-envelope boundary", err)
+			}
+			if len(feed.changes) != 0 || len(feed.blobs) != 0 {
+				t.Fatal("unsafe cached source reached the server")
+			}
+			var retained string
+			if err := db.QueryRow(`SELECT envelope FROM exchange_exports WHERE repo=? AND group_id=?`, a.repo, group).Scan(&retained); err != nil || retained != string(captured) {
+				t.Fatal("immutable legacy capture was rewritten", err)
+			}
+			status, err := sa.ExchangeStatus(labCtx, a.repo)
+			if err != nil || !slices.Contains(status.PendingUpload, group) || slices.Contains(status.Retained, group) {
+				t.Fatal("refused upload was lost or falsely acknowledged", status, err)
+			}
+			if shape == "derivative" {
+				b, sb := exchangeHost(t)
+				d := labImportBound(t, sb, source, b.repo, "integrated")
+				if len(d.Effects) != 1 || len(d.Source.Derivative.Omitted) != 1 {
+					t.Fatal("legacy received evidence was lost", d)
+				}
+				d = sourceDecision(t, sb, group, "integrated")
+				labRebuild(t, sb)
+				if again := sourceDecision(t, sb, group, "integrated"); !reflect.DeepEqual(d, again) {
+					t.Fatal("rebuild changed retained legacy evidence", again)
+				}
+			}
+		})
+	}
 }
 
 // The portable source carries its own schema marker beside the version-1

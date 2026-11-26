@@ -55,18 +55,18 @@ type ExperimentSource struct {
 	Actions []ExperimentAction
 	// Derivative is nil for a complete raw group. When set, this source is the
 	// separately identified portable unit of the raw group Parent names, never
-	// a truncation of it: Actions are exactly the portable members and every
-	// other member is retained under Omitted as evidence only.
+	// a truncation of it: Actions are exactly the portable members. Excluded
+	// members remain in the sender's local event log, not the wire envelope.
 	Derivative *ExperimentDerivative `json:",omitempty"`
 }
 
 // ExperimentDerivative marks an exported source as the portable unit of one
 // raw command group. Parent is that group's identity — the shared origin
-// event — and Omitted retains every non-portable member's untouched
-// ExperimentAction: inspectable evidence, never classified and never an
-// effect. The unit's atomicity covers Actions alone.
+// event. The unit's atomicity covers Actions alone.
 type ExperimentDerivative struct {
-	Parent  string
+	Parent string
+	// Omitted is read-only legacy evidence. Keep it decodable for retained
+	// sources and rebuilds, but never include excluded raw actions in exports.
 	Omitted []ExperimentAction `json:",omitempty"`
 }
 
@@ -362,10 +362,8 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 // experimentPortableUnit projects one complete exported group into the
 // portable unit a paired exchange may carry. A fully portable group returns
 // unchanged; a mixed group returns its separately identified derivative —
-// portable members as Actions, the rest retained under Derivative.Omitted.
-// ok=false means no portable unit exists: the caller keeps the raw source,
-// which explicit uploads retain as receiver-side evidence while
-// ExchangeStatus keeps the group out of automatic PendingUpload. The
+// portable members as Actions, the rest staying strictly local.
+// ok=false means no portable unit exists and the source must not upload. The
 // projection is deterministic, so exchange_exports retries emit identical
 // bytes and receivers dedup on the same source identity.
 func experimentPortableUnit(source ExperimentSource, repo string) (ExperimentSource, bool) {
@@ -393,8 +391,6 @@ func experimentPortableUnit(source ExperimentSource, repo string) (ExperimentSou
 	for i, a := range source.Actions {
 		if mask[i] {
 			out.Actions = append(out.Actions, a)
-		} else {
-			out.Derivative.Omitted = append(out.Derivative.Omitted, a)
 		}
 	}
 	return out, true

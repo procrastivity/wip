@@ -360,13 +360,13 @@ func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group str
 			return ExchangeChange{}, err
 		}
 		// A mixed command group uploads only its portable unit, separately
-		// identified as a derivative of the raw group. A group with no
-		// portable member keeps its raw source: explicit uploads retain
-		// unsupported work as receiver-side evidence exactly as before, and
-		// automatic eligibility is ExchangeStatus's decision, not this one's.
-		if unit, portable := experimentPortableUnit(source, b.LocalRepo); portable {
-			source = unit
+		// identified as a derivative of the raw group. No caller, including
+		// an explicit ExchangePass, may upload local-only source evidence.
+		unit, portable := experimentPortableUnit(source, b.LocalRepo)
+		if !portable {
+			return ExchangeChange{}, fmt.Errorf("exchange: source group has no portable unit")
 		}
+		source = unit
 		for _, a := range source.Actions {
 			if a.Event.Repo != b.LocalRepo {
 				return ExchangeChange{}, fmt.Errorf("exchange: source outside binding")
@@ -408,8 +408,21 @@ func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group str
 		return ExchangeChange{}, err
 	}
 	var change ExchangeChange
-	err = json.Unmarshal([]byte(raw), &change)
-	return change, err
+	if err := json.Unmarshal([]byte(raw), &change); err != nil {
+		return ExchangeChange{}, err
+	}
+	// Old captures may contain excluded actions, including in Derivative.
+	// Never replay those bytes or silently rewrite an immutable retry: the
+	// server might already have committed the original before a lost reply.
+	var source ExperimentSource
+	if err := json.Unmarshal([]byte(change.Source), &source); err != nil {
+		return ExchangeChange{}, err
+	}
+	unit, portable := experimentPortableUnit(source, b.LocalRepo)
+	if !portable || len(unit.Actions) != len(source.Actions) || (source.Derivative != nil && len(source.Derivative.Omitted) != 0) {
+		return ExchangeChange{}, fmt.Errorf("exchange: cached envelope contains local-only evidence; refusing to transmit or rewrite immutable source group %s", group)
+	}
+	return change, nil
 }
 
 // exchangeDigestShaped reports whether s is a lowercase sha256 hex digest —

@@ -488,14 +488,8 @@ func TestSharedStoreDependencyMixedGroup(t *testing.T) {
 	if d.Source.Derivative == nil || len(d.Effects) != 1 {
 		t.Fatalf("decision is not a one-action derivative: %+v", d)
 	}
-	var sawConfig bool
-	for _, a := range d.Source.Derivative.Omitted {
-		if a.Event.Type == store.TypeConfigSet {
-			sawConfig = true
-		}
-	}
-	if !sawConfig {
-		t.Fatal("omitted evidence lost the config.set")
+	if len(d.Source.Derivative.Omitted) != 0 {
+		t.Fatal("excluded config.set crossed the wire")
 	}
 	if got, found := relationEdge(t, f.sb, f.step1.ID, f.step2.ID); !found || got.ID != eid {
 		t.Fatalf("derivative edge = %+v found=%v", got, found)
