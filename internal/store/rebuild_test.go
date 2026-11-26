@@ -417,6 +417,8 @@ func (h *harness) hasProjectionTable(table string) bool {
 	// schema probe into "table absent"; each case names the version that adds
 	// the projection table.
 	switch table {
+	case "transfer_snapshot_imports":
+		return h.SchemaVersion() >= 16
 	case "transfer_origins", "transfer_receipts":
 		return h.SchemaVersion() >= 15
 	case "run_matters":

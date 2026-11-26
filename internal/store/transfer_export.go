@@ -28,7 +28,11 @@ func originKey(kind string, o transfer.Origin) string {
 func transferOrigin(ctx context.Context, q querier, repo, lineage, kind, id string) (transfer.Origin, error) {
 	o := transfer.Origin{Lineage: lineage, Repo: repo, ID: id}
 	var key string
-	err := q.QueryRowContext(ctx, `SELECT origin FROM transfer_origins WHERE repo=? AND target=?`, repo, id).Scan(&key)
+	origins, err := transferOriginsSource(ctx, q)
+	if err != nil {
+		return o, err
+	}
+	err = q.QueryRowContext(ctx, `SELECT origin FROM `+origins+` WHERE repo=? AND target=?`, repo, id).Scan(&key)
 	if err == sql.ErrNoRows {
 		return o, nil
 	}
@@ -102,14 +106,18 @@ func transferRows(ctx context.Context, q querier, repo, lineage string) (*transf
 				// An imported cancellation is a state fact, not a fabricated
 				// historical transition. Its original metadata lives in the log.
 				var payload string
-				err = q.QueryRowContext(ctx, `SELECT e.payload FROM transfer_origins o JOIN events e ON e.id=o.birth_event WHERE o.repo=? AND o.target=?`, repo, n.ID).Scan(&payload)
+				origins, e := transferOriginsSource(ctx, q)
+				if e != nil {
+					return nil, e
+				}
+				err = q.QueryRowContext(ctx, `SELECT e.payload FROM `+origins+` o JOIN events e ON e.id=o.birth_event WHERE o.repo=? AND o.target=?`, repo, n.ID).Scan(&payload)
 				if err == nil {
 					var p transferImported
 					if err = json.Unmarshal([]byte(payload), &p); err != nil {
 						return nil, err
 					}
 					for _, old := range p.Snapshot.Nodes {
-						if p.Plan.Mapping[old.ID] == n.ID {
+						if (p.Plan != nil && p.Plan.Mapping[old.ID] == n.ID) || (p.Plan == nil && old.ID == n.ID) {
 							n.Reason = old.Reason
 						}
 					}
@@ -286,7 +294,11 @@ func (s *Store) ExportTransfer(ctx context.Context, repo, lineage string, select
 		if roots[n.Matter] {
 			if n.Kind == "matter" {
 				var payload string
-				err = tx.QueryRowContext(ctx, `SELECT e.payload FROM transfer_origins o JOIN events e ON e.id=o.birth_event WHERE o.repo=? AND o.target=?`, repo, n.ID).Scan(&payload)
+				origins, e := transferOriginsSource(ctx, tx)
+				if e != nil {
+					return nil, e
+				}
+				err = tx.QueryRowContext(ctx, `SELECT e.payload FROM `+origins+` o JOIN events e ON e.id=o.birth_event WHERE o.repo=? AND o.target=? AND e.type='work.imported'`, repo, n.ID).Scan(&payload)
 				if err == nil {
 					var imported transferImported
 					if err = json.Unmarshal([]byte(payload), &imported); err != nil {

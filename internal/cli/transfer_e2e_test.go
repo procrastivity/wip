@@ -306,9 +306,14 @@ func TestTransferCLIImportUsesInvocationRole(t *testing.T) {
 					t.Fatalf("backed role refused: %+v", r)
 				}
 				s = openTestStore(t, db)
-				ev := wantOneEvent(t, s, preview.Work.Operation, store.TypeWorkImported)
-				if ev.Actor != store.RoleActor(role) {
-					t.Fatalf("import actor = %q, want role:%s", ev.Actor, role)
+				events, err := s.EventsOfSubject(context.Background(), preview.Work.Operation)
+				if err != nil || len(events) != 2 || events[0].Type != store.TypeWorkSnapshot || events[1].Type != store.TypeWorkImported {
+					t.Fatalf("import must commit its public root and private companion together: %+v %v", events, err)
+				}
+				for _, ev := range events {
+					if ev.Actor != store.RoleActor(role) || ev.Correlation != events[0].ID || ev.Causation != events[0].ID {
+						t.Fatalf("import lost invocation actor or atomic root linkage: %+v", ev)
+					}
 				}
 				_ = s.Close()
 				if r := runIn(t, dir, dbEnv, "plumbing", "role", "close", role); r.exitCode != 0 {

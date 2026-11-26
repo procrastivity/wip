@@ -25,7 +25,7 @@ import (
 // admits them on both the bound and the unbound path.
 func experimentPortableMember(typ string) bool {
 	switch typ {
-	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted, TypeContentCreated:
+	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted, TypeContentCreated, TypeWorkSnapshot:
 		return true
 	}
 	return false
@@ -73,6 +73,7 @@ var experimentLifecycleEdges = map[string]experimentLifecycleEdge{
 // the export whitelist and the exchange status dependency scan all derive
 // from, so the three can never drift apart.
 var experimentPortableTypeNames = []string{
+	TypeWorkSnapshot,
 	TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted,
 	TypeStepReordered, TypeStepReplaced, TypeStepRemoved,
 	TypeBacklogEntered, TypeBacklogPlanned, TypeBacklogDeclined, TypeBacklogDelegated,
@@ -245,7 +246,7 @@ func experimentUnitMask(events []Event, repo string) []bool {
 func experimentClassifyPortable(ctx context.Context, v View, a ExperimentAction, s *Store) (string, string, string, bool, error) {
 	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	e := a.Event
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -259,6 +260,8 @@ func experimentClassifyPortable(ctx context.Context, v View, a ExperimentAction,
 		}
 	}
 	switch e.Type {
+	case TypeWorkSnapshot:
+		return experimentClassifySnapshot(ctx, v, a, s)
 	case TypeMatterCreated, TypeStageCreated, TypeStepCreated, TypeStepInserted:
 		return experimentClassifyBirth(ctx, v, a, history)
 	case TypeContentCreated:
@@ -452,7 +455,7 @@ func experimentClassifyFinding(ctx context.Context, v View, a ExperimentAction, 
 	refuse := func(reason string) (string, string, string, bool, error) { return "conflict", reason, "", false, nil }
 	wait := func(reason string) (string, string, string, bool, error) { return "pending", reason, "", false, nil }
 	e := a.Event
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -628,7 +631,7 @@ func experimentBaselineIndex(ctx context.Context, v View, subject string, histor
 		}
 	}
 	var birth string
-	qerr := v.q.QueryRowContext(ctx, `SELECT birth_event FROM nodes WHERE id=?`, subject).Scan(&birth)
+	qerr := v.q.QueryRowContext(ctx, `SELECT n.birth_event FROM nodes n JOIN events e ON e.id=n.birth_event WHERE n.id=? AND e.type=?`, subject, TypeStepReplaced).Scan(&birth)
 	if qerr != nil {
 		if errors.Is(qerr, sql.ErrNoRows) {
 			return -1, false, nil
@@ -707,7 +710,7 @@ func experimentClassifyAmendment(ctx context.Context, v View, a ExperimentAction
 	if a.Baseline == "" {
 		return wait("missing baseline evidence")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -979,7 +982,7 @@ func experimentClassifyBacklog(ctx context.Context, v View, a ExperimentAction) 
 	if a.Baseline == "" {
 		return wait("missing baseline evidence")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1058,7 +1061,7 @@ func experimentClassifyDependency(ctx context.Context, v View, a ExperimentActio
 	if !IsIdentityShaped(e.Subject) || e.Subject == p.Blocker {
 		return refuse("invalid dependency edge")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1418,7 +1421,7 @@ func experimentClassifyGateDeclared(ctx context.Context, v View, a ExperimentAct
 	if repos == 0 {
 		return wait("gate declaration awaiting repo")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1524,7 +1527,7 @@ func experimentClassifyGateNode(ctx context.Context, v View, a ExperimentAction)
 	if !IsIdentityShaped(e.Subject) {
 		return refuse("invalid gate subject")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1747,7 +1750,7 @@ func experimentClassifyReference(ctx context.Context, v View, a ExperimentAction
 	if !IsIdentityShaped(e.Subject) {
 		return refuse("invalid reference subject")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}

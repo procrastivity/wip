@@ -20,9 +20,9 @@ import (
 const (
 	// These sit above every shipped version, so `through(...)` never produces a
 	// register with two entries at one version. Bump them when a migration
-	// ships (v15, offline-transfer, is what moved them last).
-	syntheticV3Version = 16
-	syntheticV4Version = 17
+	// ships (v16, portable-work-snapshot, is what moved them last).
+	syntheticV3Version = 17
+	syntheticV4Version = 18
 )
 
 // Tests for the migration framework (step-09): versioned, forward-only,

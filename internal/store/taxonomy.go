@@ -330,13 +330,19 @@ const TypeWorkImported = "work.imported"
 // V15Taxonomy introduces the rebuild-safe offline import fold.
 var V15Taxonomy = []EventType{durable(TypeWorkImported, Family("transfer"))}
 
+// TypeWorkSnapshot is the portable, inert state root of an offline import.
+const TypeWorkSnapshot = "work.snapshot"
+
+// V16Taxonomy adds public snapshot roots without changing private v15 history.
+var V16Taxonomy = []EventType{durable(TypeWorkSnapshot, Family("transfer"))}
+
 // taxonomySets is one slice per numbered migration that seeds event types.
 // P1Taxonomy is v1's frozen content and is never edited: a later phase adds its
 // types as a *new* slice, seeded by its own migration and appended here. That is
 // what keeps "never edit a shipped migration; append" structural rather than
 // remembered — the migration's INSERT is generated from the same slice that
 // stamp-time validation reads, so the two cannot drift.
-var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy, V13Taxonomy, V14Taxonomy, V15Taxonomy}
+var taxonomySets = [][]EventType{P1Taxonomy, V2Taxonomy, V3Taxonomy, V4Taxonomy, V5Taxonomy, V6Taxonomy, V7Taxonomy, V9Taxonomy, V11Taxonomy, V13Taxonomy, V14Taxonomy, V15Taxonomy, V16Taxonomy}
 
 // registeredTypes is every event type this binary knows about, across every
 // taxonomy set.

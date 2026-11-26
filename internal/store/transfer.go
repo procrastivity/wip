@@ -408,13 +408,17 @@ func (s *Store) planTransfer(ctx context.Context, q querier, x *transfer.Snapsho
 	}
 	used := map[string]bool{p.Operation: true}
 	objects := transferObjects(x)
+	origins, err := transferOriginsSource(ctx, q)
+	if err != nil {
+		return nil, err
+	}
 	archiveIDs := map[string]bool{x.Repo: true}
 	for _, o := range objects {
 		archiveIDs[o.id], archiveIDs[o.origin.ID] = true, true
 	}
 	for _, o := range objects {
 		var existingRepo string
-		err = q.QueryRowContext(ctx, `SELECT repo FROM transfer_origins WHERE origin=?`, o.key).Scan(&existingRepo)
+		err = q.QueryRowContext(ctx, `SELECT repo FROM `+origins+` WHERE origin=?`, o.key).Scan(&existingRepo)
 		if err == nil && existingRepo != repo {
 			return nil, fmt.Errorf("store: source origin %s already maps to Repo %s; cannot remap it to Repo %s", o.key, existingRepo, repo)
 		}
@@ -422,7 +426,7 @@ func (s *Store) planTransfer(ctx context.Context, q querier, x *transfer.Snapsho
 			return nil, err
 		}
 		var target, fp, state string
-		err = q.QueryRowContext(ctx, `SELECT target,fingerprint,state FROM transfer_origins WHERE repo=? AND origin=?`, repo, o.key).Scan(&target, &fp, &state)
+		err = q.QueryRowContext(ctx, `SELECT target,fingerprint,state FROM `+origins+` WHERE repo=? AND origin=?`, repo, o.key).Scan(&target, &fp, &state)
 		switch err {
 		case nil:
 			if fp != o.fingerprint {
@@ -540,6 +544,7 @@ func transferContentOrder(x *transfer.Snapshot, mapping map[string]string) error
 }
 
 type transferImported struct {
+	Root     bool                      `json:"root,omitempty"`
 	Snapshot *transfer.Snapshot        `json:"snapshot"`
 	Plan     *TransferPlan             `json:"plan"`
 	Contents map[string]ContentWritten `json:"contents"`
@@ -609,8 +614,13 @@ func (s *Store) ApplyTransfer(ctx context.Context, actor Actor, x *transfer.Snap
 			}
 			payload.Contents[c.ID] = w
 		}
+		root, err := canonicalWorkSnapshot(ctx, t.q, payload)
+		if err != nil {
+			return nil, err
+		}
+		payload.Root = true
 		receipt = &TransferReceipt{Operation: p.Operation, Digest: p.Digest, Repo: p.Repo, Mapping: p.Mapping}
-		return []Draft{{Type: TypeWorkImported, Subject: p.Operation, Payload: payload}}, nil
+		return []Draft{{Type: TypeWorkSnapshot, Subject: p.Operation, Payload: root}, {Type: TypeWorkImported, Subject: p.Operation, Payload: payload, Cause: 0}}, nil
 	})
 	if errors.Is(err, errTransferReceipt) {
 		return receipt, nil
@@ -671,6 +681,9 @@ func projectTransfer(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if digest != plan.Digest || plan.Operation != ev.Subject || plan.Repo != ev.Repo {
 		return fmt.Errorf("store: import event metadata mismatch")
 	}
+	if p.Root {
+		return projectTransferCompanion(ctx, tx, ev, p)
+	}
 	// The dedicated fold enforces exactly the same mapping/identity/state
 	// guards as apply. It intentionally excludes only non-evented pairing.
 	if checked, e := (&Store{}).planTransfer(ctx, tx, x, plan.Repo, plan.Renames, plan, true); e != nil {
@@ -681,6 +694,15 @@ func projectTransfer(ctx context.Context, tx *sql.Tx, ev Event) error {
 	if err = transferContentOrder(x, plan.Mapping); err != nil {
 		return err
 	}
+	if err = projectTransferState(ctx, tx, ev, p); err != nil {
+		return err
+	}
+	return projectTransferReceipt(ctx, tx, ev, p)
+}
+
+func projectTransferState(ctx context.Context, tx *sql.Tx, ev Event, p transferImported) error {
+	x, plan := p.Snapshot, p.Plan
+	var err error
 	nodes := canonicalTransferNodes(x.Nodes)
 	sort.SliceStable(nodes, func(i, j int) bool {
 		rank := func(k string) int {
@@ -752,8 +774,19 @@ func projectTransfer(ctx context.Context, tx *sql.Tx, ev Event) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func projectTransferReceipt(ctx context.Context, tx *sql.Tx, ev Event, p transferImported) error {
+	x, plan := p.Snapshot, p.Plan
 	for _, o := range transferObjects(x) {
 		if plan.Reused[o.id] {
+			continue
+		}
+		if p.Root {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO transfer_snapshot_imports(target,fingerprint,birth_event) VALUES(?,?,?)`, plan.Mapping[o.id], o.fingerprint, ev.ID); err != nil {
+				return err
+			}
 			continue
 		}
 		state, err := transferState(ctx, tx, o.kind, plan.Mapping[o.id])

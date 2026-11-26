@@ -112,11 +112,33 @@ Its preview shows the destination Repo's locally retained pairing state:
 - Paused project: stays paused; importing does not resume it.
 - Unpaired project: stays local until explicitly paired.
 
-This policy also covers existing pilot pairings as broader sync support lands.
-The current pilot's narrow event representation does **not** yet support every
-imported snapshot family; that remains a visible technical coverage limitation,
-not a new consent requirement. This feature does not implement broader network
-sync. For private staging, use an unpaired project. Pausing only delays transfer.
+Compatible clients synchronize the supported snapshot-v1 state and subsequent
+ordinary portable edits under existing pilot pairings, including imports made
+before pairing. Each new import commits an immutable portable state root and
+an atomic private receipt/plan companion. Only the state root travels; no
+pairing/account metadata or execution authority is included. A snapshot records
+observed state, not invented historical creation or start commands.
+
+Receivers keep the shared native object identities and verify each object's
+membership in its snapshot before accepting later edits. Independently importing
+the same archive on different peers does not establish that correspondence:
+divergent identities, origins or occupied addresses remain visible conflicts,
+not title-based merges. Older clients retain unknown snapshot families as
+unsupported evidence; upgrade peers rather than bypassing validation.
+
+Content is applied with the whole snapshot, never partially. Spilled content
+may remain visibly pending until a later ordinary pass fetches and verifies its
+bytes. Cloud's existing 32 MiB per-blob transport limit still applies. A larger
+local import remains valid locally, but sync reports the incompatible content
+instead of uploading an incomplete snapshot or imposing a local archive quota.
+
+Development stores containing the older private-only `work.imported` shape
+remain readable and rebuildable. Their immutable events and captured upload
+identities are not rewritten automatically. A later edit requiring one of those
+legacy imports reports the missing portable snapshot anchor before upload;
+legacy conversion is not part of this bridge.
+
+For private staging, use an unpaired project. Pausing only delays transfer.
 
 ## Snapshot-v1 coverage and limits
 

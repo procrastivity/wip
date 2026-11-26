@@ -29,7 +29,7 @@ import (
 )
 
 func TestRunExchangeAfterOfflineImport(t *testing.T) {
-	for _, mode := range []string{"uncached", "cached", "laravel"} {
+	for _, mode := range []string{"uncached", "cached", "laravel", "running", "running-laravel"} {
 		t.Run(mode, func(t *testing.T) {
 			src, source := exchangeHost(t)
 			dst, target := exchangeHost(t)
@@ -40,20 +40,33 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 			if _, err := writesurface.CreateStage(labCtx, source, store.ActorHuman, src.repo, "portable", "Stage"); err != nil {
 				t.Fatal(err)
 			}
+			content := labFillBytes(store.SpillThreshold+379, 'i')
+			if _, err := writesurface.WriteOnce(labCtx, source, store.ActorHuman, src.repo, "portable", store.KindBrief, content); err != nil {
+				t.Fatal(err)
+			}
+			running := strings.HasPrefix(mode, "running")
+			if running {
+				if _, err := writesurface.Start(labCtx, source, store.ActorHuman, src.repo, "portable/stage"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			x, err := source.ExportTransfer(labCtx, src.repo, "offline-source", transfer.Selection{Matters: []string{m.ID}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			var endpoint, token string
-			if mode == "laravel" {
+			if strings.HasSuffix(mode, "laravel") {
 				f := startLaravelFixture(t)
 				endpoint, token = f.endpoint(), f.Owner
 			} else {
 				_, endpoint = newLabExchangeFeed(t)
 			}
-			paired, err := target.PairExchange(labCtx, dst.repo, endpoint)
-			if err != nil {
-				t.Fatal(err)
+			var paired store.ExchangeStatus
+			if !running {
+				paired, err = target.PairExchange(labCtx, dst.repo, endpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			plan, err := target.PlanTransfer(labCtx, x, dst.repo, map[string]string{m.ID: "local-alias"})
 			if err != nil {
@@ -62,6 +75,12 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 			receipt, err := target.ApplyTransfer(labCtx, store.ActorHuman, x, plan)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if running {
+				paired, err = target.PairExchange(labCtx, dst.repo, endpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			n, err := writesurface.CreateStep(labCtx, target, store.ActorHuman, dst.repo, "local-alias/stage", "Native step")
 			if err != nil {
@@ -72,7 +91,7 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 				t.Fatal("native start after import", err)
 			}
 			before := labEvents(t, target)
-			if mode == "uncached" {
+			if mode == "uncached" || mode == "running" {
 				original, err := target.ExperimentExport(labCtx, paired.Binding.InstallationID, started[0].Correlation)
 				if err != nil {
 					t.Fatal(err)
@@ -84,9 +103,19 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 			}
 			wire := &exchangeBatchTransport{}
 			client := store.ExchangeClient{HTTP: &http.Client{Transport: wire}, Token: token}
+			if mode == "cached" {
+				wire.lost = 1
+				if _, err := target.RunExchange(labCtx, client, dst.repo); err == nil {
+					t.Fatal("expected lost committed response")
+				}
+				if err := target.Close(); err != nil {
+					t.Fatal(err)
+				}
+				target = labOpen(t, dst.db)
+			}
 			for i := 0; i < 2; i++ {
 				status, err := target.RunExchange(labCtx, client, dst.repo)
-				if err != nil || len(status.PendingUpload) != 0 || status.Conflicts != 0 || status.Waiting != 0 || len(status.Unsupported) == 0 {
+				if err != nil || len(status.PendingUpload) != 0 || status.Conflicts != 0 || status.Waiting != 0 {
 					t.Fatal("ordinary sync after import", status, err)
 				}
 				if !reflect.DeepEqual(before, labEvents(t, target)) {
@@ -96,10 +125,50 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if mode == "cached" && (len(wire.bodies) != 2 || !bytes.Equal(wire.bodies[0], wire.bodies[1])) {
+				t.Fatal("lost-response reopen changed the captured snapshot source")
+			}
 			for _, body := range wire.bodies {
-				if bytes.Contains(body, []byte("work.imported")) || bytes.Contains(body, []byte("offline-source")) {
-					t.Fatal("offline snapshot reached exchange wire")
+				for _, change := range exchangeBatchChanges(t, body) {
+					if strings.Contains(change.Source, "work.imported") || strings.Contains(change.Source, "\"pairing\":") || strings.Contains(change.Source, "\"preconditions\":") {
+						t.Fatal("private import metadata reached exchange wire")
+					}
 				}
+			}
+			peer, receiver := exchangeHost(t)
+			if _, err := receiver.PairExchange(labCtx, peer.repo, endpoint); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 2; pass++ {
+				status, err := receiver.RunExchange(labCtx, client, peer.repo)
+				if err != nil || status.Conflicts != 0 || (pass == 1 && status.Waiting != 0) {
+					t.Fatalf("fresh peer pass %d: conflicts=%d waiting=%d err=%v", pass, status.Conflicts, status.Waiting, err)
+				}
+				if pass == 0 {
+					if _, err := receiver.Node(labCtx, receipt.Mapping[m.ID]); err == nil {
+						t.Fatal("snapshot partially applied before spilled bytes arrived")
+					}
+				}
+			}
+			for _, id := range []string{receipt.Mapping[m.ID], n.ID} {
+				node, err := receiver.Node(labCtx, id)
+				if err != nil || node.Repo != peer.repo || node.Lifecycle != store.InProgress {
+					t.Fatal("fresh peer lost imported/native work", node, err)
+				}
+			}
+			segments, err := receiver.ContentSegments(labCtx, receipt.Mapping[m.ID], store.KindBrief)
+			if err != nil || len(segments) != 1 {
+				t.Fatal("snapshot content closure missing", segments, err)
+			}
+			got, err := receiver.SegmentBytes(labCtx, segments[0].ID)
+			if err != nil || !bytes.Equal(got, content) {
+				t.Fatal("snapshot spilled bytes differ", err)
+			}
+			if err := receiver.Rebuild(labCtx); err != nil {
+				t.Fatal("fresh peer rebuild", err)
+			}
+			if out, err := receiver.Outbox(labCtx, peer.repo); err != nil || len(out) != 0 {
+				t.Fatal("snapshot receipt created delivery authority", out, err)
 			}
 			if node, err := target.Node(labCtx, n.ID); err != nil || node.Lifecycle != store.InProgress {
 				t.Fatal("native lifecycle lost", node, err)
@@ -114,8 +183,8 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 			}
 			for _, d := range activities {
 				for _, a := range d.Source.Actions {
-					if a.Event.Type == store.TypeWorkImported || strings.Contains(string(a.Event.Payload), "offline-source") {
-						t.Fatal("offline archive provenance reached exchange")
+					if a.Event.Type == store.TypeWorkImported || strings.Contains(string(a.Event.Payload), "\"pairing\"") {
+						t.Fatal("private import plan reached exchange")
 					}
 				}
 			}
@@ -133,6 +202,213 @@ func TestRunExchangeAfterOfflineImport(t *testing.T) {
 			forged, err := target.ExperimentImportBound(labCtx, original, dst.repo)
 			if err != nil || forged.Disposition != "conflict" || !reflect.DeepEqual(before, labEvents(t, target)) {
 				t.Fatal("altered ancestor claim authenticated", forged, err)
+			}
+		})
+	}
+}
+
+func TestImportedSnapshotDependenciesAndClaims(t *testing.T) {
+	src, source := exchangeHost(t)
+	dst, sender := exchangeHost(t)
+	m, err := writesurface.CreateMatter(labCtx, source, store.ActorHuman, src.repo, "First", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.CreateStage(labCtx, source, store.ActorHuman, src.repo, "first", "Stage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writesurface.Start(labCtx, source, store.ActorHuman, src.repo, "first/stage"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := writesurface.CreateMatter(labCtx, source, store.ActorHuman, src.repo, "Second", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := writesurface.BacklogAdd(labCtx, source, store.ActorHuman, src.repo, store.ProvenanceIntake, "Linked entry", "Portable detail", "first/stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roots []store.ExperimentSource
+	var entryID string
+	for _, selection := range []transfer.Selection{{Matters: []string{m.ID}}, {Matters: []string{other.ID}}, {Backlog: []string{entry.ID}}} {
+		x, err := source.ExportTransfer(labCtx, src.repo, "snapshot-source", selection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sender.PlanTransfer(labCtx, x, dst.repo, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := sender.ApplyTransfer(labCtx, store.ActorHuman, x, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Mapping[entry.ID] != "" {
+			entryID = r.Mapping[entry.ID]
+		}
+		root, err := sender.ExperimentExport(labCtx, "snapshot-sender", sourceGroup(t, sender, r.Operation, store.TypeWorkSnapshot))
+		if err != nil {
+			t.Fatal(err)
+		}
+		root.Actions = root.Actions[:1]
+		root.Derivative = &store.ExperimentDerivative{Parent: root.Actions[0].Event.ID}
+		roots = append(roots, root)
+	}
+	t.Run("reused-member-delayed-root", func(t *testing.T) {
+		p, receiver := exchangeHost(t)
+		labImportBound(t, receiver, roots[2], p.repo, "pending")
+		if _, found, err := receiver.BacklogEntry(labCtx, p.repo, entryID); err != nil || found {
+			t.Fatal("reference-dependent snapshot partially applied")
+		}
+		labImportBound(t, receiver, roots[0], p.repo, "integrated")
+		d, err := receiver.ExperimentRecheckBound(labCtx, p.repo, roots[2].Actions[0].Event.ID)
+		if err != nil || d.Disposition != "integrated" {
+			t.Fatal("genuine reference did not unblock the new linked backlog", d, err)
+		}
+		got, found, err := receiver.BacklogEntry(labCtx, p.repo, entryID)
+		if err != nil || !found || got.Title != entry.Title || got.Detail != entry.Detail || got.Repo != p.repo {
+			t.Fatal("reused-root closure changed linked backlog", got, err)
+		}
+		labRebuild(t, receiver)
+		labImportBound(t, receiver, roots[2], p.repo, "integrated")
+	})
+	t.Run("storage-failure-retry", func(t *testing.T) {
+		p, receiver := exchangeHost(t)
+		db, err := sql.Open("sqlite", p.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		if _, err := db.Exec(`CREATE TRIGGER fail_snapshot BEFORE INSERT ON nodes BEGIN SELECT RAISE(ABORT,'snapshot storage fault'); END`); err != nil {
+			t.Fatal(err)
+		}
+		before := labEvents(t, receiver)
+		if _, err := receiver.ExperimentImportBound(labCtx, roots[0], p.repo); err == nil || !strings.Contains(err.Error(), "snapshot storage fault") {
+			t.Fatal("storage failure was retained as a permanent semantic decision", err)
+		}
+		if !reflect.DeepEqual(before, labEvents(t, receiver)) {
+			t.Fatal("failed snapshot admission left native effects")
+		}
+		if _, err := db.Exec(`DROP TRIGGER fail_snapshot`); err != nil {
+			t.Fatal(err)
+		}
+		labImportBound(t, receiver, roots[0], p.repo, "integrated")
+	})
+	for _, attack := range []string{"unrelated-root", "private-effect", "reused-subject", "unrelated-subject"} {
+		t.Run(attack, func(t *testing.T) {
+			p, receiver := exchangeHost(t)
+			var effect string
+			for _, root := range roots[:2] {
+				d := labImportBound(t, receiver, root, p.repo, "integrated")
+				if effect == "" {
+					effect = d.Effects[0]
+				}
+			}
+			claim := roots[2]
+			claim.Actions = append([]store.ExperimentAction(nil), claim.Actions...)
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(claim.Actions[0].Event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			var refs map[string]string
+			if err := json.Unmarshal(payload["references"], &refs); err != nil || len(refs) == 0 {
+				t.Fatal("test needs genuine reused member references", err)
+			}
+			switch attack {
+			case "unrelated-root", "private-effect":
+				for id := range refs {
+					refs[id] = roots[1].Actions[0].Event.ID
+					if attack == "private-effect" {
+						refs[id] = effect
+					}
+				}
+			case "reused-subject":
+				for id := range refs {
+					claim.Actions[0].Event.Subject = id
+					break
+				}
+			case "unrelated-subject":
+				n, err := writesurface.CreateMatter(labCtx, receiver, store.ActorHuman, p.repo, "Unrelated local work", "unrelated")
+				if err != nil {
+					t.Fatal(err)
+				}
+				claim.Actions[0].Event.Subject = n.ID
+			}
+			payload["references"], _ = json.Marshal(refs)
+			claim.Actions[0].Event.Payload, _ = json.Marshal(payload)
+			before := labEvents(t, receiver)
+			d := labImportBound(t, receiver, claim, p.repo, "conflict")
+			if len(d.Effects) != 0 || !reflect.DeepEqual(before, labEvents(t, receiver)) {
+				t.Fatal("snapshot claim changed existing member identity/history")
+			}
+		})
+	}
+	n, err := writesurface.CreateStep(labCtx, sender, store.ActorHuman, dst.repo, "first/stage", "Later native step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := sender.ExperimentExport(labCtx, "snapshot-sender", sourceGroup(t, sender, n.ID, store.TypeStepCreated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := labStart(t, dst, sender, "snapshot-sender", "first/"+n.Locator)
+	t.Run("delayed-root", func(t *testing.T) {
+		p, receiver := exchangeHost(t)
+		labImportBound(t, receiver, child, p.repo, "pending")
+		before, err := receiver.ExperimentDecisionHistory(labCtx, child.Actions[0].Event.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		labImportBound(t, receiver, roots[0], p.repo, "integrated")
+		d, err := receiver.ExperimentRecheckBound(labCtx, p.repo, child.Actions[0].Event.ID)
+		if err != nil || d.Disposition != "integrated" {
+			t.Fatal("snapshot arrival did not unblock its native child", d.Disposition, d.Reason, err)
+		}
+		after, err := receiver.ExperimentDecisionHistory(labCtx, child.Actions[0].Event.ID)
+		if err != nil || len(after) != 2 || reflect.DeepEqual(before[0].Evidence, after[1].Evidence) {
+			t.Fatal("snapshot membership missing from dependency evidence", err)
+		}
+		labImportBound(t, receiver, started, p.repo, "integrated")
+		labState(t, receiver, n.ID, store.InProgress)
+		labRebuild(t, receiver)
+	})
+	for _, mutation := range []string{"nonmember-root", "wrong-parent", "native-alias", "private-ancestor"} {
+		t.Run(mutation, func(t *testing.T) {
+			p, receiver := exchangeHost(t)
+			var effect string
+			for _, root := range roots {
+				d := labImportBound(t, receiver, root, p.repo, "integrated")
+				if effect == "" {
+					effect = d.Effects[0]
+				}
+			}
+			labImportBound(t, receiver, child, p.repo, "integrated")
+			raw, err := json.Marshal(started)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var claim store.ExperimentSource
+			if err := json.Unmarshal(raw, &claim); err != nil {
+				t.Fatal(err)
+			}
+			a := &claim.Actions[0]
+			switch mutation {
+			case "nonmember-root":
+				a.Ancestors[0].Event = roots[1].Actions[0].Event.ID
+			case "wrong-parent":
+				a.Parent = ""
+			case "private-ancestor":
+				a.Ancestors[0].Event = effect
+			case "native-alias":
+				// A locally native action must not authenticate a fabricated
+				// generated-effect alias merely because Event+Host match.
+				a.Ancestors[0].NativeEvent = a.Ancestors[0].Event
+				receiver, p.repo = sender, dst.repo
+			}
+			before := labEvents(t, receiver)
+			d := labImportBound(t, receiver, claim, p.repo, "conflict")
+			if len(d.Effects) != 0 || !reflect.DeepEqual(before, labEvents(t, receiver)) {
+				t.Fatal("forged snapshot claim changed native state")
 			}
 		})
 	}

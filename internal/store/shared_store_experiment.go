@@ -151,7 +151,7 @@ func experimentNativeMatch(ctx context.Context, v View, a ExperimentAction, host
 	// Direct lab exports need no exchange cache. Derive their observations
 	// from immutable history at the action/group boundary, never live nodes.
 	expected := ExperimentAction{Event: e}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return true, false, err
 	}
@@ -170,7 +170,7 @@ func experimentNativeMatch(ctx context.Context, v View, a ExperimentAction, host
 	}
 	for parent != "" {
 		b := ExperimentBaseline{Subject: parent}
-		history, err := v.EventsOfSubject(ctx, parent)
+		history, err := experimentSubjectHistory(ctx, v, parent)
 		if err != nil {
 			return true, false, err
 		}
@@ -240,11 +240,22 @@ func experimentNativeMatch(ctx context.Context, v View, a ExperimentAction, host
 // Parentage is immutable birth evidence, including replacement births filed
 // under the replaced subject. Tombstones and later lifecycle are irrelevant.
 func experimentHistoricalParent(ctx context.Context, v View, repo, subject, before string) (parent, replacement string, err error) {
-	history, err := v.EventsOfSubject(ctx, subject)
+	history, err := experimentSubjectHistory(ctx, v, subject)
 	if err != nil {
 		return "", "", err
 	}
 	for _, e := range history {
+		if e.ID < before && e.Repo == repo && e.Type == TypeWorkSnapshot {
+			p, err := decodeWorkSnapshot(e)
+			if err != nil {
+				return "", "", err
+			}
+			for _, n := range p.Snapshot.Nodes {
+				if n.ID == subject && p.References[subject] == "" {
+					return n.Parent, "", nil
+				}
+			}
+		}
 		if e.ID < before && (e.Type == TypeMatterCreated || e.Type == TypeStageCreated || e.Type == TypeStepCreated || e.Type == TypeStepInserted) {
 			var birth NodeBirth
 			if err := decode(e, &birth); err != nil {
@@ -427,7 +438,7 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 		if count != 0 || ev.Actor == integrationEffectActor {
 			return out, fmt.Errorf("experiment: integration effects are not source actions")
 		}
-		history, err := v.EventsOfSubject(ctx, ev.Subject)
+		history, err := experimentSubjectHistory(ctx, v, ev.Subject)
 		if err != nil {
 			return out, err
 		}
@@ -470,7 +481,7 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				if err := tx.QueryRowContext(ctx, `SELECT subject, type FROM events WHERE id=?`, birthID).Scan(&replacedID, &birthType); err != nil {
 					return out, err
 				}
-				if birthType == TypeWorkImported {
+				if birthType == TypeWorkImported || birthType == TypeWorkSnapshot {
 					a.Parent, _, err = experimentHistoricalParent(ctx, v, ev.Repo, ev.Subject, ev.ID)
 					if err != nil {
 						return out, err
@@ -489,7 +500,7 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 			}
 		}
 		for parent := a.Parent; parent != ""; {
-			history, err := v.EventsOfSubject(ctx, parent)
+			history, err := experimentSubjectHistory(ctx, v, parent)
 			if err != nil {
 				return out, err
 			}
@@ -876,6 +887,13 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 				a.Event.Subject = target
 			}
 		}
+		snapshotEvidence := true
+		if !nativeEcho && experimentSourceCompatible(source.Version) {
+			snapshotEvidence, err = experimentSnapshotObservations(ctx, v, a, target)
+			if err != nil {
+				return ExperimentDecision{}, err
+			}
+		}
 		if !nativeEcho && a.Baseline != "" {
 			a.Baseline, err = experimentMappedEvidence(ctx, v, a.Baseline, target)
 			if err != nil {
@@ -894,6 +912,8 @@ func (s *Store) experimentEvaluate(ctx context.Context, tx *sql.Tx, group string
 			disposition, reason = "conflict", "source identity differs from immutable native evidence or native origin is unverified"
 		} else if nativeEcho {
 			disposition, effect = "integrated", eventID
+		} else if !snapshotEvidence {
+			disposition, reason = "conflict", "snapshot anchor does not prove bound object membership"
 		} else if target != "" && experimentPortableMember(a.Event.Type) {
 			disposition, reason, effect, need, err = experimentClassifyPortable(ctx, v, a, s)
 		} else {
@@ -1058,7 +1078,7 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 	if a.Baseline == "" {
 		return pending("missing baseline evidence")
 	}
-	history, err := v.EventsOfSubject(ctx, e.Subject)
+	history, err := experimentSubjectHistory(ctx, v, e.Subject)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1085,7 +1105,7 @@ func experimentClassify(ctx context.Context, v View, a ExperimentAction, subject
 				if ancestor.Lifecycle == Planned {
 					return pending("incomplete ancestor cascade")
 				}
-				history, err := v.EventsOfSubject(ctx, parent)
+				history, err := experimentSubjectHistory(ctx, v, parent)
 				if err != nil {
 					return "", "", "", false, err
 				}
@@ -1196,6 +1216,29 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 			subject = target
 		}
 		subjects[subject] = true
+		if a.Event.Type == TypeStageCreated || a.Event.Type == TypeStepCreated || a.Event.Type == TypeStepInserted {
+			var p NodeBirth
+			if decodeStrict(a.Event, &p) == nil {
+				subjects[p.Parent] = true
+			}
+		}
+		if a.Event.Type == TypeWorkSnapshot {
+			if p, err := decodeWorkSnapshot(a.Event); err == nil {
+				for _, n := range p.Snapshot.Nodes {
+					subjects[n.ID] = true
+				}
+				for _, e := range p.Snapshot.Backlog {
+					subjects[e.ID] = true
+				}
+				for _, original := range p.References {
+					mapped, err := experimentMappedEvidence(ctx, v, original, target)
+					if err != nil {
+						return nil, err
+					}
+					evidence = append(evidence, "mapping:"+original+":"+mapped)
+				}
+			}
+		}
 		if a.Parent != "" {
 			subjects[a.Parent] = true
 		}
@@ -1209,7 +1252,7 @@ func experimentEvidence(ctx context.Context, v View, source ExperimentSource, ta
 		}
 	}
 	for subject := range subjects {
-		history, err := v.EventsOfSubject(ctx, subject)
+		history, err := experimentSubjectHistory(ctx, v, subject)
 		if err != nil {
 			return nil, err
 		}

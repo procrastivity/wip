@@ -427,6 +427,11 @@ func (s *Store) exchangeExport(ctx context.Context, b ExchangeBinding, group str
 	if !portable || len(unit.Actions) != len(source.Actions) || (source.Derivative != nil && len(source.Derivative.Omitted) != 0) {
 		return ExchangeChange{}, fmt.Errorf("exchange: cached envelope contains local-only evidence; refusing to transmit or rewrite immutable source group %s", group)
 	}
+	for _, a := range source.Actions {
+		if err := experimentLegacyImportDependency(ctx, s.View, a); err != nil {
+			return ExchangeChange{}, err
+		}
+	}
 	return change, nil
 }
 
@@ -473,12 +478,37 @@ func exchangeSpilledRefs(source ExperimentSource) []ContentWritten {
 	var out []ContentWritten
 	seen := map[string]bool{}
 	for _, a := range source.Actions {
-		p, ok := exchangeSpilledPayload(a.Event.Payload)
-		if !ok || seen[p.BlobRef] {
-			continue
+		for _, raw := range exchangeContentPayloads(a.Event) {
+			p, ok := exchangeSpilledPayload(raw)
+			if !ok || seen[p.BlobRef] {
+				continue
+			}
+			seen[p.BlobRef] = true
+			out = append(out, p)
 		}
-		seen[p.BlobRef] = true
-		out = append(out, p)
+	}
+	return out
+}
+
+// Snapshot segments are nested in one atomic state fact, not top-level
+// content actions. Both upload and fetch walk that same complete closure.
+func exchangeContentPayloads(ev Event) []json.RawMessage {
+	if ev.Type != TypeWorkSnapshot {
+		return []json.RawMessage{ev.Payload}
+	}
+	p, err := decodeWorkSnapshot(ev)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(p.Contents))
+	for id := range p.Contents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]json.RawMessage, 0, len(ids))
+	for _, id := range ids {
+		raw, _ := json.Marshal(p.Contents[id])
+		out = append(out, raw)
 	}
 	return out
 }
@@ -502,6 +532,20 @@ func (s *Store) exchangeUploadChangeBlobs(ctx context.Context, c ExchangeClient,
 func (s *Store) exchangeUploadBlobs(ctx context.Context, c ExchangeClient, b ExchangeBinding, source ExperimentSource) error {
 	if err := checkExchangeBinding(ctx, s.db, b); err != nil {
 		return err
+	}
+	for _, a := range source.Actions {
+		if a.Event.Type != TypeWorkSnapshot {
+			continue
+		}
+		p, err := decodeWorkSnapshot(a.Event)
+		if err != nil {
+			return err
+		}
+		for _, w := range p.Contents {
+			if w.BlobRef != "" && w.ByteLen > exchangeBlobMaxBytes {
+				return fmt.Errorf("exchange: imported snapshot %s content %s exceeds the %d-byte transport blob limit; local work retained", a.Event.Subject, w.Content, exchangeBlobMaxBytes)
+			}
+		}
 	}
 	needs := map[string]ContentWritten{}
 	var digests []string
@@ -565,9 +609,8 @@ func (s *Store) exchangeFetchBlobs(ctx context.Context, c ExchangeClient, b Exch
 		if d.Disposition != "pending" {
 			continue
 		}
-		for _, a := range d.Source.Actions {
-			p, ok := exchangeSpilledPayload(a.Event.Payload)
-			if !ok || claimed[p.BlobRef] {
+		for _, p := range exchangeSpilledRefs(d.Source) {
+			if claimed[p.BlobRef] {
 				continue
 			}
 			claimed[p.BlobRef] = true

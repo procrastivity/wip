@@ -29,6 +29,8 @@ func applyEvent(ctx context.Context, tx *sql.Tx, ev Event) error {
 
 func applyEventVersion(ctx context.Context, tx *sql.Tx, ev Event, schemaVersion int) error {
 	switch ev.Type {
+	case TypeWorkSnapshot:
+		return projectWorkSnapshot(ctx, tx, ev)
 	case TypeWorkImported:
 		return projectTransfer(ctx, tx, ev)
 	// ---- lifecycle -------------------------------------------------------
@@ -217,7 +219,7 @@ var projectionTables = append(append([]string{}, v1ProjectionTables...),
 	"run_matters", "roles", "tracker_references", "tracker_push_records",
 	// v13: config, gate declarations and gate exemptions stopped being the
 	// exception to "everything durable is a projection of the log".
-	"gate_exemptions", "gate_declarations", "config", "transfer_origins", "transfer_receipts")
+	"gate_exemptions", "gate_declarations", "config", "transfer_origins", "transfer_receipts", "transfer_snapshot_imports")
 
 // Rebuild throws the projection away and folds the whole log back over it.
 //
@@ -2316,6 +2318,9 @@ func projectionTablesForTx(ctx context.Context, tx *sql.Tx, version int) []strin
 	// dispatches — so the rebuild remains valid even when foreign-key
 	// deferral is unavailable on a driver.
 	var out []string
+	if version >= 16 {
+		out = append(out, "transfer_snapshot_imports")
+	}
 	if version >= 15 {
 		out = append(out, "transfer_origins", "transfer_receipts")
 	}
