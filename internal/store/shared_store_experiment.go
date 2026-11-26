@@ -253,6 +253,24 @@ func experimentHistoricalParent(ctx context.Context, v View, repo, subject, befo
 			return birth.Parent, "", nil
 		}
 	}
+	// Snapshot births are filed under the import operation, not each node.
+	// Read their immutable mapping rather than treating transfer origins as
+	// authenticated sync aliases or consulting today's mutable node state.
+	imports, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE repo=? AND type=? AND id<? AND EXISTS (SELECT 1 FROM json_each(events.payload,'$.plan.mapping') WHERE value=?) ORDER BY id`, repo, TypeWorkImported, before, subject)
+	if err != nil {
+		return "", "", err
+	}
+	for _, e := range imports {
+		var p transferImported
+		if err := decodeStrict(e, &p); err != nil {
+			return "", "", err
+		}
+		for _, n := range p.Snapshot.Nodes {
+			if p.Plan.Mapping[n.ID] == subject && !p.Plan.Reused[n.ID] {
+				return p.Plan.Mapping[n.Parent], "", nil
+			}
+		}
+	}
 	births, err := v.eventList(ctx, `SELECT `+eventColumns+` FROM events WHERE repo=? AND type=? AND id<? AND json_extract(payload,'$.replacement')=? ORDER BY id`, repo, TypeStepReplaced, before, subject)
 	if err != nil || len(births) == 0 {
 		return "", "", err
@@ -451,6 +469,12 @@ func (s *Store) ExperimentExport(ctx context.Context, host, correlation string) 
 				var replacedID, birthType string
 				if err := tx.QueryRowContext(ctx, `SELECT subject, type FROM events WHERE id=?`, birthID).Scan(&replacedID, &birthType); err != nil {
 					return out, err
+				}
+				if birthType == TypeWorkImported {
+					a.Parent, _, err = experimentHistoricalParent(ctx, v, ev.Repo, ev.Subject, ev.ID)
+					if err != nil {
+						return out, err
+					}
 				}
 				if birthType == TypeStepReplaced {
 					var parent string

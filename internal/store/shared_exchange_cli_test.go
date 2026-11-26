@@ -24,8 +24,119 @@ import (
 	"time"
 
 	"github.com/procrastivity/wip/internal/store"
+	"github.com/procrastivity/wip/internal/transfer"
 	"github.com/procrastivity/wip/internal/writesurface"
 )
+
+func TestRunExchangeAfterOfflineImport(t *testing.T) {
+	for _, mode := range []string{"uncached", "cached", "laravel"} {
+		t.Run(mode, func(t *testing.T) {
+			src, source := exchangeHost(t)
+			dst, target := exchangeHost(t)
+			m, err := writesurface.CreateMatter(labCtx, source, store.ActorHuman, src.repo, "Portable", "portable")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writesurface.CreateStage(labCtx, source, store.ActorHuman, src.repo, "portable", "Stage"); err != nil {
+				t.Fatal(err)
+			}
+			x, err := source.ExportTransfer(labCtx, src.repo, "offline-source", transfer.Selection{Matters: []string{m.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var endpoint, token string
+			if mode == "laravel" {
+				f := startLaravelFixture(t)
+				endpoint, token = f.endpoint(), f.Owner
+			} else {
+				_, endpoint = newLabExchangeFeed(t)
+			}
+			paired, err := target.PairExchange(labCtx, dst.repo, endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := target.PlanTransfer(labCtx, x, dst.repo, map[string]string{m.ID: "local-alias"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := target.ApplyTransfer(labCtx, store.ActorHuman, x, plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, err := writesurface.CreateStep(labCtx, target, store.ActorHuman, dst.repo, "local-alias/stage", "Native step")
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, err := writesurface.Start(labCtx, target, store.ActorHuman, dst.repo, "local-alias/"+n.Locator)
+			if err != nil || len(started) == 0 {
+				t.Fatal("native start after import", err)
+			}
+			before := labEvents(t, target)
+			if mode == "uncached" {
+				original, err := target.ExperimentExport(labCtx, paired.Binding.InstallationID, started[0].Correlation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				echo, err := target.ExperimentImportBound(labCtx, original, dst.repo)
+				if err != nil || echo.Disposition != "integrated" {
+					t.Fatal("authentic no-cache echo rejected", echo, err)
+				}
+			}
+			wire := &exchangeBatchTransport{}
+			client := store.ExchangeClient{HTTP: &http.Client{Transport: wire}, Token: token}
+			for i := 0; i < 2; i++ {
+				status, err := target.RunExchange(labCtx, client, dst.repo)
+				if err != nil || len(status.PendingUpload) != 0 || status.Conflicts != 0 || status.Waiting != 0 || len(status.Unsupported) == 0 {
+					t.Fatal("ordinary sync after import", status, err)
+				}
+				if !reflect.DeepEqual(before, labEvents(t, target)) {
+					t.Fatal("self echo duplicated native events")
+				}
+				if err := target.Rebuild(labCtx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, body := range wire.bodies {
+				if bytes.Contains(body, []byte("work.imported")) || bytes.Contains(body, []byte("offline-source")) {
+					t.Fatal("offline snapshot reached exchange wire")
+				}
+			}
+			if node, err := target.Node(labCtx, n.ID); err != nil || node.Lifecycle != store.InProgress {
+				t.Fatal("native lifecycle lost", node, err)
+			}
+			retry, err := target.ApplyTransfer(labCtx, store.ActorHuman, x, plan)
+			if err != nil || !reflect.DeepEqual(receipt, retry) || !reflect.DeepEqual(before, labEvents(t, target)) {
+				t.Fatal("receipt retry after sync/rebuild changed work", retry, err)
+			}
+			activities, err := target.ExperimentActivities(labCtx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range activities {
+				for _, a := range d.Source.Actions {
+					if a.Event.Type == store.TypeWorkImported || strings.Contains(string(a.Event.Payload), "offline-source") {
+						t.Fatal("offline archive provenance reached exchange")
+					}
+				}
+			}
+			if out, err := target.Outbox(labCtx, dst.repo); err != nil || len(out) != 0 {
+				t.Fatal("import/sync created delivery authority", out, err)
+			}
+			// A genuine original remains authenticated after rebuild, but an
+			// altered imported-ancestor observation cannot claim that identity.
+			original, err := target.ExperimentExport(labCtx, paired.Binding.InstallationID, started[0].Correlation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last := &original.Actions[len(original.Actions)-1]
+			last.Ancestors = last.Ancestors[:len(last.Ancestors)-1]
+			forged, err := target.ExperimentImportBound(labCtx, original, dst.repo)
+			if err != nil || forged.Disposition != "conflict" || !reflect.DeepEqual(before, labEvents(t, target)) {
+				t.Fatal("altered ancestor claim authenticated", forged, err)
+			}
+		})
+	}
+}
 
 type syncCLI struct {
 	host   labPair
