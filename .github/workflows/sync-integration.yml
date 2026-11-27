@@ -89,6 +89,7 @@ jobs:
       - name: Install and check Laravel
         working-directory: cloud
         run: |
+          cp .env.example .env
           composer install --prefer-dist --no-interaction
           composer validate --strict
           vendor/bin/pint --test
